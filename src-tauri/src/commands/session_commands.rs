@@ -293,6 +293,7 @@ pub async fn launch_solo(
     flags: Option<Vec<String>>,
     evaluator_cli: Option<String>,
     evaluator_model: Option<String>,
+    with_evaluator: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let agent_config = AgentConfig {
         cli: cli.clone(),
@@ -305,7 +306,7 @@ pub async fn launch_solo(
         initial_prompt: None,
     };
 
-    // Build evaluator_config: validate if provided, else fall back to cli silently
+    // An omitted evaluator CLI uses the session default when the evaluator launches.
     let evaluator_config = if let Some(ref eval_cli) = evaluator_cli {
         Some(AgentConfig {
             cli: eval_cli.clone(),
@@ -320,7 +321,7 @@ pub async fn launch_solo(
     } else {
         None
     };
-    let with_evaluator = evaluator_config.is_some();
+    let with_evaluator = with_evaluator.unwrap_or(true);
 
     let config = HiveLaunchConfig {
         project_path,

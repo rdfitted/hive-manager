@@ -1,0 +1,12 @@
+{
+  "nodes": [
+    {"id": "c1", "expansion": {"parameters": {"source_ref": ".ai-docs/one.md"}}},
+    {"id": "c2", "expansion": {"parameters": {"source_ref": "global:patterns/two.md"}}},
+    {"id": "c3", "expansion": {"parameters": {"source_ref": ".ai-docs/three.md"}}}
+  ],
+  "edges": [
+    {"source": "c1", "target": "T1", "kind": "informs", "provenance": "knowledge"},
+    {"source": "c2", "target": "T1", "kind": "informs", "provenance": "knowledge"},
+    {"source": "c3", "target": "T2", "kind": "informs", "provenance": "knowledge"}
+  ]
+}

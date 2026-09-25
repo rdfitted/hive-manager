@@ -21,6 +21,13 @@ afterEach(() => {
 });
 
 describe('ContractViewer', () => {
+  it('shows an empty state without a contract and never invokes the missing command', () => {
+    render(ContractViewer);
+
+    expect(screen.getByText('No sprint contract available.')).toBeTruthy();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
   it('renders every typed criterion kind without invoking the legacy command', () => {
     render(ContractViewer, {
       props: {

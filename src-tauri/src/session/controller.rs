@@ -19,14 +19,16 @@ use crate::http::handlers::evaluator::read_qa_verdict_record;
 use crate::judgment::ledger::{JudgmentLedger, OutcomeInput, OutcomeSource};
 use crate::orchestrator::org_graph::composition::{
     admit_ack_miss_sample, compose_context_with_remaining, is_ack_sampled,
-    knowledge_reference_chars, knowledge_refs_from_work_graph, render_composed_context,
+    knowledge_edge_captures_from_work_graph_task, knowledge_reference_chars,
+    knowledge_refs_from_work_graph, render_composed_context,
     render_composed_context_with_ack_tags, spawn_context_from_work_graph_task, ComposedContext,
-    ContextBudget, ContextOrigin, DroppedContext, SpawnContext, ACK_QUESTION_VERSION,
-    ACK_SAMPLE_RATE,
+    ContextBudget, ContextOrigin, DroppedContext, KnowledgeEdgeCapture, SpawnContext,
+    ACK_QUESTION_VERSION, ACK_SAMPLE_RATE,
 };
 use crate::orchestrator::org_graph::definitions::{
     resolve_role_definition, role_prompt_template, ResolvedRoleDefinition,
 };
+use crate::orchestrator::org_graph::retrieval_ledger::record_spawn_rows;
 use crate::orchestrator::org_graph::{KnowledgeRef, KnowledgeSource, RoleDefinition};
 use crate::orchestrator::session_orchestrator::SessionOrchestrator;
 use crate::orchestrator::work_graph::schema::TaskTier;
@@ -70,8 +72,10 @@ const SPAWN_CONTEXT_SCHEMA_VERSION: &str = "hive.spawn-context/v1";
 #[derive(Debug, Clone, Default)]
 struct ResolvedSpawnContext {
     context: SpawnContext,
+    context_available: bool,
     ack_eligible: bool,
     miss_candidates: Vec<KnowledgeRef>,
+    edge_captures: Vec<KnowledgeEdgeCapture>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +85,7 @@ struct BuiltWorkerPrompt {
     budget: ContextBudget,
     sampled: bool,
     miss_sample_positions: Vec<usize>,
+    rendered_knowledge_chars: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,6 +102,14 @@ struct SpawnContextSidecar {
     sample_rate: f64,
     question_version: u32,
     miss_sample_references: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivery_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    global_summary_included: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rendered_knowledge_chars: Option<usize>,
+    #[serde(default)]
+    decision_ids: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +121,21 @@ struct SpawnKeptReference {
     pointer: String,
     priority: u16,
     chars: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    match_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    edge_rationale: Option<String>,
+}
+
+fn rendered_knowledge_section_chars(prompt: &str) -> usize {
+    let marker = "### Knowledge References\n\n";
+    prompt
+        .split_once(marker)
+        .map(|(_, tail)| {
+            let section = tail.split_once("\n### ").map_or(tail, |(section, _)| section);
+            marker.chars().count() + section.chars().count()
+        })
+        .unwrap_or(0)
 }
 
 impl BuiltWorkerPrompt {
@@ -117,20 +145,32 @@ impl BuiltWorkerPrompt {
         session_id: &str,
         plan_task_id: Option<&str>,
         role_definition_id: Option<&str>,
+        delivery_path: &str,
+        edge_captures: &[KnowledgeEdgeCapture],
     ) -> SpawnContextSidecar {
         let kept = self
             .context
             .knowledge
             .iter()
             .enumerate()
-            .map(|(index, item)| SpawnKeptReference {
-                tag: self.sampled.then(|| format!("k{}", index + 1)),
-                position: index + 1,
-                origin: item.origin,
-                source: item.reference.source,
-                pointer: item.reference.pointer.clone(),
-                priority: item.reference.priority,
-                chars: knowledge_reference_chars(&item.reference),
+            .map(|(index, item)| {
+                let mut matching = edge_captures.iter().filter(|edge| {
+                    edge.source == item.reference.source
+                        && edge.pointer == item.reference.pointer
+                });
+                let first = matching.next();
+                let unique = first.filter(|_| matching.next().is_none());
+                SpawnKeptReference {
+                    tag: self.sampled.then(|| format!("k{}", index + 1)),
+                    position: index + 1,
+                    origin: item.origin,
+                    source: item.reference.source,
+                    pointer: item.reference.pointer.clone(),
+                    priority: item.reference.priority,
+                    chars: knowledge_reference_chars(&item.reference),
+                    match_type: unique.and_then(|edge| edge.match_type.clone()),
+                    edge_rationale: unique.and_then(|edge| edge.rationale.clone()),
+                }
             })
             .collect();
         let miss_sample_references = self
@@ -155,6 +195,18 @@ impl BuiltWorkerPrompt {
             sample_rate: ACK_SAMPLE_RATE,
             question_version: ACK_QUESTION_VERSION,
             miss_sample_references,
+            delivery_path: Some(delivery_path.to_string()),
+            global_summary_included: Some(self.context.knowledge.iter().any(|item| {
+                let mut matching = edge_captures.iter().filter(|edge| {
+                    edge.source == item.reference.source
+                        && edge.pointer == item.reference.pointer
+                });
+                matching.next().is_some_and(|edge| {
+                    edge.is_global_summary && matching.next().is_none()
+                })
+            })),
+            rendered_knowledge_chars: Some(self.rendered_knowledge_chars),
+            decision_ids: Vec::new(),
         }
     }
 }
@@ -167,8 +219,9 @@ impl SpawnContextSidecar {
             budget: ContextBudget::default(),
             sampled: false,
             miss_sample_positions: Vec::new(),
+            rendered_knowledge_chars: 0,
         }
-        .sidecar(agent_id, session_id, None, None)
+        .sidecar(agent_id, session_id, None, None, "composition-free", &[])
     }
 }
 
@@ -4423,6 +4476,34 @@ Last updated: {timestamp}
         )
     }
 
+    fn queen_review_round_protocol(
+        session_id: &str,
+        scope_phrase: &str,
+        has_evaluator: bool,
+    ) -> String {
+        let schema_step = format!(
+            "For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work."
+        );
+        let queen_step = r#"Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work. For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{"result":"ACCEPT|PARTIAL|DECLINE"}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified."#;
+        let (indent, before_command) = if has_evaluator {
+            ("   ", "\n\n   ```bash\n\n")
+        } else {
+            (
+                "",
+                "\n3. If unresolved findings remain, you MUST spawn a Reconciler worker via `POST /api/sessions/{session_id}/workers`, wait for and validate its paired adjudication artifacts, then spawn the required Resolver workers, integrate their fixes, and return to Step 1.\n   ```bash\n",
+            )
+        };
+        let before_command = before_command.replace("{session_id}", session_id);
+        format!(
+            r#"{indent}{schema_step}{before_command}   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate {scope_phrase} into one fix list. Produce review-round-N.md and review-round-N.json with one structured disposition per finding."}}'
+   ```
+   {queen_step}
+"#,
+        )
+    }
+
     fn queen_post_workers_protocol(
         session_id: &str,
         session_root: &Path,
@@ -4433,10 +4514,21 @@ Last updated: {timestamp}
         let qa_verdict_path = Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
         let prince_verdict_path =
             Self::prompt_path(&session_root.join("peer").join("prince-verdict.json"));
+        let review_round_protocol = Self::queen_review_round_protocol(
+            session_id,
+            if has_evaluator {
+                "external PR review comments"
+            } else {
+                "external review comments and integrity findings"
+            },
+            has_evaluator,
+        );
 
         if !has_evaluator {
             return format!(
                 r#"## Post-Workers Protocol (MANDATORY)
+
+QA is disabled for this session. Tell the operator that the milestone QA gate will not run before push.
 
 1. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
 2. You MUST wait 10 minutes, collect PR comments plus any remaining integrity concerns, and use this `gh api` workflow:
@@ -4444,12 +4536,7 @@ Last updated: {timestamp}
    gh api repos/<owner>/<repo>/issues/<pr-number>/comments
    gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
    ```
-3. If unresolved findings remain, you MUST spawn a Reconciler worker and the required resolver workers via `POST /api/sessions/{session_id}/workers`, integrate their fixes, and then return to Step 1.
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
-     -H "Content-Type: application/json" \
-     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate external review comments and integrity findings into one fix list"}}'
-
+{review_round_protocol}   ```bash
    curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
      -H "Content-Type: application/json" \
      -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM findings from the reconciled list"}}'
@@ -4478,7 +4565,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
    ```
 3. You MUST inspect the verdict.
    - If it says `PASS` or `FAIL`, the Prince automatically takes over remediation of the QA findings. Continue to Step 4.
-   - If it says `BLOCKED`, QA could not produce a usable verdict (read the rationale — typically a missing UI/host or a transport failure). STOP. Do NOT push. Surface to the operator (they will force-pass / force-fail).
+   - If it says `BLOCKED`, QA could not produce a usable verdict. Surface the stated reason and do NOT push. Fix the cause if it is yours (for example, start the missing UI/host or repair the transport), then rewrite `peer/milestone-ready.json` to re-enter QA. A newer file mtime counts as fresh; HTTP `POST /milestone-ready` is always fresh. Re-entry counts against the iteration limit. At `QaMaxRetriesExceeded`, STOP and surface to the operator. Force-pass and force-fail are operator-only.
 4. You MUST wait for the Prince to finish remediation by polling `{prince_verdict_path}` inline. The Prince reads the QA findings, fixes them with its OWN fix team, and self-certifies. You MUST NOT spawn Reconciler or Resolver workers for QA findings — remediating QA findings is the Prince's job, not yours.
    ```bash
    while [ ! -f "{prince_verdict_path}" ]; do
@@ -4490,17 +4577,15 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
    cat "{prince_verdict_path}"
    ```
    - If the Prince verdict is `PASS`/`DONE`, continue to Step 5.
-   - If the Prince verdict is `BLOCKED`, STOP. Do NOT push. Surface to the operator.
+   - If the Prince verdict is `BLOCKED`, surface the stated reason and do NOT push. Fix the cause if it is yours, then rewrite `peer/milestone-ready.json` to re-enter QA. A newer file mtime counts as fresh; HTTP `POST /milestone-ready` is always fresh. Re-entry counts against the iteration limit. At `QaMaxRetriesExceeded`, STOP and surface to the operator. Force-pass and force-fail are operator-only.
 5. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
-6. You MUST wait 10 minutes, then collect EXTERNAL PR review comments and resolve them. The Reconciler/Resolver workers here are for PR review comments ONLY — a separate concern from the QA findings the Prince already handled. Whenever unresolved PR comments remain, spawn them, integrate their fixes, and return to Step 5:
+6. You MUST wait 10 minutes, then collect EXTERNAL PR review comments and resolve them. The Reconciler/Resolver workers here are for PR review comments ONLY — a separate concern from the QA findings the Prince already handled. Whenever unresolved PR comments remain, spawn the Reconciler, wait for and validate its paired adjudication artifacts, then spawn Resolver workers, integrate their fixes, and return to Step 5:
    ```bash
    gh api repos/<owner>/<repo>/issues/<pr-number>/comments
    gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
+   ```
 
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
-     -H "Content-Type: application/json" \
-     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate external PR review comments into one fix list"}}'
-
+{review_round_protocol}   ```bash
    curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
      -H "Content-Type: application/json" \
      -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM external PR review comments from the reconciled list"}}'
@@ -6926,7 +7011,7 @@ When the objective and every configured gate are complete, send this `completed`
             "resolver" => "Resolve assigned review findings and document any intentionally skipped item with rationale.",
             "tester" => "Run the assigned validation suite, repair in-scope failures, and report unresolved evidence.",
             "code-quality" => "Resolve assigned external-review comments and verify the result.",
-            "reconciler" => "Reconcile evaluator and external-review findings into one prioritized, deduplicated result.",
+            "reconciler" => "Reconcile evaluator and external-review findings into one prioritized, deduplicated result; for external PR findings emit the paired review-round-N.md and review-round-N.json adjudication artifacts, with one disposition per finding and rationale only in markdown.",
             "researcher" => "Investigate the assigned question read-only and return concise findings with evidence.",
             _ => "Complete the coherent implementation workstream assigned by the Queen.",
         };
@@ -7030,6 +7115,7 @@ When the objective and every configured gate are complete, send this `completed`
         } else {
             (false, render_composed_context(&composition.context))
         };
+        let rendered_knowledge_chars = rendered_knowledge_section_chars(&composed_context);
         let activation_wait_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
             session_id,
@@ -7239,6 +7325,7 @@ treated as stuck and requeued.
             budget: spawn_context.budget,
             sampled,
             miss_sample_positions,
+            rendered_knowledge_chars,
         }
     }
 
@@ -7512,6 +7599,7 @@ Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files f
 | Spawn Worker | `spawn-worker.md` | Reference only - Planners use this to spawn workers |
 | List Workers | `list-workers.md` | Get list of all workers and their status |
 | Mark Worker Status | `mark-worker-status.md` | Mark each independently verified worker complete |
+| Judge | `judge.md` | Record and compare blind shadow judgments with the gated Jev CLI |
 | Submit Learning | `submit-learning.md` | Record a learning via HTTP API |
 | List Learnings | `list-learnings.md` | Get all learnings for this session |
 | Delete Learning | `delete-learning.md` | Remove a learning by ID |
@@ -8073,6 +8161,58 @@ For a Fusion variant or another agent type, keep the request identical and use t
             "mark-worker-status.md",
             &mark_worker_status_tool,
         )?;
+
+        let judge_tool = r#"# Judge Tool
+
+Run `python tools/judgment/judge.py` from the session worktree. This is an on-demand shadow comparison tool. **A Jev answer never gates any hive action.** `record` and `outcome` write local rows; only `ask` can send to Jev.
+
+## Blind inputs
+
+Build observations from the finding text and cited code at the reviewed SHA, or from observed QA evidence. Never pass an answer, rationale, severity, verdict, result, or measured value in observations or question data. Structured fields with those names are rejected at any depth. Do not use an adjudication note as evidence. The subject reference is local and is never sent automatically.
+
+Use JSON files for `--subject-ref`, `--observations`, `--answer`, `--question`, and `--label`. Global path overrides (`--ledger`, `--tables`, `--policy`, `--redact-dictionary`) precede the subcommand; `JUDGMENT_LEDGER`, `JUDGMENT_TABLES`, `JUDGMENT_EGRESS_POLICY`, and `JUDGMENT_REDACT_DICTIONARY` are equivalents. A name dictionary is required for any send: use `--redact-dictionary <file>` or `JUDGMENT_REDACT_DICTIONARY`. A dictionary hit, email, missing dictionary, or incomplete scan blocks egress.
+
+## Review finding example
+
+Prepare these synthetic files from the reviewed SHA:
+
+```text
+review-subject.json       {"finding_id":"F1","reviewed_sha":"0123456"}
+review-observations.json  {"finding_text":"The validation branch is missing.","cited_code":"if valid { proceed(); }"}
+incumbent-answer.json     {"result":"ACCEPT"}
+review-question.json      {"type":"choice","instructions":"Classify whether the cited code supports this finding.","criteria":{"ACCEPT":"The finding is supported.","PARTIAL":"Only part is supported.","DECLINE":"The finding is unsupported."}}
+final-label.json          {"result":"ACCEPT"}
+```
+
+```bash
+python tools/judgment/judge.py record --surface hive.review.finding --subject-ref review-subject.json --observations review-observations.json --answer incumbent-answer.json --question-id review-finding --model incumbent-model
+# Copy the decision_id from the record result into --source-decision-id:
+python tools/judgment/judge.py --redact-dictionary names.json ask --surface hive.review.finding --subject-ref review-subject.json --observations review-observations.json --question-id review-finding --question review-question.json --source-decision-id <incumbent-decision-id>
+# Attach verified fix evidence to the incumbent; the linked Jev row inherits its outcome:
+python tools/judgment/judge.py outcome --decision-id <incumbent-decision-id> --label final-label.json --source downstream --note "evidence_tier=fixed test=synthetic-review-regression"
+```
+
+For a dry run, add `--dry-run` after `ask`. It performs all gates and writes a row, with zero transport calls.
+
+## QA criterion example
+
+Use a subject such as `{"milestone_id":"M1","criterion_id":"C1","reviewed_sha":"0123456"}` and blind observations such as `{"observed":"The cited test returned the expected value."}`. A noul question file can contain:
+
+```json
+{"type":"noul","instructions":"Does the observed evidence satisfy criterion C1?","criteria":{"true":"Evidence satisfies C1.","false":"Evidence does not satisfy C1."}}
+```
+
+```bash
+python tools/judgment/judge.py --redact-dictionary names.json ask --surface hive.qa.criterion --subject-ref qa-subject.json --observations qa-observations.json --question-id qa-C1 --question qa-question.json --dry-run
+```
+
+## Egress and results
+
+Live egress is limited to the git-origin project `rdfitted/hive-manager` and allowlisted `hive.review.finding` and `hive.qa.criterion` surfaces. A live send needs `TYPESAFE_API_KEY`; without it, `ask` records `no-key` and sends nothing. Redaction and policy checks still run for dry runs and no-key calls. The request is capped at 32 KiB.
+
+Every command prints one JSON object with `status`, `decision_id`, `sent`, `answer`, `model`, `latency_ms`, `usage`, `error`, and `redaction` (counts and reason classes only when blocked). Exit `0` means a row was written, including `dry-run` or `no-key`; exit `2` means invalid input; exit `3` means policy, redaction, or size blocked after a row; exit `4` means transport failed after a row; exit `5` means the ledger write failed. Treat a Jev result only as shadow evidence for later audit.
+"#;
+        Self::write_tool_file(project_path, session_id, "judge.md", judge_tool)?;
 
         // Submit Learning tool
         let submit_learning_tool = r#"# Submit Learning Tool
@@ -9142,6 +9282,8 @@ Last updated: {timestamp}
                 &session_id,
                 None,
                 resolved_role.definition.as_ref().map(|definition| definition.id.as_str()),
+                "composition-free",
+                &[],
             );
             Self::write_spawn_artifacts_fail_open(
                 &project_path,
@@ -10244,10 +10386,12 @@ phases and do EXACTLY this, then stop:
         }
         ResolvedSpawnContext {
             context: spawn_context_from_work_graph_task(&graph, plan_task_id),
+            context_available: true,
             ack_eligible,
             miss_candidates: ack_eligible
                 .then(|| knowledge_refs_from_work_graph(&graph))
                 .unwrap_or_default(),
+            edge_captures: knowledge_edge_captures_from_work_graph_task(&graph, plan_task_id),
         }
     }
 
@@ -11835,6 +11979,8 @@ The backend composed and persisted the following authoritative skeleton before l
             session_id,
             None,
             resolved_role.definition.as_ref().map(|definition| definition.id.as_str()),
+            "composition-free",
+            &[],
         );
         Self::write_spawn_artifacts_fail_open(
             &session.project_path,
@@ -12142,6 +12288,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .join("judgments")
                 .join("ledger.jsonl"),
         );
+        let mut outcomes = Vec::with_capacity(record.criteria.len());
         for criterion in record.criteria {
             let Some(decision_id) = criterion.decision_id else {
                 continue;
@@ -12152,14 +12299,15 @@ The backend composed and persisted the following authoritative skeleton before l
                 "criterion_number".to_string(),
                 serde_json::json!(criterion.number),
             );
-            let _ = ledger.record_outcome(OutcomeInput {
+            outcomes.push(OutcomeInput {
                 decision_id,
-                label: serde_json::json!(label),
+                label: serde_json::json!({ "result": label }),
                 source: OutcomeSource::Downstream,
                 note: None,
                 extra,
             });
         }
+        let _ = ledger.record_outcomes(outcomes);
     }
 
     fn apply_qa_verdict_to_session(
@@ -12361,9 +12509,9 @@ The backend composed and persisted the following authoritative skeleton before l
 
     /// Mark QA inconclusive — the Evaluator reported BLOCKED, or the verdict timed
     /// out with no usable response. Transitions QaInProgress -> QaInconclusive,
-    /// which blocks PR push / completion and surfaces to the operator. Writes a
-    /// BLOCKED verdict file so the Queen's poll loop terminates (instead of hanging)
-    /// and escalates rather than pushing. Operator unblocks via force-pass / force-fail.
+    /// which blocks PR push / completion. Writes a BLOCKED verdict file so the
+    /// Queen's poll loop terminates. After fixing the cause, the Queen can re-arm
+    /// QA with a fresh milestone; force-pass and force-fail remain operator-only.
     pub fn mark_qa_inconclusive(
         &self,
         session_id: &str,
@@ -12715,7 +12863,6 @@ The backend composed and persisted the following authoritative skeleton before l
         self.qa_timeout_handles.lock().contains_key(session_id)
     }
 
-    #[allow(dead_code)]
     pub fn on_milestone_ready(&self, session_id: &str) -> Result<(), String> {
         self.on_milestone_ready_with_mtime(session_id, None)
     }
@@ -12943,7 +13090,14 @@ The backend composed and persisted the following authoritative skeleton before l
         Ok(new_state)
     }
 
-    #[allow(dead_code)]
+    fn qa_timeout_reason(timeout_secs: u64) -> String {
+        format!(
+            "QA verdict timed out after {}s with no response. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Queen: surface the reason, fix the cause if it is yours, then rewrite peer/milestone-ready.json to re-enter QA (a newer mtime counts as fresh; HTTP POST /milestone-ready is always fresh). Re-entry counts against the iteration limit. At QaMaxRetriesExceeded, stop and surface to the operator. Force-pass and force-fail are operator-only.",
+            timeout_secs
+        )
+    }
+
+    #[cfg(test)]
     pub fn on_qa_timeout(&self, session_id: &str) -> Result<(), String> {
         let timeout_secs = self
             .get_session(session_id)
@@ -12954,17 +13108,15 @@ The backend composed and persisted the following authoritative skeleton before l
             session_id,
             timeout_secs
         );
-        let reason = format!(
-            "QA verdict timed out after {}s with no response. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Operator action required (force-pass / force-fail).",
-            timeout_secs
-        );
+        let reason = Self::qa_timeout_reason(timeout_secs);
         self.mark_qa_inconclusive(session_id, &reason)?;
         Ok(())
     }
 
     /// Start a QA timeout timer. On expiry, marks QA inconclusive, writes a
-    /// BLOCKED verdict, and surfaces the session for operator action. Cancel by
-    /// calling `cancel_qa_timeout`.
+    /// BLOCKED verdict. The Queen may fix the cause and re-arm QA with a fresh
+    /// milestone; force-pass and force-fail remain operator-only. Cancel by calling
+    /// `cancel_qa_timeout`.
     pub fn start_qa_timeout(&self, session_id: &str, timeout_secs: u64) {
         // Cancel any existing timer
         self.cancel_qa_timeout(session_id);
@@ -12999,8 +13151,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 );
 
                 // A timed-out QA must NOT silently ship. Transition to QaInconclusive,
-                // which blocks PR push / completion and surfaces to the operator. The
-                // operator unblocks with force-pass / force-fail.
+                // which blocks PR push / completion. The Queen may fix the cause
+                // and re-arm QA; force-pass and force-fail remain operator-only.
                 let transition = {
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
@@ -13068,10 +13220,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
                     // Write a BLOCKED verdict file so the Queen's poll loop terminates
                     // (instead of hanging forever) and she escalates rather than pushes.
-                    let reason = format!(
-                        "QA verdict timed out after {}s with no response. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Operator action required (force-pass / force-fail).",
-                        timeout_secs
-                    );
+                    let reason = SessionController::qa_timeout_reason(timeout_secs);
                     let verdict_content = serde_json::json!({
                         "kind": "qa-verdict",
                         "verdict": "BLOCKED",
@@ -15689,12 +15838,33 @@ The backend composed and persisted the following authoritative skeleton before l
                 return Err(err);
             }
         };
-        let sidecar = worker_build.sidecar(
+        let mut sidecar = worker_build.sidecar(
             &worker_id,
             session_id,
             plan_task_id,
             resolved_role.definition.as_ref().map(|definition| definition.id.as_str()),
+            if plan_task_id.is_none() || !spawn_context.context_available {
+                "composition-free"
+            } else if spawn_context.ack_eligible {
+                "read-work-graph-fallback"
+            } else {
+                "task-bound"
+            },
+            &spawn_context.edge_captures,
         );
+        if spawn_context.context_available
+            && plan_task_id.is_some_and(|id| !id.trim().is_empty())
+        {
+            if let (Some(storage), Ok(serialized_sidecar)) =
+                (self.storage.as_ref(), serde_json::to_value(&sidecar))
+            {
+                sidecar.decision_ids = record_spawn_rows(
+                    &storage.base_dir().join("judgments").join("ledger.jsonl"),
+                    &session.project_path,
+                    &serialized_sidecar,
+                );
+            }
+        }
         Self::write_spawn_artifacts_fail_open(
             &session.project_path,
             session_id,
@@ -17144,9 +17314,13 @@ mod tests {
 
     #[test]
     fn plan_task_spawn_persists_principal_only_for_the_spawned_worker() {
+        let _retrieval_env_guard =
+            crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
         const SESSION_ID: &str = "principal-spawn";
         let temp = tempfile::tempdir().expect("temporary principal fixture");
-        let project_path = temp.path().join("project");
+        let project_path = temp.path().join("synthetic-repo");
         std::fs::create_dir_all(&project_path).unwrap();
         let storage = Arc::new(
             SessionStorage::new_with_base(temp.path().join("storage"))
@@ -17155,8 +17329,10 @@ mod tests {
         let session_dir = storage
             .create_session_dir(SESSION_ID)
             .expect("session state directory");
+        let mut graph = test_task_graph("guides/fallback.md");
+        graph.edges[0].rationale = Some("knowledge attachment matched inferred-scope:exact".to_string());
         StateManager::new(session_dir.clone())
-            .write_work_graph(&test_task_graph("guides/fallback.md"))
+            .write_work_graph(&graph)
             .unwrap();
 
         let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
@@ -17275,10 +17451,63 @@ mod tests {
         )
         .expect("valid context sidecar");
         assert_eq!(sidecar.plan_task_id.as_deref(), Some("T1"));
-        assert!(sidecar
+        assert_eq!(sidecar.delivery_path.as_deref(), Some("read-work-graph-fallback"));
+        assert_eq!(sidecar.global_summary_included, Some(false));
+        assert!(sidecar.rendered_knowledge_chars.unwrap() > 0);
+        let ledger_content = std::fs::read_to_string(
+            storage.base_dir().join("judgments").join("ledger.jsonl"),
+        )
+        .expect("plan-bound retrieval rows");
+        let decisions: Vec<serde_json::Value> = ledger_content
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|row: &serde_json::Value| {
+                row["kind"] == "decision" && row["surface"] == "hive.retrieval.spawn"
+            })
+            .collect();
+        assert_eq!(decisions.len(), sidecar.kept.len() + sidecar.dropped.len());
+        assert_eq!(sidecar.decision_ids.len(), decisions.len());
+        for (captured, row) in sidecar.decision_ids.iter().zip(&decisions) {
+            assert_eq!(captured.as_deref(), row["decision_id"].as_str());
+            assert_eq!(row["subject_ref"]["repo"], "synthetic-repo");
+        }
+        let kept = sidecar
             .kept
             .iter()
-            .any(|reference| reference.pointer == "guides/fallback.md"));
+            .find(|reference| reference.pointer == "guides/fallback.md")
+            .expect("plan-bound knowledge reference");
+        assert_eq!(kept.match_type.as_deref(), Some("inferred-scope:exact"));
+        assert_eq!(
+            kept.edge_rationale.as_deref(),
+            Some("knowledge attachment matched inferred-scope:exact")
+        );
+
+        let ledger_path = storage.base_dir().join("judgments").join("ledger.jsonl");
+        std::fs::remove_file(&ledger_path).unwrap();
+        std::fs::create_dir(&ledger_path).unwrap();
+        let next = controller
+            .add_worker_for_plan_task(
+                SESSION_ID,
+                AgentConfig {
+                    cli: test_cli.clone(),
+                    ..AgentConfig::default()
+                },
+                WorkerRole::new("general", "General", &test_cli),
+                None,
+                Some(4),
+                Some("T1"),
+                None,
+            )
+            .expect("ledger write failure must not abort a plan-bound spawn");
+        let failed_sidecar: SpawnContextSidecar = serde_json::from_str(
+            &std::fs::read_to_string(durable_dir.join(format!("{}-context.json", next.id)))
+                .expect("fail-open context sidecar"),
+        )
+        .unwrap();
+        assert_eq!(
+            failed_sidecar.decision_ids,
+            vec![None; failed_sidecar.kept.len() + failed_sidecar.dropped.len()]
+        );
     }
 
     #[test]
@@ -17402,12 +17631,21 @@ mod tests {
             budget: ContextBudget::default(),
             sampled: true,
             miss_sample_positions: vec![0],
+            rendered_knowledge_chars: 0,
         };
         let sidecar = build.sidecar(
             "sidecar-worker-1",
             "sidecar",
             Some("T1"),
             Some("backend"),
+            "task-bound",
+            &[crate::orchestrator::org_graph::composition::KnowledgeEdgeCapture {
+                source: KnowledgeSource::Institutional,
+                pointer: "roles/backend.md".to_string(),
+                match_type: Some("inferred-scope:exact".to_string()),
+                rationale: Some("inferred-scope:exact".to_string()),
+                is_global_summary: true,
+            }],
         );
         let encoded = serde_json::to_string_pretty(&sidecar).unwrap();
         let decoded: SpawnContextSidecar = serde_json::from_str(&encoded).unwrap();
@@ -17420,6 +17658,12 @@ mod tests {
         assert_eq!(decoded.kept[0].source, context.knowledge[0].reference.source);
         assert_eq!(decoded.kept[0].pointer, context.knowledge[0].reference.pointer);
         assert_eq!(decoded.kept[0].priority, context.knowledge[0].reference.priority);
+        assert_eq!(decoded.kept[0].match_type.as_deref(), Some("inferred-scope:exact"));
+        assert_eq!(decoded.kept[0].edge_rationale.as_deref(), Some("inferred-scope:exact"));
+        assert_eq!(decoded.delivery_path.as_deref(), Some("task-bound"));
+        assert_eq!(decoded.global_summary_included, Some(true));
+        assert_eq!(decoded.rendered_knowledge_chars, Some(0));
+        assert!(decoded.decision_ids.is_empty());
         assert_eq!(decoded.dropped, context.dropped);
         assert_eq!(decoded.miss_sample_references, vec!["k1"]);
 
@@ -17434,6 +17678,10 @@ mod tests {
         assert_eq!(composition_free["dropped"], serde_json::json!([]));
         assert_eq!(composition_free["sampled"], false);
         assert_eq!(composition_free["miss_sample_references"], serde_json::json!([]));
+        assert_eq!(composition_free["delivery_path"], "composition-free");
+        assert_eq!(composition_free["global_summary_included"], false);
+        assert_eq!(composition_free["rendered_knowledge_chars"], 0);
+        assert_eq!(composition_free["decision_ids"], serde_json::json!([]));
     }
 
     #[test]
@@ -17486,7 +17734,14 @@ mod tests {
         assert!(!build.sampled);
         assert!(!build.prompt.contains(ACK_INSTRUCTION));
         assert!(!build
-            .sidecar("empty-sampled-worker-1", &sampled_session, Some("T1"), None)
+            .sidecar(
+                "empty-sampled-worker-1",
+                &sampled_session,
+                Some("T1"),
+                None,
+                "task-bound",
+                &[],
+            )
             .sampled);
     }
 
@@ -18128,6 +18383,257 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_spawn_sidecar_without_capture_fields_deserializes() {
+        let legacy = r#"{
+            "schema_version": "hive.spawn-context/v1",
+            "agent_id": "legacy-worker-1",
+            "session_id": "legacy",
+            "plan_task_id": "T1",
+            "role_definition_id": null,
+            "budget": {"role_chars": 4096, "task_chars": 4096, "conversation_chars": 4096},
+            "kept": [{"tag": null, "position": 1, "origin": "task", "source": "project", "pointer": "guides/legacy.md", "priority": 80, "chars": 20}],
+            "dropped": [],
+            "sampled": false,
+            "sample_rate": 0.33,
+            "question_version": 1,
+            "miss_sample_references": []
+        }"#;
+        let decoded: SpawnContextSidecar = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.delivery_path, None);
+        assert_eq!(decoded.global_summary_included, None);
+        assert_eq!(decoded.rendered_knowledge_chars, None);
+        assert!(decoded.decision_ids.is_empty());
+        assert_eq!(decoded.kept[0].match_type, None);
+        assert_eq!(decoded.kept[0].edge_rationale, None);
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert!(encoded["kept"][0].get("match_type").is_none());
+        assert!(encoded["kept"][0].get("edge_rationale").is_none());
+    }
+
+    fn legacy_post_workers_protocol(
+        session_id: &str,
+        session_root: &Path,
+        has_evaluator: bool,
+    ) -> String {
+        let milestone_ready_path =
+            SessionController::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
+        let qa_verdict_path = SessionController::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
+        let prince_verdict_path =
+            SessionController::prompt_path(&session_root.join("peer").join("prince-verdict.json"));
+
+        if !has_evaluator {
+            return format!(
+                r#"## Post-Workers Protocol (MANDATORY)
+
+QA is disabled for this session. Tell the operator that the milestone QA gate will not run before push.
+
+1. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
+2. You MUST wait 10 minutes, collect PR comments plus any remaining integrity concerns, and use this `gh api` workflow:
+   ```bash
+   gh api repos/<owner>/<repo>/issues/<pr-number>/comments
+   gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
+   ```
+For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work.
+3. If unresolved findings remain, you MUST spawn a Reconciler worker via `POST /api/sessions/{session_id}/workers`, wait for and validate its paired adjudication artifacts, then spawn the required Resolver workers, integrate their fixes, and return to Step 1.
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate external review comments and integrity findings into one fix list. Produce review-round-N.md and review-round-N.json with one structured disposition per finding."}}'
+   ```
+   Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work. For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{{"result":"ACCEPT|PARTIAL|DECLINE"}}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified.
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM findings from the reconciled list"}}'
+   ```
+4. You MUST call `POST /api/sessions/{session_id}/complete` only after the latest push has aged at least 10 minutes and there are no new unresolved PR comments or integrity concerns.
+"#,
+                session_id = session_id,
+            );
+        }
+
+        format!(
+            r#"## Post-Workers Protocol (MANDATORY)
+
+Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the backend at session launch (`spawn_launch_evaluator_agents`). They already exist as `AgentRole::Evaluator` and `AgentRole::Prince`. You MUST NOT spawn either one. DO NOT `curl POST /workers` with `role=evaluator`, DO NOT `curl POST /evaluators`, and DO NOT spawn a Prince. Signal QA via `{milestone_ready_path}`, WAIT for `{qa_verdict_path}`, then WAIT for `{prince_verdict_path}` before you push.
+
+1. You MUST execute the QA Milestone Handoff block below exactly as written. Treat Step 2 of that handoff as blocking.
+2. You MUST wait for the Evaluator verdict by polling `{qa_verdict_path}` inline. You MUST NOT use `/loop`.
+   ```bash
+   while [ ! -f "{qa_verdict_path}" ]; do
+     curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+       -H "Content-Type: application/json" \
+       -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Evaluator verdict"}}'
+     sleep 30
+   done
+   cat "{qa_verdict_path}"
+   ```
+3. You MUST inspect the verdict.
+   - If it says `PASS` or `FAIL`, the Prince automatically takes over remediation of the QA findings. Continue to Step 4.
+   - If it says `BLOCKED`, QA could not produce a usable verdict. Surface the stated reason and do NOT push. Fix the cause if it is yours (for example, start the missing UI/host or repair the transport), then rewrite `peer/milestone-ready.json` to re-enter QA. A newer file mtime counts as fresh; HTTP `POST /milestone-ready` is always fresh. Re-entry counts against the iteration limit. At `QaMaxRetriesExceeded`, STOP and surface to the operator. Force-pass and force-fail are operator-only.
+4. You MUST wait for the Prince to finish remediation by polling `{prince_verdict_path}` inline. The Prince reads the QA findings, fixes them with its OWN fix team, and self-certifies. You MUST NOT spawn Reconciler or Resolver workers for QA findings — remediating QA findings is the Prince's job, not yours.
+   ```bash
+   while [ ! -f "{prince_verdict_path}" ]; do
+     curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+       -H "Content-Type: application/json" \
+       -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Prince remediation"}}'
+     sleep 30
+   done
+   cat "{prince_verdict_path}"
+   ```
+   - If the Prince verdict is `PASS`/`DONE`, continue to Step 5.
+   - If the Prince verdict is `BLOCKED`, surface the stated reason and do NOT push. Fix the cause if it is yours, then rewrite `peer/milestone-ready.json` to re-enter QA. A newer file mtime counts as fresh; HTTP `POST /milestone-ready` is always fresh. Re-entry counts against the iteration limit. At `QaMaxRetriesExceeded`, STOP and surface to the operator. Force-pass and force-fail are operator-only.
+5. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
+6. You MUST wait 10 minutes, then collect EXTERNAL PR review comments and resolve them. The Reconciler/Resolver workers here are for PR review comments ONLY — a separate concern from the QA findings the Prince already handled. Whenever unresolved PR comments remain, spawn the Reconciler, wait for and validate its paired adjudication artifacts, then spawn Resolver workers, integrate their fixes, and return to Step 5:
+   ```bash
+   gh api repos/<owner>/<repo>/issues/<pr-number>/comments
+   gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
+   ```
+
+   For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work.
+
+   ```bash
+
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate external PR review comments into one fix list. Produce review-round-N.md and review-round-N.json with one structured disposition per finding."}}'
+   ```
+   Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work. For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{{"result":"ACCEPT|PARTIAL|DECLINE"}}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified.
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM external PR review comments from the reconciled list"}}'
+   ```
+7. You MUST call `POST /api/sessions/{session_id}/complete` only after QA is resolved, the Prince has certified `PASS`, the latest push has aged at least 10 minutes, and there are no new unresolved PR comments.
+"#,
+            milestone_ready_path = milestone_ready_path,
+            qa_verdict_path = qa_verdict_path,
+            prince_verdict_path = prince_verdict_path,
+            session_id = session_id,
+        )
+    }
+
+    #[test]
+    fn queen_review_round_protocol_is_shared_and_preserves_both_rendered_branches() {
+        use sha2::{Digest, Sha256};
+
+        let source = include_str!("controller.rs");
+        let production_source = source.split("mod tests {").next().unwrap();
+        assert_eq!(
+            production_source
+                .matches(concat!("For review round N, ", "give the Reconciler"))
+                .count(),
+            1,
+        );
+        assert_eq!(
+            production_source
+                .matches(concat!("Queen: wait for the Reconciler's ", "markdown and JSON"))
+                .count(),
+            1,
+        );
+
+        let session_root = Path::new("/repo/.hive-manager/session-123");
+        for (has_evaluator, original_sha256) in [
+            (false, "710fcb803684fc5dd4c3957a5a9cfcf55908b590f758ccd3af4328c032f88eea"),
+            (true, "ce010744ca1ab392a93d875d57ca736acb028aead54017df0cedb1b246c0b1ef"),
+        ] {
+            let rendered = SessionController::queen_post_workers_protocol(
+                "session-123",
+                session_root,
+                has_evaluator,
+            );
+            assert_eq!(
+                rendered,
+                legacy_post_workers_protocol("session-123", session_root, has_evaluator),
+            );
+            assert_eq!(
+                format!("{:x}", Sha256::digest(rendered.as_bytes())),
+                original_sha256,
+                "Post-Workers text changed with has_evaluator={has_evaluator}",
+            );
+        }
+    }
+
+    #[test]
+    fn queen_protocol_rearms_blocked_qa_and_prince_with_operator_only_overrides() {
+        let protocol = SessionController::queen_post_workers_protocol(
+            "session-123",
+            Path::new("/repo/.hive-manager/session-123"),
+            true,
+        );
+        for blocked_step in [
+            protocol
+                .split("- If it says `BLOCKED`")
+                .nth(1)
+                .expect("QA BLOCKED step")
+                .split("4. You MUST wait for the Prince")
+                .next()
+                .unwrap(),
+            protocol
+                .split("- If the Prince verdict is `BLOCKED`")
+                .nth(1)
+                .expect("Prince BLOCKED step")
+                .split("5. You MUST commit")
+                .next()
+                .unwrap(),
+        ] {
+            assert!(blocked_step.to_lowercase().contains("surface the stated reason"));
+            assert!(blocked_step.contains("Fix the cause if it is yours"));
+            assert!(blocked_step.contains("rewrite `peer/milestone-ready.json`"));
+            assert!(blocked_step.contains("newer file mtime counts as fresh"));
+            assert!(blocked_step.contains("HTTP `POST /milestone-ready` is always fresh"));
+            assert!(blocked_step.contains("counts against the iteration limit"));
+            assert!(blocked_step.contains("At `QaMaxRetriesExceeded`, STOP and surface to the operator"));
+            assert!(blocked_step.contains("Force-pass and force-fail are operator-only"));
+        }
+    }
+
+    #[test]
+    fn queen_protocol_reports_when_qa_is_disabled() {
+        let session_root = Path::new("/repo/.hive-manager/session-123");
+        let qa_off = SessionController::queen_post_workers_protocol(
+            "session-123",
+            session_root,
+            false,
+        );
+        assert!(qa_off.contains("QA is disabled for this session"));
+        assert!(qa_off.contains("milestone QA gate will not run before push"));
+
+        let qa_on = SessionController::queen_post_workers_protocol(
+            "session-123",
+            session_root,
+            true,
+        );
+        assert!(!qa_on.contains("QA is disabled for this session"));
+    }
+
+    #[test]
+    fn queen_protocol_records_blind_review_adjudications_in_both_modes() {
+        let session_root = Path::new("/repo/.hive-manager/session-123");
+        for has_evaluator in [false, true] {
+            let protocol = SessionController::queen_post_workers_protocol(
+                "session-123",
+                session_root,
+                has_evaluator,
+            );
+            assert!(protocol.contains("notes/review-round-N.md` plus sibling `review-round-N.json`"));
+            assert!(protocol.contains("`finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE)"));
+            assert!(protocol.contains("Keep rationale and severity out of JSON"));
+            assert!(protocol.contains("Validate that every finding is represented before assigning Resolver work"));
+            assert!(protocol.contains("Produce review-round-N.md and review-round-N.json with one structured disposition per finding"));
+            assert!(protocol.contains("schema_version: hive.review-adjudications/v1"));
+            assert!(protocol.contains("run `judge record --surface hive.review.finding --question-id review_finding_disposition`"));
+            assert!(protocol.contains("`git show <sha>:<path>`"));
+            assert!(protocol.contains("Remove reviewer severity badges/headers and never include the Reconciler rationale"));
+            assert!(protocol.contains("`judge ask --surface hive.review.finding --source-decision-id <record_id>`"));
+            assert!(protocol.contains("its answer never changes the fix list"));
+            assert!(protocol.contains("attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees"));
+            assert!(protocol.contains("A resolved thread alone supplies no truth label"));
+        }
+        assert!(include_str!("controller.rs").contains("for external PR findings emit the paired review-round-N.md and review-round-N.json adjudication artifacts, with one disposition per finding and rationale only in markdown"));
+    }
+
+    #[test]
     fn worker_task_file_path_uses_worktree_local_hive_manager_dir() {
         let path = SessionController::task_file_path_for_worker(
             Path::new("/repo/.hive-manager/worktrees/session-123/worker-2"),
@@ -18584,6 +19090,18 @@ mod tests {
         assert!(status_content.contains(
             "keeps agent liveness fresh for stall detection but does not extend the session's 10-minute quiescence window"
         ));
+
+        let judge_tool_path = temp_dir
+            .path()
+            .join(".hive-manager")
+            .join("session-123")
+            .join("tools")
+            .join("judge.md");
+        let judge_content = std::fs::read_to_string(judge_tool_path).expect("read judge tool doc");
+        assert!(judge_content.contains("python tools/judgment/judge.py"));
+        assert!(judge_content.contains("A Jev answer never gates any hive action"));
+        assert!(judge_content.contains("outcome --decision-id <incumbent-decision-id>"));
+        assert!(judge_content.contains("--source downstream --note \"evidence_tier=fixed"));
 
         let learning_tool_path = temp_dir
             .path()
@@ -19391,6 +19909,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         );
 
         assert!(hardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
+        assert!(hardened_queen_prompt.contains("| Judge | `judge.md` |"));
         assert!(!unhardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
     }
 
@@ -20191,7 +20710,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         );
         assert!(outcomes.iter().all(|row| {
             row["kind"] == "outcome"
-                && row["label"] == "pass"
+                && row["label"] == serde_json::json!({ "result": "pass" })
                 && row["source"] == "downstream"
         }));
     }
@@ -20252,7 +20771,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let outcomes = read_test_outcomes(&storage);
         assert_eq!(outcomes.len(), 2);
         assert!(outcomes.iter().all(|row| {
-            row["label"] == "fail" && row["source"] == "downstream"
+            row["label"] == serde_json::json!({ "result": "fail" })
+                && row["source"] == "downstream"
         }));
     }
 
@@ -20494,7 +21014,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         );
         assert!(outcomes.iter().all(|row| {
             row["kind"] == "outcome"
-                && row["label"] == "pass"
+                && row["label"] == serde_json::json!({ "result": "pass" })
                 && row["source"] == "downstream"
         }));
     }
@@ -20600,6 +21120,34 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             blocked_pattern.is_match(&body),
             "Solo's shell guard must match the actual PeerMessageRecord envelope"
         );
+    }
+
+    #[test]
+    fn qa_timeout_verdict_explains_reentry_and_operator_only_overrides() {
+        let temp = tempfile::tempdir().expect("temp");
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "timeout-guidance",
+            SessionState::QaInProgress { iteration: Some(1) },
+            temp.path().to_path_buf(),
+            true,
+        ));
+        controller.on_qa_timeout("timeout-guidance").expect("timeout");
+        let verdict_path = temp
+            .path()
+            .join(".hive-manager/timeout-guidance/peer/qa-verdict.json");
+        let body = std::fs::read_to_string(verdict_path).expect("verdict body");
+        for guidance in [
+            "fix the cause if it is yours",
+            "rewrite peer/milestone-ready.json",
+            "newer mtime counts as fresh",
+            "HTTP POST /milestone-ready is always fresh",
+            "counts against the iteration limit",
+            "At QaMaxRetriesExceeded, stop and surface to the operator",
+            "Force-pass and force-fail are operator-only",
+        ] {
+            assert!(body.contains(guidance), "missing timeout guidance: {guidance}");
+        }
     }
 
     #[test]

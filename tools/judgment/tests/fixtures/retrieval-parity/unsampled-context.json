@@ -1,0 +1,14 @@
+{
+  "schema_version": "hive.spawn-context/v1",
+  "session_id": "55555555-5555-4555-8555-555555555555",
+  "agent_id": "55555555-5555-4555-8555-555555555555-worker-2",
+  "plan_task_id": "T2",
+  "sampled": false,
+  "question_version": 1,
+  "kept": [
+    {"tag": null, "position": 1, "origin": "role", "source": "institutional", "pointer": "engineering/guide.md", "priority": 50, "chars": 40}
+  ],
+  "dropped": [
+    {"pointer": ".ai-docs/four.md", "origin": "task", "reason": "task_budget_exceeded"}
+  ]
+}

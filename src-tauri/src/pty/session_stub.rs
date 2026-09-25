@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -305,6 +306,7 @@ pub struct PtySession {
     env: Vec<(String, String)>,
     env_removed: Vec<String>,
     output_ring: Arc<Mutex<OutputRing>>,
+    kill_error_once: AtomicBool,
 }
 
 unsafe impl Send for PtySession {}
@@ -354,6 +356,9 @@ impl PtySession {
                 .map(str::to_string)
                 .collect(),
             output_ring,
+            kill_error_once: AtomicBool::new(
+                args.iter().any(|arg| *arg == "--stub-tree-kill-fails-once"),
+            ),
         };
 
         // #207 test fixture: a flag-borne sentinel is the only way an integration test
@@ -520,6 +525,11 @@ impl PtySession {
     }
 
     pub fn kill(&self) -> Result<(), PtyError> {
+        if self.kill_error_once.swap(false, Ordering::SeqCst) {
+            return Err(PtyError::IoError(std::io::Error::other(
+                "synthetic partial tree-kill failure",
+            )));
+        }
         Ok(())
     }
 

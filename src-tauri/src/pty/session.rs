@@ -138,6 +138,45 @@ fn into_io_error<E: std::fmt::Display>(error: E) -> PtyError {
     PtyError::IoError(std::io::Error::other(error.to_string()))
 }
 
+#[cfg(windows)]
+fn kill_windows_tree(pid: u32) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut helper = Command::new("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .args(["/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = helper.try_wait()? {
+            return if status.success() || status.code() == Some(128) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "taskkill /PID {pid} /T /F exited with {status}"
+                )))
+            };
+        }
+        if Instant::now() >= deadline {
+            let _ = helper.kill();
+            let _ = helper.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("taskkill /PID {pid} /T /F timed out"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 impl MasterPtyHandle {
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
         use portable_pty::PtySize;
@@ -300,6 +339,8 @@ pub struct PtySession {
     writer: Arc<Mutex<SendWriter>>,
     reader: Arc<Mutex<SendReader>>,
     child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
+    #[cfg(windows)]
+    child_pid: Option<u32>,
     master: Arc<Mutex<MasterPtyHandle>>,
     /// Bounded, offset-addressed history of everything the child wrote to the PTY.
     ///
@@ -395,6 +436,8 @@ impl PtySession {
             .slave
             .spawn_command(cmd)
             .map_err(|e| PtyError::SpawnError(e.to_string()))?;
+        #[cfg(windows)]
+        let child_pid = child.process_id();
 
         // #175(d): the child is ALREADY RUNNING at this point. Returning `Err`
         // from either step below without killing it would leave a live process
@@ -429,6 +472,8 @@ impl PtySession {
             writer: Arc::new(Mutex::new(SendWriter(writer))),
             reader: Arc::new(Mutex::new(SendReader(reader))),
             child: Arc::new(Mutex::new(Some(child))),
+            #[cfg(windows)]
+            child_pid,
             master: Arc::new(Mutex::new(MasterPtyHandle(master))),
             output_ring: Arc::new(Mutex::new(OutputRing::new(replay_capacity))),
         })
@@ -541,8 +586,49 @@ impl PtySession {
     }
 
     pub fn kill(&self) -> Result<(), PtyError> {
+        #[cfg(windows)]
+        return self.kill_with_tree_killer(kill_windows_tree);
+
+        #[cfg(not(windows))]
+        {
+            let mut child = self.child.lock();
+            if let Some(ref mut c) = *child {
+                if c.try_wait().map_err(into_io_error)?.is_some() {
+                    return Ok(());
+                }
+                c.kill().map_err(into_io_error)?;
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(windows)]
+    fn kill_with_tree_killer(
+        &self,
+        tree_killer: impl FnOnce(u32) -> std::io::Result<()>,
+    ) -> Result<(), PtyError> {
         let mut child = self.child.lock();
+        if let Some(pid) = self.child_pid {
+            // A reaped direct child says nothing about descendants. Always try the
+            // recorded PID; /T can only enumerate children while that root exists.
+            // Descendants reparented after root exit cannot be recovered by PID.
+            match tree_killer(pid) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    tracing::warn!(pid, %error, "PTY process-tree kill failed; retaining cleanup target");
+                    if let Some(ref mut c) = *child {
+                        if c.try_wait().ok().flatten().is_none() {
+                            let _ = c.kill();
+                        }
+                    }
+                    return Err(PtyError::IoError(error));
+                }
+            }
+        }
         if let Some(ref mut c) = *child {
+            if c.try_wait().map_err(into_io_error)?.is_some() {
+                return Ok(());
+            }
             c.kill().map_err(into_io_error)?;
         }
         Ok(())
@@ -661,6 +747,162 @@ pub fn read_from_reader(reader: &Arc<Mutex<SendReader>>, buf: &mut [u8]) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{sanitize_bracketed_paste, BRACKETED_PASTE_END};
+
+    #[cfg(windows)]
+    mod windows_tree {
+        use std::fs;
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        use tempfile::TempDir;
+
+        use super::super::{AgentRole, PtySession};
+        use crate::adapters::pty_submit_policy;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        fn pid_is_live(pid: u32) -> bool {
+            Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command"])
+                .arg(format!(
+                    "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
+                ))
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        }
+
+        struct PingCleanup(Option<u32>);
+
+        impl Drop for PingCleanup {
+            fn drop(&mut self) {
+                if let Some(pid) = self.0 {
+                    let _ = Command::new("taskkill")
+                        .arg("/PID")
+                        .arg(pid.to_string())
+                        .args(["/T", "/F"])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
+            }
+        }
+
+        #[test]
+        fn killing_real_pty_session_reaps_ping_grandchild() {
+            let temp = TempDir::new().unwrap();
+            let pid_file = temp.path().join("ping.pid");
+            let script_file = temp.path().join("spawn-ping.ps1");
+            let escaped_pid_file = pid_file.to_string_lossy().replace('\'', "''");
+            fs::write(
+                &script_file,
+                format!(
+                    "$ErrorActionPreference = 'Stop'\n\
+                     $child = Start-Process -FilePath ping.exe -ArgumentList '-n 600 127.0.0.1' -PassThru -NoNewWindow\n\
+                     [IO.File]::WriteAllText('{escaped_pid_file}', [string]$child.Id)\n\
+                     Wait-Process -Id $child.Id\n"
+                ),
+            ).unwrap();
+            let script = script_file.to_string_lossy();
+            let session = PtySession::new(
+                "synthetic-tree-kill".to_string(),
+                AgentRole::Worker { index: 1, parent: None },
+                "powershell.exe",
+                pty_submit_policy("powershell.exe"),
+                &[],
+                &["-NoProfile", "-NonInteractive", "-File", &script],
+                temp.path().to_str(),
+                80,
+                24,
+                8192,
+            ).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let pid = loop {
+                if let Ok(value) = fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = value.trim().parse::<u32>() {
+                        break pid;
+                    }
+                }
+                assert!(Instant::now() < deadline, "ping PID was not reported");
+                thread::sleep(Duration::from_millis(50));
+            };
+            let mut cleanup = PingCleanup(Some(pid));
+            assert!(pid_is_live(pid), "ping grandchild exited before kill");
+            session.kill().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while pid_is_live(pid) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!pid_is_live(pid), "ping grandchild {pid} survived PTY kill");
+            cleanup.0 = None;
+        }
+
+        #[test]
+        fn killing_already_exited_real_pty_session_is_idempotent() {
+            let temp = TempDir::new().unwrap();
+            let session = PtySession::new(
+                "synthetic-exited".to_string(),
+                AgentRole::Worker { index: 1, parent: None },
+                "cmd.exe",
+                pty_submit_policy("cmd.exe"),
+                &[],
+                &["/c", "exit", "0"],
+                temp.path().to_str(),
+                80,
+                24,
+                8192,
+            ).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while session.is_alive() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(25));
+            }
+            assert!(!session.is_alive(), "synthetic child did not exit");
+            let mut attempted_pid = None;
+            session.kill_with_tree_killer(|pid| {
+                attempted_pid = Some(pid);
+                Ok(())
+            }).unwrap();
+            assert_eq!(attempted_pid, session.child_pid);
+            session.kill().unwrap();
+            session.kill().unwrap();
+        }
+
+        #[test]
+        fn failed_tree_kill_of_exited_root_remains_retryable() {
+            let temp = TempDir::new().unwrap();
+            let session = PtySession::new(
+                "synthetic-exited-failure".to_string(),
+                AgentRole::Worker { index: 1, parent: None },
+                "cmd.exe",
+                pty_submit_policy("cmd.exe"),
+                &[],
+                &["/c", "exit", "0"],
+                temp.path().to_str(),
+                80,
+                24,
+                8192,
+            ).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while session.is_alive() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(25));
+            }
+            assert!(!session.is_alive());
+            assert!(session.kill_with_tree_killer(|_| Err(std::io::Error::other("partial failure"))).is_err());
+            let mut retried = false;
+            session.kill_with_tree_killer(|_| {
+                retried = true;
+                Ok(())
+            }).unwrap();
+            assert!(retried);
+        }
+    }
 
     #[test]
     fn sanitize_bracketed_paste_removes_end_sequence_from_payload() {

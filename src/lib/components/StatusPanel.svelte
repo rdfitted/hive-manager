@@ -106,7 +106,7 @@
     if (v === 'QaInProgress') return 'QA In Progress';
     if (v === 'PrinceRemediation') return 'Prince Remediation';
     if (v === 'QaPassed') return 'QA Passed';
-    if (v === 'QaInconclusive') return 'QA Inconclusive — operator action needed';
+    if (v === 'QaInconclusive') return 'QA Inconclusive — awaiting re-entry';
     if (v === 'QaMaxRetriesExceeded') return 'QA Max Retries Exceeded';
     return v ?? 'Unknown';
   }
@@ -270,6 +270,11 @@
       return role === 'Evaluator' || role === 'QaWorker';
     });
   }
+
+  function isQaOff(session: Session): boolean {
+    if (!('Hive' in session.session_type || 'Solo' in session.session_type)) return false;
+    return !session.agents.some((agent) => serdeEnumVariantName(agent.role) === 'Evaluator');
+  }
 </script>
 
 <div class="status-content">
@@ -340,6 +345,11 @@
             <p class="hint">Launch a new session to get started</p>
           </div>
         {:else}
+        {#if isQaOff($activeSession)}
+          <section class="section">
+            <span class="status-badge status-warning">QA Off</span>
+          </section>
+        {/if}
         {#if isQaPhase($activeSession.state)}
           <section class="section">
             <QaFeedbackPanel />

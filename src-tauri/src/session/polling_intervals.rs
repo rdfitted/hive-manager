@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-pub const ACTIVATION_POLL_INTERVAL: Duration = Duration::from_secs(30);
-
 pub const SMOKE_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 pub const SMOKE_ACTIVE_POLL_INTERVAL: Duration = Duration::from_secs(15);
 pub const SMOKE_EVALUATOR_FIRST_POLL_INTERVAL: Duration = Duration::from_secs(30);

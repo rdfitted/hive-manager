@@ -5,6 +5,7 @@ pub mod boundary;
 pub mod composition;
 pub mod definitions;
 pub mod ownership;
+pub(crate) mod retrieval_ledger;
 pub mod schema;
 
 pub use schema::{

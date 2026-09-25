@@ -4732,6 +4732,55 @@ async fn test_create_hive_with_evaluator_config_propagates_to_evaluator() {
 }
 
 #[tokio::test]
+async fn http_hive_qa_defaults_on_and_explicit_false_opts_out() {
+    for requested in [None, Some(false)] {
+        let (app, controller) = setup_test_app_with_controller().await;
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo_for_launch_fixture(temp_dir.path());
+        let mut body = serde_json::json!({
+            "project_path": temp_dir.path().to_string_lossy(),
+            "mode": "hive",
+            "objective": "Check QA default",
+            "worker_count": 1,
+            "default_cli": "claude",
+            "smoke_test": true,
+        });
+        if let Some(enabled) = requested {
+            body["with_evaluator"] = serde_json::json!(enabled);
+            body["evaluator_cli"] = serde_json::json!("codex");
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&bytes));
+        let launched: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let session_id = launched["session_id"].as_str().unwrap();
+        let session = controller.read().get_session(session_id).unwrap();
+        assert_eq!(
+            session
+                .agents
+                .iter()
+                .any(|agent| matches!(agent.role, AgentRole::Evaluator)),
+            requested.unwrap_or(true),
+        );
+        controller.write().close_session(session_id).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn test_launch_swarm_accepts_model_capable_configs() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = TempDir::new().unwrap();
@@ -5014,6 +5063,52 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
         assert!(prompt.contains("sleep 1200"));
         assert!(prompt.contains("sleep 480"));
 
+        controller.write().close_session(session_id).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn http_solo_qa_defaults_on_and_explicit_false_opts_out() {
+    for requested in [None, Some(false)] {
+        let (app, controller) = setup_test_app_with_controller().await;
+        let temp_dir = TempDir::new().unwrap();
+        init_git_repo_for_launch_fixture(temp_dir.path());
+        let mut body = serde_json::json!({
+            "project_path": temp_dir.path().to_string_lossy(),
+            "task_description": "Check solo QA default",
+            "cli": "claude",
+        });
+        if let Some(enabled) = requested {
+            body["with_evaluator"] = serde_json::json!(enabled);
+            body["evaluator_cli"] = serde_json::json!("codex");
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/solo")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&bytes));
+        let launched: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let session_id = launched["session_id"].as_str().unwrap();
+        let session = controller.read().get_session(session_id).unwrap();
+        assert_eq!(
+            session
+                .agents
+                .iter()
+                .any(|agent| matches!(agent.role, AgentRole::Evaluator)),
+            requested.unwrap_or(true),
+        );
         controller.write().close_session(session_id).unwrap();
     }
 }

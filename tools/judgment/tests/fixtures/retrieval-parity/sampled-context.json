@@ -1,0 +1,20 @@
+{
+  "schema_version": "hive.spawn-context/v1",
+  "session_id": "55555555-5555-4555-8555-555555555555",
+  "agent_id": "55555555-5555-4555-8555-555555555555-worker-1",
+  "plan_task_id": "T1",
+  "sampled": true,
+  "question_version": 1,
+  "miss_sample_references": ["k2"],
+  "delivery_path": "read-work-graph-fallback",
+  "global_summary_included": true,
+  "rendered_knowledge_chars": 180,
+  "decision_ids": [],
+  "kept": [
+    {"tag": "k1", "position": 1, "origin": "task", "source": "project", "pointer": ".ai-docs/one.md", "priority": 80, "chars": 100, "match_type": "inferred-scope:exact", "edge_rationale": "inferred-scope:exact"},
+    {"tag": "k2", "position": 2, "origin": "role_and_task", "source": "institutional", "pointer": "patterns/two.md", "priority": 60, "chars": 80, "match_type": null, "edge_rationale": null}
+  ],
+  "dropped": [
+    {"pointer": ".ai-docs/three.md", "origin": "task", "reason": "task_budget_exceeded"}
+  ]
+}

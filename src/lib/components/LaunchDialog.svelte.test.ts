@@ -135,3 +135,44 @@ describe('LaunchDialog tier routing', () => {
     });
   });
 });
+
+describe('LaunchDialog QA defaults', () => {
+  it('launches a Hive with QA enabled by default', async () => {
+    const launchHive = vi.fn();
+    const view = render(LaunchDialog, {
+      props: { show: true },
+      events: { launchHive },
+    });
+    await fireEvent.click(view.getByRole('button', { name: 'Browse' }));
+    const qaCheckbox = view.getByRole('checkbox', { name: /QA: Evaluator \+ QA workers/ }) as HTMLInputElement;
+    expect(qaCheckbox.checked).toBe(true);
+    expect(view.getByText(/UI and A11Y workers need a rendered browser/)).toBeTruthy();
+    await fireEvent.click(view.getByRole('button', { name: 'Launch' }));
+
+    expect(launchHive).toHaveBeenCalledTimes(1);
+    expect(launchHive.mock.calls[0]?.[0].detail).toEqual(expect.objectContaining({
+      with_evaluator: true,
+      evaluator_config: expect.objectContaining({ cli: expect.any(String) }),
+      qa_workers: expect.arrayContaining([expect.objectContaining({ specialization: 'api' })]),
+    }));
+  });
+
+  it('launches Solo with QA enabled by default', async () => {
+    const launchSolo = vi.fn();
+    const view = render(LaunchDialog, {
+      props: { show: true },
+      events: { launchSolo },
+    });
+    await fireEvent.click(view.getByRole('button', { name: 'Solo' }));
+    await fireEvent.click(view.getByRole('button', { name: 'Browse' }));
+    expect((view.getByRole('checkbox', { name: /QA: Evaluator \+ QA workers/ }) as HTMLInputElement).checked).toBe(true);
+    await fireEvent.click(view.getByRole('button', { name: 'Launch' }));
+
+    expect(launchSolo).toHaveBeenCalledTimes(1);
+    expect(launchSolo.mock.calls[0]?.[0].detail).toEqual(expect.objectContaining({
+      with_evaluator: true,
+      evaluator_config: expect.objectContaining({ cli: expect.any(String) }),
+      qa_workers: expect.arrayContaining([expect.objectContaining({ specialization: 'api' })]),
+    }));
+  });
+});

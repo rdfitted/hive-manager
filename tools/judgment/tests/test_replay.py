@@ -587,7 +587,7 @@ class ReplayPlumbingTests(unittest.TestCase):
             rows = list(ledger.read_records([ledger_path]))
             outcomes = [row for row in rows if row.get("kind") == "outcome"]
             self.assertEqual(2, len(outcomes), "ack outcomes must be idempotent")
-            self.assertTrue(all(row["label"] == "unused" for row in outcomes))
+            self.assertTrue(all(row["label"] == {"result": "unused"} for row in outcomes))
             self.assertEqual(
                 [False, True],
                 sorted(row["proxy_mentioned"] for row in outcomes),
@@ -770,8 +770,8 @@ class ReplayPlumbingTests(unittest.TestCase):
             ]
             self.assertEqual(3, len(spawn_rows), "replay must be idempotent")
             self.assertEqual(
-                ["kept", "kept", "dropped"],
-                [row["answer"]["disposition"] for row in spawn_rows],
+                [{"result": "used"}, {"result": "used"}, {"result": "unused"}],
+                [row["answer"] for row in spawn_rows],
             )
             self.assertEqual(
                 {
@@ -784,9 +784,9 @@ class ReplayPlumbingTests(unittest.TestCase):
                     "cost": None,
                     "miss_sample": False,
                 },
-                spawn_rows[2]["answer"],
+                spawn_rows[2]["retrieval_features"],
             )
-            self.assertTrue(spawn_rows[1]["answer"]["miss_sample"])
+            self.assertTrue(spawn_rows[1]["retrieval_features"]["miss_sample"])
             self.assertEqual((3, []), ledger.validate_file([ledger_path]))
 
     def test_replay_names_parseable_session_without_a_persisted_work_graph(self):

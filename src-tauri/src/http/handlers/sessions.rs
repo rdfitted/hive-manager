@@ -281,6 +281,7 @@ pub struct LaunchSoloRequest {
     pub evaluator_config: Option<AgentConfig>,
     pub evaluator_cli: Option<String>,
     pub evaluator_model: Option<String>,
+    pub with_evaluator: Option<bool>,
     pub name: Option<String>,
     pub color: Option<String>,
 }
@@ -462,11 +463,11 @@ pub async fn create_session(
                 req.evaluator_cli,
                 req.evaluator_model,
                 req.with_evaluator
-                    .unwrap_or(false)
+                    .unwrap_or(true)
                     .then_some(default_cli.as_str()),
                 queen_model.as_deref(),
             )?;
-            let with_evaluator = req.with_evaluator.unwrap_or(false) || evaluator_config.is_some();
+            let with_evaluator = req.with_evaluator.unwrap_or(true);
 
             let execution_policy = {
                 // Resolve against the same institutional wiki root the /api/tier-ladder
@@ -884,14 +885,14 @@ pub async fn launch_solo(
         initial_prompt: None,
     };
 
+    let with_evaluator = req.with_evaluator.unwrap_or(true);
     let evaluator_config = evaluator_config_from_request(
         req.evaluator_config,
         req.evaluator_cli,
         req.evaluator_model,
-        None,
-        None,
+        with_evaluator.then_some(agent_config.cli.as_str()),
+        agent_config.model.as_deref(),
     )?;
-    let with_evaluator = evaluator_config.is_some();
 
     let config = HiveLaunchConfig {
         project_path: req.project_path,

@@ -1,0 +1,16 @@
+{
+  "nodes": [
+    {"id": "context::knowledge::one", "expansion": {"parameters": {"source_ref": ".ai-docs/one.md"}}},
+    {"id": "context::knowledge::two", "expansion": {"parameters": {"source_ref": "institutional:engineering/two.md"}}},
+    {"id": "context::knowledge::three", "expansion": {"parameters": {"source_ref": ".ai-docs/three.md"}}},
+    {"id": "context::knowledge::four", "expansion": {"parameters": {"source_ref": "institutional:engineering/four.md"}}},
+    {"id": "context::knowledge::five", "expansion": {"parameters": {"source_ref": ".ai-docs/five.md"}}}
+  ],
+  "edges": [
+    {"source": "context::knowledge::one", "target": "T1", "kind": "informs", "provenance": "knowledge", "rationale": "inferred-scope:exact"},
+    {"source": "context::knowledge::two", "target": "T1", "kind": "informs", "provenance": "knowledge", "rationale": "inferred-scope:exact"},
+    {"source": "context::knowledge::three", "target": "T1", "kind": "informs", "provenance": "knowledge", "rationale": "inferred-scope:suffix"},
+    {"source": "context::knowledge::four", "target": "T1", "kind": "informs", "provenance": "knowledge", "rationale": "inferred-scope:suffix"},
+    {"source": "context::knowledge::five", "target": "T1", "kind": "informs", "provenance": "knowledge"}
+  ]
+}

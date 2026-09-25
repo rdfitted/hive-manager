@@ -1,0 +1,8 @@
+{
+  "criterion_answer_json": "{\"result\":\"pass\"}",
+  "criterion_rationale": "Typed criteria passed",
+  "criterion_iteration": 2,
+  "override_label_json": "{\"result\":\"fail\"}",
+  "terminal_label_json": "{\"result\":\"pass\"}",
+  "advisory_answer_json": "{\"result\":\"fail\"}"
+}

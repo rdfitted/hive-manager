@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "_doc": "Repo-owned judgment policy for hive surfaces. Targets below are initial goals from hive-manager#291; promotion requires an operator decision backed by an audit run.",
+  "targets": {
+    "repeatability": 1.0,
+    "agreement_binary": 0.95,
+    "agreement_multiclass": 0.90,
+    "agreement_scored_within1": 0.90,
+    "ece_max": 0.05,
+    "fail_open_max": 0.01,
+    "min_labeled_n": 200,
+    "min_heldout_n": 100,
+    "small_n_warning": 100,
+    "repeatability_basis": "decision",
+    "jitter_warn": 0.05
+  },
+  "demotion": {
+    "rolling_window": 50,
+    "agreement_drop_pts": 5,
+    "fail_open_max_7d": 0.05
+  },
+  "surfaces": {
+    "hive.qa.criterion": { "mode": "shadow", "question_type": "multiclass" },
+    "hive.qa.milestone": { "mode": "shadow", "question_type": "multiclass" },
+    "hive.qa.criterion.pass_fail": { "mode": "shadow", "question_type": "multiclass", "_doc": "Reserved for a future split; current rows use hive.qa.criterion." },
+    "hive.qa.criterion.scored": { "mode": "shadow", "question_type": "scored", "_doc": "Reserved until numeric answer and label rows are implemented." },
+    "hive.fusion.rank": { "mode": "shadow", "question_type": "multiclass" },
+    "hive.retrieval.spawn": { "mode": "shadow", "question_type": "multiclass", "judge": "code", "reason": "Local inclusion decision per kept or dropped reference; sampled model acknowledgements may supply outcomes." },
+    "hive.retrieval.delivery": { "mode": "shadow", "question_type": "multiclass", "_doc": "Reserved for a future delivery-integrity question and outcome; no live writer in 0.54.0." },
+    "hive.review.finding": { "mode": "shadow", "question_type": "multiclass", "judge": null, "reason": "incumbent review adjudication plus optional gated Jev shadow; promotion awaits held-out labels and #291" }
+  },
+  "policy_targets": {
+    "_doc": "Surface-specific #291 targets for operator review. The vendored audit reads global targets, not these metadata fields.",
+    "hive.qa.criterion": { "heldout_agreement_min": 0.95, "at_least_incumbent": true },
+    "hive.qa.criterion.scored": { "within_one_min": 0.90, "mae_at_most_incumbent": true },
+    "hive.fusion.rank": { "top_one_agreement_min": 0.80, "sessions_min": 30 },
+    "hive.retrieval.spawn": { "kept_precision": "must_not_fall", "sampled_miss_rate": "must_not_rise" },
+    "all": { "decision_repeatability_min": 1.0, "probability_jitter_max": 0.05, "ece_10_bucket_max": 0.05, "labeled_n_min": 200, "heldout_fraction": 0.5, "fail_open_7d_max": 0.01, "gating_p95_latency_s_max": 1.5 }
+  }
+}

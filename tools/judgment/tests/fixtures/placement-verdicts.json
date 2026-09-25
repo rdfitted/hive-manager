@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "decisions": [
+    {
+      "id": "D1",
+      "verdict": "shadow-log-only",
+      "judge_class": null,
+      "reason_class": "measured-number",
+      "n": 3,
+      "usable": false,
+      "surface": "hive.retrieval.spawn",
+      "surface_state": "live"
+    },
+    {
+      "id": "D2",
+      "verdict": "shadow-log-only",
+      "judge_class": null,
+      "reason_class": "not-yet-measurable",
+      "missing_data": "direct global_summary_included observations and a comparable D2 outcome",
+      "flip_condition": "additive sidecars capture inclusion and an independent D2 question/outcome is approved",
+      "surface": null,
+      "surface_state": null
+    },
+    {
+      "id": "D3",
+      "verdict": "invoke",
+      "judge_class": "deterministic rule",
+      "reason_class": "measured-number",
+      "n": 3,
+      "usable": true,
+      "surface": "hive.retrieval.spawn",
+      "surface_state": "live"
+    },
+    {
+      "id": "D4",
+      "verdict": "decline",
+      "judge_class": null,
+      "reason_class": "named-gate",
+      "gate": "determinism requirement",
+      "surface": null,
+      "surface_state": null
+    },
+    {
+      "id": "D5",
+      "verdict": "shadow-log-only",
+      "judge_class": null,
+      "reason_class": "not-yet-measurable",
+      "missing_data": "delivery_path and rendered_knowledge_chars on legacy sidecars, plus delivery-integrity outcomes",
+      "flip_condition": "additive sidecars identify the path, integrity labels exist, and a held-out scorecard evaluates it",
+      "surface": "hive.retrieval.delivery",
+      "surface_state": "proposed"
+    },
+    {
+      "id": "D6",
+      "verdict": "decline",
+      "judge_class": null,
+      "reason_class": "named-gate",
+      "gate": "client-data exposure",
+      "surface": null,
+      "surface_state": null
+    },
+    {
+      "id": "D7",
+      "verdict": "shadow-log-only",
+      "judge_class": null,
+      "reason_class": "measured-number",
+      "n": 3,
+      "usable": false,
+      "surface": "hive.retrieval.spawn",
+      "surface_state": "live"
+    },
+    {
+      "id": "D8",
+      "verdict": "decline",
+      "judge_class": null,
+      "reason_class": "named-gate",
+      "gate": "determinism requirement",
+      "surface": null,
+      "surface_state": null
+    }
+  ]
+}

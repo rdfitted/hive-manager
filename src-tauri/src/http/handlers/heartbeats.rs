@@ -12,6 +12,7 @@ use super::validate_session_id;
 use crate::coordination::StateManager;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
+use crate::orchestrator::org_graph::retrieval_ledger::record_ack_outcomes;
 use crate::orchestrator::work_graph::completion_ledger::{
     NodeCompletionFact, NodeCompletionProvenance,
 };
@@ -404,17 +405,18 @@ pub async fn post_heartbeat(
     }
 
     if let Some(knowledge_ack) = knowledge_ack {
-        if let Err(error) = append_knowledge_ack(
+        match append_knowledge_ack(
             &state.storage.session_dir(&session_id),
             &session_id,
             &agent_id,
             &knowledge_ack,
         ) {
-            tracing::warn!(
+            Ok(()) => record_knowledge_ack_outcomes(&state, &session_id, &agent_id, &knowledge_ack),
+            Err(error) => tracing::warn!(
                 session_id = %session_id,
                 agent_id = %agent_id,
                 "Failed to persist knowledge_ack after heartbeat effects committed: {error}"
-            );
+            ),
         }
     }
 
@@ -424,6 +426,49 @@ pub async fn post_heartbeat(
             message: "Heartbeat recorded".to_string(),
         }),
     ))
+}
+
+/// Retrieval outcomes are local observations and must never change the heartbeat response.
+fn record_knowledge_ack_outcomes(
+    state: &AppState,
+    session_id: &str,
+    agent_id: &str,
+    knowledge_ack: &[String],
+) {
+    let project_path = {
+        let controller = state.session_controller.read();
+        controller
+            .get_session(session_id)
+            .map(|session| session.project_path.clone())
+    };
+    let Some(project_path) = project_path else {
+        tracing::warn!(session_id, agent_id, "Skipping retrieval outcomes: session unavailable");
+        return;
+    };
+    let sidecar_path = project_path
+        .join(".hive-manager")
+        .join(session_id)
+        .join("prompts")
+        .join(format!("{agent_id}-context.json"));
+    let sidecar = match std::fs::read(&sidecar_path).and_then(|bytes| {
+        serde_json::from_slice::<serde_json::Value>(&bytes).map_err(std::io::Error::other)
+    }) {
+        Ok(sidecar) => sidecar,
+        Err(error) => {
+            tracing::warn!(session_id, agent_id, path = %sidecar_path.display(),
+                "Skipping retrieval outcomes: failed to read spawn context sidecar: {error}");
+            return;
+        }
+    };
+    if sidecar.get("session_id").and_then(serde_json::Value::as_str) != Some(session_id)
+        || sidecar.get("agent_id").and_then(serde_json::Value::as_str) != Some(agent_id)
+    {
+        tracing::warn!(session_id, agent_id, path = %sidecar_path.display(),
+            "Skipping retrieval outcomes: spawn context identity does not match heartbeat");
+        return;
+    }
+    let ledger_path = state.storage.base_dir().join("judgments").join("ledger.jsonl");
+    record_ack_outcomes(&ledger_path, &sidecar, knowledge_ack);
 }
 
 /// GET /api/sessions/active - Returns active sessions and agent heartbeats
@@ -705,6 +750,53 @@ mod tests {
             .collect()
     }
 
+    fn retrieval_ledger_path(fixture: &HeartbeatFixture) -> std::path::PathBuf {
+        fixture
+            .state
+            .storage
+            .base_dir()
+            .join("judgments")
+            .join("ledger.jsonl")
+    }
+
+    fn write_retrieval_sidecar(fixture: &HeartbeatFixture, sampled: bool) {
+        let sidecar_path = fixture
+            ._temp
+            .path()
+            .join(".hive-manager")
+            .join(SESSION_ID)
+            .join("prompts")
+            .join(format!("{WORKER_ID}-context.json"));
+        std::fs::create_dir_all(sidecar_path.parent().unwrap()).unwrap();
+        let sidecar = serde_json::json!({
+            "schema_version": "hive.spawn-context/v1",
+            "session_id": SESSION_ID,
+            "agent_id": WORKER_ID,
+            "plan_task_id": "T-knowledge",
+            "sampled": sampled,
+            "kept": [
+                {"tag": "k1", "pointer": "project.md"},
+                {"tag": "k2", "pointer": "wiki.md"}
+            ],
+            "dropped": [{"pointer": "other.md"}],
+            "decision_ids": ["decision-kept-1", "decision-kept-2", "decision-dropped"]
+        });
+        std::fs::write(sidecar_path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+    }
+
+    fn stored_retrieval_outcomes(fixture: &HeartbeatFixture) -> Vec<serde_json::Value> {
+        let path = retrieval_ledger_path(fixture);
+        if !path.exists() {
+            return Vec::new();
+        }
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|record| record["kind"] == "outcome")
+            .collect()
+    }
+
     fn work_node(id: &str, principal: &str) -> WorkNode {
         WorkNode::new(
             id,
@@ -802,9 +894,13 @@ mod tests {
             .is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn absent_knowledge_ack_is_distinct_from_an_explicit_empty_ack_on_disk() {
+        let _environment_lock = crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fixture = fixture();
+        write_retrieval_sidecar(&fixture, true);
         let session_dir = fixture.state.storage.session_dir(SESSION_ID);
         let path = knowledge_ack_path(&session_dir);
 
@@ -814,6 +910,7 @@ mod tests {
         );
         assert_eq!(status, StatusCode::OK);
         assert!(!path.exists(), "absent knowledge_ack must write no row");
+        assert!(stored_retrieval_outcomes(&fixture).is_empty());
 
         let (status, _) = expect_success(
             heartbeat_with_knowledge_ack(
@@ -832,6 +929,11 @@ mod tests {
         assert_eq!(records[0].session_id, SESSION_ID);
         assert_eq!(records[0].agent_id, WORKER_ID);
         assert!(records[0].knowledge_ack.is_empty());
+        let outcomes = stored_retrieval_outcomes(&fixture);
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes
+            .iter()
+            .all(|row| row["label"] == serde_json::json!({ "result": "unused" })));
 
         assert!(path.starts_with(fixture.state.storage.base_dir()));
         assert!(
@@ -865,6 +967,7 @@ mod tests {
     #[tokio::test]
     async fn knowledge_ack_append_failure_is_fail_open_after_heartbeat_commit() {
         let fixture = fixture();
+        write_retrieval_sidecar(&fixture, true);
         let path = knowledge_ack_path(&fixture.state.storage.session_dir(SESSION_ID));
         std::fs::create_dir_all(&path).expect("directory occupying ack ledger path");
 
@@ -887,6 +990,145 @@ mod tests {
             .get_heartbeat_info(SESSION_ID);
         assert_eq!(heartbeats[WORKER_ID].status, "completed");
         assert!(path.is_dir(), "failed append must not replace the obstacle");
+        assert!(stored_retrieval_outcomes(&fixture).is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sampled_knowledge_ack_joins_kept_decisions_once() {
+        let _environment_lock = crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = fixture();
+        write_retrieval_sidecar(&fixture, true);
+
+        let response = expect_success(
+            heartbeat_with_knowledge_ack(
+                Arc::clone(&fixture.state),
+                WORKER_ID,
+                "completed",
+                Some(vec!["k1".into()]),
+            )
+            .await,
+            "sampled completed knowledge acknowledgement",
+        );
+        assert_eq!(response.0, StatusCode::OK);
+        let outcomes = stored_retrieval_outcomes(&fixture);
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0]["decision_id"], "decision-kept-1");
+        assert_eq!(outcomes[0]["label"], serde_json::json!({ "result": "used" }));
+        assert_eq!(outcomes[0]["source"], "model-ack");
+        assert_eq!(outcomes[1]["decision_id"], "decision-kept-2");
+        assert_eq!(
+            outcomes[1]["label"],
+            serde_json::json!({ "result": "unused" })
+        );
+        assert!(outcomes
+            .iter()
+            .all(|row| row["decision_id"] != "decision-dropped"));
+
+        let response = expect_success(
+            heartbeat_with_knowledge_ack(
+                Arc::clone(&fixture.state),
+                WORKER_ID,
+                "completed",
+                Some(vec!["k1".into()]),
+            )
+            .await,
+            "repeated sampled acknowledgement",
+        );
+        assert_eq!(response.0, StatusCode::OK);
+        assert_eq!(stored_knowledge_acks(&fixture).len(), 2);
+        assert_eq!(stored_retrieval_outcomes(&fixture).len(), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsampled_and_out_of_context_acks_write_no_retrieval_outcomes() {
+        let _environment_lock = crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let unsampled = fixture();
+        write_retrieval_sidecar(&unsampled, false);
+        let response = expect_success(
+            heartbeat_with_knowledge_ack(
+                Arc::clone(&unsampled.state),
+                WORKER_ID,
+                "completed",
+                Some(vec!["k1".into()]),
+            )
+            .await,
+            "unsampled acknowledgement",
+        );
+        assert_eq!(response.0, StatusCode::OK);
+        assert!(stored_retrieval_outcomes(&unsampled).is_empty());
+
+        let out_of_context = fixture();
+        write_retrieval_sidecar(&out_of_context, true);
+        let response = expect_success(
+            heartbeat_with_knowledge_ack(
+                Arc::clone(&out_of_context.state),
+                WORKER_ID,
+                "completed",
+                Some(vec!["k1".into(), "k3".into()]),
+            )
+            .await,
+            "out-of-context acknowledgement",
+        );
+        assert_eq!(response.0, StatusCode::OK);
+        assert!(stored_retrieval_outcomes(&out_of_context).is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retrieval_ledger_failure_preserves_completed_heartbeat_response() {
+        let _environment_lock = crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = fixture();
+        write_retrieval_sidecar(&fixture, true);
+        let ledger_path = retrieval_ledger_path(&fixture);
+        std::fs::create_dir_all(&ledger_path).unwrap();
+
+        let response = expect_success(
+            heartbeat_with_knowledge_ack(
+                Arc::clone(&fixture.state),
+                WORKER_ID,
+                "completed",
+                Some(vec!["k1".into()]),
+            )
+            .await,
+            "ledger failure after acknowledgement append",
+        );
+        assert_eq!(response.0, StatusCode::OK);
+        assert_eq!(stored_knowledge_acks(&fixture).len(), 1);
+        assert!(ledger_path.is_dir());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retrieval_kill_switch_preserves_ack_without_outcomes() {
+        let _guard = crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("HIVE_RETRIEVAL_LEDGER");
+        std::env::set_var("HIVE_RETRIEVAL_LEDGER", "off");
+        let fixture = fixture();
+        write_retrieval_sidecar(&fixture, true);
+        let response = heartbeat_with_knowledge_ack(
+            Arc::clone(&fixture.state),
+            WORKER_ID,
+            "completed",
+            Some(vec!["k1".into()]),
+        )
+        .await;
+        match previous {
+            Some(value) => std::env::set_var("HIVE_RETRIEVAL_LEDGER", value),
+            None => std::env::remove_var("HIVE_RETRIEVAL_LEDGER"),
+        }
+
+        assert_eq!(
+            expect_success(response, "kill-switch acknowledgement").0,
+            StatusCode::OK
+        );
+        assert_eq!(stored_knowledge_acks(&fixture).len(), 1);
+        assert!(stored_retrieval_outcomes(&fixture).is_empty());
     }
 
     #[tokio::test]

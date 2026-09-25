@@ -188,6 +188,63 @@ def observed_production_attachments(
     )
 
 
+def _match_types_for_task(
+    session_store_root: Path, session_id: str, task_id: object
+) -> dict[tuple[str, str], str]:
+    """Resolve persisted knowledge-edge rationales by the spawned reference.
+
+    A missing, blank, or conflicting rationale is deliberately unclassified.
+    Edge provenance is only a filter here; it is not the match type.
+    """
+    if not isinstance(task_id, str) or not task_id:
+        return {}
+    path = session_store_root / session_id / "state" / "work-graph.json"
+    try:
+        graph = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(graph, dict):
+        return {}
+    nodes = {}
+    for node in graph.get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        expansion = node.get("expansion")
+        parameters = (
+            expansion.get("parameters") if isinstance(expansion, dict) else None
+        )
+        if isinstance(parameters, dict) and isinstance(
+            parameters.get("source_ref"), str
+        ):
+            nodes[node.get("id")] = parameters["source_ref"].strip()
+    matches: dict[tuple[str, str], set[str]] = {}
+    for edge in graph.get("edges", []):
+        if not isinstance(edge, dict) or edge.get("target") != task_id:
+            continue
+        if edge.get("kind") != "informs" or edge.get("provenance") != "knowledge":
+            continue
+        source_ref = nodes.get(edge.get("source"))
+        if not source_ref:
+            continue
+        if source_ref.startswith("institutional:"):
+            source, pointer = "institutional", source_ref[len("institutional:") :]
+        elif source_ref.startswith("global:"):
+            source, pointer = "institutional", source_ref[len("global:") :]
+        else:
+            source, pointer = "project", source_ref
+        key = (source, pointer.strip().replace("\\", "/"))
+        rationale = edge.get("rationale")
+        matches.setdefault(key, set()).add(
+            rationale.strip()
+            if isinstance(rationale, str) and rationale.strip()
+            else "unknown"
+        )
+    return {
+        key: next(iter(values)) if len(values) == 1 else "unknown"
+        for key, values in matches.items()
+    }
+
+
 def load_spawn_contexts(session: Path) -> tuple[list[dict], list[str]]:
     contexts = []
     errors = []
@@ -434,6 +491,7 @@ def summarize_knowledge_acks(
             "by_position": _grouped_precision(kept, "position"),
             "by_origin": _grouped_precision(kept, "origin"),
             "by_provenance": _grouped_precision(kept, "provenance"),
+            "by_match_type": _grouped_precision(kept, "match_type"),
         },
         "miss_rate": miss_summary,
         "proxy_agreement": {
@@ -499,7 +557,7 @@ def _record_spawn_context(
     context: dict,
 ) -> None:
     agent_id = context["agent_id"]
-    for reference_index, reference, answer in _spawn_reference_rows(context):
+    for reference_index, reference, features in _spawn_reference_rows(context):
         decision_id = _spawn_decision_id(
             repo_name, session_id, agent_id, reference_index
         )
@@ -514,18 +572,20 @@ def _record_spawn_context(
             "tag": reference.get("tag"),
             "pointer": reference.get("pointer"),
         }
-        judgment_ledger.record_decision(
+        row = judgment_ledger.record_decision(
             "hive.retrieval.spawn",
             subject,
             "code",
-            answer,
+            {"result": "used" if features["disposition"] == "kept" else "unused"},
             question_id="knowledge_ack",
             question_version=str(context.get("question_version", "")) or None,
             mode="shadow",
             decision_id=decision_id,
             ledger=ledger_path,
+            retrieval_features=features,
         )
-        existing_decisions.add(decision_id)
+        if row is not None:
+            existing_decisions.add(decision_id)
 
 
 def _evaluate_spawn_ack(
@@ -539,6 +599,7 @@ def _evaluate_spawn_ack(
     completed: bool,
     cli: str,
     changed: Optional[set[str]],
+    match_types: dict[tuple[str, str], str],
 ) -> tuple[Optional[dict], list[dict], Optional[dict], list[str]]:
     if not context.get("sampled"):
         return None, [], None, []
@@ -586,10 +647,10 @@ def _evaluate_spawn_ack(
         decision_id = _spawn_decision_id(
             repo_name, session_id, agent_id, reference_index
         )
-        label = "used" if used else "unused"
-        outcome_key = (decision_id, label, "model-ack")
+        label = {"result": "used" if used else "unused"}
+        outcome_key = _outcome_key(decision_id, label, "model-ack")
         if outcome_key not in existing_outcomes:
-            judgment_ledger.record_outcome(
+            row = judgment_ledger.record_outcome(
                 decision_id,
                 label,
                 "model-ack",
@@ -600,13 +661,21 @@ def _evaluate_spawn_ack(
                 tag=tag,
                 proxy_mentioned=mentioned,
             )
-            existing_outcomes.add(outcome_key)
+            if row is not None:
+                existing_outcomes.add(outcome_key)
         observations.append(
             {
                 "used": used,
                 "position": answer["position"],
                 "origin": answer["origin"],
                 "provenance": answer["provenance"],
+                "match_type": match_types.get(
+                    (
+                        str(reference.get("source")),
+                        str(reference.get("pointer")).replace("\\", "/"),
+                    ),
+                    "unknown",
+                ),
                 "miss_sample": answer["miss_sample"],
                 "proxy_mentioned": mentioned,
                 "cli": cli,
@@ -658,14 +727,20 @@ def _evaluate_session_acks(
     observations = []
     spot_checks = []
     out_of_context = []
+    match_types_by_task = {}
     for context in contexts:
         agent_id = context["agent_id"]
         acknowledgement = acknowledgements.get(agent_id)
         plan_task_id = context.get("plan_task_id")
+        match_task_id = plan_task_id if isinstance(plan_task_id, str) else ""
         completed = acknowledgement is not None or (
             isinstance(plan_task_id, str)
             and (agent_id, plan_task_id) in completed_spawn_keys
         )
+        if context.get("sampled") and match_task_id not in match_types_by_task:
+            match_types_by_task[match_task_id] = _match_types_for_task(
+                session_store_root, session.name, match_task_id
+            )
         (
             sampled_spawn,
             context_observations,
@@ -681,6 +756,7 @@ def _evaluate_session_acks(
             completed=completed,
             cli=agent_clis.get(agent_id, "unknown"),
             changed=changed,
+            match_types=match_types_by_task.get(match_task_id, {}),
         )
         if sampled_spawn is not None:
             sampled_spawns.append(sampled_spawn)
@@ -1062,6 +1138,10 @@ def _decision_id(*parts: str) -> str:
     return str(uuid.uuid5(DECISION_NAMESPACE, name))
 
 
+def _outcome_key(decision_id: str, label: object, source: str) -> tuple[str, str, str]:
+    return decision_id, judgment_ledger.canonical_json(label), source
+
+
 def _existing_ledger_keys(ledger_path: Path) -> tuple[set[str], set[tuple[str, str, str]]]:
     decisions: set[str] = set()
     outcomes: set[tuple[str, str, str]] = set()
@@ -1069,9 +1149,9 @@ def _existing_ledger_keys(ledger_path: Path) -> tuple[set[str], set[tuple[str, s
         if row.get("kind") == "decision":
             decisions.add(str(row.get("decision_id")))
         elif row.get("kind") == "outcome":
-            outcomes.add(
-                (str(row.get("decision_id")), str(row.get("label")), str(row.get("source")))
-            )
+            outcomes.add(_outcome_key(
+                str(row.get("decision_id")), row.get("label"), str(row.get("source"))
+            ))
     return decisions, outcomes
 
 
@@ -1135,7 +1215,7 @@ def _record_pair(
     if path_relevant is None:
         return
     label = "path-relevant" if path_relevant else "path-miss"
-    outcome_key = (note_id, label, "downstream")
+    outcome_key = _outcome_key(note_id, label, "downstream")
     if outcome_key not in existing_outcomes:
         judgment_ledger.record_outcome(
             note_id,

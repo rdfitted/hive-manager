@@ -1,0 +1,1 @@
+{"schema_version":"hive.spawn-context/v1","plan_task_id":"T1","sampled":true,"global_summary_included":true,"kept":[{"origin":"role_and_task","chars":100},{"origin":"task","chars":200}],"dropped":[{"reason":"task_budget_exceeded"}],"miss_sample_references":["k2"]}
