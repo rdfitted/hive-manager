@@ -38,7 +38,9 @@ class JudgeTests(unittest.TestCase):
             "type": "noul", "instructions": "Does the observed evidence satisfy the criterion?",
             "criteria": {"true": "It does.", "false": "It does not."},
         })
-        self.key = patch.dict(os.environ, {"TYPESAFE_API_KEY": "synthetic-test-key"})
+        # Hermetic: never fall back to the operator's real ~/.ai-gateway.env.
+        self.key = patch.dict(os.environ, {"TYPESAFE_API_KEY": "synthetic-test-key",
+                                           "JUDGMENT_KEY_FILE": str(self.root / "no-such-key-file.env")})
         self.key.start()
         self.addCleanup(self.key.stop)
 
@@ -277,6 +279,83 @@ class JudgeTests(unittest.TestCase):
         with patch.object(jev_transport.request, "urlopen", return_value=response):
             with self.assertRaisesRegex(jev_transport.TransportError, "^response-too-large$"):
                 jev_transport.send(b"{}", "synthetic-key")
+
+    # --- key-file fallback and policy-declared question types ---
+
+    def _key_file(self, text):
+        path = self.root / "gateway.env"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_key_file_fallback_sends_when_env_is_unset(self):
+        key_file = self._key_file("AI_GATEWAY_API_KEY=other\nTYPESAFE_API_KEY=synthetic-file-key\n")
+        with patch.dict(os.environ, {"JUDGMENT_KEY_FILE": str(key_file)}):
+            os.environ.pop("TYPESAFE_API_KEY", None)
+            code, result, send = self._run(self._args())
+        self.assertEqual((0, "recorded", True), (code, result["status"], result["sent"]))
+        self.assertEqual("synthetic-file-key", send.call_args.args[1])
+        self.assertNotIn("synthetic-file-key", self.ledger.read_text(encoding="utf-8"))
+
+    def test_environment_key_wins_over_key_file(self):
+        key_file = self._key_file("TYPESAFE_API_KEY=synthetic-file-key\n")
+        with patch.dict(os.environ, {"JUDGMENT_KEY_FILE": str(key_file)}):
+            code, result, send = self._run(self._args())
+        self.assertEqual("synthetic-test-key", send.call_args.args[1])
+
+    def test_no_env_and_no_key_file_is_no_key(self):
+        with patch.dict(os.environ, {"JUDGMENT_KEY_FILE": str(self.root / "absent.env")}):
+            os.environ.pop("TYPESAFE_API_KEY", None)
+            code, result, send = self._run(self._args())
+        self.assertEqual((0, "no-key", False), (code, result["status"], result["sent"]))
+        send.assert_not_called()
+
+    def _declared_policy(self, surface, entry):
+        policy = json.loads(self.policy.read_text(encoding="utf-8"))
+        policy["surfaces"][surface] = {"allow": True, "redact": "names", "decided": "2026-09-25",
+                                       "by": "rdfitted", **entry}
+        return self._file("declared-policy.json", policy)
+
+    def test_policy_declared_noul_surface_records_true_false(self):
+        policy = self._declared_policy("memory.relevance.test", {"question_type": "noul"})
+        code, result, send = self._run(self._args(surface="memory.relevance.test", policy=policy))
+        self.assertEqual((0, "recorded", {"result": "true"}), (code, result["status"], result["answer"]))
+        send.assert_called_once()
+
+    def test_policy_declared_choice_keys_are_enforced(self):
+        policy = self._declared_policy("curate.residual.test",
+                                       {"question_type": "choice", "choice_keys": ["promote", "noise"]})
+        wrong = self._file("wrong-choice.json", {"type": "choice", "instructions": "Promote?",
+                                                 "criteria": {"yes": "y", "no": "n"}})
+        code, result, send = self._run(self._args(surface="curate.residual.test", policy=policy, question=wrong))
+        self.assertEqual((2, "invalid-input"), (code, result["status"]))
+        send.assert_not_called()
+        right = self._file("right-choice.json", {"type": "choice", "instructions": "Promote?",
+                                                 "criteria": {"promote": "durable", "noise": "one-off"}})
+        provider = {"model": "jev-1.13.0", "answers": {"q1": {
+            "type": "choice", "choice": "promote", "probabilities": {"promote": 0.8, "noise": 0.2}}}}
+        code, result, send = self._run(self._args(surface="curate.residual.test", policy=policy, question=right),
+                                       provider=provider)
+        self.assertEqual((0, {"result": "promote"}), (code, result["answer"]))
+
+    def test_policy_ledger_path_is_the_default_when_no_flag_or_env(self):
+        policy = json.loads(self.policy.read_text(encoding="utf-8"))
+        policy["ledger"] = str(self.root / "policy-ledger.jsonl")
+        policy_file = self._file("ledger-policy.json", policy)
+        with patch.dict(os.environ, {}):
+            os.environ.pop("JUDGMENT_LEDGER", None)
+            self.assertEqual(self.root / "policy-ledger.jsonl", judge._default_ledger(policy_file))
+            os.environ["JUDGMENT_LEDGER"] = str(self.root / "env-ledger.jsonl")
+            self.assertEqual(self.root / "env-ledger.jsonl", judge._default_ledger(policy_file))
+        with patch.dict(os.environ, {}):
+            os.environ.pop("JUDGMENT_LEDGER", None)
+            self.assertTrue(str(judge._default_ledger(self.policy)).endswith(
+                str(Path("hive-manager") / "judgments" / "ledger.jsonl")))
+
+    def test_allowlisted_surface_without_declared_type_is_rejected(self):
+        policy = self._declared_policy("memory.relevance.untyped", {})
+        code, result, send = self._run(self._args(surface="memory.relevance.untyped", policy=policy))
+        self.assertEqual((2, "invalid-input"), (code, result["status"]))
+        send.assert_not_called()
 
 
 if __name__ == "__main__":

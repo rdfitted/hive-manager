@@ -8208,7 +8208,7 @@ python tools/judgment/judge.py --redact-dictionary names.json ask --surface hive
 
 ## Egress and results
 
-Live egress is limited to the git-origin project `rdfitted/hive-manager` and allowlisted `hive.review.finding` and `hive.qa.criterion` surfaces. A live send needs `TYPESAFE_API_KEY`; without it, `ask` records `no-key` and sends nothing. Redaction and policy checks still run for dry runs and no-key calls. The request is capped at 32 KiB.
+Live egress is limited to the git-origin project `rdfitted/hive-manager` and allowlisted `hive.review.finding` and `hive.qa.criterion` surfaces. A live send needs `TYPESAFE_API_KEY`, read from the environment or else from `~/.ai-gateway.env`; without either, `ask` records `no-key` and sends nothing. Redaction and policy checks still run for dry runs and no-key calls. The request is capped at 32 KiB.
 
 Every command prints one JSON object with `status`, `decision_id`, `sent`, `answer`, `model`, `latency_ms`, `usage`, `error`, and `redaction` (counts and reason classes only when blocked). Exit `0` means a row was written, including `dry-run` or `no-key`; exit `2` means invalid input; exit `3` means policy, redaction, or size blocked after a row; exit `4` means transport failed after a row; exit `5` means the ledger write failed. Treat a Jev result only as shadow evidence for later audit.
 "#;
