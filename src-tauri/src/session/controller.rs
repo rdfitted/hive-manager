@@ -1265,6 +1265,56 @@ impl SessionController {
         self.event_emitter = Some(EventEmitter::new(event_bus));
     }
 
+    fn parse_legacy_launch_command(command: &str) -> Result<(String, Vec<String>), String> {
+        let mut words = Vec::new();
+        let mut current = String::new();
+        let mut quote = None;
+        let mut started = false;
+        let mut chars = command.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\\'
+                && matches!(chars.peek(), Some(next) if next.is_whitespace() || *next == '"' || *next == '\'')
+            {
+                current.push(chars.next().unwrap());
+                started = true;
+            } else if let Some(delimiter) = quote {
+                if ch == delimiter {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+            } else if ch == '"' || ch == '\'' {
+                quote = Some(ch);
+                started = true;
+            } else if ch.is_whitespace() {
+                if started {
+                    words.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            } else {
+                current.push(ch);
+                started = true;
+            }
+        }
+        if quote.is_some() {
+            return Err("Unterminated quote in legacy launch command".to_string());
+        }
+        if started {
+            words.push(current);
+        }
+        if words.is_empty() {
+            #[cfg(windows)]
+            let shell = "cmd.exe".to_string();
+            #[cfg(not(windows))]
+            let shell = std::env::var("SHELL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "/bin/sh".to_string());
+            return Ok((shell, Vec::new()));
+        }
+        Ok((words.remove(0), words))
+    }
+
     pub fn launch_hive(
         &self,
         project_path: PathBuf,
@@ -1279,13 +1329,10 @@ impl SessionController {
         let prompt_str = prompt.unwrap_or_default();
         let cwd = project_path.to_str().unwrap_or(".");
 
-        // Parse command - support "command arg1 arg2" format
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        let (cmd, base_args) = if parts.is_empty() {
-            ("cmd.exe", vec![])
-        } else {
-            (parts[0], parts[1..].to_vec())
-        };
+        // Parse command without splitting quoted executable paths or arguments.
+        let (launch_command, parsed_args) = Self::parse_legacy_launch_command(command)?;
+        let cmd = launch_command.as_str();
+        let base_args: Vec<&str> = parsed_args.iter().map(String::as_str).collect();
         let launch_model = extract_model_arg(&base_args)
             .or_else(|| CliRegistry::default_model(cmd).map(ToString::to_string));
 
@@ -10292,12 +10339,11 @@ phases and do EXACTLY this, then stop:
     }
 
     fn configured_institutional_wiki_root(&self) -> Option<PathBuf> {
-        self.storage
+        let configured = self.storage
             .as_ref()
             .and_then(|storage| storage.load_config().ok())
-            .and_then(|config| config.global_wiki_path)
-            .filter(|path| !path.trim().is_empty())
-            .map(|path| PathBuf::from(expand_tilde(&path)))
+            .and_then(|config| config.global_wiki_path);
+        Some(crate::wiki::resolve_wiki_root(configured.as_deref()))
     }
 
     fn resolve_worker_role_definition(
@@ -17276,6 +17322,55 @@ mod tests {
         );
         assert_eq!(extract_model_arg(&["--model="]), None);
         assert_eq!(extract_model_arg(&["-m"]), None);
+    }
+
+    #[test]
+    fn legacy_launch_parser_preserves_quoted_paths_and_arguments() {
+        let (command, args) = SessionController::parse_legacy_launch_command(
+            "\"/path with space/agent\" --model \"model with space\"",
+        )
+        .unwrap();
+        assert_eq!(command, "/path with space/agent");
+        assert_eq!(args, ["--model", "model with space"]);
+        assert!(SessionController::parse_legacy_launch_command("\"unfinished").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_launch_parser_preserves_windows_executable_path() {
+        let (command, args) = SessionController::parse_legacy_launch_command(
+            "\"C:\\Program Files\\Agent\\agent.exe\" --mode safe",
+        )
+        .unwrap();
+        assert_eq!(command, "C:\\Program Files\\Agent\\agent.exe");
+        assert_eq!(args, ["--mode", "safe"]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn legacy_launch_parser_preserves_unix_executable_path() {
+        let (command, args) = SessionController::parse_legacy_launch_command(
+            "'/Applications/Agent CLI/bin/agent' --mode safe",
+        )
+        .unwrap();
+        assert_eq!(command, "/Applications/Agent CLI/bin/agent");
+        assert_eq!(args, ["--mode", "safe"]);
+    }
+
+    #[test]
+    fn legacy_launch_empty_command_uses_platform_shell() {
+        let (command, args) = SessionController::parse_legacy_launch_command("  ").unwrap();
+        assert!(args.is_empty());
+        #[cfg(windows)]
+        assert_eq!(command, "cmd.exe");
+        #[cfg(not(windows))]
+        assert_eq!(
+            command,
+            std::env::var("SHELL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "/bin/sh".to_string())
+        );
     }
 
     #[test]

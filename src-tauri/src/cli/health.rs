@@ -252,43 +252,9 @@ fn tier_ladder_omission(issue: &TierLadderResolutionIssue) -> TierLadderOmission
 }
 
 pub(crate) fn configured_institutional_wiki_root(config: &AppConfig) -> Option<PathBuf> {
-    config
-        .global_wiki_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .map(|path| expand_tilde_path(&path, user_home().as_deref()))
-}
-
-fn user_home() -> Option<PathBuf> {
-    let preferred = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let fallback = if cfg!(windows) { "HOME" } else { "USERPROFILE" };
-    std::env::var_os(preferred)
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os(fallback).filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-}
-
-fn expand_tilde_path(path: &Path, home: Option<&Path>) -> PathBuf {
-    let Some(raw) = path.to_str() else {
-        return path.to_path_buf();
-    };
-    let Some(rest) = raw.strip_prefix('~') else {
-        return path.to_path_buf();
-    };
-    if !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('\\') {
-        return path.to_path_buf();
-    }
-    let Some(home) = home else {
-        return path.to_path_buf();
-    };
-    let rest = rest.trim_start_matches(['/', '\\']);
-    if rest.is_empty() {
-        home.to_path_buf()
-    } else {
-        home.join(rest)
-    }
+    Some(crate::wiki::resolve_wiki_root(
+        config.global_wiki_path.as_deref(),
+    ))
 }
 
 fn executable_for_cli(cli: &str) -> &str {

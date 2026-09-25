@@ -2,9 +2,8 @@
  * Slash-command registry for the Composer (#128).
  *
  * Each command has a `label` (the `/token` shown), a `description`, and an `expand()` that
- * returns the text inserted into the flattened plain-text prompt. The MVP set is locked to
- * the three real `SessionMode` values (hive / fusion / research) plus a few quick actions;
- * expanding the set later is purely additive here.
+ * returns CLI-independent text inserted into the flattened plain-text prompt. Session modes
+ * are launched through the sidebar dialog, not sent to the attached CLI as slash text.
  *
  * `clear` and `attach` are control commands: they expand to an empty string (the Composer
  * intercepts them by `action` rather than inserting text).
@@ -25,46 +24,18 @@ export interface SlashCommand {
 
 export const SLASH_COMMANDS: SlashCommand[] = [
   {
-    name: 'hive',
-    label: '/hive',
-    description: 'Hive orchestration mode',
-    action: 'insert',
-    expand: () => '/hive ',
-  },
-  {
-    name: 'fusion',
-    label: '/fusion',
-    description: 'Fusion (multi-variant) mode',
-    action: 'insert',
-    expand: () => '/fusion ',
-  },
-  {
-    name: 'debate',
-    label: '/debate',
-    description: 'Debate mode (argue positions)',
-    action: 'insert',
-    expand: () => '/debate ',
-  },
-  {
-    name: 'research',
-    label: '/research',
-    description: 'Research mode',
-    action: 'insert',
-    expand: () => '/research ',
-  },
-  {
     name: 'ask',
     label: '/ask',
     description: 'Ask without making changes',
     action: 'insert',
-    expand: () => '/ask ',
+    expand: () => 'Answer without modifying any files: ',
   },
   {
     name: 'plan',
     label: '/plan',
     description: 'Produce a plan, do not implement',
     action: 'insert',
-    expand: () => '/plan ',
+    expand: () => 'Produce a plan only; do not modify files: ',
   },
   {
     name: 'clear',

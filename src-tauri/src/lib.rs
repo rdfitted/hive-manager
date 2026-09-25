@@ -26,6 +26,7 @@ mod storage;
 mod tauri_shim;
 mod templates;
 mod watcher;
+mod wiki;
 pub mod workspace;
 
 #[cfg(not(test))]
