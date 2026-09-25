@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::evidence::{scrub, scrub_value, write_evidence};
@@ -166,24 +167,37 @@ impl JudgmentLedger {
     }
 
     pub(crate) fn record_decisions(&self, inputs: Vec<DecisionInput>) -> Vec<Option<DecisionRecord>> {
-        let mut records = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            match self.prepare_decision(input) {
-                Ok(record) => records.push(Some(record)),
-                Err(error) => {
-                    tracing::warn!(ledger = %self.ledger_path.display(), %error, "judgment decision was not written");
-                    records.push(None);
+        let count = inputs.len();
+        match with_ledger_lock(&self.ledger_path, || {
+            let mut records = Vec::with_capacity(count);
+            let mut created = Vec::new();
+            for input in inputs {
+                match self.prepare_decision(input) {
+                    Ok((record, path)) => {
+                        if let Some(path) = path { created.push(path); }
+                        records.push(Some(record));
+                    }
+                    Err(error) => {
+                        tracing::warn!(ledger = %self.ledger_path.display(), %error, "judgment decision was not written");
+                        records.push(None);
+                    }
                 }
             }
-        }
-        let ready: Vec<_> = records.iter().filter_map(Option::as_ref).collect();
-        if !ready.is_empty() {
-            if let Err(error) = append_records(&self.ledger_path, &ready) {
+            let ready: Vec<_> = records.iter().filter_map(Option::as_ref).collect();
+            if !ready.is_empty() {
+                if let Err(error) = append_records_unlocked(&self.ledger_path, &ready) {
+                    for path in created { let _ = fs::remove_file(path); }
+                    return Err(error);
+                }
+            }
+            Ok(records)
+        }) {
+            Ok(records) => records,
+            Err(error) => {
                 tracing::warn!(ledger = %self.ledger_path.display(), %error, "judgment decisions were not written");
-                return vec![None; records.len()];
+                vec![None; count]
             }
         }
-        records
     }
 
     pub(crate) fn record_outcome(&self, input: OutcomeInput) -> Option<OutcomeRecord> {
@@ -221,13 +235,101 @@ impl JudgmentLedger {
         records
     }
 
-    fn record_decision_inner(&self, input: DecisionInput) -> io::Result<DecisionRecord> {
-        let record = self.prepare_decision(input)?;
-        append_record(&self.ledger_path, &record)?;
-        Ok(record)
+    /// Retrieval IDs are deterministic. Evidence presence is a bounded lookup for
+    /// an already written decision, and the lookup and append share the ledger lock.
+    pub(crate) fn record_retrieval_decisions_once(&self, inputs: Vec<DecisionInput>) -> Vec<Option<DecisionRecord>> {
+        let count = inputs.len();
+        match with_ledger_lock(&self.ledger_path, || {
+            let mut results = Vec::with_capacity(count);
+            let mut pending = Vec::new();
+            let mut created = Vec::new();
+            for input in inputs {
+                let existed = input.decision_id.as_deref().is_some_and(|id| {
+                    self.ledger_path.parent().unwrap().join("evidence").join(format!("{id}.json")).exists()
+                });
+                match self.prepare_decision(input) {
+                    Ok((record, path)) => {
+                        if let Some(path) = path { created.push(path); }
+                        if !existed { pending.push(record.clone()); }
+                        results.push(Some(record));
+                    }
+                    Err(error) => {
+                        tracing::warn!(ledger = %self.ledger_path.display(), %error, "retrieval decision was not written");
+                        results.push(None);
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                if let Err(error) = append_records_unlocked(&self.ledger_path, &pending) {
+                    for path in created { let _ = fs::remove_file(path); }
+                    return Err(error);
+                }
+            }
+            Ok(results)
+        }) {
+            Ok(results) => results,
+            Err(error) => {
+                tracing::warn!(ledger = %self.ledger_path.display(), %error, "retrieval decisions were not written");
+                vec![None; count]
+            }
+        }
     }
 
-    fn prepare_decision(&self, input: DecisionInput) -> io::Result<DecisionRecord> {
+    pub(crate) fn record_retrieval_outcomes_once(&self, inputs: Vec<OutcomeInput>) -> Vec<Option<OutcomeRecord>> {
+        let count = inputs.len();
+        match with_ledger_lock(&self.ledger_path, || {
+            let index = retrieval_outcome_index(&self.ledger_path)?;
+            let mut results = Vec::with_capacity(count);
+            let mut pending = Vec::new();
+            let mut markers = Vec::new();
+            for input in inputs {
+                let marker = outcome_marker(&index, &input.decision_id, &input.label, input.source)?;
+                if marker.exists() {
+                    results.push(None);
+                    continue;
+                }
+                match self.prepare_outcome(input) {
+                    Ok(record) => {
+                        markers.push(marker);
+                        pending.push(record.clone());
+                        results.push(Some(record));
+                    }
+                    Err(error) => {
+                        tracing::warn!(ledger = %self.ledger_path.display(), %error, "retrieval outcome was not written");
+                        results.push(None);
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                append_records_unlocked(&self.ledger_path, &pending)?;
+                for marker in markers {
+                    if let Err(error) = fs::write(&marker, b"") {
+                        tracing::warn!(path = %marker.display(), %error, "retrieval outcome index marker was not written");
+                    }
+                }
+            }
+            Ok(results)
+        }) {
+            Ok(results) => results,
+            Err(error) => {
+                tracing::warn!(ledger = %self.ledger_path.display(), %error, "retrieval outcomes were not written");
+                vec![None; count]
+            }
+        }
+    }
+
+    fn record_decision_inner(&self, input: DecisionInput) -> io::Result<DecisionRecord> {
+        with_ledger_lock(&self.ledger_path, || {
+            let (record, created) = self.prepare_decision(input)?;
+            if let Err(error) = append_records_unlocked(&self.ledger_path, &[&record]) {
+                if let Some(path) = created { let _ = fs::remove_file(path); }
+                return Err(error);
+            }
+            Ok(record)
+        })
+    }
+
+    fn prepare_decision(&self, input: DecisionInput) -> io::Result<(DecisionRecord, Option<PathBuf>)> {
         validate_extra_fields(&input.extra, DECISION_CORE_FIELDS)?;
         if input.surface.is_empty() {
             return Err(io::Error::new(
@@ -278,8 +380,14 @@ impl JudgmentLedger {
             error: input.error,
             extra: input.extra,
         };
-        let clean = scrub_record(record)?;
-        Ok(clean)
+        let clean = match scrub_record(record) {
+            Ok(clean) => clean,
+            Err(error) => {
+                if let Some(path) = evidence.created_path { let _ = fs::remove_file(path); }
+                return Err(error);
+            }
+        };
+        Ok((clean, evidence.created_path))
     }
 
     fn record_outcome_inner(&self, input: OutcomeInput) -> io::Result<OutcomeRecord> {
@@ -378,7 +486,52 @@ fn append_record<T: Serialize>(ledger_path: &Path, record: &T) -> io::Result<()>
     append_records(ledger_path, &[record])
 }
 
+fn outcome_marker(index: &Path, id: &str, label: &Value, source: OutcomeSource) -> io::Result<PathBuf> {
+    let result = label.get("result").and_then(Value::as_str).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "retrieval outcome has no result"))?;
+    let key = serde_json::to_vec(&(id, result, source)).map_err(io::Error::other)?;
+    Ok(index.join(format!("{:x}", Sha256::digest(key))))
+}
+
+fn retrieval_outcome_index(ledger_path: &Path) -> io::Result<PathBuf> {
+    let parent = ledger_path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ledger path has no parent"))?;
+    let name = ledger_path.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ledger path has no filename"))?;
+    let index = parent.join(format!("{}.retrieval-outcome-index", name.to_string_lossy()));
+    fs::create_dir_all(&index)?;
+    let cursor_path = index.join(".indexed");
+    let cursor = fs::read_to_string(&cursor_path).ok().and_then(|text| text.parse::<u64>().ok()).unwrap_or(0);
+    match fs::File::open(ledger_path) {
+        Ok(mut file) => {
+            let end = file.metadata()?.len();
+            if cursor == end && cursor_path.exists() { return Ok(index); }
+            file.seek(SeekFrom::Start(if cursor <= end { cursor } else { 0 }))?;
+            for line in BufReader::new(file).lines() {
+                let line = line?;
+                let Ok(row) = serde_json::from_str::<Value>(&line) else { continue; };
+                if row.get("kind").and_then(Value::as_str) != Some("outcome") { continue; }
+                let (Some(id), Some(label), Some(source)) = (
+                    row.get("decision_id").and_then(Value::as_str),
+                    row.get("label"),
+                    row.get("source").cloned().and_then(|value| serde_json::from_value::<OutcomeSource>(value).ok()),
+                ) else { continue; };
+                if let Ok(marker) = outcome_marker(&index, id, label, source) {
+                    fs::write(marker, b"")?;
+                }
+            }
+            fs::write(cursor_path, end.to_string())?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::write(cursor_path, b"0")?;
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(index)
+}
+
 fn append_records<T: Serialize>(ledger_path: &Path, records: &[T]) -> io::Result<()> {
+    with_ledger_lock(ledger_path, || append_records_unlocked(ledger_path, records))
+}
+
+fn with_ledger_lock<T>(ledger_path: &Path, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     let parent = ledger_path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ledger path has no parent"))?;
@@ -391,26 +544,25 @@ fn append_records<T: Serialize>(ledger_path: &Path, records: &[T]) -> io::Result
         .write(true)
         .open(lock_path(ledger_path))?;
     FileExt::lock_exclusive(&lock_file)?;
-
-    let result = (|| {
-        let mut lines = Vec::new();
-        for record in records {
-            let serialized = serde_json::to_string(record).map_err(io::Error::other)?;
-            lines.extend_from_slice(scrub(&serialized).as_bytes());
-            lines.push(b'\n');
-        }
-        let mut ledger = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .append(true)
-            .open(ledger_path)?;
-        ledger.write_all(&lines)?;
-        ledger.flush()?;
-        Ok(())
-    })();
-
+    let result = operation();
     let _ = FileExt::unlock(&lock_file);
     result
+}
+
+fn append_records_unlocked<T: Serialize>(ledger_path: &Path, records: &[T]) -> io::Result<()> {
+    let mut lines = Vec::new();
+    for record in records {
+        let serialized = serde_json::to_string(record).map_err(io::Error::other)?;
+        lines.extend_from_slice(scrub(&serialized).as_bytes());
+        lines.push(b'\n');
+    }
+    let mut ledger = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .append(true)
+        .open(ledger_path)?;
+    ledger.write_all(&lines)?;
+    ledger.flush()
 }
 
 #[cfg(test)]
@@ -571,6 +723,38 @@ mod tests {
         let rows = read_rows(&path);
         assert!(rows[0]["sampling"].is_null());
         assert_eq!(rows[1]["sampling"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn repeated_decision_id_never_replaces_existing_evidence() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("ledger.jsonl");
+        let ledger = JudgmentLedger::new(path.clone());
+        let first = ledger.record_decision(decision("same-id")).unwrap();
+        let evidence_path = temp.path().join(first.state_ref.unwrap());
+        let original = fs::read(&evidence_path).unwrap();
+        let mut changed = decision("same-id");
+        changed.observations["excerpts"] = serde_json::json!(["Changed observation"]);
+        assert!(ledger.record_decision(changed).is_none());
+        assert_eq!(fs::read(evidence_path).unwrap(), original);
+        assert_eq!(read_rows(&path).len(), 1);
+        assert!(ledger.record_decision(decision("same-id")).is_some());
+    }
+
+    #[test]
+    fn failed_batch_append_removes_only_new_evidence() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("ledger.jsonl");
+        let ledger = JudgmentLedger::new(path.clone());
+        let first = ledger.record_decision(decision("existing-id")).unwrap();
+        let prior_path = temp.path().join(first.state_ref.unwrap());
+        let prior_bytes = fs::read(&prior_path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let result = ledger.record_decisions(vec![decision("existing-id"), decision("new-id")]);
+        assert!(result.iter().all(Option::is_none));
+        assert_eq!(fs::read(prior_path).unwrap(), prior_bytes);
+        assert!(!temp.path().join("evidence/new-id.json").exists());
     }
 
     #[test]

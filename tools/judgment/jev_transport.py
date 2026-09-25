@@ -30,7 +30,10 @@ def send(payload: bytes, api_key: str, *, timeout: float = 30.0) -> dict:
             with request.urlopen(message, timeout=timeout) as response:
                 if response.status != 200:
                     raise TransportError(f"http-{response.status}")
-                result = json.loads(response.read(1024 * 1024 + 1))
+                body = response.read(1024 * 1024 + 1)
+                if len(body) > 1024 * 1024:
+                    raise TransportError("response-too-large")
+                result = json.loads(body)
                 if not isinstance(result, dict):
                     raise TransportError("invalid-response")
                 return result

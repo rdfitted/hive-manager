@@ -1,5 +1,5 @@
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -19,6 +19,7 @@ const SECRET_ENV_VARS: &[&str] = &[
 pub(super) struct EvidenceWrite {
     pub(super) state_hash: String,
     pub(super) state_ref: String,
+    pub(super) created_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Default)]
@@ -179,10 +180,28 @@ pub(super) fn write_evidence(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ledger path has no parent"))?;
     let evidence_dir = parent.join("evidence");
     fs::create_dir_all(&evidence_dir)?;
-    fs::write(evidence_dir.join(format!("{decision_id}.json")), canonical)?;
+    let path = evidence_dir.join(format!("{decision_id}.json"));
+    let created_path = match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            if let Err(error) = file.write_all(&canonical) {
+                let _ = fs::remove_file(&path);
+                return Err(error);
+            }
+            Some(path)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let existing = fs::read(&path)?;
+            if Sha256::digest(&existing) != Sha256::digest(&canonical) {
+                return Err(io::Error::new(io::ErrorKind::AlreadyExists, "evidence id has different observations"));
+            }
+            None
+        }
+        Err(error) => return Err(error),
+    };
 
     Ok(EvidenceWrite {
         state_hash,
         state_ref: format!("evidence/{decision_id}.json"),
+        created_path,
     })
 }

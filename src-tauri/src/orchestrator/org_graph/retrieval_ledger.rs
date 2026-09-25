@@ -1,8 +1,7 @@
 //! Local, shadow-only rows for references actually considered at worker spawn.
 
 use std::collections::HashSet;
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader};
+use std::fs;
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
@@ -63,38 +62,6 @@ fn field(reference: &Value, name: &str) -> Value {
     reference.get(name).cloned().unwrap_or(Value::Null)
 }
 
-fn existing_rows(ledger_path: &Path) -> io::Result<(HashSet<String>, HashSet<(String, String, String)>)> {
-    let file = match File::open(ledger_path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((HashSet::new(), HashSet::new())),
-        Err(error) => return Err(error),
-    };
-    let mut decisions = HashSet::new();
-    let mut outcomes = HashSet::new();
-    for line in BufReader::new(file).lines() {
-        let line = line?;
-        let Ok(row) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let Some(id) = row.get("decision_id").and_then(Value::as_str) else {
-            continue;
-        };
-        match row.get("kind").and_then(Value::as_str) {
-            Some("decision") => { decisions.insert(id.to_string()); }
-            Some("outcome") => {
-                if let (Some(result), Some(source)) = (
-                    row.pointer("/label/result").and_then(Value::as_str),
-                    row.get("source").and_then(Value::as_str),
-                ) {
-                    outcomes.insert((id.to_string(), result.to_string(), source.to_string()));
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok((decisions, outcomes))
-}
-
 /// Returns one durable decision ID slot per valid kept then dropped reference.
 pub(crate) fn record_spawn_rows(
     ledger_path: &Path,
@@ -117,13 +84,6 @@ pub(crate) fn record_spawn_rows(
         tracing::warn!(path = %original_project_path.display(), "retrieval ledger skipped: original project path unavailable");
         return ids;
     };
-    let existing = match existing_rows(ledger_path) {
-        Ok((decisions, _)) => decisions,
-        Err(error) => {
-            tracing::warn!(path = %ledger_path.display(), %error, "retrieval ledger skipped: unable to read existing rows");
-            return ids;
-        }
-    };
     let misses: HashSet<&str> = sidecar.get("miss_sample_references")
         .and_then(Value::as_array)
         .into_iter().flatten().filter_map(Value::as_str).collect();
@@ -136,10 +96,6 @@ pub(crate) fn record_spawn_rows(
     let mut positions = Vec::new();
     for (index, (reference, kept)) in references.into_iter().enumerate() {
         let id = decision_id(&repo, session_id, agent_id, index);
-        if existing.contains(&id) {
-            ids[index] = Some(id);
-            continue;
-        }
         let mut subject_ref = Map::new();
         subject_ref.insert("repo".into(), json!(repo));
         subject_ref.insert("session_id".into(), json!(session_id));
@@ -192,7 +148,7 @@ pub(crate) fn record_spawn_rows(
         });
         positions.push((index, id));
     }
-    for ((index, id), result) in positions.into_iter().zip(JudgmentLedger::new(ledger_path.to_path_buf()).record_decisions(inputs)) {
+    for ((index, id), result) in positions.into_iter().zip(JudgmentLedger::new(ledger_path.to_path_buf()).record_retrieval_decisions_once(inputs)) {
         if result.is_some() {
             ids[index] = Some(id);
         }
@@ -212,13 +168,6 @@ pub(crate) fn record_ack_outcomes(ledger_path: &Path, sidecar: &Value, ack: &[St
         tracing::warn!(tag, "retrieval acknowledgement has out-of-context tag; no outcomes written");
         return 0;
     }
-    let (_, mut existing) = match existing_rows(ledger_path) {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(path = %ledger_path.display(), %error, "retrieval outcomes skipped: unable to read existing rows");
-            return 0;
-        }
-    };
     let ids = sidecar.get("decision_ids").and_then(Value::as_array);
     let acknowledged: HashSet<&str> = ack.iter().map(String::as_str).collect();
     let mut inputs = Vec::new();
@@ -227,7 +176,6 @@ pub(crate) fn record_ack_outcomes(ledger_path: &Path, sidecar: &Value, ack: &[St
         let Some(tag) = reference.get("tag").and_then(Value::as_str) else { continue; };
         let Some(id) = ids.and_then(|ids| ids.get(index)).and_then(Value::as_str) else { continue; };
         let result = if acknowledged.contains(tag) { "used" } else { "unused" };
-        if !existing.insert((id.to_string(), result.to_string(), "model-ack".into())) { continue; }
         let mut extra = Map::new();
         extra.insert("session_id".into(), field(sidecar, "session_id"));
         extra.insert("agent_id".into(), field(sidecar, "agent_id"));
@@ -240,7 +188,8 @@ pub(crate) fn record_ack_outcomes(ledger_path: &Path, sidecar: &Value, ack: &[St
             extra,
         });
     }
-    JudgmentLedger::new(ledger_path.to_path_buf()).record_outcomes(inputs).into_iter().filter(Option::is_some).count()
+    if inputs.is_empty() { return 0; }
+    JudgmentLedger::new(ledger_path.to_path_buf()).record_retrieval_outcomes_once(inputs).into_iter().filter(Option::is_some).count()
 }
 
 #[cfg(test)]
@@ -365,6 +314,70 @@ mod tests {
         assert!(!ledger.exists());
         if let Some(value) = previous { std::env::set_var("HIVE_RETRIEVAL_LEDGER", value); }
         else { std::env::remove_var("HIVE_RETRIEVAL_LEDGER"); }
+    }
+
+    #[test]
+    fn large_existing_ledger_keeps_retrieval_spawn_under_fifty_ms() {
+        let _guard = RETRIEVAL_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("synthetic-repo");
+        fs::create_dir(&repo).unwrap();
+        let ledger = temp.path().join("ledger.jsonl");
+        let row = b"{\"kind\":\"decision\",\"decision_id\":\"unrelated\",\"padding\":\"synthetic synthetic synthetic synthetic synthetic\"}\n";
+        let mut file = fs::File::create(&ledger).unwrap();
+        use std::io::Write;
+        for _ in 0..100_000 { file.write_all(row).unwrap(); }
+        drop(file);
+        assert!(fs::metadata(&ledger).unwrap().len() >= 10_000_000);
+        let mut sidecar = fixture("sampled");
+        let mut best_ms = u128::MAX;
+        for index in 0..3 {
+            sidecar["agent_id"] = json!(format!("synthetic-agent-{index}"));
+            let start = Instant::now();
+            let ids = record_spawn_rows(&ledger, &repo, &sidecar);
+            best_ms = best_ms.min(start.elapsed().as_millis());
+            assert!(ids.iter().all(Option::is_some));
+        }
+        assert!(best_ms < 50, "best spawn took {best_ms} ms against large ledger");
+    }
+
+    #[test]
+    fn concurrent_retrieval_writers_append_each_id_once() {
+        let _guard = RETRIEVAL_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("synthetic-repo");
+        fs::create_dir(&repo).unwrap();
+        let ledger = temp.path().join("ledger.jsonl");
+        let sidecar = fixture("sampled");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let barrier = barrier.clone();
+                let sidecar = sidecar.clone();
+                let ledger = ledger.clone();
+                let repo = repo.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    assert!(record_spawn_rows(&ledger, &repo, &sidecar).iter().all(Option::is_some));
+                });
+            }
+        });
+        assert_eq!(rows(&ledger).len(), 3);
+        let mut sidecar = sidecar;
+        let ids = record_spawn_rows(&ledger, &repo, &sidecar);
+        sidecar["decision_ids"] = json!(ids);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let barrier = barrier.clone();
+                let sidecar = sidecar.clone();
+                let ledger = ledger.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    record_ack_outcomes(&ledger, &sidecar, &["k1".into()]);
+                });
+            }
+        });
+        assert_eq!(rows(&ledger).len(), 5);
     }
 
     #[test]

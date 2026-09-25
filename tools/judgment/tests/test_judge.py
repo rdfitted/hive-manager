@@ -201,7 +201,16 @@ class JudgeTests(unittest.TestCase):
         send.assert_not_called()
 
     def test_project_identity_accepts_only_github_origin_and_cannot_be_overridden(self):
-        self.assertEqual("rdfitted/hive-manager", judge._project_identity())
+        with patch.object(judge.subprocess, "run") as git:
+            git.side_effect = [
+                MagicMock(stdout=str(self.root) + "\n"),
+                MagicMock(stdout="git@github.com:rdfitted/hive-manager.git\n"),
+            ]
+            self.assertEqual("rdfitted/hive-manager", judge._project_identity(self.root))
+        self.assertEqual(["git", "rev-parse", "--show-toplevel"], git.call_args_list[0].args[0])
+        self.assertEqual(self.root, git.call_args_list[0].kwargs["cwd"])
+        self.assertEqual(["git", "remote", "get-url", "origin"], git.call_args_list[1].args[0])
+        self.assertEqual(str(self.root), git.call_args_list[1].kwargs["cwd"])
         self.assertEqual("owner/repo", judge.GITHUB_REMOTE.fullmatch(
             "git@github.com:Owner/Repo.git").group(1).lower() + "/" +
             judge.GITHUB_REMOTE.fullmatch("git@github.com:Owner/Repo.git").group(2).lower())
@@ -253,6 +262,21 @@ class JudgeTests(unittest.TestCase):
             with self.assertRaisesRegex(jev_transport.TransportError, "http-401"):
                 jev_transport.send(b"{}", "synthetic-key")
         self.assertEqual(1, call.call_count)
+
+    def test_transport_response_size_boundary(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.status = 200
+        valid_json = b'{"ok":true}'
+        limit = 1024 * 1024
+        response.read.return_value = valid_json + b" " * (limit - len(valid_json))
+        with patch.object(jev_transport.request, "urlopen", return_value=response):
+            self.assertEqual({"ok": True}, jev_transport.send(b"{}", "synthetic-key"))
+        response.read.assert_called_with(limit + 1)
+        response.read.return_value += b" "
+        with patch.object(jev_transport.request, "urlopen", return_value=response):
+            with self.assertRaisesRegex(jev_transport.TransportError, "^response-too-large$"):
+                jev_transport.send(b"{}", "synthetic-key")
 
 
 if __name__ == "__main__":
