@@ -586,21 +586,48 @@ impl PtySession {
     }
 
     pub fn kill(&self) -> Result<(), PtyError> {
+        #[cfg(windows)]
+        return self.kill_with_tree_killer(kill_windows_tree);
+
+        #[cfg(not(windows))]
+        {
+            let mut child = self.child.lock();
+            if let Some(ref mut c) = *child {
+                if c.try_wait().map_err(into_io_error)?.is_some() {
+                    return Ok(());
+                }
+                c.kill().map_err(into_io_error)?;
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(windows)]
+    fn kill_with_tree_killer(
+        &self,
+        tree_killer: impl FnOnce(u32) -> std::io::Result<()>,
+    ) -> Result<(), PtyError> {
         let mut child = self.child.lock();
+        if let Some(pid) = self.child_pid {
+            // A reaped direct child says nothing about descendants. Always try the
+            // recorded PID; /T can only enumerate children while that root exists.
+            // Descendants reparented after root exit cannot be recovered by PID.
+            match tree_killer(pid) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    tracing::warn!(pid, %error, "PTY process-tree kill failed; retaining cleanup target");
+                    if let Some(ref mut c) = *child {
+                        if c.try_wait().ok().flatten().is_none() {
+                            let _ = c.kill();
+                        }
+                    }
+                    return Err(PtyError::IoError(error));
+                }
+            }
+        }
         if let Some(ref mut c) = *child {
             if c.try_wait().map_err(into_io_error)?.is_some() {
                 return Ok(());
-            }
-            #[cfg(windows)]
-            if let Some(pid) = self.child_pid {
-                match kill_windows_tree(pid) {
-                    Ok(()) => return Ok(()),
-                    Err(error) => {
-                        tracing::warn!(pid, %error, "PTY process-tree kill failed; killing direct child");
-                        c.kill().map_err(into_io_error)?;
-                        return Err(PtyError::IoError(error));
-                    }
-                }
             }
             c.kill().map_err(into_io_error)?;
         }
@@ -832,13 +859,48 @@ mod tests {
                 24,
                 8192,
             ).unwrap();
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(30);
             while session.is_alive() && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(25));
             }
             assert!(!session.is_alive(), "synthetic child did not exit");
+            let mut attempted_pid = None;
+            session.kill_with_tree_killer(|pid| {
+                attempted_pid = Some(pid);
+                Ok(())
+            }).unwrap();
+            assert_eq!(attempted_pid, session.child_pid);
             session.kill().unwrap();
             session.kill().unwrap();
+        }
+
+        #[test]
+        fn failed_tree_kill_of_exited_root_remains_retryable() {
+            let temp = TempDir::new().unwrap();
+            let session = PtySession::new(
+                "synthetic-exited-failure".to_string(),
+                AgentRole::Worker { index: 1, parent: None },
+                "cmd.exe",
+                pty_submit_policy("cmd.exe"),
+                &[],
+                &["/c", "exit", "0"],
+                temp.path().to_str(),
+                80,
+                24,
+                8192,
+            ).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while session.is_alive() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(25));
+            }
+            assert!(!session.is_alive());
+            assert!(session.kill_with_tree_killer(|_| Err(std::io::Error::other("partial failure"))).is_err());
+            let mut retried = false;
+            session.kill_with_tree_killer(|_| {
+                retried = true;
+                Ok(())
+            }).unwrap();
+            assert!(retried);
         }
     }
 

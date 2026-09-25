@@ -410,7 +410,7 @@ impl PtyManager {
 
             // Evaluator/prince respawns intentionally reuse their stable ID after exit.
             // Reap that dead handle, while still rejecting a live same-ID replacement.
-            let _ = existing.kill();
+            existing.kill()?;
             let mut sessions = self.sessions.write();
             if sessions
                 .get(&id)
@@ -602,14 +602,9 @@ impl PtyManager {
         let _lifecycle_guard = self.lifecycle.lock();
         let session = self.sessions.read().get(id).cloned();
         if let Some(session) = session {
-            if let Err(error) = session.kill() {
-                // Some PTY backends report an error when killing a process that already
-                // exited. Drop that dead handle, but retain genuinely live failures so a
-                // later cleanup attempt can retry them.
-                if session.is_alive() {
-                    return Err(error);
-                }
-            }
+            // Direct-child liveness cannot prove that its descendants were reaped.
+            // Retain the exact session on any failed tree cleanup for a later retry.
+            session.kill()?;
 
             // Remove only the exact session we killed. This avoids retaining its process
             // handle without deleting a same-id replacement created concurrently.
@@ -719,6 +714,26 @@ impl PtyManager {
 impl Default for PtyManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod cross_platform_spawn_tests {
+    use super::{AgentRole, PtyManager};
+
+    #[test]
+    fn test_session_spawn_does_not_require_installed_cli() {
+        let manager = PtyManager::new();
+        manager.create_session(
+            "missing-cli-fixture".to_string(),
+            AgentRole::Worker { index: 1, parent: None },
+            "hive-manager-nonexistent-test-cli",
+            &[],
+            None,
+            80,
+            24,
+        ).unwrap();
+        manager.kill("missing-cli-fixture").unwrap();
     }
 }
 
@@ -1338,6 +1353,57 @@ mod tests {
 
         manager.kill("doa-agent").unwrap();
         assert!(manager.recent_output("doa-agent").is_none());
+    }
+
+    #[test]
+    fn failed_tree_cleanup_keeps_dead_session_for_retry() {
+        let manager = PtyManager::new();
+        manager
+            .create_session(
+                "retry-cleanup".to_string(),
+                worker_role(),
+                "claude",
+                &["--stub-die-on-start", "--stub-tree-kill-fails-once"],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+        assert!(!manager.is_alive("retry-cleanup"));
+        assert!(manager.kill("retry-cleanup").is_err());
+        assert!(manager.sessions.read().contains_key("retry-cleanup"));
+        manager.kill("retry-cleanup").unwrap();
+        assert!(!manager.sessions.read().contains_key("retry-cleanup"));
+    }
+
+    #[test]
+    fn failed_cleanup_blocks_same_id_replacement_until_retry() {
+        let manager = PtyManager::new();
+        manager
+            .create_session(
+                "retry-replacement".to_string(),
+                worker_role(),
+                "claude",
+                &["--stub-die-on-start", "--stub-tree-kill-fails-once"],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+        let original = manager.sessions.read().get("retry-replacement").cloned().unwrap();
+        let replacement = || manager.create_session(
+            "retry-replacement".to_string(), worker_role(), "claude", &[], None, 80, 24,
+        );
+        assert!(replacement().is_err());
+        assert!(Arc::ptr_eq(
+            manager.sessions.read().get("retry-replacement").unwrap(),
+            &original,
+        ));
+        replacement().unwrap();
+        assert!(!Arc::ptr_eq(
+            manager.sessions.read().get("retry-replacement").unwrap(),
+            &original,
+        ));
     }
 
     /// #287: the snapshot exposes the same bytes the diagnostic tail sees, with offsets

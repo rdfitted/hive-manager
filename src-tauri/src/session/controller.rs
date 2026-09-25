@@ -4476,6 +4476,34 @@ Last updated: {timestamp}
         )
     }
 
+    fn queen_review_round_protocol(
+        session_id: &str,
+        scope_phrase: &str,
+        has_evaluator: bool,
+    ) -> String {
+        let schema_step = format!(
+            "For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work."
+        );
+        let queen_step = r#"Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work. For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{"result":"ACCEPT|PARTIAL|DECLINE"}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified."#;
+        let (indent, before_command) = if has_evaluator {
+            ("   ", "\n\n   ```bash\n\n")
+        } else {
+            (
+                "",
+                "\n3. If unresolved findings remain, you MUST spawn a Reconciler worker via `POST /api/sessions/{session_id}/workers`, wait for and validate its paired adjudication artifacts, then spawn the required Resolver workers, integrate their fixes, and return to Step 1.\n   ```bash\n",
+            )
+        };
+        let before_command = before_command.replace("{session_id}", session_id);
+        format!(
+            r#"{indent}{schema_step}{before_command}   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate {scope_phrase} into one fix list. Produce review-round-N.md and review-round-N.json with one structured disposition per finding."}}'
+   ```
+   {queen_step}
+"#,
+        )
+    }
+
     fn queen_post_workers_protocol(
         session_id: &str,
         session_root: &Path,
@@ -4486,6 +4514,15 @@ Last updated: {timestamp}
         let qa_verdict_path = Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
         let prince_verdict_path =
             Self::prompt_path(&session_root.join("peer").join("prince-verdict.json"));
+        let review_round_protocol = Self::queen_review_round_protocol(
+            session_id,
+            if has_evaluator {
+                "external PR review comments"
+            } else {
+                "external review comments and integrity findings"
+            },
+            has_evaluator,
+        );
 
         if !has_evaluator {
             return format!(
@@ -4499,15 +4536,7 @@ QA is disabled for this session. Tell the operator that the milestone QA gate wi
    gh api repos/<owner>/<repo>/issues/<pr-number>/comments
    gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
    ```
-For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work.
-3. If unresolved findings remain, you MUST spawn a Reconciler worker via `POST /api/sessions/{session_id}/workers`, wait for and validate its paired adjudication artifacts, then spawn the required Resolver workers, integrate their fixes, and return to Step 1.
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
-     -H "Content-Type: application/json" \
-     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate external review comments and integrity findings into one fix list. Produce review-round-N.md and review-round-N.json with one structured disposition per finding."}}'
-   ```
-   Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work. For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{{"result":"ACCEPT|PARTIAL|DECLINE"}}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified.
-   ```bash
+{review_round_protocol}   ```bash
    curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
      -H "Content-Type: application/json" \
      -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM findings from the reconciled list"}}'
@@ -4556,16 +4585,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
    gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
    ```
 
-   For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work.
-
-   ```bash
-
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
-     -H "Content-Type: application/json" \
-     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate external PR review comments into one fix list. Produce review-round-N.md and review-round-N.json with one structured disposition per finding."}}'
-   ```
-   Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work. For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{{"result":"ACCEPT|PARTIAL|DECLINE"}}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified.
-   ```bash
+{review_round_protocol}   ```bash
    curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
      -H "Content-Type: application/json" \
      -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM external PR review comments from the reconciled list"}}'
@@ -18388,6 +18408,150 @@ mod tests {
         let encoded = serde_json::to_value(decoded).unwrap();
         assert!(encoded["kept"][0].get("match_type").is_none());
         assert!(encoded["kept"][0].get("edge_rationale").is_none());
+    }
+
+    fn legacy_post_workers_protocol(
+        session_id: &str,
+        session_root: &Path,
+        has_evaluator: bool,
+    ) -> String {
+        let milestone_ready_path =
+            SessionController::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
+        let qa_verdict_path = SessionController::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
+        let prince_verdict_path =
+            SessionController::prompt_path(&session_root.join("peer").join("prince-verdict.json"));
+
+        if !has_evaluator {
+            return format!(
+                r#"## Post-Workers Protocol (MANDATORY)
+
+QA is disabled for this session. Tell the operator that the milestone QA gate will not run before push.
+
+1. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
+2. You MUST wait 10 minutes, collect PR comments plus any remaining integrity concerns, and use this `gh api` workflow:
+   ```bash
+   gh api repos/<owner>/<repo>/issues/<pr-number>/comments
+   gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
+   ```
+For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work.
+3. If unresolved findings remain, you MUST spawn a Reconciler worker via `POST /api/sessions/{session_id}/workers`, wait for and validate its paired adjudication artifacts, then spawn the required Resolver workers, integrate their fixes, and return to Step 1.
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate external review comments and integrity findings into one fix list. Produce review-round-N.md and review-round-N.json with one structured disposition per finding."}}'
+   ```
+   Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work. For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{{"result":"ACCEPT|PARTIAL|DECLINE"}}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified.
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM findings from the reconciled list"}}'
+   ```
+4. You MUST call `POST /api/sessions/{session_id}/complete` only after the latest push has aged at least 10 minutes and there are no new unresolved PR comments or integrity concerns.
+"#,
+                session_id = session_id,
+            );
+        }
+
+        format!(
+            r#"## Post-Workers Protocol (MANDATORY)
+
+Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the backend at session launch (`spawn_launch_evaluator_agents`). They already exist as `AgentRole::Evaluator` and `AgentRole::Prince`. You MUST NOT spawn either one. DO NOT `curl POST /workers` with `role=evaluator`, DO NOT `curl POST /evaluators`, and DO NOT spawn a Prince. Signal QA via `{milestone_ready_path}`, WAIT for `{qa_verdict_path}`, then WAIT for `{prince_verdict_path}` before you push.
+
+1. You MUST execute the QA Milestone Handoff block below exactly as written. Treat Step 2 of that handoff as blocking.
+2. You MUST wait for the Evaluator verdict by polling `{qa_verdict_path}` inline. You MUST NOT use `/loop`.
+   ```bash
+   while [ ! -f "{qa_verdict_path}" ]; do
+     curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+       -H "Content-Type: application/json" \
+       -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Evaluator verdict"}}'
+     sleep 30
+   done
+   cat "{qa_verdict_path}"
+   ```
+3. You MUST inspect the verdict.
+   - If it says `PASS` or `FAIL`, the Prince automatically takes over remediation of the QA findings. Continue to Step 4.
+   - If it says `BLOCKED`, QA could not produce a usable verdict. Surface the stated reason and do NOT push. Fix the cause if it is yours (for example, start the missing UI/host or repair the transport), then rewrite `peer/milestone-ready.json` to re-enter QA. A newer file mtime counts as fresh; HTTP `POST /milestone-ready` is always fresh. Re-entry counts against the iteration limit. At `QaMaxRetriesExceeded`, STOP and surface to the operator. Force-pass and force-fail are operator-only.
+4. You MUST wait for the Prince to finish remediation by polling `{prince_verdict_path}` inline. The Prince reads the QA findings, fixes them with its OWN fix team, and self-certifies. You MUST NOT spawn Reconciler or Resolver workers for QA findings — remediating QA findings is the Prince's job, not yours.
+   ```bash
+   while [ ! -f "{prince_verdict_path}" ]; do
+     curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+       -H "Content-Type: application/json" \
+       -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Prince remediation"}}'
+     sleep 30
+   done
+   cat "{prince_verdict_path}"
+   ```
+   - If the Prince verdict is `PASS`/`DONE`, continue to Step 5.
+   - If the Prince verdict is `BLOCKED`, surface the stated reason and do NOT push. Fix the cause if it is yours, then rewrite `peer/milestone-ready.json` to re-enter QA. A newer file mtime counts as fresh; HTTP `POST /milestone-ready` is always fresh. Re-entry counts against the iteration limit. At `QaMaxRetriesExceeded`, STOP and surface to the operator. Force-pass and force-fail are operator-only.
+5. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
+6. You MUST wait 10 minutes, then collect EXTERNAL PR review comments and resolve them. The Reconciler/Resolver workers here are for PR review comments ONLY — a separate concern from the QA findings the Prince already handled. Whenever unresolved PR comments remain, spawn the Reconciler, wait for and validate its paired adjudication artifacts, then spawn Resolver workers, integrate their fixes, and return to Step 5:
+   ```bash
+   gh api repos/<owner>/<repo>/issues/<pr-number>/comments
+   gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
+   ```
+
+   For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work.
+
+   ```bash
+
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate external PR review comments into one fix list. Produce review-round-N.md and review-round-N.json with one structured disposition per finding."}}'
+   ```
+   Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work. For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{{"result":"ACCEPT|PARTIAL|DECLINE"}}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified.
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM external PR review comments from the reconciled list"}}'
+   ```
+7. You MUST call `POST /api/sessions/{session_id}/complete` only after QA is resolved, the Prince has certified `PASS`, the latest push has aged at least 10 minutes, and there are no new unresolved PR comments.
+"#,
+            milestone_ready_path = milestone_ready_path,
+            qa_verdict_path = qa_verdict_path,
+            prince_verdict_path = prince_verdict_path,
+            session_id = session_id,
+        )
+    }
+
+    #[test]
+    fn queen_review_round_protocol_is_shared_and_preserves_both_rendered_branches() {
+        use sha2::{Digest, Sha256};
+
+        let source = include_str!("controller.rs");
+        let production_source = source.split("mod tests {").next().unwrap();
+        assert_eq!(
+            production_source
+                .matches(concat!("For review round N, ", "give the Reconciler"))
+                .count(),
+            1,
+        );
+        assert_eq!(
+            production_source
+                .matches(concat!("Queen: wait for the Reconciler's ", "markdown and JSON"))
+                .count(),
+            1,
+        );
+
+        let session_root = Path::new("/repo/.hive-manager/session-123");
+        for (has_evaluator, original_sha256) in [
+            (false, "710fcb803684fc5dd4c3957a5a9cfcf55908b590f758ccd3af4328c032f88eea"),
+            (true, "ce010744ca1ab392a93d875d57ca736acb028aead54017df0cedb1b246c0b1ef"),
+        ] {
+            let rendered = SessionController::queen_post_workers_protocol(
+                "session-123",
+                session_root,
+                has_evaluator,
+            );
+            assert_eq!(
+                rendered,
+                legacy_post_workers_protocol("session-123", session_root, has_evaluator),
+            );
+            assert_eq!(
+                format!("{:x}", Sha256::digest(rendered.as_bytes())),
+                original_sha256,
+                "Post-Workers text changed with has_evaluator={has_evaluator}",
+            );
+        }
     }
 
     #[test]
