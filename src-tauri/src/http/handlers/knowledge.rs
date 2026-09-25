@@ -614,7 +614,11 @@ pub async fn get_knowledge_page(
 
 async fn resolve_wiki_root(state: &AppState) -> PathBuf {
     let configured = state.config.read().await.global_wiki_path.clone();
-    crate::wiki::resolve_wiki_root(configured.as_deref())
+    resolve_wiki_root_from(configured.as_deref())
+}
+
+pub(crate) fn resolve_wiki_root_from(configured: Option<&str>) -> PathBuf {
+    crate::wiki::resolve_wiki_root(configured)
 }
 
 async fn resolve_wiki_folders(

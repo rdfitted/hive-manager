@@ -87,9 +87,16 @@
 </form>
 
 <style>
-  .wiki-settings { display: grid; gap: 0.6rem; padding: 1rem; border-radius: var(--lattice-radius-md); }
+  .wiki-settings {
+    display: grid;
+    gap: 0.6rem;
+    padding: 1rem;
+    border-radius: var(--radius-md);
+    background: var(--bg-panel);
+    box-shadow: var(--elev-1), var(--edge-lip);
+  }
   label { font-weight: 600; }
-  p { margin: 0 0 0.35rem; color: var(--lattice-text-muted); font-size: 0.82rem; }
+  p { margin: 0 0 0.35rem; color: var(--text-secondary); font-size: var(--text-small); }
   input, select { width: 100%; }
   button { justify-self: start; }
 </style>

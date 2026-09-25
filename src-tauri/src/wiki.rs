@@ -1,5 +1,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const DEFAULT_WIKI_ROOT: &str = "~/.ai-docs/wiki";
 
@@ -54,6 +56,59 @@ fn expand_tilde_path(path: &Path, home: Option<&Path>) -> PathBuf {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WikiState {
+    Absent,
+    Local,
+    Remote,
+}
+
+pub(crate) fn wiki_state(root: &Path) -> WikiState {
+    wiki_state_from(root, bounded_probe)
+}
+
+pub(crate) fn wiki_state_from(
+    root: &Path,
+    probe: impl Fn(&str, &[&str], &Path) -> bool,
+) -> WikiState {
+    if !root.is_dir() || !root.join("index.md").is_file() {
+        return WikiState::Absent;
+    }
+    if !probe("git", &["rev-parse", "--show-toplevel"], root)
+        || !probe("git", &["remote", "get-url", "origin"], root)
+        || !probe("gh", &["auth", "status"], root)
+    {
+        return WikiState::Local;
+    }
+    WikiState::Remote
+}
+
+pub(crate) fn bounded_probe(executable: &str, args: &[&str], root: &Path) -> bool {
+    let mut child = match Command::new(executable)
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +132,48 @@ mod tests {
             resolve_wiki_root_from(None, Some("~someone/wiki"), Some(home)),
             PathBuf::from("~someone/wiki")
         );
+    }
+
+    #[test]
+    fn embedded_role_pointers_have_starter_pages_or_optional_project_context() {
+        use crate::orchestrator::org_graph::definitions::{
+            resolve_role_definition, RoleDefinitionSource, RoleResolutionIssueKind,
+        };
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let starter = repo.join("docs/wiki-starter");
+        let project = tempfile::tempdir().unwrap();
+        let missing_root = project.path().join("missing-wiki");
+        let empty_root = project.path().join("empty-wiki");
+        std::fs::create_dir(&empty_root).unwrap();
+
+        let mut checked = 0;
+        for entry in std::fs::read_dir(repo.join("roles")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                continue;
+            }
+            let role = path.file_stem().unwrap().to_str().unwrap();
+            let source = std::fs::read_to_string(&path).unwrap();
+            let frontmatter: serde_json::Value = serde_json::from_str(source.lines().nth(1).unwrap()).unwrap();
+            for pointer in frontmatter["knowledge_scope"].as_array().unwrap() {
+                let relative = pointer["pointer"].as_str().unwrap();
+                match pointer["source"].as_str().unwrap() {
+                    "institutional" => assert!(starter.join(relative).is_file(), "{role}: {relative}"),
+                    "project" => {
+                        assert_eq!(relative, "project-dna.md", "{role}: project context is optional");
+                        assert!(pointer["summary"].as_str().unwrap().starts_with("Optional "));
+                    }
+                    other => panic!("{role}: unexpected source {other}"),
+                }
+            }
+            for root in [&missing_root, &empty_root] {
+                let resolved = resolve_role_definition(project.path(), Some(root), role);
+                assert!(resolved.definition.is_some(), "{role}: embedded fallback missing");
+                assert_eq!(resolved.base_source, Some(RoleDefinitionSource::EmbeddedDefault));
+                assert!(resolved.issues.iter().any(|issue| issue.kind == RoleResolutionIssueKind::InstitutionalUnavailable));
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 15);
     }
 }

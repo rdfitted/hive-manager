@@ -173,6 +173,7 @@ pub fn run() {
         .manage(StorageState(Arc::clone(&storage)))
         .manage(Arc::clone(&action_registry))
         .setup(move |app| {
+            crate::templates::warn_stale_template_overrides(&storage.templates_dir());
             // Set app handle for event emission
             {
                 let mut controller = session_controller.write();

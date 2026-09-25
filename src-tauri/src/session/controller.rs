@@ -4196,20 +4196,31 @@ Last updated: {timestamp}
     /// `cli` is the CLI that will execute the rendered prompt (see
     /// [`Self::normalize_wiki_path_for_cli`]).
     ///
-    /// The gate flags exist so an unset/blank wiki path renders a prompt containing no
-    /// read of an empty path: the whole `cat "<path>/index.md"` block is dropped
-    /// and a short skip notice renders in its place. A debate must still run to
-    /// completion with no wiki configured.
+    /// Gate flags are based on the current directory and index file, never a configured string.
     fn insert_wiki_path_variables(
         variables: &mut HashMap<String, String>,
         global_wiki_path: &str,
         cli: &str,
     ) {
-        let normalized = Self::normalize_wiki_path_for_cli(global_wiki_path, cli);
-        let configured = !normalized.trim().is_empty();
-        variables.insert("global_wiki_path".to_string(), normalized);
-        variables.insert("has_global_wiki".to_string(), configured.to_string());
-        variables.insert("no_global_wiki".to_string(), (!configured).to_string());
+        let root = crate::wiki::resolve_wiki_root(Some(global_wiki_path));
+        let state = crate::wiki::wiki_state(&root);
+        Self::insert_wiki_path_variables_from_state(variables, &root, cli, state);
+    }
+
+    fn insert_wiki_path_variables_from_state(
+        variables: &mut HashMap<String, String>,
+        root: &Path,
+        cli: &str,
+        state: crate::wiki::WikiState,
+    ) {
+        let normalize = |path: &Path| Self::normalize_wiki_path_for_cli(&path.to_string_lossy(), cli);
+        variables.insert("global_wiki_path".to_string(), normalize(root));
+        variables.insert("wiki_index_path".to_string(), normalize(&root.join("index.md")));
+        variables.insert("wiki_schema_path".to_string(), normalize(&root.join("schema.md")));
+        variables.insert("has_global_wiki".to_string(), (state != crate::wiki::WikiState::Absent).to_string());
+        variables.insert("no_global_wiki".to_string(), (state == crate::wiki::WikiState::Absent).to_string());
+        variables.insert("wiki_is_local".to_string(), (state == crate::wiki::WikiState::Local).to_string());
+        variables.insert("wiki_is_remote".to_string(), (state == crate::wiki::WikiState::Remote).to_string());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -17189,8 +17200,9 @@ mod tests {
     use crate::workspace::git::current_head;
     use chrono::{Duration, Utc};
     use parking_lot::RwLock;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -21711,7 +21723,11 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     // would prove nothing about what a debater receives.
     // ---------------------------------------------------------------------
 
-    const DEBATE_TEST_WIKI_PATH: &str = "/home/tester/.ai-docs/wiki";
+    fn indexed_test_wiki() -> TempDir {
+        let wiki = TempDir::new().unwrap();
+        std::fs::write(wiki.path().join("index.md"), "# Test wiki\n").unwrap();
+        wiki
+    }
 
     fn debate_test_debater_with_cli(cli: &str) -> DebateDebaterMetadata {
         DebateDebaterMetadata {
@@ -21797,7 +21813,10 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
 
     #[test]
     fn debater_prompt_loads_prior_wiki_context_when_path_configured() {
-        let prompt = render_debate_test_debater_prompt(DEBATE_TEST_WIKI_PATH);
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let wiki = indexed_test_wiki();
+        let path = wiki.path().to_str().unwrap();
+        let prompt = render_debate_test_debater_prompt(path);
 
         assert!(
             prompt.contains("## Prior Wiki Context"),
@@ -21805,17 +21824,17 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             prompt
         );
         assert!(
-            prompt.contains(DEBATE_TEST_WIKI_PATH),
+            prompt.contains(&path.replace('\\', "/")),
             "debater prompt never names the configured wiki path:\n{}",
             prompt
         );
         assert!(
-            prompt.contains(&format!("cat \"{}/index.md\"", DEBATE_TEST_WIKI_PATH)),
+            prompt.contains(&format!("cat \"{}/index.md\"", path.replace('\\', "/"))),
             "debater prompt is missing the concrete index read:\n{}",
             prompt
         );
         assert!(
-            !prompt.contains("No global wiki path is configured"),
+            !prompt.contains("No wiki is configured"),
             "debater prompt rendered the skip notice despite a configured path:\n{}",
             prompt
         );
@@ -21824,13 +21843,16 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
 
     #[test]
     fn debater_prompt_skips_wiki_load_gracefully_when_path_unset() {
-        for unset in ["", "   "] {
-            let prompt = render_debate_test_debater_prompt(unset);
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let wiki = TempDir::new().unwrap();
+        for unset in [wiki.path().join("missing"), wiki.path().join("directory-only")] {
+            if unset.ends_with("directory-only") { std::fs::create_dir(&unset).unwrap(); }
+            let prompt = render_debate_test_debater_prompt(unset.to_str().unwrap());
 
             assert_no_dangling_wiki_read(&prompt, "debater");
             assert_no_unrendered_template_syntax(&prompt, "debater");
             assert!(
-                prompt.contains("No global wiki path is configured"),
+                prompt.contains("No wiki is configured"),
                 "debater prompt is missing the explicit skip notice:\n{}",
                 prompt
             );
@@ -21854,13 +21876,16 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     /// makes the empty case a real skip rather than a promise in prose.
     #[test]
     fn research_queen_prompt_skips_wiki_load_gracefully_when_path_unset() {
-        for unset in ["", "   "] {
-            let prompt = render_research_queen_prompt(unset, "claude");
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let wiki = TempDir::new().unwrap();
+        for unset in [wiki.path().join("missing"), wiki.path().join("directory-only")] {
+            if unset.ends_with("directory-only") { std::fs::create_dir(&unset).unwrap(); }
+            let prompt = render_research_queen_prompt(unset.to_str().unwrap(), "claude");
 
             assert_no_dangling_wiki_read(&prompt, "queen-research");
             assert_no_unrendered_template_syntax(&prompt, "queen-research");
             assert!(
-                prompt.contains("No global wiki path is configured"),
+                prompt.contains("No wiki is configured"),
                 "queen-research prompt is missing the explicit skip notice:\n{}",
                 prompt
             );
@@ -21880,10 +21905,13 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
 
     #[test]
     fn debate_judge_prompt_loads_prior_wiki_context_when_path_configured() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let wiki = indexed_test_wiki();
+        let path = wiki.path().to_str().unwrap();
         let prompt = SessionController::build_debate_judge_prompt(
             "session-wiki",
             &debate_test_metadata(),
-            DEBATE_TEST_WIKI_PATH,
+            path,
             "claude",
         );
 
@@ -21893,12 +21921,12 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             prompt
         );
         assert!(
-            prompt.contains(&format!("cat \"{}/index.md\"", DEBATE_TEST_WIKI_PATH)),
+            prompt.contains(&format!("cat \"{}/index.md\"", path.replace('\\', "/"))),
             "judge prompt is missing the concrete index read:\n{}",
             prompt
         );
         assert!(
-            !prompt.contains("No global wiki path is configured"),
+            !prompt.contains("No wiki is configured"),
             "judge prompt rendered the skip notice despite a configured path:\n{}",
             prompt
         );
@@ -21913,18 +21941,21 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
 
     #[test]
     fn debate_judge_prompt_skips_wiki_load_gracefully_when_path_unset() {
-        for unset in ["", "   "] {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let wiki = TempDir::new().unwrap();
+        for unset in [wiki.path().join("missing"), wiki.path().join("directory-only")] {
+            if unset.ends_with("directory-only") { std::fs::create_dir(&unset).unwrap(); }
             let prompt = SessionController::build_debate_judge_prompt(
                 "session-wiki",
                 &debate_test_metadata(),
-                unset,
+                unset.to_str().unwrap(),
                 "claude",
             );
 
             assert_no_dangling_wiki_read(&prompt, "judge");
             assert_no_unrendered_template_syntax(&prompt, "judge");
             assert!(
-                prompt.contains("No global wiki path is configured"),
+                prompt.contains("No wiki is configured"),
                 "judge prompt is missing the explicit skip notice:\n{}",
                 prompt
             );
@@ -21935,23 +21966,6 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             assert!(prompt.contains(".hive-manager/session-wiki/debate/verdict.md"));
         }
     }
-
-    // ---------------------------------------------------------------------
-    // `global_wiki_path` separator / WSL normalization (issue #168)
-    //
-    // `expand_tilde` resolves `~` from `USERPROFILE` on Windows, so what reaches a
-    // prompt is MIXED-separator. Every assertion below is on the string a builder
-    // actually returns: a template-constant assertion would prove nothing about
-    // what the agent receives, which is the whole point of the issue.
-    // ---------------------------------------------------------------------
-
-    /// Exactly what `expand_tilde("~/.ai-docs/wiki")` yields on Windows: `USERPROFILE`
-    /// contributes backslashes, the configured remainder keeps its forward slashes.
-    const MIXED_SEPARATOR_WIKI_PATH: &str = r"C:\Users\RDuff/.ai-docs/wiki";
-    /// The Git-Bash/MSYS-safe spelling every non-WSL CLI must receive.
-    const FORWARD_SLASH_WIKI_PATH: &str = "C:/Users/RDuff/.ai-docs/wiki";
-    /// The only spelling that resolves under WSL. `C:/Users/...` does NOT.
-    const WSL_WIKI_PATH: &str = "/mnt/c/Users/RDuff/.ai-docs/wiki";
 
     fn render_research_queen_prompt(global_wiki_path: &str, queen_cli: &str) -> String {
         let extra_vars =
@@ -21965,151 +21979,48 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         )
     }
 
-    /// A backslash surviving into the prompt is the defect. Asserting on the drive
-    /// prefix catches it wherever in the prompt it appears -- the load block, the
-    /// prose line naming the path, or the Phase 4 / Wiki Capture `cd`.
-    fn assert_no_windows_separators(prompt: &str, label: &str) {
-        assert!(
-            !prompt.contains(r"C:\"),
-            "{} prompt still carries a backslash-separated Windows wiki path:\n{}",
-            label,
-            prompt
-        );
-    }
-
     #[test]
-    fn research_queen_prompt_renders_a_forward_slash_wiki_path() {
-        let prompt = render_research_queen_prompt(MIXED_SEPARATOR_WIKI_PATH, "claude");
-
-        assert!(
-            prompt.contains(&format!("cat \"{}/index.md\"", FORWARD_SLASH_WIKI_PATH)),
-            "queen-research prompt is missing the normalized index read:\n{}",
-            prompt
-        );
-        // Phase 4's capture block quotes the same variable and must agree.
-        assert!(
-            prompt.contains(&format!("cd \"{}\"", FORWARD_SLASH_WIKI_PATH)),
-            "queen-research wiki capture `cd` was not normalized:\n{}",
-            prompt
-        );
-        assert_no_windows_separators(&prompt, "queen-research");
-        assert_no_unrendered_template_syntax(&prompt, "queen-research");
-    }
-
-    /// A separator swap alone would leave `C:/Users/...` here, which is just as
-    /// unresolvable under WSL as `C:\Users\...` -- solved-looking but not solved.
-    #[test]
-    fn research_queen_prompt_translates_the_wiki_path_for_a_wsl_backed_queen() {
-        let prompt = render_research_queen_prompt(MIXED_SEPARATOR_WIKI_PATH, "cursor");
-
-        assert!(
-            prompt.contains(&format!("cat \"{}/index.md\"", WSL_WIKI_PATH)),
-            "cursor-backed queen-research prompt did not get a /mnt-translated path:\n{}",
-            prompt
-        );
-        assert!(
-            prompt.contains(&format!("cd \"{}\"", WSL_WIKI_PATH)),
-            "cursor-backed queen-research capture `cd` was not translated:\n{}",
-            prompt
-        );
-        assert!(
-            !prompt.contains("C:"),
-            "cursor-backed queen-research prompt still names a drive letter WSL cannot \
-             resolve:\n{}",
-            prompt
-        );
-        assert_no_unrendered_template_syntax(&prompt, "queen-research");
-    }
-
-    #[test]
-    fn debate_prompts_render_a_forward_slash_wiki_path() {
-        let debater =
-            render_debate_test_debater_prompt_for_cli(MIXED_SEPARATOR_WIKI_PATH, "claude");
-        assert!(
-            debater.contains(&format!("cat \"{}/index.md\"", FORWARD_SLASH_WIKI_PATH)),
-            "debater prompt is missing the normalized index read:\n{}",
-            debater
-        );
-        assert_no_windows_separators(&debater, "debater");
-        assert_no_unrendered_template_syntax(&debater, "debater");
-
-        let judge = SessionController::build_debate_judge_prompt(
-            "session-wiki",
-            &debate_test_metadata(),
-            MIXED_SEPARATOR_WIKI_PATH,
-            "claude",
-        );
-        assert!(
-            judge.contains(&format!("cat \"{}/index.md\"", FORWARD_SLASH_WIKI_PATH)),
-            "judge prompt is missing the normalized index read:\n{}",
-            judge
-        );
-        assert!(
-            judge.contains(&format!("cd \"{}\"", FORWARD_SLASH_WIKI_PATH)),
-            "judge wiki capture `cd` was not normalized:\n{}",
-            judge
-        );
-        assert_no_windows_separators(&judge, "judge");
-        assert_no_unrendered_template_syntax(&judge, "judge");
-    }
-
-    #[test]
-    fn debate_prompts_translate_the_wiki_path_for_wsl_backed_clis() {
-        let debater =
-            render_debate_test_debater_prompt_for_cli(MIXED_SEPARATOR_WIKI_PATH, "cursor");
-        assert!(
-            debater.contains(&format!("cat \"{}/index.md\"", WSL_WIKI_PATH)),
-            "cursor-backed debater prompt did not get a /mnt-translated path:\n{}",
-            debater
-        );
-        assert!(
-            !debater.contains("C:"),
-            "cursor-backed debater prompt still names a drive letter WSL cannot resolve:\n{}",
-            debater
-        );
-
-        let judge = SessionController::build_debate_judge_prompt(
-            "session-wiki",
-            &debate_test_metadata(),
-            MIXED_SEPARATOR_WIKI_PATH,
-            "cursor",
-        );
-        assert!(
-            judge.contains(&format!("cat \"{}/index.md\"", WSL_WIKI_PATH)),
-            "cursor-backed judge prompt did not get a /mnt-translated path:\n{}",
-            judge
-        );
-        assert!(
-            judge.contains(&format!("cd \"{}\"", WSL_WIKI_PATH)),
-            "cursor-backed judge capture `cd` was not translated:\n{}",
-            judge
-        );
-        assert!(
-            !judge.contains("C:"),
-            "cursor-backed judge prompt still names a drive letter WSL cannot resolve:\n{}",
-            judge
-        );
+    fn wiki_root_index_and_schema_paths_are_normalized_for_each_cli() {
+        let root = Path::new(r"C:\Example Wiki\root");
+        for (cli, expected) in [
+            ("claude", "C:/Example Wiki/root"),
+            ("cursor", "/mnt/c/Example Wiki/root"),
+        ] {
+            let mut variables = HashMap::new();
+            SessionController::insert_wiki_path_variables_from_state(
+                &mut variables,
+                root,
+                cli,
+                crate::wiki::WikiState::Local,
+            );
+            assert_eq!(variables["global_wiki_path"], expected);
+            assert_eq!(variables["wiki_index_path"], format!("{expected}/index.md"));
+            assert_eq!(variables["wiki_schema_path"], format!("{expected}/schema.md"));
+        }
     }
 
     /// A failed `cat` currently degrades to "no prior context" with no signal to
     /// anyone. Every prompt that instructs the read must also instruct the report.
     #[test]
     fn wiki_loading_prompts_require_reporting_a_failed_read() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let wiki = indexed_test_wiki();
+        let path = wiki.path().to_str().unwrap();
         let prompts = [
             (
                 "queen-research",
-                render_research_queen_prompt(MIXED_SEPARATOR_WIKI_PATH, "claude"),
+                render_research_queen_prompt(path, "claude"),
             ),
             (
                 "debater",
-                render_debate_test_debater_prompt(DEBATE_TEST_WIKI_PATH),
+                render_debate_test_debater_prompt(path),
             ),
             (
                 "judge",
                 SessionController::build_debate_judge_prompt(
                     "session-wiki",
                     &debate_test_metadata(),
-                    DEBATE_TEST_WIKI_PATH,
+                    path,
                     "claude",
                 ),
             ),
@@ -22129,5 +22040,127 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
                 prompt
             );
         }
+    }
+
+    #[test]
+    fn wiki_render_matrix_uses_filesystem_state_and_remote_probe() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let temporary = TempDir::new().unwrap();
+        let absent = temporary.path().join("absent");
+        let no_index = temporary.path().join("no-index");
+        let local = temporary.path().join("local");
+        let git_local = temporary.path().join("git-local");
+        let remote = temporary.path().join("remote");
+        for root in [&no_index, &local, &git_local, &remote] {
+            std::fs::create_dir(root).unwrap();
+        }
+        for root in [&local, &git_local, &remote] {
+            std::fs::write(root.join("index.md"), "# Test index\n").unwrap();
+        }
+        for root in [&git_local, &remote] {
+            let status = Command::new("git").args(["init", "-q"]).arg(root).status().unwrap();
+            assert!(status.success());
+        }
+        assert!(Command::new("git")
+            .args(["-C", remote.to_str().unwrap(), "remote", "add", "origin", "https://example.invalid/wiki.git"])
+            .status().unwrap().success());
+
+        let cases = [
+            (&absent, crate::wiki::WikiState::Absent),
+            (&no_index, crate::wiki::WikiState::Absent),
+            (&local, crate::wiki::WikiState::Local),
+            (&git_local, crate::wiki::WikiState::Local),
+            (&remote, crate::wiki::WikiState::Remote),
+        ];
+        let engine = crate::templates::TemplateEngine::new(temporary.path().join("templates"));
+        for (root, expected_state) in cases {
+            let state = crate::wiki::wiki_state_from(root, |program, args, cwd| {
+                if program == "gh" { true } else { crate::wiki::bounded_probe(program, args, cwd) }
+            });
+            assert_eq!(state, expected_state, "{}", root.display());
+            if root != &remote {
+                let mut production_variables = HashMap::new();
+                SessionController::insert_wiki_path_variables(
+                    &mut production_variables,
+                    root.to_str().unwrap(),
+                    "claude",
+                );
+                assert_eq!(
+                    production_variables["has_global_wiki"],
+                    (state != crate::wiki::WikiState::Absent).to_string(),
+                    "production gate for {}",
+                    root.display(),
+                );
+            }
+            let mut variables = HashMap::new();
+            SessionController::insert_wiki_path_variables_from_state(
+                &mut variables, root, "claude", state,
+            );
+            variables.insert("agent_id".to_string(), "test-agent".to_string());
+            variables.insert("heartbeat_status".to_string(), "working".to_string());
+            variables.insert("heartbeat_summary".to_string(), "testing".to_string());
+            variables.insert("api_base_url".to_string(), "http://localhost:18800".to_string());
+            let context = crate::templates::PromptContext {
+                session_id: "test-session".to_string(),
+                project_path: root.to_string_lossy().to_string(),
+                task: Some("Test topic".to_string()),
+                variables,
+            };
+            for template in ["queen-research", "debater", "debate-judge"] {
+                let prompt = engine.render_template(template, &context).unwrap();
+                assert!(!prompt.contains("{{#if"), "{template}: {prompt}");
+                assert!(!prompt.contains(&["~/.ai-docs", "schema.md"].join("/")), "{template}");
+                if state == crate::wiki::WikiState::Absent {
+                    assert!(!prompt.contains("cat \""), "{template}: {prompt}");
+                    assert!(prompt.contains("No wiki is configured"), "{template}: {prompt}");
+                } else {
+                    assert!(prompt.contains("index.md"), "{template}: {prompt}");
+                }
+                if template != "debater" {
+                    assert_eq!(prompt.contains("gh pr create"), state == crate::wiki::WikiState::Remote, "{template}: {prompt}");
+                    if state != crate::wiki::WikiState::Absent {
+                        assert!(prompt.contains(&root.join("schema.md").to_string_lossy().replace('\\', "/")), "{template}: {prompt}");
+                        assert!(prompt.contains("minimal frontmatter"), "{template}: {prompt}");
+                    }
+                }
+            }
+        }
+        assert_eq!(crate::wiki::wiki_state_from(&remote, |program, args, cwd| {
+            if program == "gh" { false } else { crate::wiki::bounded_probe(program, args, cwd) }
+        }), crate::wiki::WikiState::Local);
+    }
+
+    #[test]
+    fn env_wiki_root_matches_atlas_prompt_and_health() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        struct RestoreEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                if let Some(value) = &self.0 {
+                    unsafe { std::env::set_var("HIVE_WIKI_ROOT", value) };
+                } else {
+                    unsafe { std::env::remove_var("HIVE_WIKI_ROOT") };
+                }
+            }
+        }
+        let restore = RestoreEnv(std::env::var_os("HIVE_WIKI_ROOT"));
+        let wiki = indexed_test_wiki();
+        unsafe { std::env::set_var("HIVE_WIKI_ROOT", wiki.path()) };
+        let app_data = TempDir::new().unwrap();
+        let storage = SessionStorage::new_with_base(app_data.path().to_path_buf()).unwrap();
+        let mut config = storage.load_config().unwrap();
+        config.global_wiki_path = Some("/ignored/config/wiki".to_string());
+        let atlas = crate::http::handlers::knowledge::resolve_wiki_root_from(config.global_wiki_path.as_deref());
+        let health = crate::cli::health::configured_institutional_wiki_root(&config).unwrap();
+        let mut variables = HashMap::new();
+        SessionController::insert_wiki_path_variables(
+            &mut variables, config.global_wiki_path.as_deref().unwrap(), "claude",
+        );
+        let normalized = |path: &Path| path.to_string_lossy().replace('\\', "/");
+        assert_eq!(normalized(&atlas), normalized(wiki.path()));
+        assert_eq!(normalized(&health), normalized(&atlas));
+        assert_eq!(variables["global_wiki_path"], normalized(&atlas));
+        assert_eq!(variables["has_global_wiki"], "true");
+        drop(restore);
     }
 }
