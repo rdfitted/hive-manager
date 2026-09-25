@@ -36,7 +36,11 @@ function decodePublicKey(encoded) {
 }
 
 export function verifyMinisign(payload, signatureText, encodedPublicKey) {
-  const lines = signatureText.trim().split(/\r?\n/);
+  const encodedOrRaw = signatureText.trim();
+  const minisignText = encodedOrRaw.startsWith('untrusted comment: ')
+    ? encodedOrRaw
+    : Buffer.from(encodedOrRaw, 'base64').toString('utf8').trim();
+  const lines = minisignText.split(/\r?\n/);
   if (lines.length !== 4 || !lines[0].startsWith('untrusted comment: ') || !lines[2].startsWith('trusted comment: ')) {
     throw new Error('Invalid minisign signature format');
   }

@@ -57,7 +57,7 @@ describe('check-version', () => {
   }
 });
 
-function signedArtifacts() {
+function signedArtifacts({ rawSignatures = false } = {}) {
   const artifactsDir = temp();
   const releaseAssetsDir = temp();
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -72,7 +72,7 @@ function signedArtifacts() {
     const global = sign(null, Buffer.concat([signature, Buffer.from(comment)]), privateKey);
     const signatureText = `untrusted comment: test-only key\n${Buffer.concat([Buffer.from('ED'), keyId, signature]).toString('base64')}\ntrusted comment: ${comment}\n${global.toString('base64')}\n`;
     writeFileSync(join(artifactsDir, filename), payload);
-    writeFileSync(join(artifactsDir, `${filename}.sig`), signatureText);
+    writeFileSync(join(artifactsDir, `${filename}.sig`), rawSignatures ? signatureText : Buffer.from(signatureText).toString('base64'));
   };
   signPayload('Hive Manager_0.55.0_x64-setup.exe');
   signPayload('Hive Manager.app.tar.gz');
@@ -94,7 +94,35 @@ describe('latest.json assembly and validation', () => {
     assert.match(manifest.platforms['darwin-aarch64'].url, /Hive\.Manager\.app\.tar\.gz$/);
     assert.equal(readFileSync(join(options.releaseAssetsDir, 'Hive.Manager.app.tar.gz'), 'utf8'), 'test payload for Hive Manager.app.tar.gz');
     assert.equal(readFileSync(join(options.releaseAssetsDir, 'Hive.Manager_0.55.0_universal.dmg'), 'utf8'), 'installer');
+    assert.match(manifest.platforms['windows-x86_64'].signature, /^dW50cnVzdGVk/);
+    assert.equal(manifest.platforms['windows-x86_64'].signature, readFileSync(join(options.releaseAssetsDir, 'Hive.Manager_0.55.0_x64-setup.exe.sig'), 'utf8'));
     assert.equal(validateAssembled(options, manifest), true);
+  });
+
+  it('also validates raw minisign text signatures', () => {
+    const options = signedArtifacts({ rawSignatures: true });
+    const manifest = assembleLatest(options);
+    assert.match(manifest.platforms['windows-x86_64'].signature, /^untrusted comment: /);
+    assert.equal(validateAssembled(options, manifest), true);
+  });
+
+  it('rejects a base64-wrapped signature made by a different key', () => {
+    const options = signedArtifacts();
+    const otherKey = signedArtifacts();
+    const manifest = assembleLatest(options);
+    const signature = readFileSync(join(otherKey.artifactsDir, 'Hive Manager_0.55.0_x64-setup.exe.sig'), 'utf8');
+    writeFileSync(join(options.releaseAssetsDir, 'Hive.Manager_0.55.0_x64-setup.exe.sig'), signature);
+    manifest.platforms['windows-x86_64'].signature = signature;
+    assert.throws(() => validateAssembled(options, manifest), /key ID differs|signature does not verify/);
+  });
+
+  it('rejects base64 that does not decode to a four-line minisign block', () => {
+    const options = signedArtifacts();
+    const manifest = assembleLatest(options);
+    const signature = Buffer.from('not a minisign block').toString('base64');
+    writeFileSync(join(options.releaseAssetsDir, 'Hive.Manager_0.55.0_x64-setup.exe.sig'), signature);
+    manifest.platforms['windows-x86_64'].signature = signature;
+    assert.throws(() => validateAssembled(options, manifest), /Invalid minisign signature format/);
   });
 
   for (const [name, mutate, error] of [
