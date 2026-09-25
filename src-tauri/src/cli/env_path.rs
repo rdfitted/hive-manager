@@ -56,6 +56,7 @@ fn probe_login_shell(shell: &std::path::Path, timeout: std::time::Duration) -> O
     let mut output_file = tempfile::tempfile().ok()?;
     let mut child = Command::new(shell)
         .args(["-ilc", "printf %s \"$PATH\""])
+        .stdin(Stdio::null())
         .stdout(Stdio::from(output_file.try_clone().ok()?))
         .stderr(Stdio::null())
         .spawn()

@@ -198,8 +198,16 @@ mod tests {
     fn codex_is_detected_through_a_path_or_exe_suffix() {
         let store = Path::new("/tmp/store");
         assert!(!isolation_args("codex.exe", store).is_empty());
-        assert!(!isolation_args(r"C:\npm\bin\codex.exe", store).is_empty());
         assert!(!isolation_args("CODEX", store).is_empty());
+        assert!(!isolation_args("/opt/homebrew/bin/codex", store).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_is_detected_through_a_windows_path() {
+        // Backslashes are path separators only on Windows.
+        let store = Path::new("/tmp/store");
+        assert!(!isolation_args(r"C:\npm\bin\codex.exe", store).is_empty());
     }
 
     #[test]

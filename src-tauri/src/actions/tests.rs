@@ -138,6 +138,11 @@ fn test_pty_create_schema_exposes_scratch_role_and_ownership_metadata() {
 
 #[test]
 fn test_pty_create_role_defaults_to_worker_and_resolves_scratch_shell() {
+    #[cfg(windows)]
+    let (scratch_command, scratch_args, scratch_shell) = ("cmd.exe", Vec::<&str>::new(), "cmd");
+    #[cfg(not(windows))]
+    let (scratch_command, scratch_args, scratch_shell) = ("login", vec!["-l"], "login");
+
     let (default_role, default_owner) = resolve_create_role_for_test(json!({
         "id": "existing-agent",
         "command": "codex",
@@ -158,13 +163,13 @@ fn test_pty_create_role_defaults_to_worker_and_resolves_scratch_shell() {
 
     let (scratch_role, scratch_owner) = resolve_create_role_for_test(json!({
         "id": "scratch:session-a:test",
-        "command": "cmd.exe",
-        "args": [],
+        "command": scratch_command,
+        "args": scratch_args,
         "cwd": ".",
         "cols": 120,
         "rows": 30,
         "role": "scratch_shell",
-        "shell": "cmd",
+        "shell": scratch_shell,
         "session_id": "session-a"
     }))
     .expect("scratch metadata should resolve to the neutral role");
@@ -173,13 +178,13 @@ fn test_pty_create_role_defaults_to_worker_and_resolves_scratch_shell() {
 
     let ambiguous_id = resolve_create_role_for_test(json!({
         "id": "scratch:session-a:part:two",
-        "command": "cmd.exe",
-        "args": [],
+        "command": scratch_command,
+        "args": scratch_args,
         "cwd": ".",
         "cols": 120,
         "rows": 30,
         "role": "scratch_shell",
-        "shell": "cmd",
+        "shell": scratch_shell,
         "session_id": "session-a"
     }))
     .expect_err("scratch unique ids containing colons must be rejected");
@@ -217,6 +222,12 @@ async fn test_pty_kill_unregisters_scratch_ownership_without_spawning() {
 
 #[tokio::test]
 async fn test_scratch_pty_rejects_unknown_session_before_process_spawn() {
+    #[cfg(windows)]
+    let (scratch_command, scratch_args, scratch_shell) =
+        ("powershell.exe", vec!["-NoLogo"], "powershell");
+    #[cfg(not(windows))]
+    let (scratch_command, scratch_args, scratch_shell) = ("login", vec!["-l"], "login");
+
     let registry = build_registry();
     let ctx = ActionContext::new(Caller::Frontend, test_state());
     let result = registry
@@ -225,13 +236,13 @@ async fn test_scratch_pty_rejects_unknown_session_before_process_spawn() {
             &ctx,
             json!({
                 "id": "scratch:missing-session:test",
-                "command": "powershell.exe",
-                "args": ["-NoLogo"],
+                "command": scratch_command,
+                "args": scratch_args,
                 "cwd": ".",
                 "cols": 120,
                 "rows": 30,
                 "role": "scratch_shell",
-                "shell": "powershell",
+                "shell": scratch_shell,
                 "session_id": "missing-session"
             }),
         )
