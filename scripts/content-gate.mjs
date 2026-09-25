@@ -78,7 +78,9 @@ export async function scan({ root, denylist, targets = DEFAULT_DIRS.map((dir) =>
     const lines = contents.split(/\r?\n/);
     const hasPosixAlternative = /(?:\.sh\b|\b(?:bash|sh)\s+\S|\bnode\s+\S)/i.test(contents);
     for (const [index, line] of lines.entries()) {
-      const location = `${path.relative(root, file) || file}:${index + 1}`;
+      const relative = path.relative(root, file);
+      const displayPath = relative.startsWith('..') || path.isAbsolute(relative) ? path.basename(file) : relative;
+      const location = `${displayPath}:${index + 1}`;
       if (PLAIN_PATTERNS.some((pattern) => pattern.test(line))) {
         findings.push(`${location}: restricted plaintext pattern`);
       }

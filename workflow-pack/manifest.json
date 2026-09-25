@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "name": "hive-manager-workflow-pack",
+  "skills": [
+    {
+      "name": "init-project-dna",
+      "tier": "core",
+      "harnesses": [
+        "claude",
+        "codex"
+      ],
+      "path": "workflow-pack/skills/init-project-dna/SKILL.md",
+      "sha256": "0ab5342bcf882084c600a60d00d55c8c9abc23f91a22ad673b4ed6ec8226a327"
+    },
+    {
+      "name": "curate-learnings",
+      "tier": "core",
+      "harnesses": [
+        "claude",
+        "codex"
+      ],
+      "path": "workflow-pack/skills/curate-learnings/SKILL.md",
+      "sha256": "1e6d5492c7624a5f7d7cfe4d54ae2b7851e4e5c75f1535f485d762b67341ba49"
+    },
+    {
+      "name": "wiki",
+      "tier": "core",
+      "harnesses": [
+        "claude",
+        "codex"
+      ],
+      "path": "workflow-pack/skills/wiki/SKILL.md",
+      "sha256": "c4348a87ec0dcfda9a4bbbb4ba7cb8dfd73ea72834ed87ba736c3750d5e4af5b"
+    },
+    {
+      "name": "learning-system",
+      "tier": "core",
+      "harnesses": [
+        "claude",
+        "codex"
+      ],
+      "path": "workflow-pack/skills/learning-system/SKILL.md",
+      "sha256": "c77bb5fc40d460712227eff6cece032352423a487373dae91eeed21a7e3334b3"
+    },
+    {
+      "name": "plan",
+      "tier": "advanced",
+      "harnesses": [
+        "claude",
+        "codex"
+      ],
+      "path": "workflow-pack/skills/plan/SKILL.md",
+      "sha256": "624cfe419da09ab035ff20e13ccce204a4b099ad0e5f28c54b0702eaadee667a"
+    },
+    {
+      "name": "scout",
+      "tier": "advanced",
+      "harnesses": [
+        "claude",
+        "codex"
+      ],
+      "path": "workflow-pack/skills/scout/SKILL.md",
+      "sha256": "2e5baef97e179f7874e6af2245ebcc4915830a9f563ada3b1d58cb76ad73ece1"
+    },
+    {
+      "name": "master-planner",
+      "tier": "advanced",
+      "harnesses": [
+        "claude",
+        "codex"
+      ],
+      "path": "workflow-pack/skills/master-planner/SKILL.md",
+      "sha256": "ac81366608b6ee7cc53ede24f393341d3195198f91bbfc4f757d47ac62b16433"
+    },
+    {
+      "name": "create-issue",
+      "tier": "advanced",
+      "harnesses": [
+        "claude",
+        "codex"
+      ],
+      "path": "workflow-pack/skills/create-issue/SKILL.md",
+      "sha256": "c5ad6ac995cfe115fdedc57a6ffe3f7e6ccd6553062ece440b5cd6c636c0b595"
+    },
+    {
+      "name": "resolvegitissue",
+      "tier": "advanced",
+      "harnesses": [
+        "claude",
+        "codex"
+      ],
+      "path": "workflow-pack/skills/resolvegitissue/SKILL.md",
+      "sha256": "eb5f82b90899db6038127cd6d4e712dc27f3d2e8c7c10057bb51ed2579a0cc54"
+    }
+  ],
+  "roster": {
+    "name": "agent-roster",
+    "tier": "core",
+    "harnesses": [
+      "claude",
+      "codex"
+    ],
+    "path": "workflow-pack/agent-roster.md",
+    "sha256": "03ea271681370713225187b1a79d1f2bb60afecd8592288bd5a799af52e245b4"
+  }
+}

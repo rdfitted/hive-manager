@@ -41,6 +41,13 @@ test('synthetic hashed denylist fails without printing matched words', async (t)
   assert.doesNotMatch(findings[0], /sample|restricted/i);
 });
 
+test('external fixture diagnostics hide parent directories', async (t) => {
+  const options = await fixture(t, 'sample restricted\n');
+  const findings = await scan({ root: path.join(options.root, 'different-root'), denylist: options.denylist, targets: [options.target] });
+  assert.match(findings[0], /^example\.md:1: denied n-gram/);
+  assert.doesNotMatch(findings[0], /content-gate-/);
+});
+
 test('plaintext pattern fails and hash file is excluded', async (t) => {
   const options = await fixture(t, 'C:\\Users\\Example\n');
   const findings = await scan({ ...options, targets: [path.join(options.root, 'workflow-pack')] });
