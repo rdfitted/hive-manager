@@ -63,6 +63,42 @@ pub(crate) enum WikiState {
     Remote,
 }
 
+/// A wiki probe shared by every prompt in one launch, round, or judge batch.
+pub(crate) struct WikiBatch {
+    pub root: PathBuf,
+    pub state: WikiState,
+}
+
+impl WikiBatch {
+    pub(crate) fn probe(root: PathBuf) -> Self {
+        // Synchronous launch entry points can be called by async handlers. Like the
+        // controller's spawn_blocking git checks, keep these bounded CLI probes off
+        // a Tokio worker whenever a multithreaded runtime is active.
+        if matches!(
+            tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()),
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread)
+        ) {
+            tokio::task::block_in_place(|| Self::probe_blocking(root))
+        } else {
+            Self::probe_blocking(root)
+        }
+    }
+
+    pub(crate) fn probe_blocking(root: PathBuf) -> Self {
+        let state = wiki_state(&root);
+        Self { root, state }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_from(
+        root: PathBuf,
+        probe: impl Fn(&str, &[&str], &Path) -> bool,
+    ) -> Self {
+        let state = wiki_state_from(&root, probe);
+        Self { root, state }
+    }
+}
+
 pub(crate) fn wiki_state(root: &Path) -> WikiState {
     wiki_state_from(root, bounded_probe)
 }
@@ -84,6 +120,17 @@ pub(crate) fn wiki_state_from(
 }
 
 pub(crate) fn bounded_probe(executable: &str, args: &[&str], root: &Path) -> bool {
+    // A remote check uses up to three sequential probes. Each gets five seconds,
+    // so one batch has at most 15 seconds of probe deadlines, off the executor.
+    bounded_probe_with_timeout(executable, args, root, Duration::from_secs(5))
+}
+
+pub(crate) fn bounded_probe_with_timeout(
+    executable: &str,
+    args: &[&str],
+    root: &Path,
+    timeout: Duration,
+) -> bool {
     let mut child = match Command::new(executable)
         .args(args)
         .current_dir(root)
@@ -95,7 +142,7 @@ pub(crate) fn bounded_probe(executable: &str, args: &[&str], root: &Path) -> boo
         Ok(child) => child,
         Err(_) => return false,
     };
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
@@ -131,6 +178,38 @@ mod tests {
         assert_eq!(
             resolve_wiki_root_from(None, Some("~someone/wiki"), Some(home)),
             PathBuf::from("~someone/wiki")
+        );
+    }
+
+    #[test]
+    fn timed_out_probe_keeps_indexed_wiki_local() {
+        let wiki = tempfile::tempdir().unwrap();
+        std::fs::write(wiki.path().join("index.md"), "# Test wiki\n").unwrap();
+        #[cfg(windows)]
+        let (program, args): (&str, &[&str]) = (
+            "powershell.exe",
+            &["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 1"],
+        );
+        #[cfg(not(windows))]
+        let (program, args): (&str, &[&str]) = ("/bin/sh", &["-c", "sleep 1"]);
+
+        assert!(bounded_probe_with_timeout(
+            program,
+            args,
+            wiki.path(),
+            Duration::from_secs(30),
+        ));
+        assert!(!bounded_probe_with_timeout(
+            program,
+            args,
+            wiki.path(),
+            Duration::from_millis(1),
+        ));
+        assert_eq!(
+            wiki_state_from(wiki.path(), |_, _, root| {
+                bounded_probe_with_timeout(program, args, root, Duration::from_millis(1))
+            }),
+            WikiState::Local,
         );
     }
 

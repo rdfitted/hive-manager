@@ -70,4 +70,32 @@ describe('UpdateChecker', () => {
     await fireEvent.click(view.getByRole('button', { name: 'Restart to finish update' }));
     await waitFor(() => expect(mocks.relaunch).toHaveBeenCalledTimes(1));
   });
+
+  it('does not check again while an installed update awaits restart', async () => {
+    let periodicCheck: (() => void) | undefined;
+    const setInterval = window.setInterval.bind(window);
+    vi.spyOn(window, 'setInterval').mockImplementation((callback, delay, ...args) => {
+      if (delay === 6 * 60 * 60 * 1000) {
+        periodicCheck = callback as () => void;
+        return 1;
+      }
+      return setInterval(callback, delay, ...args);
+    });
+    const update = { version: '0.55.0', downloadAndInstall: vi.fn().mockResolvedValue(undefined) };
+    mocks.check.mockResolvedValue(update);
+    mocks.invoke.mockResolvedValue([{ state: 'Running' }]);
+    mocks.confirm.mockResolvedValue(false);
+    const view = render(UpdateChecker);
+    await waitFor(() => expect(view.getByText('Update available: v0.55.0')).toBeTruthy());
+    await fireEvent.click(view.getByRole('button', { name: 'Update Now' }));
+    await waitFor(() => expect(view.getByRole('button', { name: 'Restart to finish update' })).toBeTruthy());
+
+    expect(mocks.check).toHaveBeenCalledTimes(2);
+    expect(periodicCheck).toBeDefined();
+    periodicCheck?.();
+    await Promise.resolve();
+    expect(mocks.check).toHaveBeenCalledTimes(2);
+    expect(view.queryByText('Update available: v0.55.0')).toBeNull();
+    expect(view.getByRole('button', { name: 'Restart to finish update' })).toBeTruthy();
+  });
 });

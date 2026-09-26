@@ -16,7 +16,7 @@
   let restartPending = false;
 
   async function checkForUpdates() {
-    if (checking || downloading) return;
+    if (checking || downloading || restartPending) return;
     checking = true;
     error = null;
     try {

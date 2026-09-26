@@ -619,38 +619,6 @@ pub struct ResearchLaunchConfig {
     pub smoke_test: bool,
 }
 
-/// Expand a leading `~` in a path to the user's home directory so the value can
-/// be safely embedded in a shell command (a tilde inside quotes is NOT expanded
-/// by the shell). Returns the input unchanged if it doesn't start with `~` or
-/// the home directory cannot be determined.
-fn expand_tilde(path: &str) -> String {
-    let Some(rest) = path.strip_prefix('~') else {
-        return path.to_string();
-    };
-    // Only expand the current user's home (`~`, `~/...`, `~\...`). A bare `~user`
-    // form refers to another user's home and is not something we resolve — leave
-    // it untouched rather than mangling it into `<home>/user`.
-    if !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('\\') {
-        return path.to_string();
-    }
-    let home = if cfg!(windows) {
-        std::env::var("USERPROFILE").ok()
-    } else {
-        std::env::var("HOME").ok()
-    };
-    match home {
-        Some(home) => {
-            let rest = rest.trim_start_matches(['/', '\\']);
-            if rest.is_empty() {
-                home
-            } else {
-                format!("{}/{}", home.trim_end_matches(['/', '\\']), rest)
-            }
-        }
-        None => path.to_string(),
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SwarmLaunchConfig {
     pub project_path: String,
@@ -1265,6 +1233,8 @@ impl SessionController {
         self.event_emitter = Some(EventEmitter::new(event_bus));
     }
 
+    // Unix escaping needs lookahead; Windows keeps backslashes literal.
+    #[cfg_attr(windows, allow(clippy::while_let_on_iterator))]
     fn parse_legacy_launch_command(command: &str) -> Result<(String, Vec<String>), String> {
         let mut words = Vec::new();
         let mut current = String::new();
@@ -1272,12 +1242,19 @@ impl SessionController {
         let mut started = false;
         let mut chars = command.chars().peekable();
         while let Some(ch) = chars.next() {
+            #[cfg(not(windows))]
             if ch == '\\'
-                && matches!(chars.peek(), Some(next) if next.is_whitespace() || *next == '"' || *next == '\'')
+                && match quote {
+                    None => chars.peek().is_some(),
+                    Some('"') => matches!(chars.peek(), Some(next) if *next == '"' || *next == '\\'),
+                    _ => false,
+                }
             {
                 current.push(chars.next().unwrap());
                 started = true;
-            } else if let Some(delimiter) = quote {
+                continue;
+            }
+            if let Some(delimiter) = quote {
                 if ch == delimiter {
                     quote = None;
                 } else {
@@ -4196,15 +4173,14 @@ Last updated: {timestamp}
     /// `cli` is the CLI that will execute the rendered prompt (see
     /// [`Self::normalize_wiki_path_for_cli`]).
     ///
-    /// Gate flags are based on the current directory and index file, never a configured string.
+    /// Gate flags use the wiki state probed once for this launch or debate round.
     fn insert_wiki_path_variables(
         variables: &mut HashMap<String, String>,
-        global_wiki_path: &str,
+        root: &Path,
         cli: &str,
+        state: crate::wiki::WikiState,
     ) {
-        let root = crate::wiki::resolve_wiki_root(Some(global_wiki_path));
-        let state = crate::wiki::wiki_state(&root);
-        Self::insert_wiki_path_variables_from_state(variables, &root, cli, state);
+        Self::insert_wiki_path_variables_from_state(variables, root, cli, state);
     }
 
     fn insert_wiki_path_variables_from_state(
@@ -4223,6 +4199,21 @@ Last updated: {timestamp}
         variables.insert("wiki_is_remote".to_string(), (state == crate::wiki::WikiState::Remote).to_string());
     }
 
+    /// Debate completion runs on the async executor; the git/gh probe is synchronous.
+    async fn probe_wiki_batch(&self) -> Result<crate::wiki::WikiBatch, SessionError> {
+        let configured = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.load_config().ok())
+            .and_then(|config| config.global_wiki_path);
+        let root = crate::wiki::resolve_wiki_root(configured.as_deref());
+        tokio::task::spawn_blocking(move || crate::wiki::WikiBatch::probe_blocking(root))
+            .await
+            .map_err(|error| {
+                SessionError::ConfigError(format!("Failed to probe wiki state: {error}"))
+            })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build_debate_debater_prompt(
         session_id: &str,
@@ -4234,7 +4225,8 @@ Last updated: {timestamp}
         previous_round_dir: Option<&Path>,
         opponent_files: &str,
         task_file: &Path,
-        global_wiki_path: &str,
+        wiki_root: &Path,
+        wiki_state: crate::wiki::WikiState,
     ) -> String {
         let mut variables = HashMap::new();
         let agent_id = Self::debate_round_agent_id(session_id, debater.index, round);
@@ -4273,7 +4265,7 @@ Last updated: {timestamp}
         variables.insert("opponent_files".to_string(), opponent_files.to_string());
         variables.insert("task_file".to_string(), Self::prompt_path(task_file));
         // The debater's own CLI executes this prompt, so it decides the wiki path form.
-        Self::insert_wiki_path_variables(&mut variables, global_wiki_path, &debater.config.cli);
+        Self::insert_wiki_path_variables(&mut variables, wiki_root, &debater.config.cli, wiki_state);
 
         let engine = TemplateEngine::default();
         let context = PromptContext {
@@ -4298,8 +4290,9 @@ Last updated: {timestamp}
     fn build_debate_judge_prompt(
         session_id: &str,
         metadata: &DebateSessionMetadata,
-        global_wiki_path: &str,
+        wiki_root: &Path,
         judge_cli: &str,
+        wiki_state: crate::wiki::WikiState,
     ) -> String {
         let mut variables = HashMap::new();
         variables.insert(
@@ -4319,7 +4312,7 @@ Last updated: {timestamp}
         );
         variables.insert("rounds".to_string(), metadata.rounds.to_string());
         variables.insert("verdict_file".to_string(), metadata.verdict_file.clone());
-        Self::insert_wiki_path_variables(&mut variables, global_wiki_path, judge_cli);
+        Self::insert_wiki_path_variables(&mut variables, wiki_root, judge_cli, wiki_state);
 
         let debater_list = metadata
             .debaters
@@ -4398,7 +4391,7 @@ Last updated: {timestamp}
     /// Normalize a configured global wiki path for embedding in the **quoted shell
     /// commands** of a rendered prompt, for the CLI that will actually execute it.
     ///
-    /// `expand_tilde` resolves `~` from `USERPROFILE` on Windows, so the value reaching
+    /// `resolve_wiki_root` resolves `~` from `USERPROFILE` on Windows, so the value reaching
     /// a prompt is mixed-separator — `C:\Users\RDuff/.ai-docs/wiki` for the default
     /// `~/.ai-docs/wiki`. Inside bash double quotes a backslash is only special before
     /// `$`, a backtick, `"`, `\`, or a newline, so `\U` survives literally and Git Bash's
@@ -9562,14 +9555,15 @@ Last updated: {timestamp}
             .and_then(|storage| storage.load_config().ok())
             .and_then(|cfg| cfg.global_wiki_path)
             .unwrap_or_else(|| "~/.ai-docs/wiki/".to_string());
-        // Expand a leading `~` so the path works inside the queen-research
-        // template's quoted shell commands (`cd "{{global_wiki_path}}"`).
-        let global_wiki_path = expand_tilde(&global_wiki_path);
+        let wiki_batch = crate::wiki::WikiBatch::probe(crate::wiki::resolve_wiki_root(Some(
+            &global_wiki_path,
+        )));
 
         // The Queen executes this prompt, so the Queen's CLI decides how the wiki path
         // must be spelled in its shell blocks.
         let extra_queen_vars = Self::research_queen_extra_vars(
-            &global_wiki_path,
+            &wiki_batch.root,
+            wiki_batch.state,
             &hive_config.queen_config.cli,
             smoke_test,
         );
@@ -9596,12 +9590,13 @@ Last updated: {timestamp}
     /// the same [`Self::insert_wiki_path_variables`] the debate templates use, so the
     /// two insert sites cannot drift.
     fn research_queen_extra_vars(
-        global_wiki_path: &str,
+        wiki_root: &Path,
+        wiki_state: crate::wiki::WikiState,
         queen_cli: &str,
         smoke_test: bool,
     ) -> HashMap<String, String> {
         let mut extra_queen_vars = HashMap::new();
-        Self::insert_wiki_path_variables(&mut extra_queen_vars, global_wiki_path, queen_cli);
+        Self::insert_wiki_path_variables(&mut extra_queen_vars, wiki_root, queen_cli, wiki_state);
         // `smoke_directive` is rendered near the top of the queen-research prompt. It is
         // empty for a normal run and a hard override for a smoke run (spawn ONE
         // researcher, trivial canned task, no wiki load/capture).
@@ -10037,7 +10032,7 @@ phases and do EXACTLY this, then stop:
         };
         Self::write_debate_metadata(&project_path, &session_id, &metadata)?;
 
-        self.spawn_debate_round(&session_id, 1)?;
+        self.spawn_debate_round(&session_id, 1, None)?;
 
         let session = self
             .get_session(&session_id)
@@ -10171,7 +10166,12 @@ phases and do EXACTLY this, then stop:
             .join("\n")
     }
 
-    fn spawn_debate_round(&self, session_id: &str, round: u8) -> Result<(), String> {
+    fn spawn_debate_round(
+        &self,
+        session_id: &str,
+        round: u8,
+        wiki_batch: Option<crate::wiki::WikiBatch>,
+    ) -> Result<(), String> {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -10202,13 +10202,14 @@ phases and do EXACTLY this, then stop:
             None
         };
 
-        let global_wiki_path = self
-            .storage
-            .as_ref()
-            .and_then(|storage| storage.load_config().ok())
-            .and_then(|cfg| cfg.global_wiki_path)
-            .unwrap_or_default();
-        let global_wiki_path = expand_tilde(&global_wiki_path);
+        let wiki_batch = wiki_batch.unwrap_or_else(|| {
+            let configured = self
+                .storage
+                .as_ref()
+                .and_then(|storage| storage.load_config().ok())
+                .and_then(|cfg| cfg.global_wiki_path);
+            crate::wiki::WikiBatch::probe(crate::wiki::resolve_wiki_root(configured.as_deref()))
+        });
 
         let mut new_agents = Vec::new();
         for debater in &metadata.debaters {
@@ -10260,7 +10261,8 @@ phases and do EXACTLY this, then stop:
                 previous_round_dir.as_deref(),
                 &opponent_files,
                 &task_file,
-                &global_wiki_path,
+                &wiki_batch.root,
+                wiki_batch.state,
             );
             let prompt_filename =
                 format!("debate-debater-{}-round-{}-prompt.md", debater.index, round);
@@ -11670,7 +11672,7 @@ The backend composed and persisted the following authoritative skeleton before l
             }
         }
 
-        self.spawn_debate_round(session_id, 1)?;
+        self.spawn_debate_round(session_id, 1, None)?;
 
         let updated_session = self
             .get_session(session_id)
@@ -13738,11 +13740,13 @@ The backend composed and persisted the following authoritative skeleton before l
                         .unwrap_or(false)
                 };
                 if !next_round_started {
-                    self.spawn_debate_round(session_id, next_round)
+                    let wiki_batch = self.probe_wiki_batch().await?;
+                    self.spawn_debate_round(session_id, next_round, Some(wiki_batch))
                         .map_err(SessionError::SpawnError)?;
                 }
             } else {
-                self.spawn_debate_judge(session_id)
+                let wiki_batch = self.probe_wiki_batch().await?;
+                self.spawn_debate_judge(session_id, Some(wiki_batch))
                     .map_err(SessionError::SpawnError)?;
             }
         }
@@ -13750,7 +13754,11 @@ The backend composed and persisted the following authoritative skeleton before l
         Ok(())
     }
 
-    fn spawn_debate_judge(&self, session_id: &str) -> Result<(), String> {
+    fn spawn_debate_judge(
+        &self,
+        session_id: &str,
+        wiki_batch: Option<crate::wiki::WikiBatch>,
+    ) -> Result<(), String> {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -13784,13 +13792,14 @@ The backend composed and persisted the following authoritative skeleton before l
         }
         self.emit_session_update(session_id);
 
-        let global_wiki_path = self
-            .storage
-            .as_ref()
-            .and_then(|storage| storage.load_config().ok())
-            .and_then(|cfg| cfg.global_wiki_path)
-            .unwrap_or_default();
-        let global_wiki_path = expand_tilde(&global_wiki_path);
+        let wiki_batch = wiki_batch.unwrap_or_else(|| {
+            let configured = self
+                .storage
+                .as_ref()
+                .and_then(|storage| storage.load_config().ok())
+                .and_then(|cfg| cfg.global_wiki_path);
+            crate::wiki::WikiBatch::probe(crate::wiki::resolve_wiki_root(configured.as_deref()))
+        });
 
         // Resolve the judge's effective CLI/model BEFORE rendering: the prompt spells the
         // wiki path differently for a WSL-backed CLI, so it must see the post-fallback
@@ -13806,8 +13815,9 @@ The backend composed and persisted the following authoritative skeleton before l
         let judge_prompt = Self::build_debate_judge_prompt(
             session_id,
             &metadata,
-            &global_wiki_path,
+            &wiki_batch.root,
             &judge_config.cli,
+            wiki_batch.state,
         );
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
@@ -17358,6 +17368,26 @@ mod tests {
         assert_eq!(args, ["--mode", "safe"]);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn legacy_launch_parser_keeps_windows_backslash_before_whitespace() {
+        let (command, args) = SessionController::parse_legacy_launch_command(r"C:\dir\ --x")
+            .unwrap();
+        assert_eq!(command, r"C:\dir\");
+        assert_eq!(args, ["--x"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_launch_parser_keeps_windows_backslash_before_closing_quote() {
+        let (command, args) = SessionController::parse_legacy_launch_command(
+            r#""C:\Tools\Agent\" --flag"#,
+        )
+        .unwrap();
+        assert_eq!(command, r"C:\Tools\Agent\");
+        assert_eq!(args, ["--flag"]);
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn legacy_launch_parser_preserves_unix_executable_path() {
@@ -17367,6 +17397,26 @@ mod tests {
         .unwrap();
         assert_eq!(command, "/Applications/Agent CLI/bin/agent");
         assert_eq!(args, ["--mode", "safe"]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn legacy_launch_parser_unix_backslash_escapes_unquoted_space() {
+        let (command, args) = SessionController::parse_legacy_launch_command(r"/a\ b/agent --x")
+            .unwrap();
+        assert_eq!(command, "/a b/agent");
+        assert_eq!(args, ["--x"]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn legacy_launch_parser_unix_backslash_obeys_quote_context() {
+        let (command, args) = SessionController::parse_legacy_launch_command(
+            r#""/a\ b/agent" "a\"b\\c" 'd\e'"#,
+        )
+        .unwrap();
+        assert_eq!(command, r"/a\ b/agent");
+        assert_eq!(args, [r#"a"b\c"#, r"d\e"]);
     }
 
     #[test]
@@ -21760,6 +21810,9 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     }
 
     fn render_debate_test_debater_prompt_for_cli(global_wiki_path: &str, cli: &str) -> String {
+        let wiki_batch = crate::wiki::WikiBatch::probe(crate::wiki::resolve_wiki_root(Some(
+            global_wiki_path,
+        )));
         SessionController::build_debate_debater_prompt(
             "session-wiki",
             &debate_test_debater_with_cli(cli),
@@ -21770,7 +21823,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             None,
             "- Debater 2: `/projects/app/debater-2/argument.md`",
             Path::new("/projects/app/debater-1/task.md"),
-            global_wiki_path,
+            &wiki_batch.root,
+            wiki_batch.state,
         )
     }
 
@@ -21908,11 +21962,13 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let _env_lock = ENV_MUTEX.lock().unwrap();
         let wiki = indexed_test_wiki();
         let path = wiki.path().to_str().unwrap();
+        let wiki_batch = crate::wiki::WikiBatch::probe(wiki.path().to_path_buf());
         let prompt = SessionController::build_debate_judge_prompt(
             "session-wiki",
             &debate_test_metadata(),
-            path,
+            &wiki_batch.root,
             "claude",
+            wiki_batch.state,
         );
 
         assert!(
@@ -21945,11 +22001,13 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let wiki = TempDir::new().unwrap();
         for unset in [wiki.path().join("missing"), wiki.path().join("directory-only")] {
             if unset.ends_with("directory-only") { std::fs::create_dir(&unset).unwrap(); }
+            let wiki_batch = crate::wiki::WikiBatch::probe(unset);
             let prompt = SessionController::build_debate_judge_prompt(
                 "session-wiki",
                 &debate_test_metadata(),
-                unset.to_str().unwrap(),
+                &wiki_batch.root,
                 "claude",
+                wiki_batch.state,
             );
 
             assert_no_dangling_wiki_read(&prompt, "judge");
@@ -21968,8 +22026,15 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     }
 
     fn render_research_queen_prompt(global_wiki_path: &str, queen_cli: &str) -> String {
-        let extra_vars =
-            SessionController::research_queen_extra_vars(global_wiki_path, queen_cli, false);
+        let wiki_batch = crate::wiki::WikiBatch::probe(crate::wiki::resolve_wiki_root(Some(
+            global_wiki_path,
+        )));
+        let extra_vars = SessionController::research_queen_extra_vars(
+            &wiki_batch.root,
+            wiki_batch.state,
+            queen_cli,
+            false,
+        );
         SessionController::build_templated_queen_prompt(
             "queen-research",
             "session-wiki",
@@ -22006,6 +22071,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let _env_lock = ENV_MUTEX.lock().unwrap();
         let wiki = indexed_test_wiki();
         let path = wiki.path().to_str().unwrap();
+        let wiki_batch = crate::wiki::WikiBatch::probe(wiki.path().to_path_buf());
         let prompts = [
             (
                 "queen-research",
@@ -22020,8 +22086,9 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
                 SessionController::build_debate_judge_prompt(
                     "session-wiki",
                     &debate_test_metadata(),
-                    path,
+                    &wiki_batch.root,
                     "claude",
+                    wiki_batch.state,
                 ),
             ),
         ];
@@ -22075,15 +22142,25 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let engine = crate::templates::TemplateEngine::new(temporary.path().join("templates"));
         for (root, expected_state) in cases {
             let state = crate::wiki::wiki_state_from(root, |program, args, cwd| {
-                if program == "gh" { true } else { crate::wiki::bounded_probe(program, args, cwd) }
+                if program == "gh" {
+                    true
+                } else {
+                    crate::wiki::bounded_probe_with_timeout(
+                        program,
+                        args,
+                        cwd,
+                        std::time::Duration::from_secs(30),
+                    )
+                }
             });
             assert_eq!(state, expected_state, "{}", root.display());
             if root != &remote {
                 let mut production_variables = HashMap::new();
                 SessionController::insert_wiki_path_variables(
                     &mut production_variables,
-                    root.to_str().unwrap(),
+                    root,
                     "claude",
+                    state,
                 );
                 assert_eq!(
                     production_variables["has_global_wiki"],
@@ -22126,8 +22203,51 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             }
         }
         assert_eq!(crate::wiki::wiki_state_from(&remote, |program, args, cwd| {
-            if program == "gh" { false } else { crate::wiki::bounded_probe(program, args, cwd) }
+            if program == "gh" {
+                false
+            } else {
+                crate::wiki::bounded_probe_with_timeout(
+                    program,
+                    args,
+                    cwd,
+                    std::time::Duration::from_secs(30),
+                )
+            }
         }), crate::wiki::WikiState::Local);
+    }
+
+    #[test]
+    fn debate_round_prompt_batch_probes_wiki_once() {
+        let wiki = indexed_test_wiki();
+        let probes = std::cell::Cell::new(0);
+        let wiki_batch = crate::wiki::WikiBatch::probe_from(
+            wiki.path().to_path_buf(),
+            |_, _, _| {
+                probes.set(probes.get() + 1);
+                false
+            },
+        );
+        assert_eq!(wiki_batch.state, crate::wiki::WikiState::Local);
+
+        for index in 1..=2 {
+            let mut debater = debate_test_debater();
+            debater.index = index;
+            let prompt = SessionController::build_debate_debater_prompt(
+                "session-wiki",
+                &debater,
+                "Monolith versus microservices",
+                1,
+                2,
+                Path::new("/projects/app/argument.md"),
+                None,
+                "No prior opponent arguments",
+                Path::new("/projects/app/task.md"),
+                &wiki_batch.root,
+                wiki_batch.state,
+            );
+            assert!(prompt.contains("## Prior Wiki Context"));
+        }
+        assert_eq!(probes.get(), 1, "the round must share one wiki probe");
     }
 
     #[test]
@@ -22154,7 +22274,10 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let health = crate::cli::health::configured_institutional_wiki_root(&config).unwrap();
         let mut variables = HashMap::new();
         SessionController::insert_wiki_path_variables(
-            &mut variables, config.global_wiki_path.as_deref().unwrap(), "claude",
+            &mut variables,
+            &atlas,
+            "claude",
+            crate::wiki::wiki_state(&atlas),
         );
         let normalized = |path: &Path| path.to_string_lossy().replace('\\', "/");
         assert_eq!(normalized(&atlas), normalized(wiki.path()));
