@@ -63,6 +63,54 @@ test('PowerShell script reference needs a POSIX alternative', async (t) => {
   assert.deepEqual(await scan({ ...options, targets: [options.target] }), []);
 });
 
+test('distant node prose and commands do not excuse a PowerShell-only line', async (t) => {
+  const options = await fixture(t, [
+    'Run setup.ps1',
+    'The node modules are already installed.',
+    'First prepare the project.',
+    'Then review the changes.',
+    'Check the output.',
+    'Continue when ready.',
+    'Later, run node scripts/other.mjs for a different task.',
+  ].join('\n'));
+  const findings = await scan({ ...options, targets: [options.target] });
+  assert.deepEqual(findings, [`${path.join('workflow-pack', 'example.md')}:1: PowerShell script without POSIX alternative`]);
+});
+
+test('an adjacent POSIX command excuses a PowerShell reference', async (t) => {
+  const options = await fixture(t, 'Run setup.ps1\nOr run node scripts/setup.mjs\n');
+  assert.deepEqual(await scan({ ...options, targets: [options.target] }), []);
+});
+
+test('a POSIX command elsewhere in the same fenced block is local', async (t) => {
+  const options = await fixture(t, [
+    '```sh',
+    'powershell ./setup.ps1',
+    '# Prepare the environment.',
+    '# Choose the target.',
+    '# Check the options.',
+    '# Then use the POSIX script.',
+    'bash ./setup.sh',
+    '```',
+  ].join('\n'));
+  assert.deepEqual(await scan({ ...options, targets: [options.target] }), []);
+});
+
+test('a POSIX command in another fenced block is unrelated', async (t) => {
+  const options = await fixture(t, [
+    '```powershell',
+    './setup.ps1',
+    '```',
+    'Choose one platform.',
+    'Review the setup instructions.',
+    '```sh',
+    'bash ./setup.sh',
+    '```',
+  ].join('\n'));
+  const findings = await scan({ ...options, targets: [options.target] });
+  assert.deepEqual(findings, [`${path.join('workflow-pack', 'example.md')}:2: PowerShell script without POSIX alternative`]);
+});
+
 test('clean content passes', async (t) => {
   const options = await fixture(t, 'Generic instructions for a local project.\n');
   assert.deepEqual(await scan({ ...options, targets: [options.target] }), []);

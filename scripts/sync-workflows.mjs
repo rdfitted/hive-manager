@@ -63,6 +63,18 @@ export async function syncWorkflows({ root = REPO_ROOT, check = false } = {}) {
   }
   const roster = await readFile(inside(root, manifest.roster.path));
   if (hash(roster) !== manifest.roster.sha256) throw new Error('Manifest hash is stale for roster');
+  for (const targetRoot of ['.claude', '.agents']) {
+    const target = inside(root, `${targetRoot}/agent-roster.md`);
+    let current;
+    try { current = await readFile(target); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (current && current.equals(roster)) continue;
+    stale.push(path.relative(root, target));
+    if (!check) {
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, roster);
+    }
+  }
   return stale;
 }
 

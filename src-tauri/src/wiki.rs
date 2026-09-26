@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -94,7 +95,17 @@ impl WikiBatch {
         root: PathBuf,
         probe: impl Fn(&str, &[&str], &Path) -> bool,
     ) -> Self {
-        let state = wiki_state_from(&root, probe);
+        // The counter test injects success/failure only; a successful toplevel
+        // probe stands for this root, leaving production path checks untouched.
+        let state = wiki_state_from(&root, |program, args, cwd| {
+            if !probe(program, args, cwd) {
+                None
+            } else if args == &["rev-parse", "--show-toplevel"] {
+                Some(root.to_string_lossy().as_bytes().to_vec())
+            } else {
+                Some(Vec::new())
+            }
+        });
         Self { root, state }
     }
 }
@@ -105,21 +116,33 @@ pub(crate) fn wiki_state(root: &Path) -> WikiState {
 
 pub(crate) fn wiki_state_from(
     root: &Path,
-    probe: impl Fn(&str, &[&str], &Path) -> bool,
+    probe: impl Fn(&str, &[&str], &Path) -> Option<Vec<u8>>,
 ) -> WikiState {
     if !root.is_dir() || !root.join("index.md").is_file() {
         return WikiState::Absent;
     }
-    if !probe("git", &["rev-parse", "--show-toplevel"], root)
-        || !probe("git", &["remote", "get-url", "origin"], root)
-        || !probe("gh", &["auth", "status"], root)
+    let Some(toplevel) = probe("git", &["rev-parse", "--show-toplevel"], root) else {
+        return WikiState::Local;
+    };
+    let Ok(toplevel) = std::str::from_utf8(&toplevel) else {
+        return WikiState::Local;
+    };
+    let toplevel = toplevel.trim_end_matches(['\r', '\n']);
+    let (Ok(canonical_toplevel), Ok(canonical_root)) =
+        (std::fs::canonicalize(toplevel), std::fs::canonicalize(root))
+    else {
+        return WikiState::Local;
+    };
+    if canonical_toplevel != canonical_root
+        || probe("git", &["remote", "get-url", "origin"], root).is_none()
+        || probe("gh", &["auth", "status"], root).is_none()
     {
         return WikiState::Local;
     }
     WikiState::Remote
 }
 
-pub(crate) fn bounded_probe(executable: &str, args: &[&str], root: &Path) -> bool {
+pub(crate) fn bounded_probe(executable: &str, args: &[&str], root: &Path) -> Option<Vec<u8>> {
     // A remote check uses up to three sequential probes. Each gets five seconds,
     // so one batch has at most 15 seconds of probe deadlines, off the executor.
     bounded_probe_with_timeout(executable, args, root, Duration::from_secs(5))
@@ -130,27 +153,40 @@ pub(crate) fn bounded_probe_with_timeout(
     args: &[&str],
     root: &Path,
     timeout: Duration,
-) -> bool {
+) -> Option<Vec<u8>> {
     let mut child = match Command::new(executable)
         .args(args)
         .current_dir(root)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) if status.success() => {
+                let stdout = child.stdout.take()?;
+                let mut output = Vec::new();
+                if stdout
+                    .take(64 * 1024 + 1)
+                    .read_to_end(&mut output)
+                    .is_err()
+                    || output.len() > 64 * 1024
+                {
+                    return None;
+                }
+                return Some(output);
+            }
+            Ok(Some(_)) => return None,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return false;
+                return None;
             }
         }
     }
@@ -193,24 +229,78 @@ mod tests {
         #[cfg(not(windows))]
         let (program, args): (&str, &[&str]) = ("/bin/sh", &["-c", "sleep 1"]);
 
-        assert!(bounded_probe_with_timeout(
-            program,
-            args,
-            wiki.path(),
-            Duration::from_secs(30),
-        ));
-        assert!(!bounded_probe_with_timeout(
-            program,
-            args,
-            wiki.path(),
-            Duration::from_millis(1),
-        ));
+        assert!(bounded_probe_with_timeout(program, args, wiki.path(), Duration::from_secs(30))
+            .is_some());
+        assert!(bounded_probe_with_timeout(program, args, wiki.path(), Duration::from_millis(1))
+            .is_none());
         assert_eq!(
             wiki_state_from(wiki.path(), |_, _, root| {
                 bounded_probe_with_timeout(program, args, root, Duration::from_millis(1))
             }),
             WikiState::Local,
         );
+    }
+
+    #[test]
+    fn nested_wiki_inside_repo_with_origin_stays_local() {
+        let temporary = tempfile::tempdir().unwrap();
+        let enclosing = temporary.path().join("enclosing");
+        let wiki = enclosing.join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::write(wiki.join("index.md"), "# Nested wiki\n").unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(&enclosing)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "-C",
+                enclosing.to_str().unwrap(),
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/dotfiles.git",
+            ])
+            .status()
+            .unwrap()
+            .success());
+
+        let timeout = Duration::from_secs(30);
+        let toplevel = bounded_probe_with_timeout(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            &wiki,
+            timeout,
+        )
+        .unwrap();
+        let toplevel = std::str::from_utf8(&toplevel)
+            .unwrap()
+            .trim_end_matches(['\r', '\n']);
+        assert_eq!(
+            std::fs::canonicalize(toplevel).unwrap(),
+            std::fs::canonicalize(&enclosing).unwrap(),
+        );
+        assert!(bounded_probe_with_timeout(
+            "git",
+            &["remote", "get-url", "origin"],
+            &wiki,
+            timeout,
+        )
+        .is_some());
+
+        let auth_checked = std::cell::Cell::new(false);
+        let state = wiki_state_from(&wiki, |program, args, cwd| {
+            if program == "gh" {
+                auth_checked.set(true);
+                Some(Vec::new())
+            } else {
+                bounded_probe_with_timeout(program, args, cwd, timeout)
+            }
+        });
+        assert_eq!(state, WikiState::Local);
+        assert!(!auth_checked.get(), "a nested wiki must not reach auth or PR flow");
     }
 
     #[test]

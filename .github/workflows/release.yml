@@ -173,13 +173,18 @@ jobs:
           else
             cp generated-notes.md release-notes.md
           fi
-          gh release create "$TAG" --repo "$REPOSITORY" --draft --verify-tag --title "Hive Manager $TAG" --notes-file release-notes.md
-          gh release upload "$TAG" release-assets/* --repo "$REPOSITORY"
+          if existing_draft="$(gh release view "$TAG" --repo "$REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            [[ "$existing_draft" == true ]] || { echo 'Release already published; refusing to modify it'; exit 1; }
+            echo "Reusing draft release $TAG"
+          else
+            gh release create "$TAG" --repo "$REPOSITORY" --draft --verify-tag --title "Hive Manager $TAG" --notes-file release-notes.md
+          fi
+          gh release upload "$TAG" release-assets/* --repo "$REPOSITORY" --clobber
           mkdir verified-assets
           gh release download "$TAG" --repo "$REPOSITORY" --dir verified-assets
-          mapfile -t local_names < <(find release-assets -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
-          mapfile -t draft_names < <(gh api "repos/$REPOSITORY/releases/tags/$TAG" --jq '.assets[].name' | LC_ALL=C sort)
-          [[ "${local_names[*]}" == "${draft_names[*]}" ]] || { echo 'Draft release asset names differ from assembled asset names'; exit 1; }
+          local_names="$(find release-assets -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
+          draft_names="$(gh release view "$TAG" --repo "$REPOSITORY" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
+          [[ "$local_names" == "$draft_names" ]] || { echo 'Draft release asset names differ from assembled asset names'; exit 1; }
           for asset in release-assets/*; do
             name="$(basename "$asset")"
             [[ -f "verified-assets/$name" ]] || { echo "Missing uploaded asset: $name"; exit 1; }

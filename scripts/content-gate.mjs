@@ -12,6 +12,7 @@ const PLAIN_PATTERNS = [
   /fitted-automation/i,
   /@fitted/i,
 ];
+const POSIX_ALTERNATIVE = /(?:\.sh\b|\b(?:bash|sh)\s+(?:-c\b|(?:\.{0,2}\/|\/|scripts\/)\S+)|\bnode\s+(?:\.\/)?scripts\/\S+)/i;
 
 export function normalize(value) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -66,6 +67,33 @@ async function collectFiles(target) {
   return files;
 }
 
+function fencedBlockIds(lines) {
+  const ids = [];
+  let fence = null;
+  let nextId = 0;
+  for (const line of lines) {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (marker && !fence) {
+      fence = { character: marker[1][0], length: marker[1].length, id: ++nextId };
+      ids.push(null);
+    } else if (marker && fence && marker[1][0] === fence.character
+        && marker[1].length >= fence.length && !marker[2].trim()) {
+      ids.push(null);
+      fence = null;
+    } else {
+      ids.push(fence?.id ?? null);
+    }
+  }
+  return ids;
+}
+
+function hasLocalPosixAlternative(lines, blockIds, index) {
+  return lines.some((line, candidate) =>
+    (Math.abs(candidate - index) <= 3
+      || (blockIds[index] !== null && blockIds[index] === blockIds[candidate]))
+    && POSIX_ALTERNATIVE.test(line));
+}
+
 export async function scan({ root, denylist, targets = DEFAULT_DIRS.map((dir) => path.join(root, dir)) }) {
   const hashes = parseDenylist(await readFile(denylist, 'utf8'));
   const findings = [];
@@ -76,7 +104,7 @@ export async function scan({ root, denylist, targets = DEFAULT_DIRS.map((dir) =>
     const contents = await readFile(file, 'utf8');
     if (contents.includes('\0')) throw new Error(`Binary file in scanned tree: ${file}`);
     const lines = contents.split(/\r?\n/);
-    const hasPosixAlternative = /(?:\.sh\b|\b(?:bash|sh)\s+\S|\bnode\s+\S)/i.test(contents);
+    const blockIds = fencedBlockIds(lines);
     for (const [index, line] of lines.entries()) {
       const relative = path.relative(root, file);
       const displayPath = relative.startsWith('..') || path.isAbsolute(relative) ? path.basename(file) : relative;
@@ -84,7 +112,7 @@ export async function scan({ root, denylist, targets = DEFAULT_DIRS.map((dir) =>
       if (PLAIN_PATTERNS.some((pattern) => pattern.test(line))) {
         findings.push(`${location}: restricted plaintext pattern`);
       }
-      if (/\.ps1\b/i.test(line) && !hasPosixAlternative) {
+      if (/\.ps1\b/i.test(line) && !hasLocalPosixAlternative(lines, blockIds, index)) {
         findings.push(`${location}: PowerShell script without POSIX alternative`);
       }
       const match = findDeniedNgram(line, hashes);

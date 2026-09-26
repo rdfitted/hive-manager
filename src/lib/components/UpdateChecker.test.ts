@@ -37,12 +37,14 @@ afterEach(() => {
 
 describe('UpdateChecker', () => {
   it('clears downloading when the install-time check finds no update', async () => {
-    mocks.check.mockResolvedValueOnce({ version: '0.55.0' }).mockResolvedValueOnce(null);
+    const close = vi.fn().mockResolvedValue(undefined);
+    mocks.check.mockResolvedValueOnce({ version: '0.55.0', close }).mockResolvedValueOnce(null);
     const view = render(UpdateChecker);
     await waitFor(() => expect(view.getByText('Update available: v0.55.0')).toBeTruthy());
     await fireEvent.click(view.getByRole('button', { name: 'Update Now' }));
     await waitFor(() => expect(view.queryByText('Downloading update... 0%')).toBeNull());
     expect(view.getByRole('button', { name: 'Check for updates' }).hasAttribute('disabled')).toBe(false);
+    expect(close).toHaveBeenCalledTimes(1);
     expect(mocks.relaunch).not.toHaveBeenCalled();
   });
 
@@ -53,22 +55,25 @@ describe('UpdateChecker', () => {
     await waitFor(() => expect(view.getByRole('alert').textContent).toContain('Could not check for updates'));
   });
 
-  it('asks before relaunching when a session is active', async () => {
-    const update = { version: '0.55.0', downloadAndInstall: vi.fn().mockResolvedValue(undefined) };
-    mocks.check.mockResolvedValue(update);
+  it('asks before download and closes the update when an active session declines', async () => {
+    const metadata = { version: '0.55.0', close: vi.fn().mockResolvedValue(undefined) };
+    const update = { version: '0.55.0', close: vi.fn().mockResolvedValue(undefined), downloadAndInstall: vi.fn().mockResolvedValue(undefined) };
+    mocks.check.mockResolvedValueOnce(metadata).mockResolvedValueOnce(update);
     mocks.invoke.mockResolvedValue([{ state: 'Running' }, { state: 'Completed' }]);
     mocks.confirm.mockResolvedValue(false);
     const view = render(UpdateChecker);
     await waitFor(() => expect(view.getByText('Update available: v0.55.0')).toBeTruthy());
     await fireEvent.click(view.getByRole('button', { name: 'Update Now' }));
     await waitFor(() => expect(mocks.confirm).toHaveBeenCalled());
+    await waitFor(() => expect(update.close).toHaveBeenCalledTimes(1));
     expect(mocks.confirm.mock.calls[0][0]).toContain('1 session is still active');
     expect(mocks.invoke).toHaveBeenCalledWith('list_sessions');
+    expect(update.downloadAndInstall).not.toHaveBeenCalled();
+    expect(metadata.close).toHaveBeenCalledTimes(1);
+    expect(update.close).toHaveBeenCalledTimes(1);
     expect(mocks.relaunch).not.toHaveBeenCalled();
-    expect(view.getByRole('button', { name: 'Restart to finish update' })).toBeTruthy();
-    mocks.confirm.mockResolvedValue(true);
-    await fireEvent.click(view.getByRole('button', { name: 'Restart to finish update' }));
-    await waitFor(() => expect(mocks.relaunch).toHaveBeenCalledTimes(1));
+    expect(view.queryByRole('button', { name: 'Restart to finish update' })).toBeNull();
+    expect(view.getByRole('button', { name: 'Update Now' })).toBeTruthy();
   });
 
   it('does not check again while an installed update awaits restart', async () => {
@@ -81,16 +86,19 @@ describe('UpdateChecker', () => {
       }
       return setInterval(callback, delay, ...args);
     });
-    const update = { version: '0.55.0', downloadAndInstall: vi.fn().mockResolvedValue(undefined) };
-    mocks.check.mockResolvedValue(update);
+    const metadata = { version: '0.55.0', close: vi.fn().mockResolvedValue(undefined) };
+    const update = { version: '0.55.0', close: vi.fn().mockResolvedValue(undefined), downloadAndInstall: vi.fn().mockResolvedValue(undefined) };
+    mocks.check.mockResolvedValueOnce(metadata).mockResolvedValueOnce(update);
     mocks.invoke.mockResolvedValue([{ state: 'Running' }]);
-    mocks.confirm.mockResolvedValue(false);
+    mocks.confirm.mockResolvedValue(true);
     const view = render(UpdateChecker);
     await waitFor(() => expect(view.getByText('Update available: v0.55.0')).toBeTruthy());
     await fireEvent.click(view.getByRole('button', { name: 'Update Now' }));
     await waitFor(() => expect(view.getByRole('button', { name: 'Restart to finish update' })).toBeTruthy());
 
     expect(mocks.check).toHaveBeenCalledTimes(2);
+    expect(update.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(mocks.relaunch).toHaveBeenCalledTimes(1);
     expect(periodicCheck).toBeDefined();
     periodicCheck?.();
     await Promise.resolve();

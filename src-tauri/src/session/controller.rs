@@ -22143,7 +22143,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         for (root, expected_state) in cases {
             let state = crate::wiki::wiki_state_from(root, |program, args, cwd| {
                 if program == "gh" {
-                    true
+                    Some(Vec::new())
                 } else {
                     crate::wiki::bounded_probe_with_timeout(
                         program,
@@ -22204,7 +22204,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         }
         assert_eq!(crate::wiki::wiki_state_from(&remote, |program, args, cwd| {
             if program == "gh" {
-                false
+                None
             } else {
                 crate::wiki::bounded_probe_with_timeout(
                     program,

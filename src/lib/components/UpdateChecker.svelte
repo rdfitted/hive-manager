@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { check } from '@tauri-apps/plugin-updater';
+  import { check, type Update } from '@tauri-apps/plugin-updater';
   import { relaunch } from '@tauri-apps/plugin-process';
   import { invoke } from '@tauri-apps/api/core';
   import { confirm } from '@tauri-apps/plugin-dialog';
@@ -21,8 +21,12 @@
     error = null;
     try {
       const update = await check();
-      updateAvailable = !!update;
-      updateVersion = update?.version ?? '';
+      try {
+        updateAvailable = !!update;
+        updateVersion = update?.version ?? '';
+      } finally {
+        await update?.close();
+      }
     } catch (e) {
       if (import.meta.env.DEV) {
         console.log('Update check skipped:', e);
@@ -40,19 +44,22 @@
     return () => window.clearInterval(interval);
   });
 
-  async function restartWhenSafe() {
+  async function confirmLiveSessions() {
+    // Refresh from the backend so a session started in another window is included.
+    const currentSessions = await invoke<Session[]>('list_sessions');
+    const liveCount = currentSessions.filter((session) => {
+      const status = sessionStateToCellStatus(session.state);
+      return status !== 'completed' && status !== 'failed';
+    }).length;
+    if (liveCount === 0) return true;
+    return confirm(`${liveCount} session${liveCount === 1 ? ' is' : 's are'} still active. Install the update now?`, {
+      title: 'Hive Manager update', kind: 'warning', okLabel: 'Install update', cancelLabel: 'Later',
+    });
+  }
+
+  async function restartWhenSafe(alreadyConfirmed = false) {
     try {
-      // Refresh from the backend so a session started in another window is included.
-      const currentSessions = await invoke<Session[]>('list_sessions');
-      const liveCount = currentSessions.filter((session) => {
-        const status = sessionStateToCellStatus(session.state);
-        return status !== 'completed' && status !== 'failed';
-      }).length;
-      if (liveCount > 0 && !await confirm(`${liveCount} session${liveCount === 1 ? ' is' : 's are'} still active. Restart to finish updating?`, {
-        title: 'Hive Manager update', kind: 'warning', okLabel: 'Restart', cancelLabel: 'Later',
-      })) {
-        return;
-      }
+      if (!alreadyConfirmed && !await confirmLiveSessions()) return;
       await relaunch();
     } catch (e) {
       error = 'Could not restart the app. Please restart it manually.';
@@ -62,14 +69,17 @@
   async function downloadAndInstall() {
     downloading = true;
     error = null;
+    let update: Update | null = null;
+    let installCompleted = false;
 
     try {
-      const update = await check();
+      update = await check();
       if (!update) {
         updateAvailable = false;
         updateVersion = '';
         return;
       }
+      if (!await confirmLiveSessions()) return;
 
       let totalBytes = 0;
       let downloadedBytes = 0;
@@ -87,13 +97,21 @@
         }
       });
 
+      installCompleted = true;
       restartPending = true;
       updateAvailable = false;
-      await restartWhenSafe();
+      await restartWhenSafe(true);
     } catch (e) {
       error = 'Could not install the update. Try again later.';
     } finally {
       downloading = false;
+      if (update && !installCompleted) {
+        try {
+          await update.close();
+        } catch {
+          error = 'Could not release the update check. Try again later.';
+        }
+      }
     }
   }
 
@@ -111,7 +129,7 @@
   {/if}
   {#if checking}<span class="update-status">Checking for updates...</span>{/if}
   {#if restartPending}
-    <button class="lattice-btn lattice-btn--primary" on:click={restartWhenSafe}>Restart to finish update</button>
+    <button class="lattice-btn lattice-btn--primary" on:click={() => restartWhenSafe()}>Restart to finish update</button>
   {/if}
   {#if error && !updateAvailable}<span class="update-error" role="alert">{error}</span>{/if}
 </div>

@@ -15,6 +15,8 @@ test('sync check detects a stale generated copy without writing; sync repairs it
   const roster = '# Roster\n';
   const source = path.join(root, 'workflow-pack/skills/example/SKILL.md');
   const copy = path.join(root, '.claude/skills/example/SKILL.md');
+  const claudeRoster = path.join(root, '.claude/agent-roster.md');
+  const codexRoster = path.join(root, '.agents/agent-roster.md');
   await mkdir(path.dirname(source), { recursive: true });
   await mkdir(path.dirname(copy), { recursive: true });
   await writeFile(source, skill);
@@ -26,9 +28,24 @@ test('sync check detects a stale generated copy without writing; sync repairs it
     roster: { path: 'workflow-pack/agent-roster.md', sha256: digest(roster) },
   }));
   const stale = await syncWorkflows({ root, check: true });
-  assert.equal(stale.length, 2);
+  assert.deepEqual(stale.sort(), [
+    path.join('.agents', 'agent-roster.md'),
+    path.join('.agents', 'skills/example/SKILL.md'),
+    path.join('.claude', 'agent-roster.md'),
+    path.join('.claude', 'skills/example/SKILL.md'),
+  ]);
   assert.equal(await readFile(copy, 'utf8'), '# Stale\n');
-  assert.equal((await syncWorkflows({ root })).length, 2);
+  await assert.rejects(readFile(claudeRoster));
+  await assert.rejects(readFile(codexRoster));
+  assert.equal((await syncWorkflows({ root })).length, 4);
   assert.equal(await readFile(copy, 'utf8'), skill);
+  assert.equal(await readFile(claudeRoster, 'utf8'), roster);
+  assert.equal(await readFile(codexRoster, 'utf8'), roster);
   assert.deepEqual(await syncWorkflows({ root, check: true }), []);
+
+  await writeFile(codexRoster, '# Stale roster\n');
+  assert.deepEqual(await syncWorkflows({ root, check: true }), [path.join('.agents', 'agent-roster.md')]);
+  assert.equal(await readFile(codexRoster, 'utf8'), '# Stale roster\n');
+  assert.deepEqual(await syncWorkflows({ root }), [path.join('.agents', 'agent-roster.md')]);
+  assert.equal(await readFile(codexRoster, 'utf8'), roster);
 });
