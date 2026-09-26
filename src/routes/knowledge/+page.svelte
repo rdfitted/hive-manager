@@ -10,6 +10,7 @@
   import KnowledgeGraph from '$lib/components/knowledge/KnowledgeGraph.svelte';
   import KnowledgePagePreview from '$lib/components/knowledge/KnowledgePagePreview.svelte';
   import KnowledgeTable from '$lib/components/knowledge/KnowledgeTable.svelte';
+  import WikiSettings from '$lib/components/knowledge/WikiSettings.svelte';
   import Skeleton from '$lib/components/Skeleton.svelte';
   import SkelBar from '$lib/components/SkelBar.svelte';
   import {
@@ -34,6 +35,7 @@
   let folder = $state<string | null>(null);
   let view = $state<KnowledgeView>('graph');
   let previewReturnFocus = $state.raw<FocusTarget | null>(null);
+  let showWikiSettings = $state(false);
 
   // The backend discovers folders from the wiki root, so this list is open-ended.
   // `preferredOrder` is a *hint* for the familiar folders only: anything it does
@@ -100,7 +102,17 @@
       <div><strong>{folders.length}</strong><span>Folders</span></div>
     </div>
 
+    <button
+      type="button"
+      class="lattice-btn lattice-btn--ghost"
+      aria-expanded={showWikiSettings}
+      onclick={() => showWikiSettings = !showWikiSettings}
+    >Wiki settings</button>
   </header>
+
+  {#if showWikiSettings}
+    <WikiSettings onSaved={() => knowledgeStore.loadGraph(sessionId)} />
+  {/if}
 
   <section class="toolbar atlas-surface atlas-surface--strip lattice-forced-colors-boundary" aria-label="Knowledge controls">
     <label class="search-field atlas-surface lattice-forced-colors-boundary lattice-forced-colors-boundary--focus-within">

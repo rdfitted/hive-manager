@@ -17,7 +17,6 @@ use crate::http::error::ApiError;
 use crate::http::state::AppState;
 
 const PROJECT_FILES: [&str; 2] = ["project-dna.md", "bug-patterns.md"];
-const DEFAULT_WIKI_ROOT: &str = "~/.ai-docs/wiki";
 
 pub(crate) const MAX_NODES: usize = 5_000;
 pub(crate) const MAX_EDGES: usize = 20_000;
@@ -615,8 +614,11 @@ pub async fn get_knowledge_page(
 
 async fn resolve_wiki_root(state: &AppState) -> PathBuf {
     let configured = state.config.read().await.global_wiki_path.clone();
-    let env_root = std::env::var_os("HIVE_WIKI_ROOT").filter(|value| !value.is_empty());
-    resolve_wiki_root_from(env_root, configured.as_deref(), user_home().as_deref())
+    resolve_wiki_root_from(configured.as_deref())
+}
+
+pub(crate) fn resolve_wiki_root_from(configured: Option<&str>) -> PathBuf {
+    crate::wiki::resolve_wiki_root(configured)
 }
 
 async fn resolve_wiki_folders(
@@ -629,53 +631,6 @@ async fn resolve_wiki_folders(
         resolve_wiki_folders_from(configured.as_deref(), discovered.folders),
         discovered.refusals,
     )
-}
-
-fn resolve_wiki_root_from(
-    env_root: Option<OsString>,
-    configured: Option<&str>,
-    home: Option<&Path>,
-) -> PathBuf {
-    let selected = env_root
-        .map(PathBuf::from)
-        .or_else(|| {
-            configured
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        })
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_WIKI_ROOT));
-    expand_tilde_path(&selected, home)
-}
-
-fn user_home() -> Option<PathBuf> {
-    let preferred = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let fallback = if cfg!(windows) { "HOME" } else { "USERPROFILE" };
-    std::env::var_os(preferred)
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os(fallback).filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-}
-
-fn expand_tilde_path(path: &Path, home: Option<&Path>) -> PathBuf {
-    let Some(raw) = path.to_str() else {
-        return path.to_path_buf();
-    };
-    let Some(rest) = raw.strip_prefix('~') else {
-        return path.to_path_buf();
-    };
-    if !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('\\') {
-        return path.to_path_buf();
-    }
-    let Some(home) = home else {
-        return path.to_path_buf();
-    };
-    let rest = rest.trim_start_matches(['/', '\\']);
-    if rest.is_empty() {
-        home.to_path_buf()
-    } else {
-        home.join(rest)
-    }
 }
 
 fn knowledge_scan_limiter() -> &'static Semaphore {
@@ -3494,19 +3449,19 @@ mod tests {
     fn wiki_root_precedence_and_tilde_expansion_are_pure() {
         let home = Path::new("C:/Users/tester");
         assert_eq!(
-            resolve_wiki_root_from(
-                Some(OsString::from("D:/configured/wiki")),
+            crate::wiki::resolve_wiki_root_from(
+                Some(OsString::from("D:/configured/wiki").as_os_str()),
                 Some("~/ignored"),
                 Some(home),
             ),
             PathBuf::from("D:/configured/wiki")
         );
         assert_eq!(
-            resolve_wiki_root_from(None, Some("~/.ai-docs/wiki"), Some(home)),
+            crate::wiki::resolve_wiki_root_from(None, Some("~/.ai-docs/wiki"), Some(home)),
             home.join(".ai-docs/wiki")
         );
         assert_eq!(
-            expand_tilde_path(Path::new("~someone/wiki"), Some(home)),
+            crate::wiki::resolve_wiki_root_from(None, Some("~someone/wiki"), Some(home)),
             PathBuf::from("~someone/wiki")
         );
         assert_eq!(strip_markdown_extension("éxy"), "éxy");

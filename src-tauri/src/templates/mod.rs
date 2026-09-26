@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -335,6 +335,11 @@ pub struct TemplateEngine {
     builtin_templates: HashMap<String, String>,
 }
 
+/// Check persisted overrides once during application startup.
+pub(crate) fn warn_stale_template_overrides(templates_dir: &Path) {
+    TemplateEngine::new(templates_dir.to_path_buf()).warn_stale_overrides();
+}
+
 impl TemplateEngine {
     /// Create a new template engine with the given templates directory
     pub fn new(templates_dir: PathBuf) -> Self {
@@ -344,6 +349,17 @@ impl TemplateEngine {
         };
         engine.load_builtin_templates();
         engine
+    }
+
+    fn warn_stale_overrides(&self) {
+        for (name, builtin) in &self.builtin_templates {
+            let path = self.templates_dir.join(format!("{name}.md"));
+            if let Ok(override_content) = fs::read_to_string(&path) {
+                if override_content != *builtin {
+                    tracing::warn!(template = %name, "On-disk template override differs from the built-in template");
+                }
+            }
+        }
     }
 
     /// Load built-in templates
@@ -1232,13 +1248,13 @@ Ground your argument in existing institutional knowledge before writing this rou
 - The global wiki path is: `{{global_wiki_path}}`
 - Read the wiki index and the topic-relevant pages directly with your own CLI filesystem access:
   ```bash
-  cat "{{global_wiki_path}}/index.md" || echo "WIKI INDEX UNREADABLE: {{global_wiki_path}}/index.md"
+  cat "{{wiki_index_path}}" || echo "WIKI INDEX UNREADABLE: {{wiki_index_path}}"
   ```
   Then read the pages from the index that are relevant to the debate topic. Use this prior knowledge to sharpen your argument and to avoid re-deriving what is already documented.
 - **Verify the read actually succeeded.** If the index does not print — or `WIKI INDEX UNREADABLE` does — do NOT silently continue with no prior context. Say so explicitly at the top of this round's argument file, so the missing grounding is visible to the judge instead of invisible to everyone.
 {{/if}}
 {{#if no_global_wiki}}
-- No global wiki path is configured. Skip this phase gracefully and argue with no prior-wiki context.
+- No wiki is configured. Skip this phase gracefully and argue with no prior-wiki context.
 {{/if}}
 
 ## Round
@@ -1291,13 +1307,13 @@ Ground your verdict in existing institutional knowledge before evaluating the ar
 - The global wiki path is: `{{global_wiki_path}}`
 - Read the wiki index and the topic-relevant pages directly with your own CLI filesystem access:
   ```bash
-  cat "{{global_wiki_path}}/index.md" || echo "WIKI INDEX UNREADABLE: {{global_wiki_path}}/index.md"
+  cat "{{wiki_index_path}}" || echo "WIKI INDEX UNREADABLE: {{wiki_index_path}}"
   ```
   Then read the pages from the index that are relevant to the debate topic. Weigh the arguments against what is already documented, and note where a position contradicts or extends prior knowledge.
 - **Verify the read actually succeeded.** If the index does not print — or `WIKI INDEX UNREADABLE` does — do NOT silently continue with no prior context. Record that fact in the verdict's Summary section, so a verdict reached without prior grounding is visibly labelled as such.
 {{/if}}
 {{#if no_global_wiki}}
-- No global wiki path is configured. Skip this phase gracefully and judge with no prior-wiki context.
+- No wiki is configured. Skip this phase gracefully and judge with no prior-wiki context.
 {{/if}}
 
 ## Evaluation Process
@@ -1315,9 +1331,14 @@ Rationale: [concise explanation]
 ## Notable Insights
 
 ## Wiki Capture
-The global wiki path is: `{{global_wiki_path}}`
-
-If `{{global_wiki_path}}` is non-empty and the debate produced durable knowledge, capture the verdict to the global wiki with this Draft -> PR flow:
+{{#if no_global_wiki}}
+No wiki is configured. Skip wiki capture.
+{{/if}}
+{{#if wiki_is_local}}
+If the debate produced durable knowledge, write it under `{{global_wiki_path}}`. If `{{wiki_schema_path}}` exists, read and follow it; otherwise use minimal frontmatter: `title`, `category`, `last_updated`. Update the index. If this directory is a Git worktree, commit the entry locally. Do not push or create a PR.
+{{/if}}
+{{#if wiki_is_remote}}
+If the debate produced durable knowledge, capture the verdict in `{{global_wiki_path}}` with this Draft -> PR flow:
 
 ```bash
 cd "{{global_wiki_path}}"
@@ -1325,7 +1346,7 @@ git checkout main && git pull --ff-only
 git checkout -b debate/{{topic_slug}}
 ```
 
-Read `~/.ai-docs/schema.md`, write a schema-compliant markdown entry summarizing the debate and sources, then:
+If `{{wiki_schema_path}}` exists, read and follow it. Otherwise use minimal frontmatter: `title`, `category`, `last_updated`. Write a markdown entry summarizing the debate and sources, then:
 
 ```bash
 git add -A
@@ -1334,11 +1355,11 @@ git push -u origin debate/{{topic_slug}}
 gh pr create --base main --title "debate: {{topic_slug}} verdict" --body "Captures debate verdict for {{topic}}"
 ```
 
-If `{{global_wiki_path}}` is empty, skip wiki capture gracefully.
+{{/if}}
 
 ## Constraints
 - You are read-only for project code.
-- Only produce the verdict and optional wiki Draft -> PR.
+- Only produce the verdict and optional wiki entry through the local or remote flow above.
 
 ## Heartbeat
 {{generic_heartbeat_snippet}}
@@ -1489,7 +1510,7 @@ When the session's work is complete and ready to commit:
         // Queen prompt for Research sessions
         self.builtin_templates.insert("queen-research".to_string(), r#"# Queen - Research Session Orchestrator
 
-{{smoke_directive}}You are the Queen agent orchestrating a Research session. You coordinate researcher workers who investigate and summarize. **No coding, no commits** happen in this session — the deliverable is synthesized knowledge, optionally captured to the global wiki.
+{{smoke_directive}}You are the Queen agent orchestrating a Research session. You coordinate researcher workers who investigate and summarize. **No production code changes or project commits** happen in this session — the deliverable is synthesized knowledge, optionally captured to the global wiki.
 
 ## Researcher Roster (you spawn these on demand)
 
@@ -1515,13 +1536,13 @@ Ground your research in existing institutional knowledge before delegating.
 - The global wiki path is: `{{global_wiki_path}}`
 - Read the wiki index and the topic-relevant pages directly with your own CLI filesystem access:
   ```bash
-  cat "{{global_wiki_path}}/index.md" || echo "WIKI INDEX UNREADABLE: {{global_wiki_path}}/index.md"
+  cat "{{wiki_index_path}}" || echo "WIKI INDEX UNREADABLE: {{wiki_index_path}}"
   ```
   Then read the pages from the index that are relevant to the research objective. Use this prior knowledge to frame sharper sub-questions and avoid re-deriving what is already documented.
 - **Verify the read actually succeeded.** If the index does not print — or `WIKI INDEX UNREADABLE` does — do NOT silently continue as if no wiki were configured. Post a short note to the conversation naming the path you tried, then proceed without prior context. A wiki that was configured but unreadable is a defect the user needs to see, not a silent downgrade.
 {{/if}}
 {{#if no_global_wiki}}
-- No global wiki path is configured. Skip this phase gracefully and proceed with no prior-wiki context.
+- No wiki is configured. Skip this phase gracefully and proceed with no prior-wiki context.
 {{/if}}
 
 ## Phase 2 — Coordinate Researchers
@@ -1561,9 +1582,16 @@ Aggregate all researcher findings into one coherent synthesis:
 - Keep every claim traceable to its source(s).
 - Present the synthesis to the user in the conversation and invite discussion / follow-up questions.
 
-## Phase 4 — Capture to Wiki (end, Draft -> PR)
+## Phase 4 — Capture to Wiki
 
-When the findings are worth keeping **AND** `{{global_wiki_path}}` is non-empty, persist them to the global wiki via a Draft -> PR workflow. **If `{{global_wiki_path}}` is empty, this phase is a graceful no-op — skip it.**
+{{#if no_global_wiki}}
+No wiki is configured. Skip wiki capture.
+{{/if}}
+{{#if wiki_is_local}}
+When the findings are worth keeping, write them under `{{global_wiki_path}}`. If `{{wiki_schema_path}}` exists, read and follow it; otherwise use minimal frontmatter: `title`, `category`, `last_updated`. Include the synthesis and a Sources section, and update the index. If this directory is a Git worktree, commit locally. Do not push or create a PR.
+{{/if}}
+{{#if wiki_is_remote}}
+When the findings are worth keeping, persist them to `{{global_wiki_path}}` via a Draft -> PR workflow.
 
 ```bash
 cd "{{global_wiki_path}}"
@@ -1571,7 +1599,7 @@ git checkout main && git pull --ff-only
 git checkout -b research/<topic-slug>
 ```
 
-Then write a new markdown entry summarizing the findings and their sources. The entry MUST have schema-compliant frontmatter — read `~/.ai-docs/schema.md` first and follow it exactly for required frontmatter fields and file placement. The body should contain the synthesis and a Sources section.
+If `{{wiki_schema_path}}` exists, read and follow it; otherwise use minimal frontmatter: `title`, `category`, `last_updated`. Write a markdown entry with the synthesis and a Sources section.
 
 ```bash
 git add -A
@@ -1581,10 +1609,11 @@ gh pr create --base main --title "research: <topic> findings" --body "<short des
 ```
 
 Report the resulting PR URL back in the conversation so the user can review it.
+{{/if}}
 
 ## Constraints (IMPORTANT)
 - This is a research session: **no production code changes and no project commits.**
-- Do **NOT** POST project-local learnings (no `curl .../api/sessions/{{session_id}}/learnings`). Knowledge capture happens only via the wiki Draft -> PR flow above.
+- Do **NOT** POST project-local learnings (no `curl .../api/sessions/{{session_id}}/learnings`). Knowledge capture happens only via the wiki flow above.
 
 ## Current Task
 
@@ -2236,6 +2265,10 @@ impl Default for TemplateEngine {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashMap};
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::fmt::MakeWriter;
 
     use crate::pty::WorkerRole;
 
@@ -2244,6 +2277,55 @@ mod tests {
         normalize_api_base_url, PromptContext, SessionTemplate, TemplateCatalog, TemplateEngine,
         TemplateError, DEFAULT_API_BASE_URL, HEARTBEAT_MAX_INTERVAL_SECS,
     };
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for LogBuffer {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn differing_override_warns_once_and_still_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = TemplateEngine::new(dir.path().to_path_buf());
+        let builtin = baseline.get_template("roles/backend").unwrap();
+        let path = dir.path().join("roles/backend.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &builtin).unwrap();
+
+        let logs = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            super::warn_stale_template_overrides(dir.path());
+            let identical = TemplateEngine::new(dir.path().to_path_buf());
+            assert_eq!(identical.get_template("roles/backend").unwrap(), builtin);
+            std::fs::write(&path, "custom role").unwrap();
+            super::warn_stale_template_overrides(dir.path());
+            let differing = TemplateEngine::new(dir.path().to_path_buf());
+            assert_eq!(differing.get_template("roles/backend").unwrap(), "custom role");
+        });
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(output.matches("template=roles/backend").count(), 1, "{output}");
+    }
 
     #[test]
     fn session_template_roundtrip() {

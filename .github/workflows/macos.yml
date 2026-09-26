@@ -1,0 +1,55 @@
+name: macOS Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  macos-test:
+    name: Svelte and Rust tests
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Svelte check
+        run: npm run check
+
+      - name: Vitest
+        run: npm test
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Cargo check tests
+        working-directory: src-tauri
+        run: cargo check --tests
+
+      - name: Cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy
+
+      - name: Cargo test library
+        working-directory: src-tauri
+        run: cargo test --lib

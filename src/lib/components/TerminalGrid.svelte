@@ -46,6 +46,7 @@
   }
 
   const TERMINAL_READY_TIMEOUT_MS = 10_000;
+  const isWindows = typeof navigator !== 'undefined' && navigator.platform.toLowerCase().startsWith('win');
   const readyTerminalIds = new Set<string>();
   const terminalReadyWaiters = new Map<string, TerminalReadyWaiter>();
 
@@ -53,7 +54,7 @@
 
   let agents = $derived(session.agents);
 
-  let selectedShell = $state<ScratchShell>('powershell');
+  let selectedShell = $state<ScratchShell>(isWindows ? 'powershell' : 'login');
   let openingScratch = $state(false);
   let openingScratchId = $state<string | null>(null);
   let scratchError = $state<string | null>(null);
@@ -308,8 +309,12 @@
       <label class="shell-picker">
         <span class="sr-only">Scratch terminal shell</span>
         <select class="lattice-input" bind:value={selectedShell} disabled={!scratchSessionAvailable || openingScratch}>
-          <option value="powershell">PowerShell</option>
-          <option value="cmd">Command Prompt</option>
+          {#if isWindows}
+            <option value="powershell">PowerShell</option>
+            <option value="cmd">Command Prompt</option>
+          {:else}
+            <option value="login">Login Shell</option>
+          {/if}
         </select>
       </label>
       <button
