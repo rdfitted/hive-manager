@@ -337,6 +337,32 @@ class JudgeTests(unittest.TestCase):
                                        provider=provider)
         self.assertEqual((0, {"result": "promote"}), (code, result["answer"]))
 
+    def test_key_file_override_expands_home(self):
+        home = self.root / "home"
+        home.mkdir()
+        (home / "gateway.env").write_text("TYPESAFE_API_KEY=synthetic-home-key\n", encoding="utf-8")
+        with patch.dict(os.environ, {"JUDGMENT_KEY_FILE": "~/gateway.env", "HOME": str(home),
+                                     "USERPROFILE": str(home)}):
+            os.environ.pop("TYPESAFE_API_KEY", None)
+            self.assertEqual("synthetic-home-key", judge._api_key())
+
+    def test_malformed_question_type_is_invalid_input(self):
+        policy = self._declared_policy("memory.relevance.test", {"question_type": []})
+        code, result, send = self._run(self._args(surface="memory.relevance.test", policy=policy))
+        self.assertEqual((2, "invalid-input"), (code, result["status"]))
+        send.assert_not_called()
+
+    def test_choice_probabilities_must_match_the_criteria(self):
+        policy = self._declared_policy("curate.residual.test",
+                                       {"question_type": "choice", "choice_keys": ["promote", "noise"]})
+        question = self._file("choice.json", {"type": "choice", "instructions": "Promote?",
+                                              "criteria": {"promote": "durable", "noise": "one-off"}})
+        provider = {"model": "jev-1.13.0", "answers": {"q1": {
+            "type": "choice", "choice": "promote", "probabilities": {"ACCEPT": 0.8, "DECLINE": 0.2}}}}
+        code, result, _ = self._run(self._args(surface="curate.residual.test", policy=policy, question=question),
+                                    provider=provider)
+        self.assertEqual((4, "transport-error", None), (code, result["status"], result["answer"]))
+
     def test_policy_ledger_path_is_the_default_when_no_flag_or_env(self):
         policy = json.loads(self.policy.read_text(encoding="utf-8"))
         policy["ledger"] = str(self.root / "policy-ledger.jsonl")

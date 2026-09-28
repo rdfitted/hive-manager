@@ -138,7 +138,7 @@ def _api_key() -> str | None:
     key = os.environ.get("TYPESAFE_API_KEY")
     if key:
         return key
-    path = Path(os.environ.get("JUDGMENT_KEY_FILE") or Path.home() / ".ai-gateway.env")
+    path = Path(os.environ.get("JUDGMENT_KEY_FILE") or Path.home() / ".ai-gateway.env").expanduser()
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError):
@@ -160,7 +160,7 @@ def _question_spec(surface: str, entry: dict | None) -> tuple[str, set[str] | No
         expected = QUESTION_TYPES[surface]
         return expected, (REVIEW_CHOICES if expected == "choice" else None)
     declared = entry.get("question_type") if isinstance(entry, dict) else None
-    if declared not in {"noul", "choice"}:
+    if not isinstance(declared, str) or declared not in {"noul", "choice"}:
         raise InputError("unsupported surface or question")
     keys = entry.get("choice_keys")
     if declared == "choice" and keys is not None:
@@ -212,7 +212,8 @@ def _answer(surface: str, response: Any, question_id: str,
     allowed = REVIEW_CHOICES if surface == "hive.review.finding" else set(((question or {}).get("criteria") or {}).keys())
     choice = item.get("choice")
     probabilities = item.get("probabilities")
-    if item.get("type") != "choice" or choice not in allowed or not isinstance(probabilities, dict):
+    if (item.get("type") != "choice" or choice not in allowed or not isinstance(probabilities, dict)
+            or set(probabilities) != allowed):
         raise jev_transport.TransportError("invalid-answer")
     return {"result": choice}, {
         "probabilities": probabilities, "confidence": item.get("confidence"),
