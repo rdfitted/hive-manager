@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { Brain, CaretDown, CaretRight, Check, House, Kanban, PencilSimple } from 'phosphor-svelte';
+  import { Brain, CaretDown, CaretRight, Check, House, Kanban, PencilSimple, SidebarSimple } from 'phosphor-svelte';
   import { page } from '$app/stores';
   import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { layout, RAIL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
+  import { shortcutLabel } from '$lib/platform';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, tick } from 'svelte';
   import LaunchDialog from './LaunchDialog.svelte';
@@ -89,6 +90,8 @@
   let recentDisclosure: HTMLButtonElement;
 
   let collapsed = $derived($layout.leftCollapsed);
+  const toggleShortcut = shortcutLabel('B');
+  let toggleLabel = $derived(`${collapsed ? 'Expand' : 'Collapse'} sidebar (${toggleShortcut})`);
   let drawerWidth = $derived($layout.leftWidth - RAIL_WIDTH);
   let knowledgeHref = $derived(
     $activeSession
@@ -426,13 +429,25 @@
         </a>
       {/each}
     </nav>
+    <!-- Pointer shortcut only; the labelled button below is the accessible control. -->
     <button
       type="button"
       class="rail-filler"
+      tabindex="-1"
+      aria-hidden="true"
       onclick={() => layout.toggleLeft()}
-      title={collapsed ? "Expand sidebar (Ctrl+B)" : "Collapse sidebar (Ctrl+B)"}
-      aria-label={collapsed ? "Expand sidebar (Ctrl+B)" : "Collapse sidebar (Ctrl+B)"}
+      title={toggleLabel}
     ></button>
+    <button
+      type="button"
+      class="rail-toggle lattice-btn lattice-btn--ghost lattice-btn--icon"
+      onclick={() => layout.toggleLeft()}
+      title={toggleLabel}
+      aria-label={toggleLabel}
+      aria-expanded={!collapsed}
+    >
+      <SidebarSimple size={18} weight="light" aria-hidden="true" />
+    </button>
   </div>
 
   <div
@@ -786,6 +801,10 @@
     background: transparent;
     cursor: pointer;
     transition: background-color var(--motion-duration-standard) var(--motion-ease-standard);
+  }
+
+  .rail-toggle {
+    flex: none;
   }
 
   .rail-filler:hover {

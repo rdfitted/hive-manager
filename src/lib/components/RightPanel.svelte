@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { ChartBar, ChatCenteredText, ClockCounterClockwise, FileText, Graph, ListBullets, NotePencil } from 'phosphor-svelte';
+  import { ChartBar, ChatCenteredText, ClockCounterClockwise, FileText, Graph, ListBullets, NotePencil, SidebarSimple } from 'phosphor-svelte';
   import { layout, RAIL_WIDTH, type RightPanelTab } from '$lib/stores/layout';
+  import { shortcutLabel } from '$lib/platform';
   import StatusPanel from './StatusPanel.svelte';
   import PlanView from './PlanView.svelte';
   import WorkGraphView from './workgraph/WorkGraphView.svelte';
@@ -21,6 +22,8 @@
   ];
 
   let collapsed = $derived($layout.rightCollapsed);
+  const toggleShortcut = shortcutLabel('J');
+  let toggleLabel = $derived(`${collapsed ? 'Expand' : 'Collapse'} panel (${toggleShortcut})`);
   let activeTab = $derived($layout.rightTab);
   let drawerWidth = $derived($layout.rightWidth - RAIL_WIDTH);
 
@@ -48,13 +51,26 @@
         <Icon size={18} weight="light" />
       </button>
     {/each}
+    <!-- Pointer shortcut only; the labelled button below is the accessible control. -->
     <button
       type="button"
       class="rail-filler"
+      tabindex="-1"
+      aria-hidden="true"
       onclick={() => layout.toggleRight()}
-      title={collapsed ? "Expand panel (Ctrl+J)" : "Collapse panel (Ctrl+J)"}
-      aria-label={collapsed ? "Expand panel (Ctrl+J)" : "Collapse panel (Ctrl+J)"}
+      title={toggleLabel}
     ></button>
+    <button
+      type="button"
+      class="rail-control rail-toggle lattice-btn lattice-btn--ghost lattice-btn--icon"
+      onclick={() => layout.toggleRight()}
+      title={toggleLabel}
+      aria-label={toggleLabel}
+      aria-expanded={!collapsed}
+    >
+      <!-- Mirrored so the highlighted pane sits on the right, next to this rail. -->
+      <SidebarSimple size={18} weight="light" aria-hidden="true" class="mirrored" />
+    </button>
   </div>
 
   <div
@@ -141,6 +157,14 @@
     background: transparent;
     cursor: pointer;
     transition: background-color var(--motion-duration-standard) var(--motion-ease-standard);
+  }
+
+  .rail-toggle {
+    flex: none;
+  }
+
+  .rail-toggle :global(.mirrored) {
+    transform: scaleX(-1);
   }
 
   .rail-filler:hover {

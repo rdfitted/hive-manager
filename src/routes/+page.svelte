@@ -14,6 +14,7 @@
   import { layout } from '$lib/stores/layout';
   import { pendingContext } from '$lib/stores/pendingContext';
   import { shell } from '$lib/stores/shell';
+  import { shortcutLabel } from '$lib/platform';
 
   let showShortcuts = $state(false);
 
@@ -232,7 +233,7 @@
               </span>
             </button>
           </div>
-          <p class="cta hint">Press <strong>Ctrl+/</strong> for keyboard shortcuts</p>
+          <p class="cta hint">Press <strong>{shortcutLabel('/')}</strong> for keyboard shortcuts</p>
         </section>
       </div>
     {:else}
