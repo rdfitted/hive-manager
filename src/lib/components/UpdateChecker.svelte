@@ -2,11 +2,15 @@
   import { onMount } from 'svelte';
   import { check, type Update } from '@tauri-apps/plugin-updater';
   import { relaunch } from '@tauri-apps/plugin-process';
+  import { getVersion } from '@tauri-apps/api/app';
   import { invoke } from '@tauri-apps/api/core';
   import { confirm } from '@tauri-apps/plugin-dialog';
   import { ArrowClockwise, ArrowUp } from 'phosphor-svelte';
   import { sessionStateToCellStatus, type Session } from '$lib/stores/sessions';
 
+  const UP_TO_DATE_MS = 4000;
+
+  let currentVersion = '';
   let updateAvailable = false;
   let updateVersion = '';
   let downloading = false;
@@ -14,11 +18,16 @@
   let error: string | null = null;
   let checking = false;
   let restartPending = false;
+  // Only a check the operator asked for confirms "up to date"; background checks stay silent.
+  let upToDate = false;
+  let upToDateTimer: number | undefined;
 
-  async function checkForUpdates() {
+  async function checkForUpdates(manual = false) {
     if (checking || downloading || restartPending) return;
     checking = true;
     error = null;
+    upToDate = false;
+    window.clearTimeout(upToDateTimer);
     try {
       const update = await check();
       try {
@@ -26,6 +35,10 @@
         updateVersion = update?.version ?? '';
       } finally {
         await update?.close();
+      }
+      if (manual && !updateAvailable) {
+        upToDate = true;
+        upToDateTimer = window.setTimeout(() => (upToDate = false), UP_TO_DATE_MS);
       }
     } catch (e) {
       if (import.meta.env.DEV) {
@@ -39,9 +52,17 @@
   }
 
   onMount(() => {
+    getVersion()
+      .then((version) => (currentVersion = version))
+      .catch(() => {
+        // Outside Tauri (plain browser dev) there is no app version to show.
+      });
     void checkForUpdates();
     const interval = window.setInterval(() => void checkForUpdates(), 6 * 60 * 60 * 1000);
-    return () => window.clearInterval(interval);
+    return () => {
+      window.clearInterval(interval);
+      window.clearTimeout(upToDateTimer);
+    };
   });
 
   async function confirmLiveSessions() {
@@ -121,13 +142,15 @@
 </script>
 
 {#if !updateAvailable || checking || restartPending || error}
-<div class="update-check-actions" class:expanded={checking || restartPending || !!error}>
+<div class="update-check-actions" class:expanded={checking || restartPending || upToDate || !!error}>
   {#if !updateAvailable && !restartPending}
-    <button class="check-icon" on:click={checkForUpdates} disabled={checking || downloading} aria-label="Check for updates" title="Check for updates">
+    <button class="check-icon" on:click={() => checkForUpdates(true)} disabled={checking || downloading} aria-label="Check for updates" title="Check for updates">
       <ArrowClockwise size={16} weight="light" aria-hidden="true" />
     </button>
   {/if}
+  {#if currentVersion}<span class="app-version" title="Installed version">v{currentVersion}</span>{/if}
   {#if checking}<span class="update-status">Checking for updates...</span>{/if}
+  {#if upToDate}<span class="update-status" role="status">Up to date</span>{/if}
   {#if restartPending}
     <button class="lattice-btn lattice-btn--primary" on:click={() => restartWhenSafe()}>Restart to finish update</button>
   {/if}
@@ -147,6 +170,9 @@
         {/if}
       </span>
     </div>
+    {#if currentVersion && !downloading}
+      <span class="update-installed">Installed: v{currentVersion}</span>
+    {/if}
 
     {#if error}
       <span class="update-error" role="alert">{error}</span>
@@ -175,7 +201,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    max-width: min(160px, calc(100vw - 32px));
+    max-width: min(280px, calc(100vw - 32px));
   }
   .update-check-actions.expanded {
     padding: 6px;
@@ -200,7 +226,33 @@
     color: var(--text-primary);
     background: var(--bg-raised);
   }
+  /* Sits over terminal output when the row is not expanded, so it carries its own surface. */
+  .app-version {
+    display: inline-flex;
+    align-items: center;
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    background: var(--bg-panel);
+    box-shadow: var(--elev-1);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .update-check-actions.expanded .app-version {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+    padding: 0 2px;
+  }
   .update-status {
+    font-size: 11px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .update-installed {
     font-size: 11px;
     color: var(--text-secondary);
   }
