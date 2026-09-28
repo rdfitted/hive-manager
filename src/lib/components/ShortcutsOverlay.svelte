@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Keyboard, X } from 'phosphor-svelte';
+  import { isMacPlatform, modifierKey } from '$lib/platform';
 
   interface Props {
     open: boolean;
@@ -8,12 +9,17 @@
 
   let { open, onClose }: Props = $props();
 
+  // App-level shortcuts accept Ctrl or ⌘; show the one that works on this platform. A focused
+  // terminal keeps Ctrl+<letter> for its agent, so off macOS the layout toggles need focus elsewhere.
+  const mod = modifierKey();
+  const panelNote = isMacPlatform() ? '' : ' (not while a terminal has focus)';
+
   const GROUPS: Array<{ title: string; shortcuts: Array<{ keys: string[]; action: string }> }> = [
     {
       title: 'Layout',
       shortcuts: [
-        { keys: ['Ctrl', 'B'], action: 'Toggle left sidebar' },
-        { keys: ['Ctrl', 'J'], action: 'Toggle right panel' },
+        { keys: [mod, 'B'], action: `Toggle left sidebar${panelNote}` },
+        { keys: [mod, 'J'], action: `Toggle right panel${panelNote}` },
         { keys: ['↑', '↓'], action: 'Navigate agents' },
       ],
     },
@@ -32,13 +38,13 @@
     {
       title: 'Context',
       shortcuts: [
-        { keys: ['Ctrl', 'I'], action: 'Capture selection / cell context for next turn' },
+        { keys: [mod, 'I'], action: 'Capture selection / cell context for next turn' },
       ],
     },
     {
       title: 'Help',
       shortcuts: [
-        { keys: ['Ctrl', '/'], action: 'Show this overlay' },
+        { keys: [mod, '/'], action: 'Show this overlay' },
       ],
     },
   ];

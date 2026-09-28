@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { get, type Writable } from 'svelte/store';
 import type { AgentInfo } from '$lib/stores/sessions';
 
 interface TestLayoutState {
@@ -289,5 +290,22 @@ describe('page Escape priority', () => {
     expect(testMocks.toggleLeft).not.toHaveBeenCalled();
     expect(testMocks.toggleRight).not.toHaveBeenCalled();
     expect(testMocks.setMaximizedTerminalId).not.toHaveBeenCalled();
+  });
+});
+
+describe('start screen', () => {
+  it('names the shortcuts-overlay key for the platform', async () => {
+    const { activeSession } = await import('$lib/stores/sessions');
+    const store = activeSession as unknown as Writable<unknown>;
+    const previous = get(store);
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    store.set(null);
+    try {
+      const view = render(Page);
+      expect(view.getByText('⌘/')).toBeTruthy();
+    } finally {
+      store.set(previous);
+      vi.restoreAllMocks();
+    }
   });
 });
