@@ -8,22 +8,31 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
 
 describe('slash commands', () => {
   it('filters by typed prefix (case-insensitive)', () => {
-    const res = filterCommands('res');
-    expect(res.map((c) => c.name)).toEqual(['research']);
+    const res = filterCommands('pl');
+    expect(res.map((c) => c.name)).toEqual(['plan']);
 
-    const upper = filterCommands('RES');
-    expect(upper.map((c) => c.name)).toEqual(['research']);
+    const upper = filterCommands('PL');
+    expect(upper.map((c) => c.name)).toEqual(['plan']);
   });
 
   it('empty query returns every command', () => {
     expect(filterCommands('').length).toBe(SLASH_COMMANDS.length);
   });
 
-  it('the three real SessionMode commands resolve to their expansions', () => {
-    expect(findCommand('hive')?.expand()).toBe('/hive ');
-    expect(findCommand('fusion')?.expand()).toBe('/fusion ');
-    expect(findCommand('research')?.expand()).toBe('/research ');
-    expect(findCommand('debate')?.expand()).toBe('/debate ');
+  it('keeps session modes out of the in-session composer', () => {
+    for (const mode of ['hive', 'fusion', 'research', 'debate']) {
+      expect(findCommand(mode)).toBeUndefined();
+    }
+  });
+
+  it('never expands to slash text sent to an attached CLI', () => {
+    expect(findCommand('ask')?.expand()).toBe('Answer without modifying any files: ');
+    expect(findCommand('plan')?.expand()).toBe('Produce a plan only; do not modify files: ');
+    for (const command of SLASH_COMMANDS) {
+      expect(command.expand()).not.toMatch(/^\s*\//);
+    }
+    expect(findCommand('clear')?.expand()).toBe('');
+    expect(findCommand('attach')?.expand()).toBe('');
   });
 
   it('quick actions are tagged with control actions, not insert', () => {

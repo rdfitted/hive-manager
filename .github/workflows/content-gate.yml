@@ -1,0 +1,28 @@
+name: Content Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  content-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Install Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Test workflow tools
+        run: node --test scripts/content-gate.test.mjs scripts/install-workflows.test.mjs scripts/sync-workflows.test.mjs
+      - name: Check generated workflow copies
+        run: node scripts/sync-workflows.mjs --check
+      - name: Scan workflow pack and starter
+        run: node scripts/content-gate.mjs

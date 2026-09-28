@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use schemars::schema::RootSchema;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -23,27 +23,59 @@ enum CreatePtyRole {
     ScratchShell,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 enum ScratchShell {
+    #[cfg(windows)]
     Powershell,
+    #[cfg(windows)]
     Cmd,
+    #[cfg(not(windows))]
+    Login,
 }
 
 impl ScratchShell {
     fn command(self) -> &'static str {
         match self {
+            #[cfg(windows)]
             Self::Powershell => "powershell.exe",
+            #[cfg(windows)]
             Self::Cmd => "cmd.exe",
+            #[cfg(not(windows))]
+            Self::Login => "login",
         }
     }
 
     fn args(self) -> &'static [&'static str] {
         match self {
+            #[cfg(windows)]
             Self::Powershell => &["-NoLogo"],
+            #[cfg(windows)]
             Self::Cmd => &[],
+            #[cfg(not(windows))]
+            Self::Login => &["-l"],
         }
     }
+
+    fn executable(self) -> String {
+        #[cfg(windows)]
+        {
+            self.command().to_string()
+        }
+        #[cfg(not(windows))]
+        {
+            // "login" is a frontend token. Resolve the user's shell in the backend,
+            // where SHELL is available, only after its command and args are validated.
+            let shell = std::env::var("SHELL").ok();
+            login_shell_executable(shell.as_deref()).to_string()
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn login_shell_executable(shell: Option<&str>) -> &str {
+    shell.filter(|value| !value.trim().is_empty())
+        .unwrap_or("/bin/zsh")
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -214,12 +246,13 @@ impl Action for CreatePty {
             .map_err(ActionError::bad_request)?;
 
         let args_refs: Vec<&str> = parsed.args.iter().map(String::as_str).collect();
+        let executable = parsed.shell.map(ScratchShell::executable);
         let create_result = {
             let pty_manager = ctx.state.pty_manager.read();
             pty_manager.create_session(
                 parsed.id.clone(),
                 role,
-                &parsed.command,
+                executable.as_deref().unwrap_or(&parsed.command),
                 &args_refs,
                 parsed.cwd.as_deref(),
                 parsed.cols,
@@ -494,6 +527,76 @@ pub fn register(registry: &mut ActionRegistry) {
     registry.register(Box::new(PtyStatus));
     registry.register(Box::new(ListPtys));
     registry.register(Box::new(PtySnapshotAction));
+}
+
+#[cfg(test)]
+mod scratch_shell_tests {
+    use super::{resolve_create_role_for_test, ScratchShell};
+    use crate::pty::AgentRole;
+    use serde_json::{json, Value};
+
+    fn scratch_input(shell: &str, command: &str, args: &[&str]) -> Value {
+        json!({
+            "id": "scratch:session-a:test",
+            "command": command,
+            "args": args,
+            "cwd": ".",
+            "cols": 120,
+            "rows": 30,
+            "role": "scratch_shell",
+            "shell": shell,
+            "session_id": "session-a"
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_scratch_shells_round_trip_and_reject_login() {
+        for (name, command, args) in [
+            ("powershell", "powershell.exe", vec!["-NoLogo"]),
+            ("cmd", "cmd.exe", vec![]),
+        ] {
+            let shell: ScratchShell = serde_json::from_value(json!(name)).unwrap();
+            assert_eq!(serde_json::to_value(shell).unwrap(), json!(name));
+            let (role, owner) = resolve_create_role_for_test(scratch_input(name, command, &args))
+                .expect("Windows shell metadata should be accepted");
+            assert!(matches!(role, AgentRole::ScratchShell));
+            assert_eq!(owner.as_deref(), Some("session-a"));
+        }
+
+        assert!(serde_json::from_value::<ScratchShell>(json!("login")).is_err());
+        assert!(resolve_create_role_for_test(scratch_input("login", "login", &["-l"])).is_err());
+        assert!(resolve_create_role_for_test(scratch_input("cmd", "cmd.exe", &["-l"])).is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_login_shell_round_trips_and_rejects_windows_shells() {
+        let shell: ScratchShell = serde_json::from_value(json!("login")).unwrap();
+        assert_eq!(serde_json::to_value(shell).unwrap(), json!("login"));
+        let (role, owner) = resolve_create_role_for_test(scratch_input("login", "login", &["-l"]))
+            .expect("Unix login shell metadata should be accepted");
+        assert!(matches!(role, AgentRole::ScratchShell));
+        assert_eq!(owner.as_deref(), Some("session-a"));
+
+        for (name, command, args) in [
+            ("powershell", "powershell.exe", vec!["-NoLogo"]),
+            ("cmd", "cmd.exe", vec![]),
+        ] {
+            assert!(serde_json::from_value::<ScratchShell>(json!(name)).is_err());
+            assert!(resolve_create_role_for_test(scratch_input(name, command, &args)).is_err());
+        }
+        assert!(resolve_create_role_for_test(scratch_input("login", "login", &[])).is_err());
+        assert!(resolve_create_role_for_test(scratch_input("login", "/bin/zsh", &["-l"])).is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_login_shell_uses_shell_or_zsh_fallback() {
+        assert_eq!(super::login_shell_executable(Some("/bin/bash")), "/bin/bash");
+        assert_eq!(super::login_shell_executable(None), "/bin/zsh");
+        assert_eq!(super::login_shell_executable(Some("  ")), "/bin/zsh");
+    }
 }
 
 #[cfg(all(test, windows))]

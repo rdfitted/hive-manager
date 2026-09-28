@@ -386,6 +386,17 @@ impl PtyManager {
         cols: u16,
         rows: u16,
     ) -> Result<String, PtyError> {
+        #[cfg(not(windows))]
+        if std::path::Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("wsl"))
+        {
+            if let Some(reason) = crate::adapters::CursorAdapter::cursor_unsupported_reason() {
+                return Err(PtyError::CreateError(reason.to_string()));
+            }
+        }
+
         // #207 fix 3: stagger codex starts. Taken before the lifecycle lock so a spawn
         // waiting out the gap does not stall kill/create of unrelated agents.
         if agent_store::has_contended_store(command) {
@@ -734,6 +745,27 @@ mod cross_platform_spawn_tests {
             24,
         ).unwrap();
         manager.kill("missing-cli-fixture").unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn cursor_wsl_launch_is_refused_before_pty_creation() {
+        let manager = PtyManager::new();
+        let result = manager.create_session(
+            "cursor-fixture".to_string(),
+            AgentRole::Worker { index: 1, parent: None },
+            "wsl",
+            &[],
+            None,
+            80,
+            24,
+        );
+        let reason = crate::adapters::CursorAdapter::cursor_unsupported_reason().unwrap();
+        assert!(matches!(
+            result,
+            Err(super::PtyError::CreateError(message)) if message == reason
+        ));
+        assert!(manager.list_sessions().is_empty());
     }
 }
 

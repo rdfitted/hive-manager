@@ -26,6 +26,7 @@ mod storage;
 mod tauri_shim;
 mod templates;
 mod watcher;
+mod wiki;
 pub mod workspace;
 
 #[cfg(not(test))]
@@ -84,6 +85,9 @@ pub fn run() {
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+
+    #[cfg(target_os = "macos")]
+    cli::env_path::initialize_macos_cli_environment();
 
     // Initialize session storage
     let storage = Arc::new(SessionStorage::new().expect("Failed to initialize session storage"));
@@ -169,6 +173,7 @@ pub fn run() {
         .manage(StorageState(Arc::clone(&storage)))
         .manage(Arc::clone(&action_registry))
         .setup(move |app| {
+            crate::templates::warn_stale_template_overrides(&storage.templates_dir());
             // Set app handle for event emission
             {
                 let mut controller = session_controller.write();
