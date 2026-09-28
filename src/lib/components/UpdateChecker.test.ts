@@ -58,6 +58,23 @@ describe('UpdateChecker', () => {
     expect(mocks.check).toHaveBeenCalledTimes(2);
   });
 
+  it('clears the up-to-date status after four seconds', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mocks.check.mockResolvedValue(null);
+      const view = render(UpdateChecker);
+      await waitFor(() => expect(view.queryByText('Checking for updates...')).toBeNull());
+      await fireEvent.click(view.getByRole('button', { name: 'Check for updates' }));
+      await waitFor(() => expect(view.getByRole('status').textContent).toBe('Up to date'));
+      await vi.advanceTimersByTimeAsync(3900);
+      expect(view.queryByText('Up to date')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(view.queryByText('Up to date')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('names the installed version in the update banner', async () => {
     mocks.check.mockResolvedValue({ version: '0.56.0', close: vi.fn().mockResolvedValue(undefined) });
     const view = render(UpdateChecker);
