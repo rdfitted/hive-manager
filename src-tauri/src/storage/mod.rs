@@ -869,7 +869,7 @@ impl SessionStorage {
                 command: "codex".to_string(),
                 auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
                 model_flag: Some("-m".to_string()),
-                default_model: "gpt-6-sol".to_string(),
+                default_model: "gpt-6.1-sol".to_string(),
                 env: None,
             },
         );
@@ -919,70 +919,70 @@ impl SessionStorage {
             "principal".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
         default_roles.insert(
             "backend".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
         default_roles.insert(
             "frontend".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
         default_roles.insert(
             "coherence".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
         default_roles.insert(
             "simplify".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
         default_roles.insert(
             "reviewer".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
         default_roles.insert(
             "reviewer-quick".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
         default_roles.insert(
             "resolver".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
         default_roles.insert(
             "tester".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
         default_roles.insert(
             "code-quality".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
         default_roles.insert(
@@ -996,14 +996,14 @@ impl SessionStorage {
             "qa-worker".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
         default_roles.insert(
             "general".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-6-sol".to_string(),
+                model: "gpt-6.1-sol".to_string(),
             },
         );
 
@@ -1920,8 +1920,8 @@ mod tests {
             let defaults = config.default_roles.get(role).unwrap();
             assert_eq!(defaults.cli, "codex", "role {role} should default to codex");
             assert_eq!(
-                defaults.model, "gpt-6-sol",
-                "role {role} should default to gpt-6-sol"
+                defaults.model, "gpt-6.1-sol",
+                "role {role} should default to gpt-6.1-sol"
             );
         }
 
@@ -1931,11 +1931,11 @@ mod tests {
 
         let principal = config.default_roles.get("principal").unwrap();
         assert_eq!(principal.cli, "codex");
-        assert_eq!(principal.model, "gpt-6-sol");
+        assert_eq!(principal.model, "gpt-6.1-sol");
 
         let frontend = config.default_roles.get("frontend").unwrap();
         assert_eq!(frontend.cli, "codex");
-        assert_eq!(frontend.model, "gpt-6-sol");
+        assert_eq!(frontend.model, "gpt-6.1-sol");
 
         let evaluator = config.default_roles.get("evaluator").unwrap();
         assert_eq!(evaluator.cli, "claude");
@@ -2025,7 +2025,7 @@ mod tests {
 
         let codex = config.clis.get("codex").expect("codex entry present");
         assert_eq!(codex.command, "codex");
-        assert_eq!(codex.default_model, "gpt-6-sol");
+        assert_eq!(codex.default_model, "gpt-6.1-sol");
     }
 
     #[test]

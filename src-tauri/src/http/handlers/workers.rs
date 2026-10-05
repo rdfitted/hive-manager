@@ -1721,7 +1721,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved.executed_as.tier, TaskTier::High);
-        assert_eq!(resolved.executed_as.model, "gpt-6-sol");
+        assert_eq!(resolved.executed_as.model, "gpt-6.1-sol");
         assert_eq!(
             resolved.executed_as.flags,
             ["-c", "model_reasoning_effort=\"xhigh\""]

@@ -1154,13 +1154,13 @@ mod tests {
             (
                 "codex",
                 TaskTier::Medium,
-                "gpt-6-sol",
+                "gpt-6.1-sol",
                 vec!["-c", "model_reasoning_effort=\"medium\""],
             ),
             (
                 "codex",
                 TaskTier::High,
-                "gpt-6-sol",
+                "gpt-6.1-sol",
                 vec!["-c", "model_reasoning_effort=\"xhigh\""],
             ),
             (

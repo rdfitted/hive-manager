@@ -8,7 +8,7 @@ import {
 } from './hiveLaunch';
 
 describe('default Hive launch contract', () => {
-  it('uses Opus Queen, GPT-6 principal, shared workspace, and split delegation defaults', () => {
+  it('uses Opus Queen, GPT-6.1 Sol principal, shared workspace, and split delegation defaults', () => {
     const defaults = createDefaultHiveFormState();
     const config = buildHiveLaunchConfig({
       projectPath: 'C:/code/project',
@@ -32,7 +32,7 @@ describe('default Hive launch contract', () => {
     expect(config.workers).toHaveLength(1);
     expect(config.workers[0]).toMatchObject({
       cli: 'codex',
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       label: 'Coding Principal 1',
     });
     expect(config.execution_policy).toEqual({
@@ -153,10 +153,10 @@ describe('default Hive launch contract', () => {
     });
   });
 
-  it('uses GPT-6 Sol for a principal when there is no session default', () => {
+  it('uses GPT-6.1 Sol for a principal when there is no session default', () => {
     expect(createSessionPrincipalConfig(null)).toEqual({
       cli: 'codex',
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-sol',
       flags: [],
     });
   });

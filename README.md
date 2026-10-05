@@ -78,7 +78,7 @@ If you installed Hive Manager before v0.55.0, download and install v0.55.0 once 
 ## Session Types
 
 ### Hive
-The default managed topology. An Opus Queen coordinates coding principals that Hive Manager launches and displays. A direct new Hive starts with one generic Codex `gpt-6-sol` coding principal; built-in feature and bug templates can preconfigure backend and frontend specializations. The operator's CLI, model, and role selections are authoritative.
+The default managed topology. An Opus Queen coordinates coding principals that Hive Manager launches and displays. A direct new Hive starts with one generic Codex `gpt-6.1-sol` coding principal; built-in feature and bug templates can preconfigure backend and frontend specializations. The operator's CLI, model, and role selections are authoritative.
 
 ### Fusion
 Launch multiple agents working on the same task in parallel. Compare approaches and pick the best solution.
@@ -100,7 +100,7 @@ Hive Manager keeps two delegation layers explicit:
 
 Native delegation policy is separate from capability inference. The current card comes from Hive Manager's CLI adapter profile, not a live binary/version probe: `disabled` always turns delegation off; `auto` permits only adapter-declared support; `encouraged` records explicit operator authorization without rewriting an unknown capability as supported. Optional child and depth values are carried into the assignment as guidance; hard concurrency enforcement remains owned by the native harness.
 
-Canonical model IDs are `gpt-6-sol` and `fable`; **GPT-6 Sol** and **Fable 5** are display names. Hive Manager normalizes the aliases `gpt-6` to `gpt-6-sol` and legacy `gpt-5.6` to `gpt-5.6-sol` at launch. Sessions and templates saved by older builds keep working. Older models remain selectable. Built-in defaults are recommendations, never hidden overrides of operator choices.
+Canonical model IDs are `gpt-6.1-sol` and `fable`; **GPT-6.1 Sol** and **Fable 5** are display names. Hive Manager normalizes the aliases `gpt-6` to `gpt-6-sol` and legacy `gpt-5.6` to `gpt-5.6-sol` at launch. Sessions and templates saved by older builds keep working. Older models remain selectable. Built-in defaults are recommendations, never hidden overrides of operator choices.
 
 When Master Planner is used, it is contract-only: it converts the objective into bounded Assignment Contracts and stops before implementation.
 
@@ -111,7 +111,7 @@ Claude Code, Codex, OpenCode, Qwen, and Droid use their installed native executa
 | CLI | Behavior | Notes |
 |-----|----------|-------|
 | [Claude Code](https://claude.ai/claude-code) | Action-Prone | Anthropic's official CLI. Supports native delegation; Opus is the recommended Queen model. |
-| [Codex](https://github.com/openai/codex) | Explicit-Polling | OpenAI's CLI. Supports native delegation; the GPT-6 models are `gpt-6-astra` (frontier), `gpt-6-sol` (the recommended coding-principal model), and `gpt-6-luna` (fast). GPT-5.6 presets remain selectable. Hive task activation uses a durable polling loop. |
+| [Codex](https://github.com/openai/codex) | Explicit-Polling | OpenAI's CLI. Supports native delegation; `gpt-6.1-sol` is the recommended coding-principal model; the GPT-6 models are `gpt-6-astra` (frontier), `gpt-6-sol` (previous-generation workhorse), and `gpt-6-luna` (fast). GPT-5.6 presets remain selectable. Hive task activation uses a durable polling loop. |
 | [OpenCode](https://github.com/opencode-ai/opencode) | Explicit-Polling | Open-source alternative. |
 | [Qwen](https://github.com/QwenLM/qwen-agent) | Instruction-Following | Follows instructions literally, respects role boundaries naturally. |
 | [Droid](https://github.com/anthropics/droid) | Interactive | TUI mode with `/model` command for model selection. |

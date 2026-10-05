@@ -7943,7 +7943,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality, researcher |
 | cli | string | No | CLI override: codex, opencode, cursor, droid, qwen, or claude. Omit to inherit the session principal CLI (`{default_cli}`). |
-| model | string | No | Model override (for example gpt-6-sol for Codex or fable/opus for Claude). Omit to inherit the principal model. |
+| model | string | No | Model override (for example gpt-6.1-sol for Codex or fable/opus for Claude). Omit to inherit the principal model. |
 | flags | string[] | No | CLI flag override. Omit to inherit principal flags; send `[]` to clear them. |
 | name | string | No | Stable worker name; defaults to `Worker N (Role)` |
 | description | string | No | One-line task summary used for deterministic labels |
@@ -8432,7 +8432,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
 | cli | string | No | CLI to use: {default_cli} (default), codex, opencode, cursor, droid, qwen |
-| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-6-sol`, `gpt-6-luna`, `glm-5.1`, `qwen3-coder`) |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-6.1-sol`, `gpt-6-luna`, `glm-5.1`, `qwen3-coder`) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -19210,7 +19210,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             .join("spawn-worker.md");
         let worker_content =
             std::fs::read_to_string(worker_tool_path).expect("read worker tool doc");
-        assert!(worker_content.contains("gpt-6-sol for Codex or fable/opus for Claude"));
+        assert!(worker_content.contains("gpt-6.1-sol for Codex or fable/opus for Claude"));
         assert!(worker_content.contains("Omit to inherit the session principal CLI (`claude`)"));
         assert!(worker_content.contains("| flags | string[] | No |"));
         assert!(worker_content.contains("Omit to inherit principal flags; send `[]` to clear them"));
@@ -19598,7 +19598,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert!(shared_prompt.contains("Current tier: `high`"));
         assert!(shared_prompt.contains("`low`: model `gpt-6-luna`"));
         assert!(shared_prompt
-            .contains(r#"`high`: model `gpt-6-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
+            .contains(r#"`high`: model `gpt-6.1-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
         assert!(shared_prompt.contains("you may spawn `low`, `medium`, or `high` work"));
         assert!(shared_prompt
             .contains("Runtime CWD: /repo/.hive-manager/worktrees/session-modern/primary"));
@@ -19732,8 +19732,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
 
         assert!(prompt.contains("Codex gpt-6-luna / low"));
         assert!(prompt.contains(r#"-m gpt-6-luna -c model_reasoning_effort="medium""#));
-        assert!(prompt.contains("Codex gpt-6-sol / medium"));
-        assert!(prompt.contains(r#"-m gpt-6-sol -c model_reasoning_effort="medium""#));
+        assert!(prompt.contains("Codex gpt-6.1-sol / medium"));
+        assert!(prompt.contains(r#"-m gpt-6.1-sol -c model_reasoning_effort="medium""#));
         assert!(!prompt.contains("gpt-5.5"));
         assert!(!prompt.contains(r#"model_reasoning_effort="low""#));
     }
@@ -21678,7 +21678,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert!(explicit_args
             .windows(2)
             .any(|pair| { pair == ["-m".to_string(), "operator-selected-model".to_string()] }));
-        assert!(!explicit_args.iter().any(|arg| arg == "gpt-6-sol"));
+        assert!(!explicit_args.iter().any(|arg| arg == "gpt-6.1-sol"));
 
         let (_, default_args) = SessionController::build_command(&AgentConfig {
             cli: "codex".to_string(),
@@ -21687,7 +21687,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         });
         assert!(default_args
             .windows(2)
-            .any(|pair| pair == ["-m".to_string(), "gpt-6-sol".to_string()]));
+            .any(|pair| pair == ["-m".to_string(), "gpt-6.1-sol".to_string()]));
 
         let legacy_config = AgentConfig {
             cli: "codex".to_string(),

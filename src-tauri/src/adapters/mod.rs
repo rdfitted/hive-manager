@@ -106,7 +106,7 @@ pub fn is_valid_cli(cli: &str) -> bool {
 pub struct AgentLaunchSpec {
     /// CLI name (e.g., "claude", "codex")
     pub cli: String,
-    /// Canonical model identifier (e.g., "opus", "gpt-6-sol"). Ignored by adapters whose
+    /// Canonical model identifier (e.g., "opus", "gpt-6.1-sol"). Ignored by adapters whose
     /// CLI does not accept a model flag.
     pub model: Option<String>,
     /// Additional CLI flags

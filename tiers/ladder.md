@@ -9,8 +9,8 @@
     },
     "codex": {
       "low": "codex-gpt-6-luna-medium",
-      "medium": "codex-gpt-6-sol-medium",
-      "high": "codex-gpt-6-sol-xhigh",
+      "medium": "codex-gpt-6-1-sol-medium",
+      "high": "codex-gpt-6-1-sol-xhigh",
       "critical": "codex-gpt-6-astra-max"
     }
   }
