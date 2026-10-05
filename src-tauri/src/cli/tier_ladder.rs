@@ -255,6 +255,67 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
     ),
     preset!(
         "codex",
+        "codex-gpt-6-1-sol",
+        "GPT-6.1 Sol",
+        "gpt-6.1-sol",
+        1
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-1-sol-low",
+        "GPT-6.1 Sol (Low effort)",
+        "gpt-6.1-sol",
+        1,
+        "-c",
+        "model_reasoning_effort=\"low\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-1-sol-medium",
+        "GPT-6.1 Sol (Medium effort)",
+        "gpt-6.1-sol",
+        1,
+        "-c",
+        "model_reasoning_effort=\"medium\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-1-sol-high",
+        "GPT-6.1 Sol (High effort)",
+        "gpt-6.1-sol",
+        2,
+        "-c",
+        "model_reasoning_effort=\"high\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-1-sol-xhigh",
+        "GPT-6.1 Sol (Extra high effort)",
+        "gpt-6.1-sol",
+        2,
+        "-c",
+        "model_reasoning_effort=\"xhigh\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-1-sol-max",
+        "GPT-6.1 Sol (Max effort)",
+        "gpt-6.1-sol",
+        3,
+        "-c",
+        "model_reasoning_effort=\"max\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-1-sol-ultra",
+        "GPT-6.1 Sol (Ultra effort)",
+        "gpt-6.1-sol",
+        3,
+        "-c",
+        "model_reasoning_effort=\"ultra\""
+    ),
+    preset!(
+        "codex",
         "codex-gpt-6-astra",
         "GPT-6 Astra",
         "gpt-6-astra",
@@ -1093,13 +1154,13 @@ mod tests {
             (
                 "codex",
                 TaskTier::Medium,
-                "gpt-6-sol",
+                "gpt-6.1-sol",
                 vec!["-c", "model_reasoning_effort=\"medium\""],
             ),
             (
                 "codex",
                 TaskTier::High,
-                "gpt-6-sol",
+                "gpt-6.1-sol",
                 vec!["-c", "model_reasoning_effort=\"xhigh\""],
             ),
             (
@@ -1196,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_covers_all_69_unique_presets_and_every_entry_expands() {
+    fn catalogue_covers_all_76_unique_presets_and_every_entry_expands() {
         let mut ids = std::collections::HashSet::new();
         let mut provider_counts = std::collections::BTreeMap::new();
 
@@ -1214,12 +1275,12 @@ mod tests {
             assert_eq!(expansion.resolved.flags, preset.flags.to_vec());
         }
 
-        assert_eq!(preset_catalogue().len(), 69);
+        assert_eq!(preset_catalogue().len(), 76);
         assert_eq!(
             provider_counts,
             std::collections::BTreeMap::from([
                 ("claude", 12),
-                ("codex", 47),
+                ("codex", 54),
                 ("cursor", 4),
                 ("droid", 2),
                 ("opencode", 2),
@@ -1236,12 +1297,12 @@ mod tests {
             .filter(|preset| preset.provider == "codex")
             .map(|preset| preset.id)
             .collect();
-        assert_eq!(codex_ids.first(), Some(&"codex-gpt-6-astra"));
+        assert_eq!(codex_ids.first(), Some(&"codex-gpt-6-1-sol"));
         let first_legacy = codex_ids
             .iter()
             .position(|id| id.starts_with("codex-gpt-5-6-"))
             .unwrap();
-        assert_eq!(first_legacy, 20, "GPT-6 presets must precede legacy 5.6");
+        assert_eq!(first_legacy, 27, "GPT-6.x presets must precede legacy 5.6");
         assert_eq!(
             expand_preset("codex", "codex-gpt-5-6-sol-medium")
                 .unwrap()
@@ -1271,6 +1332,16 @@ mod tests {
                     vec!["-c".to_string(), format!("model_reasoning_effort=\"{effort}\"")]
                 );
             }
+        }
+        let model = "gpt-6.1-sol";
+        assert_eq!(expand_preset("codex", "codex-gpt-6-1-sol").unwrap().resolved.model, model);
+        for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+            let expansion = expand_preset("codex", &format!("codex-gpt-6-1-sol-{effort}")).unwrap();
+            assert_eq!(expansion.resolved.model, model);
+            assert_eq!(
+                expansion.resolved.flags,
+                vec!["-c".to_string(), format!("model_reasoning_effort=\"{effort}\"")]
+            );
         }
         assert!(expand_preset("codex", "codex-gpt-6-luna-ultra").is_none());
         assert!(expand_preset("codex", "codex-gpt-6-terra").is_none());

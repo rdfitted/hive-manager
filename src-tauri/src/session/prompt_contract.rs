@@ -441,7 +441,7 @@ mod tests {
         assert!(section.contains("`low`: model `gpt-6-luna`"));
         assert!(section.contains(r#"model_reasoning_effort="medium""#));
         assert!(section
-            .contains(r#"`high`: model `gpt-6-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
+            .contains(r#"`high`: model `gpt-6.1-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
         assert!(section.contains("you may spawn `low`, `medium`, or `high` work"));
     }
 

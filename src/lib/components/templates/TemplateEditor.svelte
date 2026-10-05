@@ -41,7 +41,7 @@
         cells = [...cells, {
             role: 'principal',
             cli: 'codex',
-            model: 'gpt-6-sol',
+            model: 'gpt-6.1-sol',
             prompt_template: 'principal'
         }];
     }

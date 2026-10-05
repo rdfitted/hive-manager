@@ -1,6 +1,6 @@
 [package]
 name = "hive-manager"
-version = "0.55.2"
+version = "0.55.3"
 description = "Multi-agent orchestration and monitoring for Claude Code workflows"
 authors = ["RDuff"]
 edition = "2021"

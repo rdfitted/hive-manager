@@ -159,7 +159,7 @@ impl CliRegistry {
         match cli {
             "claude" => Some("opus"),
             "opencode" => Some("opencode/big-pickle"),
-            "codex" => Some("gpt-6-sol"),
+            "codex" => Some("gpt-6.1-sol"),
             "cursor" => Some("composer-2.5"),
             "droid" => Some("glm-5.1"),
             "qwen" => Some("qwen3-coder"),
@@ -389,7 +389,7 @@ mod tests {
                 command: "codex".to_string(),
                 auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
                 model_flag: Some("-m".to_string()),
-                default_model: "gpt-6-sol".to_string(),
+                default_model: "gpt-6.1-sol".to_string(),
                 env: None,
             },
         );
@@ -546,7 +546,7 @@ mod tests {
             .args
             .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(built.args.contains(&"-m".to_string()));
-        assert!(built.args.contains(&"gpt-6-sol".to_string()));
+        assert!(built.args.contains(&"gpt-6.1-sol".to_string()));
     }
 
     #[test]
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn test_default_model_lookup() {
         assert_eq!(CliRegistry::default_model("claude"), Some("opus"));
-        assert_eq!(CliRegistry::default_model("codex"), Some("gpt-6-sol"));
+        assert_eq!(CliRegistry::default_model("codex"), Some("gpt-6.1-sol"));
         assert_eq!(CliRegistry::default_model("droid"), Some("glm-5.1"));
         assert_eq!(CliRegistry::default_model("cursor"), Some("composer-2.5"));
         assert_eq!(CliRegistry::default_model("unknown"), None);
@@ -762,7 +762,7 @@ mod tests {
     fn test_resolve_tier_uses_provider_native_model_and_effort_flags() {
         let registry = CliRegistry::new(test_config());
         let codex = registry.resolve_tier("codex", TaskTier::High).unwrap();
-        assert_eq!(codex.model, "gpt-6-sol");
+        assert_eq!(codex.model, "gpt-6.1-sol");
         assert_eq!(codex.flags, vec!["-c", "model_reasoning_effort=\"xhigh\""]);
 
         let claude = registry.resolve_tier("claude", TaskTier::Low).unwrap();
