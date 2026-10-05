@@ -688,7 +688,7 @@ async fn test_preset_catalogue_returns_all_entries_with_matching_expansions() {
     let presets = json["presets"]
         .as_array()
         .expect("presets should be an array");
-    assert_eq!(presets.len(), 69);
+    assert_eq!(presets.len(), 76);
 
     for preset in presets {
         let provider = preset["provider"]

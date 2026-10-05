@@ -22,7 +22,7 @@ export interface CliOption {
 export const cliOptions: CliOption[] = [
   { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude', defaultModel: 'opus' },
   { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model', defaultModel: 'opencode/big-pickle' },
-  { value: 'codex', label: 'Codex', description: 'OpenAI GPT-6 (Astra / Sol / Luna)', defaultModel: 'gpt-6-sol' },
+  { value: 'codex', label: 'Codex', description: 'OpenAI GPT-6.1 Sol, GPT-6 (Astra / Sol / Luna)', defaultModel: 'gpt-6-sol' },
   { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Composer 2.5)', defaultModel: 'composer-2.5' },
   { value: 'droid', label: 'Droid', description: 'GLM 5.1 (Factory Droid CLI)', defaultModel: 'glm-5.1' },
   { value: 'qwen', label: 'Qwen', description: 'Qwen Code CLI (Qwen3-Coder)', defaultModel: 'qwen3-coder' },
