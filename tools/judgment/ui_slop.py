@@ -28,13 +28,14 @@ def observations(finding: dict, page_kind: str, *, ignored: bool) -> dict:
     fields = {"rule": {"id": finding.get("antipattern", ""),
                        "name": finding.get("name", "")},
               "relpath": relpath, "snippet": finding.get("snippet", ""),
-              "context": finding.get("context", "")[:300], "page_kind": page_kind}
+              "context": finding.get("context", ""), "page_kind": page_kind}
     if ignored:
         fields["ignore_reason"] = finding.get("reason", "")
     if not all(isinstance(v, str) for v in [*fields["rule"].values(),
                  fields["snippet"], fields["context"], fields["page_kind"],
                  fields.get("ignore_reason", "")]):
         raise judge.InputError("finding text must contain strings")
+    fields["context"] = fields["context"][:300]
     judge._blind(fields)
     return fields
 
@@ -126,8 +127,10 @@ def report(ledger_path: Path) -> dict:
         group["statuses"][status] = group["statuses"].get(status, 0) + 1
         p = row.get("noul")
         if isinstance(p, (int, float)) and not isinstance(p, bool) and math.isfinite(p) and 0 <= p <= 1:
-            band = "act" if p >= 0.8 else "human" if p >= 0.35 else "drop"
-            group["bands"][band] += 1
+            answer = row.get("answer")
+            band = answer.get("result") if isinstance(answer, dict) else None
+            if not row.get("error") and isinstance(band, str) and band in group["bands"]:
+                group["bands"][band] += 1
             label = labels.get(row["decision_id"], {}).get("result")
             if label in {"true", "false"}:
                 group["labeled"] += 1

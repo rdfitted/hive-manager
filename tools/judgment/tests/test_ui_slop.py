@@ -108,6 +108,43 @@ class UiSlopTests(unittest.TestCase):
         self.assertEqual({"act": 0, "human": 0, "drop": 1}, report["matches_rule"]["bands"])
         self.assertIsNone(report["injection"]["brier_score"])
 
+    def test_observations_rejects_non_string_context(self):
+        for context in (None, 7, {"text": "invalid"}, ["invalid"]):
+            with self.subTest(context=context):
+                with self.assertRaises(judge.InputError):
+                    ui_slop.observations({**self.finding, "context": context},
+                                         "unknown", ignored=False)
+        state = ui_slop.observations({**self.finding, "context": "a" * 301},
+                                     "unknown", ignored=False)
+        self.assertEqual("a" * 300, state["context"])
+
+    def test_report_uses_recorded_band(self):
+        rows = []
+        answers = ({"result": "human"}, {}, {"result": "invalid"}, None,
+                   {"result": ["act"]})
+        for index, answer in enumerate(answers):
+            row = {"kind": "decision", "surface": "ui.slop",
+                   "question_id": "matches_rule", "decision_id": str(index),
+                   "noul": 0.9}
+            if index != 1:
+                row["answer"] = answer
+            rows.append(row)
+        rows.append({"kind": "outcome", "source": "human-label",
+                     "decision_id": "0", "label": {"result": "true"}})
+        rows.append({"kind": "decision", "surface": "ui.slop",
+                     "question_id": "injection", "decision_id": "other",
+                     "noul": float("nan"), "answer": {"result": "act"}})
+        with patch.object(ledger, "read_records", return_value=iter(rows)):
+            groups = ui_slop.report(self.log)["questions"]
+        self.assertEqual({"matches_rule", "injection"}, set(groups))
+        self.assertEqual({"act": 0, "human": 1, "drop": 0},
+                         groups["matches_rule"]["bands"])
+        self.assertEqual(5, groups["matches_rule"]["rows"])
+        self.assertEqual(1, groups["matches_rule"]["labeled"])
+        self.assertAlmostEqual(0.01, groups["matches_rule"]["brier_score"])
+        self.assertEqual({"act": 0, "human": 0, "drop": 0},
+                         groups["injection"]["bands"])
+
     def test_report_dry_run_and_cli(self):
         self.ask(dry_run=True)
         output = io.StringIO()

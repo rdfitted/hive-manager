@@ -3,6 +3,7 @@
     python -I -m unittest discover -s workflow-pack/skills/slop-check/tests
 """
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -64,10 +65,20 @@ class Fixtures(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(rules(v, "suppressed"), [("low-contrast", "F3-static-contrast")])
 
+    def test_fixture_light_paper_is_not_cream(self):
+        source = (FIX / "dark_tokens.html").read_text(encoding="utf-8")
+        token = re.search(r":root\{--paper:(#[0-9a-fA-F]{6});", source)
+        self.assertIsNotNone(token)
+        color = token.group(1)
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+        # engine-v0.1.5 cream predicate: light, ordered RGB with warm red-blue spread.
+        is_cream = min(r, g, b) >= 209 and r >= g >= b and 6 <= r - b <= 48
+        self.assertFalse(is_cream, color)
+
     def test_rendered_scan_runs_both_viewports(self):
         url = (FIX / "dark_tokens.html").as_uri()
         code, v = run(url, "--root", str(FIX))
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 0, json.dumps(v, indent=2))
         self.assertEqual(sorted(t["viewport"] for t in v["targets"]), ["1280x800", "390x844"])
         self.assertEqual(v["suppressed"], [])  # rendered contrast is trusted, nothing to filter
 

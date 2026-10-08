@@ -106,7 +106,7 @@
         },
         {
           "path": "workflow-pack/skills/slop-check/fixtures/dark_tokens.html",
-          "sha256": "072560354b0e6cf0e79484418404d36ad5d776a7328300b8b8fe1cd61469091a"
+          "sha256": "2ce00c3ae4478e4fa2ea636affc495866aec6fbaf5a4f2fe28dc7d1cc8ff7387"
         },
         {
           "path": "workflow-pack/skills/slop-check/fixtures/email/welcome_email.ts",
@@ -130,7 +130,7 @@
         },
         {
           "path": "workflow-pack/skills/slop-check/scripts/slop_check.py",
-          "sha256": "79f7f198bec62f3249c17bd6d3068da261eb127b9de1cb884b4965f606ad1a3a"
+          "sha256": "eba9a9eb72a2918418fed1d367ad67bae364fbc249e09e8ec000c3bc5b73541f"
         },
         {
           "path": "workflow-pack/skills/slop-check/SKILL.md",
@@ -138,11 +138,11 @@
         },
         {
           "path": "workflow-pack/skills/slop-check/tests/test_contracts.py",
-          "sha256": "ed8f4a1f77be267e09f339d0288f9a81d7934ea53073a0300ed92a2945df0a55"
+          "sha256": "303955b6be91835ef8ee02f32185c203d7270d4388915dddb4f6bd913eb31f9c"
         },
         {
           "path": "workflow-pack/skills/slop-check/tests/test_slop_check.py",
-          "sha256": "24bb07bf14db64276ea877bb0b9996cde2938fbb79de80a7b53e9d396ea3e02e"
+          "sha256": "f98a7490ef1ecb0abbd1fdc183910b54b607dbc8390934ddea28f1cef3eff23f"
         }
       ]
     }

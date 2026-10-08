@@ -171,9 +171,7 @@ def ignore_match(f: dict, ignores: list[dict], root: Path | None) -> dict | None
         if ig.get("value") and ig["value"].lower() not in f.get("snippet", "").lower():
             continue
         if ig.get("path"):
-            fp = f.get("file", "")
-            rel = os.path.relpath(fp, root).replace("\\", "/") if root and not is_url(fp) else fp
-            if not fnmatch.fnmatch(rel, ig["path"]):
+            if not fnmatch.fnmatch(f.get("relpath", ""), ig["path"]):
                 continue
         return ig
     return None
@@ -258,7 +256,7 @@ def apply_baseline(verdict: dict, path: str) -> None:
         raise ValueError('baseline must be a successful verdict v2')
     if base.get('errors') != []:
         raise ValueError('baseline must have no errors')
-    keys = set()
+    keys = Counter()
     for bucket in BUCKETS:
         rows = base.get(bucket)
         if not isinstance(rows, list):
@@ -274,11 +272,12 @@ def apply_baseline(verdict: dict, path: str) -> None:
             key = finding_key(f)
             if f.get('finding_key') != key:
                 raise ValueError('baseline finding key does not match its identity')
-            keys.add(key)
+            keys[key] += 1
     for bucket in ('gating', 'advisory'):
         new = []
         for f in verdict[bucket]:
-            if f['finding_key'] in keys:
+            if keys[f['finding_key']] > 0:
+                keys[f['finding_key']] -= 1
                 verdict['preexisting'].append(f)
             else:
                 new.append(f)

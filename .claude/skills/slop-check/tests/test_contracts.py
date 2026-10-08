@@ -59,6 +59,32 @@ class Contracts(unittest.TestCase):
         self.assertEqual(finding['finding_key'], base['gating'][0]['finding_key'])
         self.assertNotEqual(finding['line'], base['gating'][0]['line'])
 
+    def test_baseline_duplicate_occurrences_remain_new(self):
+        for bucket in ('gating', 'advisory'):
+            for count in (1, 2):
+                with self.subTest(bucket=bucket, baseline_count=count):
+                    finding = {'antipattern': 'side-tab', 'relpath': 'src/widget.css',
+                               'snippet': 'border-left: 3px solid red;'}
+                    finding['finding_key'] = slop_check.finding_key(finding)
+                    base = {'verdict_version': 2, 'verdict': 'block', 'errors': [],
+                            **{b: [] for b in slop_check.BUCKETS}}
+                    base[bucket] = [dict(finding) for _ in range(count)]
+                    path = self.root / 'duplicates.json'
+                    path.write_text(json.dumps(base), encoding='utf-8')
+                    verdict = {b: [] for b in slop_check.BUCKETS}
+                    verdict[bucket] = [{**finding, 'snippet': ' border-left:  3px solid red; '}
+                                       for _ in range(count + 1)]
+                    slop_check.apply_baseline(verdict, str(path))
+                    self.assertEqual((len(verdict[bucket]), len(verdict['preexisting'])), (1, count))
+
+    def test_path_ignore_uses_canonical_relpath(self):
+        finding = {'antipattern': 'gradient-text', 'relpath': 'src/widget.css',
+                   'file': str(self.root / 'raw-alias' / 'widget.css'), 'snippet': 'gradient'}
+        ignore = {'rule': 'gradient-text', 'path': 'src/*.css', 'reason': 'licensed mark'}
+        self.assertEqual(slop_check.ignore_match(finding, [ignore], self.root), ignore)
+        self.assertIsNone(slop_check.ignore_match({**finding, 'relpath': 'other/widget.css'},
+                                                  [ignore], self.root))
+
     def test_new_finding_blocks_with_baseline(self):
         baseline, _ = self.baseline()
         head = self.copy_tree('head')

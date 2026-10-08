@@ -60,7 +60,7 @@ fn merge_base(workspace: &Path) -> Option<String> {
 
 // Quote concrete values as shell literals. Tokens remain for completion-time inputs.
 fn shell_value(value: &str) -> String {
-    if value.contains(['"', '$', '`', '\n', '\r']) {
+    if value.contains(['"', '$', '`', '\\', '\n', '\r']) {
         let escaped = if cfg!(windows) {
             value.replace('\'', "''")
         } else {
@@ -163,6 +163,10 @@ mod tests {
         let command = render_command(SlopGateMode::Report, "script", "D:/project", "D:/root", "session", "T'O$(secret)");
         let quoted = if cfg!(windows) { "--task 'T''O$(secret)'" } else { "--task 'T'\"'\"'O$(secret)'" };
         assert!(command.contains(quoted));
+        for task in [r"T\\literal", "Ttrailing\\"] {
+            let command = render_command(SlopGateMode::Report, "script", "D:/project", "D:/root", "session", task);
+            assert!(command.contains(&format!("--task '{task}'")), "{command}");
+        }
     }
 
     #[test]
