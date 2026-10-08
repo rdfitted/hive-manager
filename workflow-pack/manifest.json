@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "hive-manager-workflow-pack",
   "skills": [
     {
@@ -91,6 +91,60 @@
       ],
       "path": "workflow-pack/skills/resolvegitissue/SKILL.md",
       "sha256": "eb5f82b90899db6038127cd6d4e712dc27f3d2e8c7c10057bb51ed2579a0cc54"
+    },
+    {
+      "name": "slop-check",
+      "tier": "advanced",
+      "harnesses": [
+        "claude",
+        "codex"
+      ],
+      "files": [
+        {
+          "path": "workflow-pack/skills/slop-check/fixtures/clean.html",
+          "sha256": "a9476abab746616a189773408b5c499f39e7aa317c47476586d4d1e6d404d5c2"
+        },
+        {
+          "path": "workflow-pack/skills/slop-check/fixtures/dark_tokens.html",
+          "sha256": "072560354b0e6cf0e79484418404d36ad5d776a7328300b8b8fe1cd61469091a"
+        },
+        {
+          "path": "workflow-pack/skills/slop-check/fixtures/email/welcome_email.ts",
+          "sha256": "3cd72e6ef155e7eccffa8e842450e8ab8c92c8365fe303f0e3a53827461bcee3"
+        },
+        {
+          "path": "workflow-pack/skills/slop-check/fixtures/gradient_text.html",
+          "sha256": "ede28034e838377ea54d0e82a6b95cf56df29415b31af7e872d87ea63ecb9fb3"
+        },
+        {
+          "path": "workflow-pack/skills/slop-check/fixtures/inter.html",
+          "sha256": "c16cb15354ac40b396832a4849d86fa1a64093f8b67b7962ee5ebb378f518383"
+        },
+        {
+          "path": "workflow-pack/skills/slop-check/fixtures/side_tab.html",
+          "sha256": "d56f766e5e57d18af11ae3ee596472160d14fc3b9a9771ba352a52c185f29872"
+        },
+        {
+          "path": "workflow-pack/skills/slop-check/fixtures/spinner.tsx",
+          "sha256": "d95bc63930e911f60af16ba352fd55c565e8a18619c82233dab171a45d679294"
+        },
+        {
+          "path": "workflow-pack/skills/slop-check/scripts/slop_check.py",
+          "sha256": "79f7f198bec62f3249c17bd6d3068da261eb127b9de1cb884b4965f606ad1a3a"
+        },
+        {
+          "path": "workflow-pack/skills/slop-check/SKILL.md",
+          "sha256": "67f391880b219af7bd1f5e6e7dff941057febc7a08bc099ac198ded340ef4d43"
+        },
+        {
+          "path": "workflow-pack/skills/slop-check/tests/test_contracts.py",
+          "sha256": "ed8f4a1f77be267e09f339d0288f9a81d7934ea53073a0300ed92a2945df0a55"
+        },
+        {
+          "path": "workflow-pack/skills/slop-check/tests/test_slop_check.py",
+          "sha256": "24bb07bf14db64276ea877bb0b9996cde2938fbb79de80a7b53e9d396ea3e02e"
+        }
+      ]
     }
   ],
   "roster": {

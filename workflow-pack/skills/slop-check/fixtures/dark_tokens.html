@@ -1,0 +1,8 @@
+<!doctype html><html><head><style>
+/* Repro for the static resolver ignoring @media conditions: it takes the dark --ink
+   and the print-only white background together, a pair no real rendering shows. */
+:root{--paper:#f7f5f0;--ink:#17191f}
+@media (prefers-color-scheme: dark){:root{--paper:#101217;--ink:#eef0f4}}
+body{font-family:"Source Serif 4",Georgia,serif;color:var(--ink);background:var(--paper);margin:40px}
+@media print{body{background:#fff}}
+</style></head><body><p>Body text that reads fine on screen in both schemes and in print.</p></body></html>
