@@ -1017,6 +1017,7 @@ impl SessionStorage {
             global_wiki_path: default_global_wiki_path(),
             knowledge_wiki_folders: None,
             pty_replay_buffer_bytes: None,
+            slop_check_mode: None,
         }
     }
 
@@ -1821,6 +1822,9 @@ pub struct AppConfig {
     /// agents spawned after the app starts.
     #[serde(default)]
     pub pty_replay_buffer_bytes: Option<usize>,
+    /// UI gate mode for newly spawned principals. Missing means report.
+    #[serde(default)]
+    pub slop_check_mode: Option<crate::session::slop_gate::SlopGateMode>,
 }
 
 /// Default location of the global LLM wiki used by Research mode.
