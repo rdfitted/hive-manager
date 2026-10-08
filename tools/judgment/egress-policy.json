@@ -20,6 +20,13 @@
       "redact": "names",
       "decided": "2026-09-24",
       "by": "rdfitted"
+    },
+    "ui.slop": {
+      "allow": true,
+      "redact": "names",
+      "question_type": "noul",
+      "decided": "2026-10-08",
+      "by": "rdfitted"
     }
   }
 }

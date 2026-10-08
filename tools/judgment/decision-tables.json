@@ -20,6 +20,7 @@
     "fail_open_max_7d": 0.05
   },
   "surfaces": {
+    "ui.slop": { "mode": "shadow", "question_type": "noul", "bands": { "act_min": 0.8, "human_min": 0.35 }, "reason": "Initial bands are recorded and reported only; never gates." },
     "hive.qa.criterion": { "mode": "shadow", "question_type": "multiclass" },
     "hive.qa.milestone": { "mode": "shadow", "question_type": "multiclass" },
     "hive.qa.criterion.pass_fail": { "mode": "shadow", "question_type": "multiclass", "_doc": "Reserved for a future split; current rows use hive.qa.criterion." },
