@@ -2,6 +2,7 @@
 """Record shadow judgments and make locally gated, blind Jev requests.
 
 ask: --surface --subject-ref JSON --observations JSON --question-id --question JSON
+ask fan-out: --surface --subject-ref JSON --observations JSON --questions JSON
 record: --surface --subject-ref JSON --answer JSON --question-id
 outcome: --decision-id --label JSON --source
 
@@ -204,6 +205,13 @@ def _answer(surface: str, response: Any, question_id: str,
         probability = item.get("noul")
         if item.get("type") != "noul" or isinstance(probability, bool) or not isinstance(probability, (int, float)) or not math.isfinite(probability) or not 0 <= probability <= 1:
             raise jev_transport.TransportError("invalid-answer")
+        if surface == "ui.slop":
+            band = "act" if probability >= 0.8 else "human" if probability >= 0.35 else "drop"
+            return {"result": band}, {
+                "probabilities": {"true": probability, "false": 1 - probability},
+                "threshold_id": "ui-slop-initial-bands", "noul": probability,
+                "confidence": None,
+            }
         yes, no = ("pass", "fail") if surface == "hive.qa.criterion" else ("true", "false")
         return {"result": yes if probability >= 0.5 else no}, {
             "probabilities": {yes: probability, no: 1 - probability},
@@ -321,6 +329,93 @@ def _decision(args: argparse.Namespace, ledger_path: Path, *, ask: bool) -> int:
                          redaction=redaction_report), exit_code)
 
 
+def _fanout(args: argparse.Namespace, ledger_path: Path) -> int:
+    """One blind request, independent shadow rows sharing persisted evidence."""
+    subject = _read_json(args.subject_ref)
+    observations = _read_json(args.observations)
+    questions = _read_json(args.questions)
+    if not isinstance(subject, dict):
+        raise InputError("subject_ref must be an object")
+    if (not isinstance(questions, dict) or not questions
+            or not all(isinstance(k, str) and k.strip() for k in questions)):
+        raise InputError("questions must be a nonempty id map")
+    _blind(subject)
+    _blind(observations)
+    _blind(questions)
+    policy = _policy(args.policy)
+    entry = _policy_entry(policy, "surfaces", args.surface)
+    # Validate every id even when the project gate will deny egress.
+    questions = {qid: _question(args.surface, q, entry) for qid, q in questions.items()}
+    project = _project_identity() if entry else None
+    status, code = "egress-denied", 3
+    safe_state, redact_mode, report = None, None, None
+    sent, response, latency_ms = False, None, None
+    answers = {}
+    if entry and _policy_entry(policy, "projects", project):
+        redact_mode = entry["redact"]
+        try:
+            dictionary = redaction.load_dictionary(
+                args.redact_dictionary, os.environ.get("JUDGMENT_REDACT_PROFILE_ROOT"))
+        except (ValueError, OSError, UnicodeError, json.JSONDecodeError):
+            dictionary = None
+        clean, redaction_report = redaction.redact(
+            {"state": observations, "model": "jev-latest", "questions": questions},
+            redact_mode, dictionary)
+        if clean is None or redaction_report["blocked"]:
+            status, code, report = "redaction-blocked", 3, redaction_report
+        else:
+            request_bytes = _json_bytes(clean)
+            if len(request_bytes) > MAX_REQUEST_BYTES:
+                status, code = "size-blocked", 3
+            else:
+                safe_state = clean["state"]
+                if args.dry_run:
+                    status, code = "dry-run", 0
+                elif not (api_key := _api_key()):
+                    status, code = "no-key", 0
+                else:
+                    sent = True
+                    start = time.monotonic()
+                    try:
+                        response = jev_transport.send(request_bytes, api_key)
+                        answers = {qid: _answer(args.surface, response, qid, q)
+                                   for qid, q in questions.items()}
+                        status, code = "recorded", 0
+                    except (jev_transport.TransportError, ValueError, TypeError,
+                            OverflowError, KeyError):
+                        status, code, response, answers = "transport-error", 4, None, {}
+                    latency_ms = round((time.monotonic() - start) * 1000)
+    results = {}
+    state_hash = state_ref = None
+    for qid, question in questions.items():
+        decision_id = str(uuid.uuid4())
+        answer, diagnostics = answers.get(qid, (None, {}))
+        model = response["model"] if response else None
+        usage = response.get("usage") if response else None
+        row = ledger.record_decision(
+            args.surface, subject, "jev", answer,
+            state=safe_state if state_hash is None else None,
+            state_hash=state_hash, state_ref=state_ref,
+            question_id=qid, question_version=ledger.sha256_of(question),
+            model=model, mode="shadow", routed="none", latency_ms=latency_ms,
+            error=status if status != "recorded" else None,
+            decision_id=decision_id, ledger=ledger_path,
+            redact_mode=redact_mode, sent=sent, usage=usage, project=project,
+            redaction=report, source_decision_id=args.source_decision_id,
+            **diagnostics)
+        if row is None:
+            results[qid] = _result("ledger-error", decision_id, sent=sent, error="ledger-error")
+            code = 5
+        else:
+            state_hash, state_ref = row["state_hash"], row["state_ref"]
+            results[qid] = _result(status, decision_id, sent=sent, answer=answer,
+                                   model=model, latency_ms=latency_ms, usage=usage,
+                                   error=status if status != "recorded" else None,
+                                   redaction=report)
+    return _emit({"status": "ledger-error" if code == 5 else status,
+                  "sent": sent, "questions": results}, code)
+
+
 def _outcome(args: argparse.Namespace, ledger_path: Path) -> int:
     label = _read_json(args.label)
     if not isinstance(label, dict) or set(label) != {"result"}:
@@ -344,8 +439,9 @@ def _parser() -> argparse.ArgumentParser:
     ask.add_argument("--surface", required=True)
     ask.add_argument("--subject-ref", required=True)
     ask.add_argument("--observations", required=True)
-    ask.add_argument("--question-id", required=True)
-    ask.add_argument("--question", required=True)
+    ask.add_argument("--question-id")
+    ask.add_argument("--question")
+    ask.add_argument("--questions", help="JSON object mapping ids to typed questions")
     ask.add_argument("--source-decision-id")
     ask.add_argument("--dry-run", action="store_true")
     record = commands.add_parser("record", help="record an incumbent locally")
@@ -385,6 +481,12 @@ def main(argv: list[str] | None = None) -> int:
         args.ledger = _default_ledger(args.policy)
     try:
         if args.command == "ask":
+            if args.questions:
+                if args.question or args.question_id:
+                    raise InputError("fan-out and single-question flags are mutually exclusive")
+                return _fanout(args, args.ledger)
+            if not args.question or not args.question_id:
+                raise InputError("single-question flags are required together")
             return _decision(args, args.ledger, ask=True)
         if args.command == "record":
             return _decision(args, args.ledger, ask=False)

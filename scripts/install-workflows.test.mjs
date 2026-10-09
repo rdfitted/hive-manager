@@ -120,3 +120,113 @@ test('dry-run uninstall writes nothing', async (t) => {
   assert.deepEqual(await readFile(recordPath), beforeRecord);
   assert.deepEqual(await readFile(skillTarget), beforeSkill);
 });
+
+async function multiFixture(t) {
+  const result = await fixture(t);
+  const { root } = result.options;
+  const manifestPath = path.join(root, 'workflow-pack/manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  manifest.schema_version = 2;
+  const skill = manifest.skills[0];
+  skill.files = [{ path: skill.path, sha256: skill.sha256 },
+    { path: 'workflow-pack/skills/example/scripts/check.py', sha256: digest('print("check")\n') }];
+  delete skill.path;
+  delete skill.sha256;
+  await mkdir(path.join(root, 'workflow-pack/skills/example/scripts'), { recursive: true });
+  await writeFile(path.join(root, skill.files[1].path), 'print("check")\n');
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  return { ...result, manifest, manifestPath,
+    scriptTarget: path.join(path.dirname(result.skillTarget), 'scripts/check.py') };
+}
+
+test('multi-file skill installs and updates every declared file', async (t) => {
+  const { options, manifest, manifestPath, skillTarget, scriptTarget } = await multiFixture(t);
+  assert.equal((await installWorkflows(options)).filter(({ kind }) => kind === 'install').length, 6);
+  for (const [index, content] of ['# Next version\n', 'print("next")\n'].entries()) {
+    const file = manifest.skills[0].files[index];
+    await writeFile(path.join(options.root, file.path), content);
+    file.sha256 = digest(content);
+  }
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.equal((await installWorkflows(options)).filter(({ kind }) => kind === 'update').length, 4);
+  assert.equal(await readFile(skillTarget, 'utf8'), '# Next version\n');
+  assert.equal(await readFile(scriptTarget, 'utf8'), 'print("next")\n');
+});
+
+test('unowned SKILL.md collision skips the whole multi-file skill', async (t) => {
+  const { options, skillTarget, scriptTarget } = await multiFixture(t);
+  await mkdir(path.dirname(skillTarget), { recursive: true });
+  await writeFile(skillTarget, '# Local skill\n');
+  const actions = await installWorkflows({ ...options, harness: 'claude' });
+  assert.ok(actions.some(({ kind, target }) => kind === 'collision' && target === skillTarget));
+  assert.equal(await readFile(skillTarget, 'utf8'), '# Local skill\n');
+  await assert.rejects(readFile(scriptTarget), { code: 'ENOENT' });
+  assert.ok(!actions.some(({ target }) => target === scriptTarget));
+  const record = JSON.parse(await readFile(path.join(options.appConfigDir, 'workflow-pack-install.json')));
+  assert.ok(!Object.keys(record.files).some((file) => file.startsWith(path.dirname(skillTarget) + path.sep)));
+});
+
+test('a later nested collision prevents an earlier SKILL.md write', async (t) => {
+  const { options, skillTarget, scriptTarget } = await multiFixture(t);
+  await mkdir(path.dirname(scriptTarget), { recursive: true });
+  await writeFile(scriptTarget, 'local script\n');
+  await installWorkflows({ ...options, harness: 'claude' });
+  await assert.rejects(readFile(skillTarget), { code: 'ENOENT' });
+  assert.equal(await readFile(scriptTarget, 'utf8'), 'local script\n');
+});
+
+test('edited owned nested file prevents sibling updates and ownership changes', async (t) => {
+  const { options, manifest, manifestPath, skillTarget, scriptTarget } = await multiFixture(t);
+  await installWorkflows({ ...options, harness: 'claude' });
+  await writeFile(scriptTarget, 'user edit\n');
+  const file = manifest.skills[0].files[0];
+  await writeFile(path.join(options.root, file.path), '# Updated\n');
+  file.sha256 = digest('# Updated\n');
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const recordPath = path.join(options.appConfigDir, 'workflow-pack-install.json');
+  const before = await readFile(recordPath);
+  const actions = await installWorkflows({ ...options, harness: 'claude' });
+  assert.ok(actions.some(({ kind, target }) => kind === 'collision' && target === scriptTarget));
+  assert.equal(await readFile(skillTarget, 'utf8'), '# First version\n');
+  assert.equal(await readFile(scriptTarget, 'utf8'), 'user edit\n');
+  assert.deepEqual(await readFile(recordPath), before);
+});
+
+test('an identical unowned v1 file remains unowned after install', async (t) => {
+  const { options, skillTarget } = await fixture(t);
+  await mkdir(path.dirname(skillTarget), { recursive: true });
+  await writeFile(skillTarget, '# First version\n');
+  const actions = await installWorkflows({ ...options, harness: 'claude' });
+  assert.ok(actions.some(({ kind, target }) => kind === 'identical' && target === skillTarget));
+  const record = JSON.parse(await readFile(path.join(options.appConfigDir, 'workflow-pack-install.json')));
+  assert.equal(record.files[skillTarget], undefined);
+  await installWorkflows({ ...options, harness: 'claude', uninstall: true });
+  assert.equal(await readFile(skillTarget, 'utf8'), '# First version\n');
+});
+
+test('multi-file dry run changes neither files nor ownership', async (t) => {
+  const { options } = await multiFixture(t);
+  assert.equal((await installWorkflows({ ...options, dryRun: true })).filter(({ kind }) => kind === 'install').length, 6);
+  await assert.rejects(readdir(options.home), { code: 'ENOENT' });
+  await assert.rejects(readdir(options.codexHome), { code: 'ENOENT' });
+  await assert.rejects(readdir(options.appConfigDir), { code: 'ENOENT' });
+});
+
+test('multi-file uninstall removes recorded obsolete files and preserves edited/unowned siblings', async (t) => {
+  const { options, manifest, manifestPath, skillTarget, scriptTarget } = await multiFixture(t);
+  await installWorkflows({ ...options, harness: 'claude' });
+  const sibling = path.join(path.dirname(skillTarget), 'local.txt');
+  await writeFile(sibling, 'local\n');
+  await writeFile(skillTarget, '# User edit\n');
+  manifest.skills = [];
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const recordPath = path.join(options.appConfigDir, 'workflow-pack-install.json');
+  const before = await readFile(recordPath);
+  await installWorkflows({ ...options, harness: 'claude', uninstall: true, dryRun: true });
+  assert.deepEqual(await readFile(recordPath), before);
+  assert.equal(await readFile(scriptTarget, 'utf8'), 'print("check")\n');
+  await installWorkflows({ ...options, harness: 'claude', uninstall: true });
+  await assert.rejects(readFile(scriptTarget), { code: 'ENOENT' });
+  assert.equal(await readFile(skillTarget, 'utf8'), '# User edit\n');
+  assert.equal(await readFile(sibling, 'utf8'), 'local\n');
+});

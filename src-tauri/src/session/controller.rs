@@ -6679,6 +6679,7 @@ This tests that:
         ];
         let validation = [
             "Every accepted workstream has evidence from its assigned principal",
+            "Every accepted UI workstream includes its slop-check verdict path and mode, with unavailable explicitly recorded rather than treated as pass.",
             "Shared files and git operations were serialized",
             "The integrated result satisfies the plan and operator objective",
         ];
@@ -6976,6 +6977,8 @@ When the objective and every configured gate are complete, send this `completed`
             project_path,
             workspace_path,
             execution_policy,
+            crate::session::slop_gate::SlopGateMode::Report,
+            None,
         )
         .prompt
     }
@@ -6994,6 +6997,8 @@ When the objective and every configured gate are complete, send this `completed`
         project_path: &Path,
         workspace_path: &Path,
         execution_policy: &HiveExecutionPolicy,
+        slop_check_mode: crate::session::slop_gate::SlopGateMode,
+        plan_task_id: Option<&str>,
     ) -> BuiltWorkerPrompt {
         let role_name = config
             .role
@@ -7054,7 +7059,7 @@ When the objective and every configured gate are complete, send this `completed`
 
         let role_description = match role_type.as_str() {
             "backend" => "Server-side logic, APIs, databases, and backend infrastructure.",
-            "frontend" => "UI components, state management, styling, and user experience.",
+            "frontend" => "UI components, state management, styling, and user experience; follow the configured UI gate at handoff.",
             "coherence" => "Code consistency, API contracts, and cross-component integration.",
             "simplify" => "Code simplification, refactoring, and reducing complexity.",
             "reviewer" => "Deep code review across correctness, security, performance, architecture, and compatibility.",
@@ -7091,7 +7096,7 @@ When the objective and every configured gate are complete, send this `completed`
             "The ACTIVE task at {}, the approved plan, repository state, project DNA, and Queen messages",
             task_file
         );
-        let principal_deliverables = [
+        let mut principal_deliverables = vec![
             "Implemented changes inside the assigned ownership boundary",
             "Focused validation output and a concise completion report",
             "One durable learning record",
@@ -7101,11 +7106,23 @@ When the objective and every configured gate are complete, send this `completed`
             "A clear answer to the assigned research question",
             "No project or git mutations",
         ];
-        let principal_validation = [
+        let slop_gate_contract = if is_research {
+            String::new()
+        } else {
+            crate::session::slop_gate::render(
+                slop_check_mode, &session_root, Path::new(&workspace_path),
+                session_id, plan_task_id, role_type.starts_with("reviewer"),
+            )
+        };
+        let mut principal_validation = vec![
             "Run the focused tests or checks named by the task",
             "Review the final diff for scope and unintended changes",
             "Confirm the delivery commit when using an isolated cell",
         ];
+        if !slop_gate_contract.is_empty() {
+            principal_deliverables.push("For owned UI diffs, provide slop-check verdict JSON, mode, base manifest and absolute log path in the completion evidence");
+            principal_validation.push("Run the configured UI slop-check gate before handoff; reviewers verify verdict JSON, base and specific ignore reasons");
+        }
         let research_validation = [
             "Cite the evidence supporting each material conclusion",
             "Separate observed facts from inference",
@@ -7230,7 +7247,7 @@ When the objective and every configured gate are complete, send this `completed`
             }
         };
 
-        let completion_protocol = if is_research {
+        let mut completion_protocol = if is_research {
             format!(
                 r#"## Completion Protocol (MANDATORY)
 
@@ -7264,6 +7281,11 @@ When the objective and every configured gate are complete, send this `completed`
                 completed_heartbeat = completed_heartbeat,
             )
         };
+
+        if !slop_gate_contract.is_empty() {
+            completion_protocol.push_str("\n");
+            completion_protocol.push_str(&slop_gate_contract);
+        }
 
         let learnings_section = if is_research {
             String::new()
@@ -8259,7 +8281,7 @@ python tools/judgment/judge.py --redact-dictionary names.json ask --surface hive
 
 ## Egress and results
 
-Live egress is limited to the git-origin project `rdfitted/hive-manager` and allowlisted `hive.review.finding` and `hive.qa.criterion` surfaces. A live send needs `TYPESAFE_API_KEY`, read from the environment or else from `~/.ai-gateway.env`; without either, `ask` records `no-key` and sends nothing. Redaction and policy checks still run for dry runs and no-key calls. The request is capped at 32 KiB.
+Live egress is limited to the git-origin project `rdfitted/hive-manager` and allowlisted `hive.review.finding`, `hive.qa.criterion` and `ui.slop` surfaces. `ui.slop` is shadow / never-gating: its initial probability bands are recorded and reported only, and it never changes a slop verdict or verdict log. Use `python tools/judgment/ui_slop.py ask --verdict <verdict-v2.json> --ledger <ledger.jsonl> --redact-dictionary <names.json>` for blind relative-path finding asks, and `python tools/judgment/ui_slop.py report --ledger <ledger.jsonl>` for per-question reporting. Fan-out uses `ask --questions <questions.json>` with an id-to-question object; legacy single-question flags remain supported. A live send needs `TYPESAFE_API_KEY`, read from the environment or else from `~/.ai-gateway.env`; without either, `ask` records `no-key` and sends nothing. Redaction and policy checks still run for dry runs and no-key calls. The request is capped at 32 KiB.
 
 Every command prints one JSON object with `status`, `decision_id`, `sent`, `answer`, `model`, `latency_ms`, `usage`, `error`, and `redaction` (counts and reason classes only when blocked). Exit `0` means a row was written, including `dry-run` or `no-key`; exit `2` means invalid input; exit `3` means policy, redaction, or size blocked after a row; exit `4` means transport failed after a row; exit `5` means the ledger write failed. Treat a Jev result only as shadow evidence for later audit.
 "#;
@@ -9309,6 +9331,8 @@ Last updated: {timestamp}
                 &project_path,
                 Path::new(&worker_cwd),
                 &config.execution_policy,
+                crate::session::slop_gate::configured_mode(self.storage.as_deref()),
+                None,
             );
             let filename = format!("worker-{}-prompt.md", index);
             let prompt_file = match Self::write_worker_prompt_file(
@@ -12014,6 +12038,8 @@ The backend composed and persisted the following authoritative skeleton before l
             &session.project_path,
             Path::new(&worker_cwd),
             &session.execution_policy,
+            crate::session::slop_gate::configured_mode(self.storage.as_deref()),
+            None,
         );
         let prompt_file = Self::write_worker_prompt_file(
             Path::new(&worker_cwd),
@@ -15884,6 +15910,8 @@ The backend composed and persisted the following authoritative skeleton before l
             &session.project_path,
             Path::new(&worker_cwd),
             &session.execution_policy,
+            crate::session::slop_gate::configured_mode(self.storage.as_deref()),
+            plan_task_id,
         );
         let filename = format!("worker-{}-prompt.md", worker_index);
         let prompt_file = match Self::write_worker_prompt_file(
@@ -17667,6 +17695,96 @@ mod tests {
         );
     }
 
+    fn slop_test_prompt(mode: crate::session::slop_gate::SlopGateMode, role: &str, task: Option<&str>, project: &Path) -> String {
+        let mut principal = codex_principal();
+        principal.role = Some(WorkerRole::new(role, role, "codex"));
+        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(project, None, role);
+        SessionController::build_worker_prompt_artifact_with_tier(
+            2, &principal, &resolved, &SpawnContext::default(), false, &[], None,
+            "slop-session-queen", "slop-session", project, &project.join("worktree"),
+            &tiered_meta_harness_policy(), mode, task,
+        ).prompt
+    }
+
+    #[test]
+    fn slop_gate_report_principal_and_reviewer_contracts() {
+        let temp = tempfile::tempdir().unwrap();
+        for role in ["frontend", "backend", "reviewer"] {
+            let prompt = slop_test_prompt(crate::session::slop_gate::SlopGateMode::Report, role, Some("T7"), temp.path());
+            assert!(prompt.contains("## UI slop-check gate"));
+            assert!(prompt.contains(".html/.tsx/.jsx/.vue/.svelte/.astro/.css/.scss"));
+            assert!(prompt.contains("INTERSECT the task's owned paths"));
+            assert!(prompt.contains("a block is logged and reported; the task may complete"));
+            assert!(prompt.contains("Error or unavailable is never a pass."));
+            assert!(prompt.contains("--mode report"));
+            if role == "reviewer" {
+                assert!(prompt.contains("Reviewer: a UI review without verdict JSON is incomplete"));
+                assert!(prompt.contains("--label fp --by reviewer"));
+            }
+        }
+    }
+
+    #[test]
+    fn slop_gate_block_principal_and_reviewer_contracts() {
+        let temp = tempfile::tempdir().unwrap();
+        for role in ["frontend", "backend", "reviewer"] {
+            let prompt = slop_test_prompt(crate::session::slop_gate::SlopGateMode::Block, role, Some("T7"), temp.path());
+            assert!(prompt.contains(".html/.tsx/.jsx/.vue/.svelte/.astro/.css/.scss"));
+            assert!(prompt.contains("block means clean up, re-run, continue until pass"));
+            assert!(prompt.contains("Error or unavailable requires escalation to the Queen"));
+            assert!(prompt.contains("Error or unavailable is never a pass."));
+            assert!(prompt.contains("--mode block"));
+            assert!(!prompt.contains("a block is logged and reported; the task may complete"));
+        }
+    }
+
+    #[test]
+    fn slop_gate_off_omits_gate_for_principal_and_reviewer() {
+        let temp = tempfile::tempdir().unwrap();
+        for role in ["frontend", "reviewer", "researcher"] {
+            let prompt = slop_test_prompt(crate::session::slop_gate::SlopGateMode::Off, role, Some("T7"), temp.path());
+            assert!(!prompt.contains("## UI slop-check gate"));
+            assert!(!prompt.contains("--mode off"));
+            assert!(!prompt.contains("Final command:"));
+        }
+        let researcher = slop_test_prompt(crate::session::slop_gate::SlopGateMode::Report, "researcher", Some("T7"), temp.path());
+        assert!(!researcher.contains("## UI slop-check gate"));
+    }
+
+    #[test]
+    fn slop_gate_absolute_session_log_and_literal_plan_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = SessionController::session_root_path(temp.path(), "slop-session");
+        assert!(root.is_absolute());
+        let log = root.join("state/slop-check.jsonl").to_string_lossy().replace('\\', "/");
+        let prompt = slop_test_prompt(crate::session::slop_gate::SlopGateMode::Report, "backend", Some("T7-exact"), temp.path());
+        assert!(prompt.contains(&format!("--log \"{log}\"")));
+        assert!(prompt.contains("--task \"T7-exact\""));
+        assert!(!prompt.contains("--task \"<task>\""));
+        assert!(prompt.contains("git merge-base HEAD origin/main"));
+        assert!(prompt.contains("baseline extraction manifest"));
+    }
+
+    #[test]
+    fn slop_gate_unbound_task_has_explicit_substitution_instruction() {
+        let temp = tempfile::tempdir().unwrap();
+        let prompt = slop_test_prompt(crate::session::slop_gate::SlopGateMode::Report, "backend", None, temp.path());
+        assert!(prompt.contains("--task \"<task>\""));
+        assert!(prompt.contains("No plan binding was supplied at spawn"));
+        assert!(prompt.contains("exact JSON-decoded Plan Task ID"));
+    }
+
+    #[test]
+    fn slop_gate_documented_commands_match_renderer_byte_for_byte() {
+        use crate::session::slop_gate::{render_command, SlopGateMode};
+        let docs = include_str!("../../../docs/wiki-starter/engineering/quality-gates.md");
+        let commands: Vec<&str> = docs.lines().filter(|line| line.starts_with("python -I ")).collect();
+        let expected: Vec<String> = [SlopGateMode::Report, SlopGateMode::Block].into_iter()
+            .map(|mode| render_command(mode, "<script>", "<workspace>", "<session-root>", "<session>", "<task>"))
+            .collect();
+        assert_eq!(commands, expected.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+
     #[test]
     fn composition_sidecar_and_unsampled_builds_preserve_legacy_prompt_bytes() {
         const SESSION_ID: &str = "composition";
@@ -17712,6 +17830,8 @@ mod tests {
             Path::new("/repo"),
             Path::new("/repo/worktree"),
             &policy,
+            crate::session::slop_gate::SlopGateMode::Report,
+            None,
         );
         let legacy = SessionController::build_worker_prompt_with_tier(
             1,
@@ -17745,6 +17865,8 @@ mod tests {
             Path::new("/repo"),
             Path::new("/repo/worktree"),
             &policy,
+            crate::session::slop_gate::SlopGateMode::Report,
+            None,
         );
         let unsampled_legacy = SessionController::build_worker_prompt_with_tier(
             1,
@@ -17886,6 +18008,8 @@ mod tests {
             Path::new("/repo"),
             Path::new("/repo/worktree"),
             &tiered_meta_harness_policy(),
+            crate::session::slop_gate::SlopGateMode::Report,
+            None,
         );
 
         assert!(!build.sampled);
@@ -19256,6 +19380,10 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             .join("judge.md");
         let judge_content = std::fs::read_to_string(judge_tool_path).expect("read judge tool doc");
         assert!(judge_content.contains("python tools/judgment/judge.py"));
+        assert!(judge_content.contains("`ui.slop` is shadow / never-gating"));
+        assert!(judge_content.contains("never changes a slop verdict or verdict log"));
+        assert!(judge_content.contains("ask --questions <questions.json>"));
+        assert!(judge_content.contains("python tools/judgment/ui_slop.py report"));
         assert!(judge_content.contains("A Jev answer never gates any hive action"));
         assert!(judge_content.contains("outcome --decision-id <incumbent-decision-id>"));
         assert!(judge_content.contains("--source downstream --note \"evidence_tier=fixed"));

@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readManifest } from './sync-workflows.mjs';
+import { readManifest, skillFiles, skillRelativePath } from './sync-workflows.mjs';
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const RECORD_FILE = 'workflow-pack-install.json';
@@ -42,7 +42,9 @@ function destinations({ home, codexHome, harness }) {
 function belongsToDestination(target, destination) {
   const relative = path.relative(destination.root, target);
   return relative && !relative.startsWith('..') && !path.isAbsolute(relative) &&
-    (relative === 'agent-roster.md' || /^skills[/\\][a-z][a-z0-9-]*[/\\]SKILL\.md$/.test(relative));
+    (relative === 'agent-roster.md' ||
+      (/^skills[/\\][a-z][a-z0-9-]*[/\\].+$/.test(relative) &&
+        relative.split(/[\\/]/).every((part) => part && part !== '.' && part !== '..' && !part.includes(':'))));
 }
 
 export async function installWorkflows({
@@ -73,7 +75,9 @@ export async function installWorkflows({
     const candidates = new Set();
     for (const destination of selected) {
       for (const skill of manifest.skills.filter((item) => item.harnesses.includes(destination.name))) {
-        candidates.add(path.join(destination.root, 'skills', skill.name, 'SKILL.md'));
+        for (const file of skillFiles(skill)) {
+          candidates.add(path.join(destination.root, 'skills', skill.name, skillRelativePath(skill, file)));
+        }
       }
       candidates.add(path.join(destination.root, 'agent-roster.md'));
     }
@@ -100,37 +104,49 @@ export async function installWorkflows({
     }
   } else {
     for (const destination of selected) {
-      const items = manifest.skills.filter((skill) => skill.harnesses.includes(destination.name)).map((skill) => ({
-        source: skill.path,
-        expected: skill.sha256,
-        target: path.join(destination.root, 'skills', skill.name, 'SKILL.md'),
-      }));
-      items.push({
+      const groups = manifest.skills.filter((skill) => skill.harnesses.includes(destination.name)).map((skill) =>
+        skillFiles(skill).map((file) => ({
+          source: file.path,
+          expected: file.sha256,
+          target: path.join(destination.root, 'skills', skill.name, skillRelativePath(skill, file)),
+        })));
+      groups.push([{
         source: manifest.roster.path,
         expected: manifest.roster.sha256,
         target: path.join(destination.root, 'agent-roster.md'),
-      });
-      for (const item of items) {
-        const source = await readFile(path.join(root, item.source));
-        if (hash(source) !== item.expected) throw new Error(`Manifest hash is stale for ${item.source}`);
-        await refuseSymlink(item.target);
-        const existing = await readOptional(item.target);
-        const installed = record.files[item.target];
-        if (existing?.equals(source)) {
-          actions.push({ kind: 'identical', target: item.target });
+      }]);
+      for (const items of groups) {
+        const planned = [];
+        for (const item of items) {
+          const source = await readFile(path.join(root, item.source));
+          if (hash(source) !== item.expected) throw new Error(`Manifest hash is stale for ${item.source}`);
+          await refuseSymlink(item.target);
+          const existing = await readOptional(item.target);
+          const installed = record.files[item.target];
+          if (existing?.equals(source)) {
+            planned.push({ ...item, kind: 'identical', bytes: source });
+            continue;
+          }
+          if (existing && (!installed || installed.sha256 !== hash(existing) || installed.source !== item.source)) {
+            planned.push({ ...item, kind: 'collision', bytes: source });
+            continue;
+          }
+          const kind = existing ? 'update' : 'install';
+          planned.push({ ...item, kind, bytes: source });
+        }
+        const collisions = planned.filter((item) => item.kind === 'collision');
+        if (collisions.length) {
+          actions.push(...collisions.map(({ kind, target }) => ({ kind, target })));
           continue;
         }
-        if (existing && (!installed || installed.sha256 !== hash(existing) || installed.source !== item.source)) {
-          actions.push({ kind: 'collision', target: item.target });
-          continue;
-        }
-        const kind = existing ? 'update' : 'install';
-        actions.push({ kind, target: item.target });
-        if (!dryRun) {
-          await mkdir(path.dirname(item.target), { recursive: true });
-          await writeFile(item.target, source);
-          record.files[item.target] = { source: item.source, sha256: item.expected };
-          changed = true;
+        for (const item of planned) {
+          actions.push({ kind: item.kind, target: item.target });
+          if (!dryRun && item.kind !== 'identical') {
+            await mkdir(path.dirname(item.target), { recursive: true });
+            await writeFile(item.target, item.bytes);
+            record.files[item.target] = { source: item.source, sha256: item.expected };
+            changed = true;
+          }
         }
       }
     }
