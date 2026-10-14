@@ -4531,11 +4531,19 @@ Last updated: {timestamp}
         session_id: &str,
         scope_phrase: &str,
         has_evaluator: bool,
+        has_judge_tool: bool,
     ) -> String {
         let schema_step = format!(
             "For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work."
         );
-        let queen_step = r#"Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work. For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{"result":"ACCEPT|PARTIAL|DECLINE"}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified."#;
+        let validate_step = "Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work.";
+        // The judge commands drive tools/judgment/judge.py, which ships only in hive-manager.
+        let judge_steps = r#" For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{"result":"ACCEPT|PARTIAL|DECLINE"}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified."#;
+        let queen_step = if has_judge_tool {
+            format!("{validate_step}{judge_steps}")
+        } else {
+            validate_step.to_string()
+        };
         let (indent, before_command) = if has_evaluator {
             ("   ", "\n\n   ```bash\n\n")
         } else {
@@ -4559,6 +4567,7 @@ Last updated: {timestamp}
         session_id: &str,
         session_root: &Path,
         has_evaluator: bool,
+        has_judge_tool: bool,
     ) -> String {
         let milestone_ready_path =
             Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
@@ -4573,6 +4582,7 @@ Last updated: {timestamp}
                 "external review comments and integrity findings"
             },
             has_evaluator,
+            has_judge_tool,
         );
 
         if !has_evaluator {
@@ -5356,8 +5366,12 @@ Do not run the debate. Stop after writing the plan.
         } else {
             String::new()
         };
-        let post_workers_protocol =
-            Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
+        let post_workers_protocol = Self::queen_post_workers_protocol(
+            session_id,
+            &session_root,
+            has_evaluator,
+            Self::project_has_judge_tool(project_path),
+        );
         let status_reporting_lines = if has_evaluator {
             r#"[TIMESTAMP] QUEEN: Variant N (name) - COMPLETED/IN_PROGRESS/FAILED
 [TIMESTAMP] QUEEN: All variants complete - spawning Judge
@@ -6779,8 +6793,12 @@ This tests that:
         } else {
             String::new()
         };
-        let post_workers_protocol =
-            Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
+        let post_workers_protocol = Self::queen_post_workers_protocol(
+            session_id,
+            &session_root,
+            has_evaluator,
+            Self::project_has_judge_tool(project_path),
+        );
         let queen_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
             session_id,
@@ -7565,8 +7583,12 @@ Awaiting task assignment from the Queen."#,
         let (project_root, project_dna_path, project_learnings_path) =
             Self::project_knowledge_prompt_paths(queen_cli, project_path);
         let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
-        let post_workers_protocol =
-            Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
+        let post_workers_protocol = Self::queen_post_workers_protocol(
+            session_id,
+            &session_root,
+            has_evaluator,
+            Self::project_has_judge_tool(project_path),
+        );
 
         // Build planner info section (what Queen will spawn)
         let mut planner_info = String::new();
@@ -18841,6 +18863,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                 "session-123",
                 session_root,
                 has_evaluator,
+                true,
             );
             assert_eq!(
                 rendered,
@@ -18859,6 +18882,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         let protocol = SessionController::queen_post_workers_protocol(
             "session-123",
             Path::new("/repo/.hive-manager/session-123"),
+            true,
             true,
         );
         for blocked_step in [
@@ -18895,6 +18919,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             "session-123",
             session_root,
             false,
+            true,
         );
         assert!(qa_off.contains("QA is disabled for this session"));
         assert!(qa_off.contains("milestone QA gate will not run before push"));
@@ -18902,6 +18927,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         let qa_on = SessionController::queen_post_workers_protocol(
             "session-123",
             session_root,
+            true,
             true,
         );
         assert!(!qa_on.contains("QA is disabled for this session"));
@@ -18915,6 +18941,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                 "session-123",
                 session_root,
                 has_evaluator,
+                true,
             );
             assert!(protocol.contains("notes/review-round-N.md` plus sibling `review-round-N.json`"));
             assert!(protocol.contains("`finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE)"));
@@ -18929,6 +18956,20 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             assert!(protocol.contains("its answer never changes the fix list"));
             assert!(protocol.contains("attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees"));
             assert!(protocol.contains("A resolved thread alone supplies no truth label"));
+
+            // Projects without tools/judgment/judge.py keep the adjudication flow but get no judge steps.
+            let no_judge = SessionController::queen_post_workers_protocol(
+                "session-123",
+                session_root,
+                has_evaluator,
+                false,
+            );
+            assert!(no_judge.contains("notes/review-round-N.md` plus sibling `review-round-N.json`"));
+            assert!(no_judge.contains("and full coverage before assigning Resolver work.\n"));
+            assert!(!no_judge.contains("judge record"));
+            assert!(!no_judge.contains("judge ask"));
+            assert!(!no_judge.contains("judge outcome"));
+            assert!(!no_judge.contains("hive.review.finding"));
         }
         assert!(include_str!("controller.rs").contains("for external PR findings emit the paired review-round-N.md and review-round-N.json adjudication artifacts, with one disposition per finding and rationale only in markdown"));
     }
