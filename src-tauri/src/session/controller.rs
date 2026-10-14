@@ -7608,6 +7608,11 @@ If you find yourself about to edit code, STOP. Assign work to a Planner instead.
         } else {
             String::new()
         };
+        let judge_tool_row = if Self::project_has_judge_tool(project_path) {
+            "| Judge | `judge.md` | Record and compare blind shadow judgments with the gated Jev CLI |\n"
+        } else {
+            ""
+        };
 
         format!(
             r#"# Queen Agent - Swarm Session
@@ -7672,8 +7677,7 @@ Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files f
 | Spawn Worker | `spawn-worker.md` | Reference only - Planners use this to spawn workers |
 | List Workers | `list-workers.md` | Get list of all workers and their status |
 | Mark Worker Status | `mark-worker-status.md` | Mark each independently verified worker complete |
-| Judge | `judge.md` | Record and compare blind shadow judgments with the gated Jev CLI |
-| Submit Learning | `submit-learning.md` | Record a learning via HTTP API |
+{judge_tool_row}| Submit Learning | `submit-learning.md` | Record a learning via HTTP API |
 | List Learnings | `list-learnings.md` | Get all learnings for this session |
 | Delete Learning | `delete-learning.md` | Remove a learning by ID |
 
@@ -7781,6 +7785,7 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
             cli = planner_spawn_cli,
             planner_info = planner_info,
             planner_count = planner_count,
+            judge_tool_row = judge_tool_row,
             project_root = project_root,
             project_dna_path = project_dna_path,
             project_learnings_path = project_learnings_path,
@@ -7900,6 +7905,18 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
                 "Failed to serialize worker context sidecar; spawn will continue: {error}"
             ),
         }
+    }
+
+    /// `judge.md` drives `tools/judgment/judge.py`, which ships only in hive-manager
+    /// itself. Checking for the script (not the git origin) means forks and clones
+    /// without a remote still get the doc, and other projects never see a tool
+    /// they cannot run.
+    fn project_has_judge_tool(project_path: &Path) -> bool {
+        project_path
+            .join("tools")
+            .join("judgment")
+            .join("judge.py")
+            .is_file()
     }
 
     /// Write a tool documentation file to the session's tools directory
@@ -8285,7 +8302,9 @@ Live egress is limited to the git-origin project `rdfitted/hive-manager` and all
 
 Every command prints one JSON object with `status`, `decision_id`, `sent`, `answer`, `model`, `latency_ms`, `usage`, `error`, and `redaction` (counts and reason classes only when blocked). Exit `0` means a row was written, including `dry-run` or `no-key`; exit `2` means invalid input; exit `3` means policy, redaction, or size blocked after a row; exit `4` means transport failed after a row; exit `5` means the ledger write failed. Treat a Jev result only as shadow evidence for later audit.
 "#;
-        Self::write_tool_file(project_path, session_id, "judge.md", judge_tool)?;
+        if Self::project_has_judge_tool(project_path) {
+            Self::write_tool_file(project_path, session_id, "judge.md", judge_tool)?;
+        }
 
         // Submit Learning tool
         let submit_learning_tool = r#"# Submit Learning Tool
@@ -19372,12 +19391,24 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             "keeps agent liveness fresh for stall detection but does not extend the session's 10-minute quiescence window"
         ));
 
+        // The temp project has no `tools/judgment/judge.py`, so it gets no judge doc.
         let judge_tool_path = temp_dir
             .path()
             .join(".hive-manager")
             .join("session-123")
             .join("tools")
             .join("judge.md");
+        assert!(!judge_tool_path.exists());
+
+        let judge_script_dir = temp_dir.path().join("tools").join("judgment");
+        std::fs::create_dir_all(&judge_script_dir).expect("create judgment dir");
+        std::fs::write(judge_script_dir.join("judge.py"), "").expect("write judge.py");
+        SessionController::write_tool_files(
+            &PathBuf::from(temp_dir.path()),
+            "session-123",
+            "claude",
+        )
+        .expect("rewrite tool files");
         let judge_content = std::fs::read_to_string(judge_tool_path).expect("read judge tool doc");
         assert!(judge_content.contains("python tools/judgment/judge.py"));
         assert!(judge_content.contains("`ui.slop` is shadow / never-gating"));
@@ -20194,8 +20225,41 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         );
 
         assert!(hardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
-        assert!(hardened_queen_prompt.contains("| Judge | `judge.md` |"));
         assert!(!unhardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
+    }
+
+    #[test]
+    fn swarm_queen_lists_judge_tool_only_when_project_ships_judge_py() {
+        let other_project = tempfile::tempdir().expect("temp dir");
+        let other_prompt = SessionController::build_swarm_queen_prompt(
+            "claude",
+            "claude",
+            other_project.path(),
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+        assert!(!other_prompt.contains("| Judge | `judge.md` |"));
+        assert!(other_prompt.contains("| Mark Worker Status | `mark-worker-status.md` |"));
+        assert!(other_prompt.contains("| Submit Learning | `submit-learning.md` |"));
+
+        let hive_project = tempfile::tempdir().expect("temp dir");
+        let judge_script_dir = hive_project.path().join("tools").join("judgment");
+        std::fs::create_dir_all(&judge_script_dir).expect("create judgment dir");
+        std::fs::write(judge_script_dir.join("judge.py"), "").expect("write judge.py");
+        let hive_prompt = SessionController::build_swarm_queen_prompt(
+            "claude",
+            "claude",
+            hive_project.path(),
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+        assert!(hive_prompt.contains(
+            "| Mark Worker Status | `mark-worker-status.md` | Mark each independently verified worker complete |\n| Judge | `judge.md` |"
+        ));
     }
 
     #[test]
