@@ -1358,6 +1358,92 @@ fn apply_work_graph_verdict_for_agent(
     Ok((routing, completion_facts))
 }
 
+fn apply_operator_verdict_with_peer_rollback(
+    controller: &SessionController,
+    session_root: &FsPath,
+    session_id: &str,
+    verdict: &str,
+    rationale: Option<&str>,
+) -> Result<SessionState, ApiError> {
+    let (log_action, _) = override_log_details(verdict)?;
+    let action = if log_action == "FORCE-PASS" { "force-pass" } else { "force-fail" };
+    let forced_verdict = if log_action == "FORCE-PASS" { "PASS" } else { "FAIL" };
+    let state_manager = StateManager::new(session_root.to_path_buf());
+    let queen_id = format!("{session_id}-queen");
+    let at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let reason = format!("operator {action}");
+    let qa_content = json!({
+        "kind": "qa-verdict",
+        "verdict": forced_verdict,
+        "reason": reason,
+        "forced_by": "operator",
+        "at": at,
+        "rationale": rationale,
+    });
+    let prince_content = json!({
+        "kind": "prince-verdict",
+        "verdict": "SKIPPED",
+        "reason": reason,
+        "forced_by": "operator",
+        "at": at,
+    });
+    let mut snapshots = Vec::new();
+    let result = (|| {
+        // Snapshot each target before replacing it. QA is published first;
+        // any later snapshot/write/transition error restores earlier writes.
+        for (kind, content) in [("qa-verdict", qa_content), ("prince-verdict", prince_content)] {
+            let path = session_root.join("peer").join(format!("{kind}.json"));
+            let previous = match fs::read(&path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(ApiError::internal(format!(
+                    "Failed to snapshot forced {kind} peer record: {error}"
+                ))),
+            };
+            snapshots.push((path, previous));
+            let written = if kind == "qa-verdict" {
+                state_manager.write_qa_verdict("operator", &queen_id, &content.to_string(), None)
+            } else {
+                state_manager.write_prince_verdict("operator", &queen_id, &content.to_string(), None)
+            };
+            written.map_err(|error| ApiError::internal(format!(
+                "Failed to persist forced {kind} peer record: {error}"
+            )))?;
+        }
+        controller.on_qa_verdict(session_id, verdict).map_err(ApiError::internal)
+    })();
+    if let Err(error) = result {
+        let mut rollback_errors = Vec::new();
+        for (path, previous) in snapshots.iter().rev() {
+            let restored = (|| -> io::Result<()> {
+                if let Some(bytes) = previous {
+                    let parent = path.parent().ok_or_else(|| io::Error::other("Peer file has no parent"))?;
+                    let mut temp = NamedTempFile::new_in(parent)?;
+                    temp.as_file_mut().write_all(bytes)?;
+                    temp.persist(path).map_err(|error| error.error)?;
+                } else if let Err(error) = fs::remove_file(path) {
+                    if error.kind() != io::ErrorKind::NotFound {
+                        return Err(error);
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = restored {
+                rollback_errors.push(format!("{}: {error}", path.display()));
+            }
+        }
+        if !rollback_errors.is_empty() {
+            return Err(ApiError::internal(format!(
+                "{}; peer verdict rollback failed: {}",
+                error.message,
+                rollback_errors.join("; ")
+            )));
+        }
+        return Err(error);
+    }
+    result
+}
+
 pub(crate) fn apply_verdict(
     state: &AppState,
     session_id: &str,
@@ -1379,47 +1465,17 @@ pub(crate) fn apply_verdict(
     let controller = state.session_controller.read();
     let _resolution = is_override.then(SessionController::lock_qa_resolution);
     require_qa_overridable(&controller, session_id, action)?;
-    if is_override {
+    let new_state = if is_override {
         let session = controller
             .get_session(session_id)
             .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
-        let state_manager =
-            StateManager::new(session.project_path.join(".hive-manager").join(session_id));
-        let queen_id = format!("{session_id}-queen");
-        let at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-        let reason = format!("operator {action}");
-        let forced_verdict = if action == "force-pass" { "PASS" } else { "FAIL" };
-        let qa_content = json!({
-            "kind": "qa-verdict",
-            "verdict": forced_verdict,
-            "reason": reason,
-            "forced_by": "operator",
-            "at": at,
-            "rationale": rationale,
-        });
-        // Publish the replacement QA verdict before writing the Prince file
-        // that releases the pinned Queen wait loop.
-        state_manager
-            .write_qa_verdict("operator", &queen_id, &qa_content.to_string(), None)
-            .map_err(|error| {
-                ApiError::internal(format!("Failed to persist forced QA verdict: {error}"))
-            })?;
-        let prince_content = json!({
-            "kind": "prince-verdict",
-            "verdict": "SKIPPED",
-            "reason": reason,
-            "forced_by": "operator",
-            "at": at,
-        });
-        state_manager
-            .write_prince_verdict("operator", &queen_id, &prince_content.to_string(), None)
-            .map_err(|error| {
-                ApiError::internal(format!("Failed to persist forced Prince verdict: {error}"))
-            })?;
-    }
-    let new_state = controller
-        .on_qa_verdict(session_id, verdict)
-        .map_err(ApiError::internal)?;
+        let session_root = session.project_path.join(".hive-manager").join(session_id);
+        apply_operator_verdict_with_peer_rollback(
+            &controller, &session_root, session_id, verdict, rationale,
+        )?
+    } else {
+        controller.on_qa_verdict(session_id, verdict).map_err(ApiError::internal)?
+    };
     drop(controller);
 
     if is_override {
@@ -3139,6 +3195,9 @@ mod tests {
                 SessionState::QaInconclusive
             ));
             assert!(!peer_dir.join("prince-verdict.json").is_file());
+            if blocked_file == "prince-verdict.json" {
+                assert!(!peer_dir.join("qa-verdict.json").exists(), "partial QA publication must roll back");
+            }
 
             std::fs::remove_dir(&blocked_path).unwrap();
             let response = app.oneshot(request()).await.unwrap();
@@ -3226,5 +3285,82 @@ mod tests {
             assert_eq!(content["reason"], "operator force-pass");
             chrono::DateTime::parse_from_rfc3339(content["at"].as_str().unwrap()).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn force_override_transition_failure_restores_exact_peer_bytes_and_absence() {
+        for (prior_qa, prior_prince) in [(false, false), (true, true), (true, false), (false, true)] {
+            let storage = TempDir::new().unwrap();
+            let project = TempDir::new().unwrap();
+            let (_, controller, _) =
+                setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+            let session_id = format!("force-missing-runtime-{}", uuid::Uuid::new_v4());
+            // Retain the launch snapshot/root, but leave its runtime row absent.
+            // The production helper must reach on_qa_verdict's actual valid-PASS
+            // missing-session error after publishing both peer files.
+            let snapshot = make_test_session(&session_id, project.path().to_str().unwrap());
+            let session_root = snapshot.project_path.join(".hive-manager").join(&session_id);
+            let peer_dir = session_root.join("peer");
+            let manager = StateManager::new(session_root.clone());
+            if prior_qa {
+                manager.write_qa_verdict("evaluator", "queen", "BLOCKED", Some("old-sha")).unwrap();
+            }
+            if prior_prince {
+                manager.write_prince_verdict("prince", "queen", "FAIL", Some("old-sha")).unwrap();
+            }
+            let qa_path = peer_dir.join("qa-verdict.json");
+            let prince_path = peer_dir.join("prince-verdict.json");
+            let qa_before = std::fs::read(&qa_path).ok();
+            let prince_before = std::fs::read(&prince_path).ok();
+
+            let _resolution = crate::session::SessionController::lock_qa_resolution();
+            let controller = controller.read();
+            let error = super::apply_operator_verdict_with_peer_rollback(
+                &controller,
+                &session_root,
+                &session_id,
+                "QA_VERDICT: PASS",
+                Some("Operator reviewed the evidence"),
+            ).unwrap_err();
+            assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(error.message.contains(&format!("Session not found: {session_id}")));
+            assert!(!error.message.contains("rollback failed"));
+            assert!(controller.get_session(&session_id).is_none());
+            assert_eq!(std::fs::read(&qa_path).ok(), qa_before);
+            assert_eq!(std::fs::read(&prince_path).ok(), prince_before);
+            assert_eq!(qa_path.is_file(), prior_qa);
+            assert_eq!(prince_path.is_file(), prior_prince);
+        }
+    }
+
+    #[tokio::test]
+    async fn force_override_partial_peer_failure_restores_prior_qa_record() {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, _) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("force-partial-peer-{}", uuid::Uuid::new_v4());
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = SessionState::QaInconclusive;
+        controller.write().insert_test_session(session);
+        let session_root = project.path().join(".hive-manager").join(&session_id);
+        StateManager::new(session_root.clone())
+            .write_qa_verdict("evaluator", "queen", "BLOCKED", Some("prior-sha"))
+            .unwrap();
+        let qa_path = session_root.join("peer/qa-verdict.json");
+        let qa_before = std::fs::read(&qa_path).unwrap();
+        std::fs::create_dir(session_root.join("peer/prince-verdict.json")).unwrap();
+
+        let response = app.oneshot(Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/qa/force-pass"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"confirm":true}"#)).unwrap())
+            .await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("Failed to snapshot forced prince-verdict"));
+        assert_eq!(std::fs::read(qa_path).unwrap(), qa_before);
+        assert!(matches!(controller.read().get_session(&session_id).unwrap().state, SessionState::QaInconclusive));
     }
 }

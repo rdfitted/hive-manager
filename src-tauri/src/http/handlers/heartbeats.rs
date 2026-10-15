@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Weak};
 
 use super::validate_agent_id;
 use super::validate_session_id;
@@ -111,7 +111,62 @@ pub struct ActiveSessionsResponse {
 
 const VALID_HEARTBEAT_STATUSES: &[&str] = &["working", "idle", "completed"];
 // Keep binding authorization and durable completion effects in the same critical section.
-static HEARTBEAT_MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static HEARTBEAT_MUTATIONS: LazyLock<parking_lot::Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(BTreeMap::new()));
+
+fn heartbeat_mutation_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = HEARTBEAT_MUTATIONS.lock();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(session_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(session_id.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
+/// Neutral audit only: unknown callers stay unknown and never infer a completion.
+async fn heartbeat_security_event(
+    state: &AppState, session_id: &str, caller_id: Option<&str>, claimed_id: &str,
+    resolved_id: Option<&str>, token: Option<&str>, reason: &'static str, rejected: bool,
+) -> Result<(), ApiError> {
+    let safe = |value: &str| {
+        if token.is_some_and(|token| !token.is_empty() && value.contains(token)) {
+            "redacted-credential".to_string()
+        } else { value.to_string() }
+    };
+    let known_session = state.session_controller.read().get_session(session_id).is_some();
+    let safe_session_id = safe(session_id);
+    let may_persist = known_session && safe_session_id == session_id;
+    let session_id = if may_persist { safe_session_id } else { "unattributed-session".to_string() };
+    let caller_id = caller_id.map(safe);
+    let claimed_id = safe(claimed_id);
+    let resolved_id = resolved_id.map(safe);
+    tracing::warn!(session_id = %session_id, caller_agent_id = ?caller_id,
+        claimed_agent_id = %claimed_id, resolved_agent_id = ?resolved_id, reason,
+        rejected, "heartbeat authorization audit");
+    // Unknown or credential-bearing session paths must never create a token-named directory.
+    if !may_persist { return Ok(()); }
+    state.event_bus.publish(Event {
+        id: uuid::Uuid::new_v4().to_string(), session_id, cell_id: None,
+        agent_id: caller_id.clone(), event_type: EventType::ArtifactUpdated,
+        timestamp: chrono::Utc::now(), severity: Severity::Warning,
+        payload: serde_json::json!({
+            "kind": if rejected { "heartbeat_rejected" } else { "heartbeat_unauthenticated" },
+            "caller_agent_id": caller_id, "claimed_agent_id": claimed_id,
+            "resolved_agent_id": resolved_id, "reason": reason,
+        }),
+    }).await.map_err(|_| ApiError::internal("Failed to persist heartbeat authorization audit"))
+}
+
+async fn reject_heartbeat(
+    state: &AppState, session_id: &str, caller_id: Option<&str>, claimed_id: &str,
+    resolved_id: Option<&str>, token: Option<&str>, reason: &'static str,
+) {
+    if heartbeat_security_event(state, session_id, caller_id, claimed_id, resolved_id, token, reason, true).await.is_err() {
+        tracing::warn!("Failed to persist rejected heartbeat audit; request remains rejected");
+    }
+}
 
 /// POST /api/sessions/{id}/heartbeat
 pub async fn post_heartbeat(
@@ -129,26 +184,52 @@ pub async fn post_heartbeat(
         ));
     }
 
-    let (caller_id, caller_is_queen) = headers
-        .get("X-Hive-Agent-Token")
-        .and_then(|header| header.to_str().ok())
-        .and_then(|token| state.pty_manager.read().authenticate_heartbeat(&session_id, token))
-        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED,
-            "Missing or invalid X-Hive-Agent-Token; restart this agent to receive its spawn credential"))?;
-    // A confused agent must not persist its own credential in a summary, provenance or target ID.
-    let token = headers.get("X-Hive-Agent-Token").and_then(|header| header.to_str().ok()).unwrap_or_default();
+    let claimed_id = req.agent_id.clone();
+    let token_headers = headers.get_all("X-Hive-Agent-Token");
+    let token = headers.get("X-Hive-Agent-Token").and_then(|header| header.to_str().ok());
+    let verify_when_present = state.pty_manager.read().heartbeat_verifies_when_present(&session_id);
+    // Codex can forward an explicitly empty header after filtering its tool environment.
+    // Only one decodable empty/whitespace value is absent; duplicates/non-UTF8 stay invalid.
+    let usable_token_absent = !headers.contains_key("X-Hive-Agent-Token")
+        || (token_headers.iter().count() == 1 && token.is_some_and(|token| token.trim().is_empty()));
+    let authenticated = if !usable_token_absent {
+        let authenticated = if token_headers.iter().count() == 1 {
+            token.and_then(|token| state.pty_manager.read().authenticate_heartbeat(&session_id, token))
+        } else { None };
+        if authenticated.is_none() {
+            let audit_claimed_id = if token_headers.iter().count() == 1 && token.is_some() {
+                claimed_id.as_str()
+            } else { "redacted-untrusted-identity" };
+            reject_heartbeat(&state, &session_id, None, audit_claimed_id, None, token, "invalid_token").await;
+            return Err(ApiError::new(StatusCode::UNAUTHORIZED,
+                "Missing or invalid X-Hive-Agent-Token; restart this agent to receive its spawn credential"));
+        }
+        authenticated
+    } else if !verify_when_present {
+        reject_heartbeat(&state, &session_id, None, &claimed_id, None, None, "missing_token").await;
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED,
+            "Missing or invalid X-Hive-Agent-Token; restart this agent to receive its spawn credential"));
+    } else { None };
+    let caller_id = authenticated.as_ref().map(|(id, _)| id.clone()).unwrap_or_else(|| claimed_id.clone());
+    let caller_is_queen = authenticated.as_ref().is_some_and(|(_, queen)| *queen);
+    // A confused agent must not persist its credential in a summary, provenance or target ID.
     let payload = serde_json::to_string(&req).map_err(|_| ApiError::bad_request("Invalid heartbeat payload"))?;
-    if payload.contains(token) {
+    if !usable_token_absent && token.is_some_and(|token| !token.is_empty() && payload.contains(token)) {
+        reject_heartbeat(&state, &session_id, authenticated.as_ref().map(|(id, _)| id.as_str()),
+            &claimed_id, req.mark_agent_id.as_deref(), token, "credential_in_payload").await;
         return Err(ApiError::bad_request("Heartbeat payload must not contain a credential value"));
     }
-    if req.agent_id != caller_id
+    if authenticated.is_some() && req.agent_id != caller_id
         && super::canonical_agent_id(&session_id, &req.agent_id) != caller_id
     {
+        reject_heartbeat(&state, &session_id, Some(&caller_id), &claimed_id, None, token, "token_owner_mismatch").await;
         return Err(ApiError::new(StatusCode::FORBIDDEN,
             "X-Hive-Agent-Token may update only its owning agent; Queen cross-agent marks require mark_agent_id"));
     }
     if let Some(target_id) = req.mark_agent_id.as_ref() {
         if !caller_is_queen {
+            reject_heartbeat(&state, &session_id, authenticated.as_ref().map(|(id, _)| id.as_str()),
+                &claimed_id, Some(target_id), token, "queen_mark_requires_credential").await;
             return Err(ApiError::new(StatusCode::FORBIDDEN,
                 "mark_agent_id requires a Queen-scoped X-Hive-Agent-Token"));
         }
@@ -158,9 +239,12 @@ pub async fn post_heartbeat(
         validate_agent_id(target_id)?;
         req.agent_id = target_id.clone();
     }
-    let _mutation_guard = HEARTBEAT_MUTATIONS.lock().await;
+    let mutation_lock = heartbeat_mutation_lock(&session_id);
+    let _mutation_guard = mutation_lock.lock().await;
     if !req.reassign_nodes.is_empty() {
         if !caller_is_queen {
+            reject_heartbeat(&state, &session_id, authenticated.as_ref().map(|(id, _)| id.as_str()),
+                &claimed_id, None, token, "reassignment_requires_credential").await;
             return Err(ApiError::new(StatusCode::FORBIDDEN, "reassign_nodes requires a Queen-scoped X-Hive-Agent-Token"));
         }
         if req.mark_agent_id.is_some() || !req.completed_nodes.is_empty()
@@ -259,7 +343,9 @@ pub async fn post_heartbeat(
 
     // Raw roster IDs take precedence over aliases. Check the resolved target too, so an
     // alias collision cannot turn an owning credential into a cross-agent write.
-    if req.mark_agent_id.is_none() && agent_id != caller_id {
+    if authenticated.is_some() && req.mark_agent_id.is_none() && agent_id != caller_id {
+        reject_heartbeat(&state, &session_id, Some(&caller_id), &claimed_id, Some(&agent_id), token,
+            "resolved_token_owner_mismatch").await;
         return Err(ApiError::new(StatusCode::FORBIDDEN,
             "X-Hive-Agent-Token does not own the resolved agent"));
     }
@@ -335,6 +421,8 @@ pub async fn post_heartbeat(
             .map(str::trim)
             .filter(|principal| !principal.is_empty());
         if agent_principal.is_none() && !(caller_is_queen && agent_id == caller_id) {
+            reject_heartbeat(&state, &session_id, authenticated.as_ref().map(|(id, _)| id.as_str()),
+                &claimed_id, Some(&agent_id), token, "missing_principal_binding").await;
             return Err(ApiError::new(StatusCode::FORBIDDEN,
                 "completed_nodes requires an authenticated agent with a current principal binding"));
         }
@@ -357,6 +445,8 @@ pub async fn post_heartbeat(
                 })
                 .collect::<Vec<_>>();
             if !ownership_conflicts.is_empty() {
+                reject_heartbeat(&state, &session_id, authenticated.as_ref().map(|(id, _)| id.as_str()),
+                    &claimed_id, Some(&agent_id), token, "principal_binding_mismatch").await;
                 return Err(ApiError::bad_request(format!(
                     "completed_nodes ownership mismatch: {}",
                     ownership_conflicts.join("; ")
@@ -391,6 +481,11 @@ pub async fn post_heartbeat(
         (normalized.into_iter().collect::<Vec<_>>(), external_completion_ids)
     };
 
+    if authenticated.is_none() {
+        heartbeat_security_event(&state, &session_id, None, &claimed_id, Some(&agent_id), None,
+            "verify_when_present", false).await?;
+    }
+
     // Neutral audit events do not infer work-graph completion, unlike AgentCompleted.
     // Persist before changing status so a failed audit write cannot silently erase evidence.
     let previous = state.session_controller.read().get_heartbeat_info(&session_id)
@@ -402,12 +497,12 @@ pub async fn post_heartbeat(
             id: uuid::Uuid::new_v4().to_string(),
             session_id: session_id.clone(),
             cell_id: None,
-            agent_id: Some(caller_id.clone()),
+            agent_id: authenticated.as_ref().map(|(id, _)| id.clone()),
             event_type: EventType::ArtifactUpdated,
             timestamp: chrono::Utc::now(),
             payload: serde_json::json!({
                 "kind": "heartbeat_status_requested",
-                "actor_agent_id": caller_id,
+                "actor_agent_id": authenticated.as_ref().map(|(id, _)| id.as_str()),
                 "target_agent_id": agent_id,
                 "queen_mark": req.mark_agent_id.is_some(),
                 "status": req.status,
@@ -1649,30 +1744,38 @@ mod tests {
 
     #[tokio::test]
     async fn forged_heartbeat_cannot_mutate_queue_liveness_or_external_completion() {
-        let fixture = fixture();
-        fixture.state.queue_manager.repo().enqueue(&running_row()).expect("queue row");
-        let manager = write_graph_and_worker_principal(&fixture,
-            TaskGraph::new(vec![work_node("T-review-3", "P1")], Vec::new()), Some("P1"));
-        let mut request = auth_request(WORKER_ID, "completed");
-        request.assignment_id = Some(ASSIGNMENT_ID);
-        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T-review-3".to_string())];
-        let wrong_headers = authenticated_headers(&fixture.state, "worker-2");
-        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
-            wrong_headers, Json(request)).await;
-        let error = result.err().expect("forgery must be rejected");
-        assert_eq!(error.status, StatusCode::FORBIDDEN);
-        let row = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
-        assert_eq!(row.status, QueueStatus::Running);
-        assert!(row.heartbeat_at.is_none());
-        assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
-        assert!(fixture.state.queue_manager.repo().external_completion_task_ids(SESSION_ID).unwrap().is_empty());
-        assert!(manager.read_node_completion_facts().unwrap().is_empty());
-        assert!(!fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl").exists());
+        for verify_when_present in [false, true] {
+            let fixture = fixture();
+            fixture.state.pty_manager.read().set_heartbeat_verify_when_present(SESSION_ID, verify_when_present);
+            fixture.state.queue_manager.repo().enqueue(&running_row()).expect("queue row");
+            let manager = write_graph_and_worker_principal(&fixture,
+                TaskGraph::new(vec![work_node("T-review-3", "P1")], Vec::new()), Some("P1"));
+            let mut request = auth_request(WORKER_ID, "completed");
+            request.assignment_id = Some(ASSIGNMENT_ID);
+            request.completed_nodes = vec![CompletedNodeEntry::Legacy("T-review-3".to_string())];
+            let wrong_headers = authenticated_headers(&fixture.state, "worker-2");
+            let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+                wrong_headers, Json(request)).await;
+            let error = result.err().expect("forgery must be rejected");
+            assert_eq!(error.status, StatusCode::FORBIDDEN);
+            let row = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
+            assert_eq!(row.status, QueueStatus::Running);
+            assert!(row.heartbeat_at.is_none());
+            assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+            assert!(fixture.state.queue_manager.repo().external_completion_task_ids(SESSION_ID).unwrap().is_empty());
+            assert!(manager.read_node_completion_facts().unwrap().is_empty());
+            let events = security_events(&fixture);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["event_type"], "artifact_updated");
+            assert_eq!(events[0]["payload"]["kind"], "heartbeat_rejected");
+            assert_eq!(events[0]["payload"]["claimed_agent_id"], WORKER_ID);
+        }
     }
 
     #[tokio::test]
     async fn tokenless_heartbeat_names_required_header_without_mutation() {
         let fixture = fixture();
+        fixture.state.pty_manager.read().set_heartbeat_verify_when_present(SESSION_ID, false);
         let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
             HeaderMap::new(), Json(auth_request(WORKER_ID, "working"))).await;
         let error = result.err().expect("legacy tokenless request must be rejected");
@@ -1694,8 +1797,13 @@ mod tests {
         let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
             authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await, "Queen explicit mark");
         assert_eq!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID)[WORKER_ID].status, "completed");
-        let events = std::fs::read_to_string(fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl")).unwrap();
-        let audit: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
+        let events = security_events(&fixture);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["payload"]["kind"], "heartbeat_rejected");
+        assert_eq!(events[0]["payload"]["caller_agent_id"], WORKER_ID);
+        assert_eq!(events[0]["payload"]["resolved_agent_id"], QUEEN_ID);
+        let audit = events.iter().find(|event| event["payload"]["kind"] == "heartbeat_status_requested")
+            .expect("Queen status audit after rejected worker mark");
         assert_eq!(audit["event_type"], "artifact_updated");
         assert_eq!(audit["payload"]["actor_agent_id"], QUEEN_ID);
         assert_eq!(audit["payload"]["target_agent_id"], WORKER_ID);
@@ -1765,26 +1873,33 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_token_cannot_complete_its_claimed_owner_or_release_dependents() {
-        let fixture = fixture();
-        fixture.state.queue_manager.repo().enqueue(&running_row()).unwrap();
-        let manager = write_graph_and_worker_principal(&fixture,
-            TaskGraph::new(vec![work_node("T-review-3", "P1")], Vec::new()), Some("P1"));
-        let _registered_headers = authenticated_headers(&fixture.state, WORKER_ID);
-        let unknown = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Hive-Agent-Token", unknown.parse().unwrap());
-        let mut request = auth_request(WORKER_ID, "completed");
-        request.assignment_id = Some(ASSIGNMENT_ID);
-        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T-review-3".to_string())];
-        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()), headers, Json(request)).await;
-        assert_eq!(result.err().expect("unregistered token must be rejected").status, StatusCode::UNAUTHORIZED);
-        let row = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
-        assert_eq!(row.status, QueueStatus::Running);
-        assert!(row.heartbeat_at.is_none());
-        assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
-        assert!(manager.read_node_completion_facts().unwrap().is_empty());
-        assert!(fixture.state.queue_manager.repo().external_completion_task_ids(SESSION_ID).unwrap().is_empty());
-        assert!(!fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl").exists());
+        for verify_when_present in [true, false] {
+            let fixture = fixture();
+            fixture.state.pty_manager.read().set_heartbeat_verify_when_present(SESSION_ID, verify_when_present);
+            fixture.state.queue_manager.repo().enqueue(&running_row()).unwrap();
+            let manager = write_graph_and_worker_principal(&fixture,
+                TaskGraph::new(vec![work_node("T-review-3", "P1")], Vec::new()), Some("P1"));
+            let _registered_headers = authenticated_headers(&fixture.state, WORKER_ID);
+            let unknown = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+            let mut headers = HeaderMap::new();
+            headers.insert("X-Hive-Agent-Token", unknown.parse().unwrap());
+            let mut request = auth_request(WORKER_ID, "completed");
+            request.assignment_id = Some(ASSIGNMENT_ID);
+            request.completed_nodes = vec![CompletedNodeEntry::Legacy("T-review-3".to_string())];
+            let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()), headers, Json(request)).await;
+            assert_eq!(result.err().expect("unregistered token must be rejected").status, StatusCode::UNAUTHORIZED);
+            let row = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
+            assert_eq!(row.status, QueueStatus::Running);
+            assert!(row.heartbeat_at.is_none());
+            assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+            assert!(manager.read_node_completion_facts().unwrap().is_empty());
+            assert!(fixture.state.queue_manager.repo().external_completion_task_ids(SESSION_ID).unwrap().is_empty());
+            let events = security_events(&fixture);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["event_type"], "artifact_updated");
+            assert_eq!(events[0]["payload"]["kind"], "heartbeat_rejected");
+            assert_eq!(events[0]["payload"]["claimed_agent_id"], WORKER_ID);
+        }
     }
 
     #[tokio::test]
@@ -1792,11 +1907,16 @@ mod tests {
         let fixture = fixture();
         let headers = authenticated_headers(&fixture.state, WORKER_ID);
         let mut request = auth_request(WORKER_ID, "completed");
-        request.summary = Some(headers["X-Hive-Agent-Token"].to_str().unwrap().to_string());
+        let secret = headers["X-Hive-Agent-Token"].to_str().unwrap().to_string();
+        request.summary = Some(secret.clone());
         let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()), headers, Json(request)).await;
         assert_eq!(result.err().expect("credential-bearing payload must be rejected").status, StatusCode::BAD_REQUEST);
         assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
-        assert!(!fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl").exists());
+        let events = security_events(&fixture);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["payload"]["kind"], "heartbeat_rejected");
+        assert_eq!(events[0]["payload"]["reason"], "credential_in_payload");
+        assert!(!serde_json::to_string(&events).unwrap().contains(&secret));
     }
 
     #[cfg(windows)]
@@ -1810,27 +1930,49 @@ mod tests {
         let app = crate::http::routes::create_router(Arc::clone(&fixture.state));
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let injected = vec![("HIVE_SESSION_ID".to_string(), SESSION_ID.to_string()),
-            ("HIVE_AGENT_ID".to_string(), WORKER_ID.to_string()), ("HIVE_AGENT_TOKEN".to_string(), token)];
+            ("HIVE_AGENT_ID".to_string(), WORKER_ID.to_string()), ("HIVE_AGENT_TOKEN".to_string(), token),
+            ("HIVE_WRONG_AGENT_TOKEN".to_string(), format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple()))];
         let inherited = std::env::vars_os().collect::<Vec<_>>();
         let environment = crate::adapters::wsl::launch_env("wsl.exe", None, &injected, &inherited).unwrap();
         let script = format!(r#"test -n "$HIVE_AGENT_TOKEN" || exit 21
-with_header=$(curl.exe -sS -o NUL -w '%{{http_code}}' -X POST 'http://localhost:{port}/api/sessions/{SESSION_ID}/heartbeat' -H 'Content-Type: application/json' -H "X-Hive-Agent-Token: $HIVE_AGENT_TOKEN" -d '{{"agent_id":"{WORKER_ID}","status":"completed","summary":"WSL live development-server check"}}') || exit 22
-without_header=$(curl.exe -sS -o NUL -w '%{{http_code}}' -X POST 'http://localhost:{port}/api/sessions/{SESSION_ID}/heartbeat' -H 'Content-Type: application/json' -d '{{"agent_id":"{WORKER_ID}","status":"completed"}}') || exit 23
-printf 'env_present=yes with_header=%s without_header=%s\n' "$with_header" "$without_header"
-test "$with_header" = 200 && test "$without_header" = 401
+with_header=$(cat <<'JSON' | curl.exe -sS -o NUL -w '%{{http_code}}' -X POST 'http://localhost:{port}/api/sessions/{SESSION_ID}/heartbeat' -H 'Content-Type: application/json' -H "X-Hive-Agent-Token: $HIVE_AGENT_TOKEN" --data-binary @-
+{{"agent_id":"{WORKER_ID}","status":"completed","summary":"WSL live development-server check"}}
+JSON
+) || exit 22
+without_header=$(cat <<'JSON' | curl.exe -sS -o NUL -w '%{{http_code}}' -X POST 'http://localhost:{port}/api/sessions/{SESSION_ID}/heartbeat' -H 'Content-Type: application/json' --data-binary @-
+{{"agent_id":"{WORKER_ID}","status":"completed"}}
+JSON
+) || exit 23
+wrong_token=$(cat <<'JSON' | curl.exe -sS -o NUL -w '%{{http_code}}' -X POST 'http://localhost:{port}/api/sessions/{SESSION_ID}/heartbeat' -H 'Content-Type: application/json' -H "X-Hive-Agent-Token: $HIVE_WRONG_AGENT_TOKEN" --data-binary @-
+{{"agent_id":"{WORKER_ID}","status":"idle"}}
+JSON
+) || exit 24
+printf 'env_present=yes with_header=%s without_header=%s wrong_token=%s\n' "$with_header" "$without_header" "$wrong_token"
+test "$with_header" = 200 && test "$without_header" = 200 && test "$wrong_token" = 401
 "#);
         let mut command = tokio::process::Command::new("wsl.exe");
-        command.args(["-d", "Ubuntu", "bash", "--noprofile", "--norc", "-c", &script]).envs(environment);
+        command.args(["-d", "Ubuntu", "bash", "--noprofile", "--norc", "-s"]).envs(environment);
+        command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         command.kill_on_drop(true);
-        let output = tokio::time::timeout(std::time::Duration::from_secs(45), command.output()).await;
+        let mut child = command.spawn().expect("WSL process launch");
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut stdin = child.stdin.take().expect("WSL script input");
+            stdin.write_all(script.as_bytes()).await.expect("WSL script write");
+        }
+        let output = tokio::time::timeout(std::time::Duration::from_secs(45), child.wait_with_output()).await;
         server.abort();
         let output = output.expect("WSL check timeout").expect("WSL process launch");
         // Only the fixed presence/status summary is printed; stderr/command arguments remain private.
         assert!(output.status.success(), "WSL live check failed (no command/environment output printed)");
         let summary = String::from_utf8(output.stdout).unwrap();
-        assert!(summary.contains("env_present=yes with_header=200 without_header=401"));
-        println!("WSL new-code ephemeral server: env_present=yes with_header=200 without_header=401");
+        assert!(summary.contains("env_present=yes with_header=200 without_header=200 wrong_token=401"));
+        println!("WSL new-code ephemeral server: env_present=yes with_header=200 without_header=200 wrong_token=401");
         assert_eq!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID)[WORKER_ID].status, "completed");
+        let events = security_events(&fixture);
+        assert!(events.iter().any(|event| event["payload"]["kind"] == "heartbeat_unauthenticated"));
+        assert!(events.iter().any(|event| event["payload"]["kind"] == "heartbeat_rejected"
+            && event["payload"]["reason"] == "invalid_token"));
     }
 
 
@@ -1850,6 +1992,270 @@ test "$with_header" = 200 && test "$without_header" = 401
         assert!(error.message.contains("durable assignment"));
         assert_eq!(manager.read_work_graph().unwrap(), before);
         assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+    }
+
+
+    fn security_events(fixture: &HeartbeatFixture) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl"))
+            .unwrap_or_default().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn verify_when_present_accepts_absent_header_with_unattributed_audit_only_for_that_session() {
+        let fixture = fixture();
+        assert!(fixture.state.pty_manager.read().heartbeat_verifies_when_present(SESSION_ID));
+        fixture.state.pty_manager.read().set_heartbeat_verify_when_present(SESSION_ID, false);
+        assert!(!fixture.state.pty_manager.read().heartbeat_verifies_when_present(SESSION_ID));
+        assert!(fixture.state.pty_manager.read().heartbeat_verifies_when_present("another-session"));
+        fixture.state.pty_manager.read().set_heartbeat_verify_when_present(SESSION_ID, true);
+        assert!(fixture.state.pty_manager.read().heartbeat_verifies_when_present("another-session"));
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+            HeaderMap::new(), Json(auth_request(WORKER_ID, "working"))).await, "compatible tokenless beat");
+        let events = security_events(&fixture);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event_type"], "artifact_updated");
+        assert!(events[0]["agent_id"].is_null());
+        assert!(events[0]["payload"]["caller_agent_id"].is_null());
+        assert_eq!(events[0]["payload"]["claimed_agent_id"], WORKER_ID);
+        assert_eq!(events[0]["payload"]["resolved_agent_id"], WORKER_ID);
+        assert_eq!(events[0]["payload"]["kind"], "heartbeat_unauthenticated");
+        assert!(events[0]["payload"].get("worker_id").is_none());
+        fixture.state.pty_manager.read().set_heartbeat_verify_when_present(SESSION_ID, false);
+        assert!(!fixture.state.pty_manager.read().heartbeat_verifies_when_present(SESSION_ID));
+    }
+
+    #[tokio::test]
+    async fn compatible_mode_never_treats_present_invalid_or_duplicate_headers_as_absent() {
+        for kind in ["malformed", "duplicate", "duplicate_empty", "wrong_session"] {
+            let fixture = fixture();
+            fixture.state.pty_manager.read().set_heartbeat_verify_when_present(SESSION_ID, true);
+            let mut headers = HeaderMap::new();
+            match kind {
+                "malformed" => { headers.insert("X-Hive-Agent-Token", axum::http::HeaderValue::from_bytes(&[0xff]).unwrap()); }
+                "duplicate" => {
+                    headers = authenticated_headers(&fixture.state, WORKER_ID);
+                    let duplicate = headers["X-Hive-Agent-Token"].clone();
+                    headers.append("X-Hive-Agent-Token", duplicate);
+                }
+                "duplicate_empty" => {
+                    headers.insert("X-Hive-Agent-Token", "".parse().unwrap());
+                    headers.append("X-Hive-Agent-Token", "".parse().unwrap());
+                }
+                _ => {
+                    let token = fixture.state.pty_manager.read().mint_heartbeat_token_for_test(WORKER_ID, "another-session", false);
+                    headers.insert("X-Hive-Agent-Token", token.parse().unwrap());
+                }
+            }
+            let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+                headers, Json(auth_request(WORKER_ID, "completed"))).await;
+            assert_eq!(result.err().expect("present invalid header must reject").status, StatusCode::UNAUTHORIZED);
+            assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+            let events = security_events(&fixture);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["payload"]["kind"], "heartbeat_rejected");
+            assert!(events[0]["agent_id"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn tokenless_queen_claim_cannot_acquire_mark_or_reassignment_authority() {
+        for reassign in [false, true] {
+            let fixture = fixture();
+            fixture.state.pty_manager.read().set_heartbeat_verify_when_present(SESSION_ID, true);
+            let mut request = auth_request(QUEEN_ID, "working");
+            if reassign {
+                request.reassign_nodes.push(NodeReassignment { node_id: "T-transfer".to_string(), agent_id: WORKER_ID.to_string() });
+            } else { request.mark_agent_id = Some(WORKER_ID.to_string()); }
+            let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()), HeaderMap::new(), Json(request)).await;
+            assert_eq!(result.err().expect("tokenless Queen claim is not authority").status, StatusCode::FORBIDDEN);
+            assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+            let events = security_events(&fixture);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["payload"]["kind"], "heartbeat_rejected");
+            assert!(events[0]["payload"]["caller_agent_id"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn rejection_audit_redacts_a_presented_credential_used_as_a_claimed_identity() {
+        let fixture = fixture();
+        let unknown = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Hive-Agent-Token", unknown.parse().unwrap());
+        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+            headers, Json(auth_request(&unknown, "working"))).await;
+        assert_eq!(result.err().expect("unknown credential").status, StatusCode::UNAUTHORIZED);
+        let events = security_events(&fixture);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["payload"]["claimed_agent_id"], "redacted-credential");
+        assert!(!serde_json::to_string(&events).unwrap().contains(&unknown));
+    }
+
+    #[tokio::test]
+    async fn duplicate_header_audit_cannot_echo_a_credential_in_the_second_value() {
+        let fixture = fixture();
+        let token = fixture.state.pty_manager.read().mint_heartbeat_token_for_test(WORKER_ID, SESSION_ID, false);
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Hive-Agent-Token", "not-a-credential".parse().unwrap());
+        headers.append("X-Hive-Agent-Token", token.parse().unwrap());
+        let mut request = auth_request(&token, "working");
+        request.mark_agent_id = Some(token.clone());
+        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()), headers, Json(request)).await;
+        assert_eq!(result.err().expect("duplicate header").status, StatusCode::UNAUTHORIZED);
+        let events = security_events(&fixture);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["payload"]["claimed_agent_id"], "redacted-untrusted-identity");
+        assert!(!serde_json::to_string(&events).unwrap().contains(&token));
+    }
+
+    #[tokio::test]
+    async fn valid_credential_in_claimed_or_mark_identity_is_rejected_with_sanitized_audit() {
+        for mark in [false, true] {
+            let fixture = fixture();
+            let headers = authenticated_headers(&fixture.state, WORKER_ID);
+            let secret = headers["X-Hive-Agent-Token"].to_str().unwrap().to_string();
+            let mut request = auth_request(WORKER_ID, "completed");
+            if mark { request.mark_agent_id = Some(secret.clone()); }
+            else { request.agent_id = secret.clone(); }
+            let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()), headers, Json(request)).await;
+            assert_eq!(result.err().expect("credential-bearing target").status, StatusCode::BAD_REQUEST);
+            assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+            let events = security_events(&fixture);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["payload"]["kind"], "heartbeat_rejected");
+            assert_eq!(events[0]["payload"]["reason"], "credential_in_payload");
+            assert!(!serde_json::to_string(&events).unwrap().contains(&secret));
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_unknown_session_never_creates_an_audit_directory() {
+        let fixture = fixture();
+        let unknown = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Hive-Agent-Token", unknown.parse().unwrap());
+        let directory = fixture.state.event_bus.data_dir();
+        let before = std::fs::read_dir(directory).unwrap().count();
+        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(unknown.clone()), headers,
+            Json(auth_request(WORKER_ID, "working"))).await;
+        assert_eq!(result.err().expect("unknown session").status, StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read_dir(directory).unwrap().count(), before);
+        assert!(!directory.join(&unknown).exists());
+        assert!(!directory.join("redacted-credential").exists());
+        assert!(!directory.join("unattributed-session").exists());
+    }
+
+    #[tokio::test]
+    async fn compatibility_retains_membership_assignment_and_principal_fences() {
+        for case in ["ghost", "stale", "binding", "queen_no_principal"] {
+            let fixture = fixture();
+            fixture.state.pty_manager.read().set_heartbeat_verify_when_present(SESSION_ID, true);
+            fixture.state.queue_manager.repo().enqueue(&running_row()).unwrap();
+            let manager = write_graph_and_worker_principal(&fixture,
+                TaskGraph::new(vec![work_node("T-review-3", "P1")], Vec::new()), Some("P2"));
+            let mut request = auth_request(if case == "ghost" { "unknown-worker" }
+                else if case == "queen_no_principal" { QUEEN_ID } else { WORKER_ID }, "completed");
+            let expected = match case {
+                "ghost" => StatusCode::NOT_FOUND,
+                "stale" => { request.assignment_id = Some(ASSIGNMENT_ID + 1); StatusCode::CONFLICT }
+                "binding" => {
+                    request.completed_nodes.push(CompletedNodeEntry::Legacy("T-review-3".to_string()));
+                    StatusCode::BAD_REQUEST
+                }
+                _ => {
+                    request.completed_nodes.push(CompletedNodeEntry::Legacy("T-review-3".to_string()));
+                    StatusCode::FORBIDDEN
+                }
+            };
+            let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()), HeaderMap::new(), Json(request)).await;
+            assert_eq!(result.err().expect("compatibility must preserve domain fences").status, expected);
+            let row = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
+            assert_eq!(row.status, QueueStatus::Running);
+            assert!(row.heartbeat_at.is_none());
+            assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+            assert!(manager.read_node_completion_facts().unwrap().is_empty());
+            assert!(fixture.state.queue_manager.repo().external_completion_task_ids(SESSION_ID).unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_audit_rejects_unauthenticated_acceptance_and_preserves_auth_rejection_status() {
+        for verify_when_present in [false, true] {
+            let fixture = fixture();
+            fixture.state.pty_manager.read().set_heartbeat_verify_when_present(SESSION_ID, verify_when_present);
+            std::fs::create_dir_all(fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl")).unwrap();
+            let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+                HeaderMap::new(), Json(auth_request(WORKER_ID, "working"))).await;
+            let expected = if verify_when_present { StatusCode::INTERNAL_SERVER_ERROR } else { StatusCode::UNAUTHORIZED };
+            assert_eq!(result.err().expect("audit failure").status, expected);
+            assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_mutation_locks_serialize_one_session_without_blocking_another() {
+        let first = heartbeat_mutation_lock("lock-test-a");
+        let same = heartbeat_mutation_lock("lock-test-a");
+        let other = heartbeat_mutation_lock("lock-test-b");
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &other));
+        let _held = first.lock().await;
+        assert!(same.try_lock().is_err());
+        assert!(other.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn codex_empty_and_whitespace_token_headers_are_accepted_and_logged_as_unauthenticated() {
+        for value in ["", "   ", " \t "] {
+            let fixture = fixture();
+            assert_eq!(fixture.state.session_controller.read().get_session(SESSION_ID).unwrap().default_cli, "codex");
+            let mut headers = HeaderMap::new();
+            headers.insert("X-Hive-Agent-Token", value.parse().unwrap());
+            let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+                headers, Json(auth_request(WORKER_ID, "working"))).await, "Codex no usable token");
+            assert_eq!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID)[WORKER_ID].status, "working");
+            let events = security_events(&fixture);
+            assert_eq!(events.len(), 1);
+            assert!(events[0]["agent_id"].is_null());
+            assert_eq!(events[0]["payload"]["kind"], "heartbeat_unauthenticated");
+            assert!(events[0]["payload"]["caller_agent_id"].is_null());
+            assert_eq!(events[0]["payload"]["claimed_agent_id"], WORKER_ID);
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_queen_with_valid_scoped_credential_can_mark_but_an_empty_header_has_no_authority() {
+        let fixture = fixture();
+        {
+            let controller = fixture.state.session_controller.read();
+            let mut session = controller.get_session(SESSION_ID).unwrap();
+            session.default_cli = "claude".to_string();
+            controller.insert_test_session(session);
+        }
+        for value in ["", "   "] {
+            let mut headers = HeaderMap::new();
+            headers.insert("X-Hive-Agent-Token", value.parse().unwrap());
+            let mut request = auth_request(QUEEN_ID, "completed");
+            request.mark_agent_id = Some(WORKER_ID.to_string());
+            let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()), headers, Json(request)).await;
+            assert_eq!(result.err().expect("empty Queen claim cannot mark").status, StatusCode::FORBIDDEN);
+            assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+        }
+        let headers = authenticated_headers(&fixture.state, QUEEN_ID);
+        assert!(fixture.state.pty_manager.read().authenticate_heartbeat(SESSION_ID,
+            headers["X-Hive-Agent-Token"].to_str().unwrap()).is_some_and(|(id, queen)| id == QUEEN_ID && queen));
+        let mut request = auth_request(QUEEN_ID, "completed");
+        request.mark_agent_id = Some(WORKER_ID.to_string());
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+            headers, Json(request)).await, "authenticated Claude Queen mark");
+        let events = security_events(&fixture);
+        assert_eq!(events.iter().filter(|event| event["payload"]["kind"] == "heartbeat_rejected").count(), 2);
+        let mark = events.iter().find(|event| event["payload"]["kind"] == "heartbeat_status_requested").unwrap();
+        assert_eq!(mark["agent_id"], QUEEN_ID);
+        assert_eq!(mark["payload"]["actor_agent_id"], QUEEN_ID);
+        assert_eq!(mark["payload"]["target_agent_id"], WORKER_ID);
+        assert_eq!(mark["payload"]["queen_mark"], true);
+        assert_eq!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID)[WORKER_ID].status, "completed");
     }
 
 }

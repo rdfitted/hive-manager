@@ -13581,157 +13581,179 @@ The backend composed and persisted the following authoritative skeleton before l
         let started = tokio::time::Instant::now();
 
         let handle = tokio::spawn(async move {
-            let expired_by = loop {
-                let expired = {
-                    let sessions = sessions.read();
-                    let Some(session) = sessions.get(&sid) else { return };
-                    if !matches!(session.state, SessionState::QaInProgress { .. } | SessionState::SpawningEvaluator)
-                        || session.qa_inconclusive_at != armed_qa_generation
-                    {
-                        return;
-                    }
-                    let heartbeats = agent_heartbeats.read();
-                    let expired = window.expired(started.elapsed(), session, heartbeats.get(&sid));
-                    // Respawning temporarily changes state, but is still part
-                    // of this review. Preserve elapsed time until launch restores
-                    // QaInProgress, where the normal timeout transition applies.
-                    if matches!(session.state, SessionState::SpawningEvaluator) {
-                        None
-                    } else {
-                        expired
-                    }
-                };
-                if let Some(reason) = expired {
-                    break reason;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            };
-
-            {
-                let _resolution = SessionController::lock_qa_resolution();
-                let timeout_secs = window.inactivity.as_secs();
-                tracing::warn!(
-                    "QA timeout fired for session {} ({}; inactivity limit {}s) — marking QA inconclusive (no auto-pass)",
-                    sid,
-                    expired_by,
-                    timeout_secs
-                );
-
-                // A timed-out QA must NOT silently ship. Transition to QaInconclusive,
-                // which blocks PR push / completion. The Queen may fix the cause
-                // and re-arm QA; force-pass and force-fail remain operator-only.
-                let transition = {
-                    let mut sessions = sessions.write();
-                    if let Some(session) = sessions.get_mut(&sid) {
-                        if !matches!(session.state, SessionState::QaInProgress { .. })
+            'watch: loop {
+                loop {
+                    let expired = {
+                        let sessions = sessions.read();
+                        let Some(session) = sessions.get(&sid) else { return };
+                        if !matches!(session.state, SessionState::QaInProgress { .. } | SessionState::SpawningEvaluator)
                             || session.qa_inconclusive_at != armed_qa_generation
                         {
-                            None
-                        } else {
-                            let previous_state = session.state.clone();
-                            let previous_checkpoint = session.qa_inconclusive_at.clone();
-                            let prior_iteration = match &session.state {
-                                SessionState::QaInProgress { iteration } => {
-                                    Some(iteration.unwrap_or(1))
-                                }
-                                _ => None,
-                            };
-                            session.qa_inconclusive_at =
-                                Some(crate::storage::QaInconclusiveCheckpoint {
-                                    at: Utc::now(),
-                                    prior_iteration,
-                                });
-                            let changes = SessionController::set_session_state_with_snapshot(
-                                storage.as_deref(),
-                                session,
-                                SessionState::QaInconclusive,
-                            );
-                            Some((previous_state, previous_checkpoint, changes, session.clone()))
-                        }
-                    } else {
-                        None
-                    }
-                };
-
-                if let Some((previous_state, previous_checkpoint, changes, updated_session)) =
-                    transition
-                {
-                    if let Some(storage) = storage.as_ref() {
-                        if let Err(error) = SessionController::persist_session_snapshot(
-                            storage,
-                            &updated_session,
-                            &sid,
-                            &principal_bindings,
-                        ) {
-                            tracing::warn!(
-                                "Failed to persist QA timeout state for {}: {}",
-                                sid,
-                                error
-                            );
-                            let mut sessions = sessions.write();
-                            if let Some(session) = sessions.get_mut(&sid) {
-                                session.qa_inconclusive_at = previous_checkpoint;
-                                let _ = SessionController::set_session_state_with_snapshot(
-                                    Some(storage.as_ref()),
-                                    session,
-                                    previous_state,
-                                );
-                            }
                             return;
                         }
+                        let heartbeats = agent_heartbeats.read();
+                        let expired = window.expired(started.elapsed(), session, heartbeats.get(&sid));
+                        // Respawning temporarily changes state, but is still part
+                        // of this review. Preserve elapsed time until launch restores
+                        // QaInProgress, where the normal timeout transition applies.
+                        if matches!(session.state, SessionState::SpawningEvaluator) {
+                            None
+                        } else {
+                            expired
+                        }
+                    };
+                    if expired.is_some() {
+                        break;
                     }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
 
-                    if let Some(emitter) = event_emitter.clone() {
-                        SessionController::fire_cell_status_changes(emitter, sid.clone(), changes);
-                    }
-
-                    // Write a BLOCKED verdict file so the Queen's poll loop terminates
-                    // (instead of hanging forever) and she escalates rather than pushes.
-                    let reason = SessionController::qa_timeout_reason(timeout_secs);
-                    let verdict_content = serde_json::json!({
-                        "kind": "qa-verdict",
-                        "verdict": "BLOCKED",
-                        "blocked_reason": "timeout",
-                        "timeout_kind": expired_by,
-                        "rationale": reason,
-                    })
-                    .to_string();
-                    let state_manager = StateManager::new(
-                        updated_session
-                            .project_path
-                            .join(".hive-manager")
-                            .join(&sid),
+                {
+                    let _resolution = SessionController::lock_qa_resolution();
+                    // A setting or heartbeat may have arrived while publication
+                    // waited for the operator/window lock. Decide again under it.
+                    let expired_by = {
+                        let sessions = sessions.read();
+                        let Some(session) = sessions.get(&sid) else { return };
+                        if !matches!(session.state, SessionState::QaInProgress { .. } | SessionState::SpawningEvaluator)
+                            || session.qa_inconclusive_at != armed_qa_generation
+                        {
+                            return;
+                        }
+                        if matches!(session.state, SessionState::SpawningEvaluator) {
+                            continue 'watch;
+                        }
+                        let heartbeats = agent_heartbeats.read();
+                        window.expired(started.elapsed(), session, heartbeats.get(&sid))
+                    };
+                    let Some(expired_by) = expired_by else { continue 'watch };
+                    let timeout_secs = window.inactivity.as_secs();
+                    tracing::warn!(
+                        "QA timeout fired for session {} ({}; inactivity limit {}s) — marking QA inconclusive (no auto-pass)",
+                        sid,
+                        expired_by,
+                        timeout_secs
                     );
-                    if let Err(err) = state_manager.write_qa_verdict(
-                        &format!("{}-evaluator", sid),
-                        &format!("{}-queen", sid),
-                        &verdict_content,
-                        None,
-                    ) {
-                        tracing::warn!(
-                            "Failed to persist BLOCKED verdict file on QA timeout for {}: {}",
-                            sid,
-                            err
-                        );
-                    }
 
-                    if let Some(ref app_handle) = app_handle {
-                        let _ = app_handle.emit(
-                            "session-update",
-                            SessionUpdate {
-                                session: updated_session,
-                            },
+                    // A timed-out QA must NOT silently ship. Transition to QaInconclusive,
+                    // which blocks PR push / completion. The Queen may fix the cause
+                    // and re-arm QA; force-pass and force-fail remain operator-only.
+                    let transition = {
+                        let mut sessions = sessions.write();
+                        if let Some(session) = sessions.get_mut(&sid) {
+                            if !matches!(session.state, SessionState::QaInProgress { .. } | SessionState::SpawningEvaluator)
+                                || session.qa_inconclusive_at != armed_qa_generation
+                            {
+                                None
+                            } else if matches!(session.state, SessionState::SpawningEvaluator) {
+                                continue 'watch;
+                            } else {
+                                let previous_state = session.state.clone();
+                                let previous_checkpoint = session.qa_inconclusive_at.clone();
+                                let prior_iteration = match &session.state {
+                                    SessionState::QaInProgress { iteration } => {
+                                        Some(iteration.unwrap_or(1))
+                                    }
+                                    _ => None,
+                                };
+                                session.qa_inconclusive_at =
+                                    Some(crate::storage::QaInconclusiveCheckpoint {
+                                        at: Utc::now(),
+                                        prior_iteration,
+                                    });
+                                let changes = SessionController::set_session_state_with_snapshot(
+                                    storage.as_deref(),
+                                    session,
+                                    SessionState::QaInconclusive,
+                                );
+                                Some((previous_state, previous_checkpoint, changes, session.clone()))
+                            }
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some((previous_state, previous_checkpoint, changes, updated_session)) =
+                        transition
+                    {
+                        if let Some(storage) = storage.as_ref() {
+                            if let Err(error) = SessionController::persist_session_snapshot(
+                                storage,
+                                &updated_session,
+                                &sid,
+                                &principal_bindings,
+                            ) {
+                                tracing::warn!(
+                                    "Failed to persist QA timeout state for {}: {}",
+                                    sid,
+                                    error
+                                );
+                                let mut sessions = sessions.write();
+                                if let Some(session) = sessions.get_mut(&sid) {
+                                    session.qa_inconclusive_at = previous_checkpoint;
+                                    let _ = SessionController::set_session_state_with_snapshot(
+                                        Some(storage.as_ref()),
+                                        session,
+                                        previous_state,
+                                    );
+                                }
+                                return;
+                            }
+                        }
+
+                        if let Some(emitter) = event_emitter.clone() {
+                            SessionController::fire_cell_status_changes(emitter, sid.clone(), changes);
+                        }
+
+                        // Write a BLOCKED verdict file so the Queen's poll loop terminates
+                        // (instead of hanging forever) and she escalates rather than pushes.
+                        let reason = SessionController::qa_timeout_reason(timeout_secs);
+                        let verdict_content = serde_json::json!({
+                            "kind": "qa-verdict",
+                            "verdict": "BLOCKED",
+                            "blocked_reason": "timeout",
+                            "timeout_kind": expired_by,
+                            "rationale": reason,
+                        })
+                        .to_string();
+                        let state_manager = StateManager::new(
+                            updated_session
+                                .project_path
+                                .join(".hive-manager")
+                                .join(&sid),
                         );
-                        let _ = app_handle.emit(
-                            "qa-inconclusive",
-                            serde_json::json!({
-                                "session_id": sid,
-                                "action": "blocked-on-timeout",
-                                "reason": reason,
-                            }),
-                        );
+                        if let Err(err) = state_manager.write_qa_verdict(
+                            &format!("{}-evaluator", sid),
+                            &format!("{}-queen", sid),
+                            &verdict_content,
+                            None,
+                        ) {
+                            tracing::warn!(
+                                "Failed to persist BLOCKED verdict file on QA timeout for {}: {}",
+                                sid,
+                                err
+                            );
+                        }
+
+                        if let Some(ref app_handle) = app_handle {
+                            let _ = app_handle.emit(
+                                "session-update",
+                                SessionUpdate {
+                                    session: updated_session,
+                                },
+                            );
+                            let _ = app_handle.emit(
+                                "qa-inconclusive",
+                                serde_json::json!({
+                                    "session_id": sid,
+                                    "action": "blocked-on-timeout",
+                                    "reason": reason,
+                                }),
+                            );
+                        }
                     }
                 }
+                break;
             }
         });
 
@@ -23259,6 +23281,72 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert_eq!(window.expired(std::time::Duration::from_secs(720), &session, None), Some("inactivity"));
         session.qa_timeout_secs = u64::MAX;
         assert_eq!(window.expired(std::time::Duration::from_secs(2700), &session, None), Some("absolute ceiling"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn qa_timeout_rechecks_launch_setting_after_waiting_for_resolution() {
+        let project = tempfile::tempdir().unwrap();
+        let controller = test_controller();
+        let mut session = qa_session_with("qa-queued-setting", SessionState::QaInProgress { iteration: Some(1) }, project.path().to_path_buf(), false);
+        session.qa_timeout_secs = 0;
+        controller.insert_test_session(session);
+        {
+            let _resolution = SessionController::lock_qa_resolution();
+            controller.start_qa_timeout("qa-queued-setting", 0);
+            // Let the immediate timeout queue for the publication lock, then
+            // model the launch setter's update while it owns that same lock.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            controller.sessions.write().get_mut("qa-queued-setting").unwrap().qa_timeout_secs = 60;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert!(matches!(controller.get_session("qa-queued-setting").unwrap().state, SessionState::QaInProgress { .. }),
+            "timeout must recheck the extended setting before committing its stale expiry decision");
+        controller.cancel_qa_timeout("qa-queued-setting");
+        assert!(!project.path().join(".hive-manager/qa-queued-setting/peer/qa-verdict.json").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn qa_timeout_preserves_respawn_that_starts_while_resolution_is_queued() {
+        let project = tempfile::tempdir().unwrap();
+        let controller = test_controller();
+        let mut session = qa_session_with(
+            "qa-queued-respawn",
+            SessionState::QaInProgress { iteration: Some(1) },
+            project.path().to_path_buf(),
+            false,
+        );
+        session.qa_timeout_secs = 0;
+        controller.insert_test_session(session);
+        let original_timer;
+        {
+            let _resolution = SessionController::lock_qa_resolution();
+            controller.start_qa_timeout("qa-queued-respawn", 0);
+            original_timer = controller.qa_timeout_handles.lock()["qa-queued-respawn"].id();
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            controller.sessions.write().get_mut("qa-queued-respawn").unwrap().state =
+                SessionState::SpawningEvaluator;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert!(!controller.qa_timeout_handles.lock()["qa-queued-respawn"].is_finished());
+        controller.sessions.write().get_mut("qa-queued-respawn").unwrap().state =
+            SessionState::QaInProgress { iteration: Some(1) };
+        controller.begin_qa_window("qa-queued-respawn").unwrap();
+        assert_eq!(
+            controller.qa_timeout_handles.lock()["qa-queued-respawn"].id(),
+            original_timer,
+            "a queued respawn must retain the original absolute clock"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !matches!(
+                controller.get_session("qa-queued-respawn").unwrap().state,
+                SessionState::QaInconclusive
+            ) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("original expired window must finish after respawn restores QA");
+        controller.cancel_qa_timeout("qa-queued-respawn");
     }
 
 }

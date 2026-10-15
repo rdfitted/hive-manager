@@ -329,6 +329,7 @@ struct HeartbeatCredential {
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
     heartbeat_credentials: RwLock<HashMap<String, HeartbeatCredential>>,
+    heartbeat_verify_when_present: RwLock<HashMap<String, bool>>,
     /// Serialize create/kill so a same-id kill cannot pass between process spawn and
     /// insertion, and a duplicate create cannot replace a still-live process handle.
     lifecycle: Mutex<()>,
@@ -354,6 +355,7 @@ impl PtyManager {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             heartbeat_credentials: RwLock::new(HashMap::new()),
+            heartbeat_verify_when_present: RwLock::new(HashMap::new()),
             lifecycle: Mutex::new(()),
             last_codex_spawn: Mutex::new(None),
             app_handle: None,
@@ -384,6 +386,18 @@ impl PtyManager {
 
     pub fn emitter_stats(&self) -> Arc<EmitterStats> {
         Arc::clone(&self.emitter_stats)
+    }
+
+    /// Operator H-5 policy: every session verifies credentials when present.
+    /// No UI, request or environment switch can disable verification of a supplied token.
+    pub(crate) fn heartbeat_verifies_when_present(&self, session_id: &str) -> bool {
+        self.heartbeat_verify_when_present.read().get(session_id).copied().unwrap_or(true)
+    }
+
+    /// Server-controlled only: never selected by an incoming heartbeat body/header.
+    #[cfg(test)]
+    pub(crate) fn set_heartbeat_verify_when_present(&self, session_id: &str, enabled: bool) {
+        self.heartbeat_verify_when_present.write().insert(session_id.to_string(), enabled);
     }
 
     fn new_heartbeat_token() -> String {
