@@ -3253,6 +3253,65 @@ impl SessionController {
         Ok(())
     }
 
+    /// Stop the Master Planner and drop it from the session's agents before the
+    /// post-planning agents spawn.
+    ///
+    /// A Windows tree-kill can report failure after the planner itself has
+    /// exited (for example when a descendant disappears mid-enumeration). The
+    /// record is then retired anyway: keeping it leaves a dead planner pane in
+    /// the terminal grid, and `/T` cannot reach descendants once the root has
+    /// gone, so a later retry gains nothing. The record stays only when the
+    /// planner process is still running, so the operator can see and stop it.
+    fn retire_master_planner(&self, session_id: &str, successor: &str) {
+        let planner_id = format!("{}-master-planner", session_id);
+        match self.stop_agent(session_id, &planner_id) {
+            Ok(()) => {
+                tracing::info!(
+                    "Stopped Master Planner {} before spawning {}",
+                    planner_id,
+                    successor
+                );
+            }
+            Err(error) => {
+                if self.pty_manager.read().is_alive(&planner_id) {
+                    tracing::warn!(
+                        "Failed to stop Master Planner {}: {}; it is still running, so it stays in the session",
+                        planner_id,
+                        error
+                    );
+                    return;
+                }
+                tracing::warn!(
+                    "Master Planner {} kill reported an error after the process exited: {}; retiring it",
+                    planner_id,
+                    error
+                );
+                // With the root gone taskkill answers "not found", which releases
+                // the PTY handle the manager kept for this retry.
+                if let Err(error) = self.pty_manager.read().kill(&planner_id) {
+                    tracing::warn!(
+                        "Retrying cleanup of exited Master Planner {} failed: {}",
+                        planner_id,
+                        error
+                    );
+                }
+            }
+        }
+
+        let mut sessions = self.sessions.write();
+        if let Some(s) = sessions.get_mut(session_id) {
+            s.agents.retain(|a| a.id != planner_id);
+        }
+    }
+
+    /// The Master Planner launches from the Queen's CLI config but must not
+    /// inherit the Queen's display label, or the grid shows two Queens.
+    fn master_planner_agent_config(queen_config: &AgentConfig) -> AgentConfig {
+        let mut config = queen_config.clone();
+        config.label = Some("Master Planner".to_string());
+        config
+    }
+
     fn truncate_agent_label(value: String, max_chars: usize) -> String {
         let mut chars = value.chars();
         let truncated: String = chars.by_ref().take(max_chars).collect();
@@ -11232,7 +11291,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
-                config: config.queen_config.clone(),
+                config: Self::master_planner_agent_config(&config.queen_config),
                 parent_id: None,
                 role_definition_id: None,
                 role_definition_version: None,
@@ -11356,7 +11415,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
-                config: queen_cfg.clone(),
+                config: Self::master_planner_agent_config(&queen_cfg),
                 parent_id: None,
                 role_definition_id: None,
                 role_definition_version: None,
@@ -11491,7 +11550,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
-                config: queen_cfg.clone(),
+                config: Self::master_planner_agent_config(&queen_cfg),
                 parent_id: None,
                 role_definition_id: None,
                 role_definition_version: None,
@@ -11587,20 +11646,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let config: FusionLaunchConfig = serde_json::from_str(&config_json)
             .map_err(|e| format!("Failed to parse pending fusion config: {}", e))?;
 
-        // Clean up Master Planner PTY before spawning Queen
-        let planner_id = format!("{}-master-planner", session_id);
-        if let Err(e) = self.stop_agent(session_id, &planner_id) {
-            tracing::warn!("Failed to stop Master Planner {}: {}", planner_id, e);
-        } else {
-            tracing::info!(
-                "Stopped Master Planner {} before spawning Fusion Queen",
-                planner_id
-            );
-            let mut sessions = self.sessions.write();
-            if let Some(s) = sessions.get_mut(session_id) {
-                s.agents.retain(|a| a.id != planner_id);
-            }
-        }
+        self.retire_master_planner(session_id, "Fusion Queen");
 
         let default_cli = if config.default_cli.trim().is_empty() {
             "claude".to_string()
@@ -11927,19 +11973,7 @@ The backend composed and persisted the following authoritative skeleton before l
             .map_err(|e| format!("Failed to parse pending debate config: {}", e))?;
         config.rounds = Self::validate_debate_rounds(config.rounds)?;
 
-        let planner_id = format!("{}-master-planner", session_id);
-        if let Err(e) = self.stop_agent(session_id, &planner_id) {
-            tracing::warn!("Failed to stop Master Planner {}: {}", planner_id, e);
-        } else {
-            tracing::info!(
-                "Stopped Master Planner {} before spawning Debate debaters",
-                planner_id
-            );
-            let mut sessions = self.sessions.write();
-            if let Some(s) = sessions.get_mut(session_id) {
-                s.agents.retain(|a| a.id != planner_id);
-            }
-        }
+        self.retire_master_planner(session_id, "Debate debaters");
 
         let default_cli = if config.default_cli.trim().is_empty() {
             "claude".to_string()
@@ -12106,7 +12140,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
-                config: config.queen_config.clone(),
+                config: Self::master_planner_agent_config(&config.queen_config),
                 parent_id: None,
                 role_definition_id: None,
                 role_definition_version: None,
@@ -14703,21 +14737,7 @@ The backend composed and persisted the following authoritative skeleton before l
             }
         };
 
-        // Clean up Master Planner PTY before spawning Queen (fixes terminal corruption)
-        let planner_id = format!("{}-master-planner", session_id);
-        if let Err(e) = self.stop_agent(session_id, &planner_id) {
-            tracing::warn!("Failed to stop Master Planner {}: {}", planner_id, e);
-        } else {
-            tracing::info!(
-                "Stopped Master Planner {} before spawning Queen",
-                planner_id
-            );
-            // Remove Master Planner from agents list to prevent resource leaks
-            let mut sessions = self.sessions.write();
-            if let Some(s) = sessions.get_mut(session_id) {
-                s.agents.retain(|a| a.id != planner_id);
-            }
-        }
+        self.retire_master_planner(session_id, "Queen");
 
         let mut new_agents = Vec::new();
 
@@ -15509,20 +15529,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .collect()
         };
 
-        // Clean up Master Planner PTY before spawning Queen
-        let planner_id = format!("{}-master-planner", session_id);
-        if let Err(e) = self.stop_agent(session_id, &planner_id) {
-            tracing::warn!("Failed to stop Master Planner {}: {}", planner_id, e);
-        } else {
-            tracing::info!(
-                "Stopped Master Planner {} before spawning Queen",
-                planner_id
-            );
-            let mut sessions = self.sessions.write();
-            if let Some(s) = sessions.get_mut(session_id) {
-                s.agents.retain(|a| a.id != planner_id);
-            }
-        }
+        self.retire_master_planner(session_id, "Queen");
 
         let mut new_agents = Vec::new();
 
@@ -18890,6 +18897,119 @@ mod tests {
                 "unexpected continuation error: {error}"
             );
         }
+    }
+
+    fn planning_session_with_planner(controller: &SessionController, session_id: &str, stub_args: &[&str]) {
+        let temp = tempfile::tempdir().expect("temp project");
+        let planner_id = format!("{session_id}-master-planner");
+        controller
+            .pty_manager
+            .read()
+            .create_session(
+                planner_id.clone(),
+                AgentRole::MasterPlanner,
+                "claude",
+                stub_args,
+                None,
+                80,
+                24,
+            )
+            .expect("spawn stub planner");
+
+        let mut session = waiting_worker_session(session_id, temp.path(), 1);
+        session.state = SessionState::PlanReady;
+        session.agents = vec![AgentInfo {
+            id: planner_id,
+            role: AgentRole::MasterPlanner,
+            status: AgentStatus::Running,
+            config: SessionController::master_planner_agent_config(&AgentConfig::default()),
+            parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
+            commit_sha: None,
+            base_commit_sha: None,
+        }];
+        controller.insert_test_session(session);
+    }
+
+    fn agent_ids(controller: &SessionController, session_id: &str) -> Vec<String> {
+        controller
+            .sessions
+            .read()
+            .get(session_id)
+            .expect("session")
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn retire_master_planner_drops_exited_planner_when_tree_kill_reports_failure() {
+        let controller = test_controller();
+        let session_id = "retire-exited";
+        planning_session_with_planner(
+            &controller,
+            session_id,
+            &["--stub-die-on-start", "--stub-tree-kill-fails-once"],
+        );
+
+        controller.retire_master_planner(session_id, "Queen");
+
+        assert!(
+            agent_ids(&controller, session_id).is_empty(),
+            "an exited planner must not linger as a pane after a partial tree-kill failure"
+        );
+        assert!(
+            !controller
+                .pty_manager
+                .read()
+                .list_sessions()
+                .iter()
+                .any(|(id, _, _)| id == &format!("{session_id}-master-planner")),
+            "the retained PTY handle is released by the retry"
+        );
+    }
+
+    #[test]
+    fn retire_master_planner_keeps_planner_that_is_still_running_after_failed_kill() {
+        let controller = test_controller();
+        let session_id = "retire-live";
+        planning_session_with_planner(&controller, session_id, &["--stub-tree-kill-fails-once"]);
+
+        controller.retire_master_planner(session_id, "Queen");
+
+        assert_eq!(
+            agent_ids(&controller, session_id),
+            vec![format!("{session_id}-master-planner")],
+            "a planner that is still running stays visible so the operator can stop it"
+        );
+    }
+
+    #[test]
+    fn retire_master_planner_drops_planner_after_clean_kill() {
+        let controller = test_controller();
+        let session_id = "retire-clean";
+        planning_session_with_planner(&controller, session_id, &[]);
+
+        controller.retire_master_planner(session_id, "Queen");
+
+        assert!(agent_ids(&controller, session_id).is_empty());
+    }
+
+    #[test]
+    fn master_planner_config_does_not_inherit_queen_label() {
+        let queen = AgentConfig {
+            cli: "claude".to_string(),
+            label: Some("Queen".to_string()),
+            ..AgentConfig::default()
+        };
+
+        let planner = SessionController::master_planner_agent_config(&queen);
+
+        assert_eq!(planner.label.as_deref(), Some("Master Planner"));
+        assert_eq!(planner.cli, "claude", "the planner still launches with the Queen's CLI");
+        assert_eq!(queen.label.as_deref(), Some("Queen"));
     }
 
     #[test]
