@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import uuid
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -84,15 +85,25 @@ def _blind(value: Any) -> None:
 def _project_identity(cwd: Path | None = None) -> str | None:
     """Use only this checkout's origin, never caller-supplied project data."""
     try:
+        resolved_cwd = (cwd if cwd is not None else Path.cwd()).resolve()
+    except (OSError, RuntimeError):
+        return None
+    return _project_identity_for_cwd(resolved_cwd)
+
+
+@cache
+def _project_identity_for_cwd(cwd: Path) -> str | None:
+    """Resolve each cwd's origin once per process, including denied lookups."""
+    try:
         root = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"], cwd=cwd,
-            capture_output=True, text=True, timeout=5, check=True,
+            capture_output=True, text=True, timeout=30, check=True,
         ).stdout.strip()
         if not root:
             return None
         remote = subprocess.run(
             ["git", "remote", "get-url", "origin"], cwd=root,
-            capture_output=True, text=True, timeout=5, check=True,
+            capture_output=True, text=True, timeout=30, check=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None

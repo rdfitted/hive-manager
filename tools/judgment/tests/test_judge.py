@@ -223,6 +223,73 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual("rdfitted/hive-manager", self._rows()[-1]["project"])
 
+    def test_slow_git_identity_is_reused_across_single_and_fanout_asks(self):
+        def slow_git(command, **kwargs):
+            # Model git taking longer than the old five-second deadline.
+            if kwargs["timeout"] < 6:
+                raise judge.subprocess.TimeoutExpired(command, 6)
+            value = str(self.root) if command[1] == "rev-parse" else "https://github.com/rdfitted/hive-manager.git"
+            return judge.subprocess.CompletedProcess(command, 0, stdout=value + "\n")
+
+        questions = self._file("questions.json", {"q1": json.loads(self.question.read_text())})
+        fanout = self._args()[:-4] + ["--questions", str(questions), "--dry-run"]
+        with patch.object(judge.Path, "cwd", return_value=self.root), \
+                patch.object(judge.subprocess, "run", side_effect=slow_git) as git, \
+                patch.object(judge.jev_transport, "send") as send:
+            for args in (self._args(dry=True), fanout, self._args(dry=True)):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(0, judge.main(args))
+                self.assertEqual("dry-run", json.loads(output.getvalue())["status"])
+            # One discovery sequence: one root lookup and one origin lookup.
+            self.assertEqual(2, git.call_count)
+            self.assertEqual([30, 30], [call.kwargs["timeout"] for call in git.call_args_list])
+            send.assert_not_called()
+        self.assertEqual(["dry-run"] * 3, [row["error"] for row in self._rows()])
+        self.assertEqual({"rdfitted/hive-manager"}, {row["project"] for row in self._rows()})
+
+    def test_identity_cache_normalizes_equivalent_cwds(self):
+        with patch.object(judge.subprocess, "run") as git:
+            git.side_effect = [MagicMock(stdout=str(self.root)),
+                               MagicMock(stdout="git@github.com:Owner/Repo.git")]
+            self.assertEqual("owner/repo", judge._project_identity(self.root))
+            self.assertEqual("owner/repo", judge._project_identity(self.root / "nested" / ".."))
+            self.assertEqual(2, git.call_count)
+            self.assertEqual(self.root.resolve(), git.call_args_list[0].kwargs["cwd"])
+
+    def test_identity_cache_tracks_current_cwd_instead_of_reusing_another_origin(self):
+        other = self.root / "other"
+        other.mkdir()
+        with patch.object(judge.Path, "cwd", side_effect=[self.root, other, self.root]), \
+                patch.object(judge.subprocess, "run") as git:
+            git.side_effect = [MagicMock(stdout=str(self.root)),
+                               MagicMock(stdout="https://github.com/Owner/First.git"),
+                               MagicMock(stdout=str(other)),
+                               MagicMock(stdout="https://github.com/Owner/Second.git")]
+            self.assertEqual("owner/first", judge._project_identity())
+            self.assertEqual("owner/second", judge._project_identity())
+            self.assertEqual("owner/first", judge._project_identity())
+            self.assertEqual(4, git.call_count)
+
+    def test_failed_identity_lookup_is_cached_and_denied(self):
+        for error in (OSError("no git"),
+                      judge.subprocess.CalledProcessError(1, "git"),
+                      judge.subprocess.TimeoutExpired("git", 30)):
+            with self.subTest(error=type(error).__name__):
+                cwd = self.root / type(error).__name__
+                with patch.object(judge.subprocess, "run", side_effect=error) as git:
+                    self.assertIsNone(judge._project_identity(cwd))
+                    self.assertIsNone(judge._project_identity(cwd))
+                    git.assert_called_once()
+
+    def test_non_github_origin_is_cached_without_accepting_another_checkout(self):
+        with patch.object(judge.subprocess, "run") as git:
+            git.side_effect = [MagicMock(stdout=str(self.root)),
+                               MagicMock(stdout="https://example.invalid/Owner/Repo.git")]
+            self.assertIsNone(judge._project_identity(self.root))
+            self.assertIsNone(judge._project_identity(self.root))
+            self.assertEqual(2, git.call_count)
+
     def test_redaction_case_rules_and_incomplete_scan(self):
         dictionary = ["Zebulon Quartermaine", "Bo", {"term": "Acme Fabrication", "kind": "organization"}]
         for text in ("zebulon quartermaine", "ACME FABRICATION", "Bo", "bot@example.invalid"):
