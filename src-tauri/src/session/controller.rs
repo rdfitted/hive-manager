@@ -4531,11 +4531,19 @@ Last updated: {timestamp}
         session_id: &str,
         scope_phrase: &str,
         has_evaluator: bool,
+        has_judge_tool: bool,
     ) -> String {
         let schema_step = format!(
             "For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work."
         );
-        let queen_step = r#"Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work. For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{"result":"ACCEPT|PARTIAL|DECLINE"}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified."#;
+        let validate_step = "Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work.";
+        // The judge commands drive tools/judgment/judge.py, which ships only in hive-manager.
+        let judge_steps = r#" For each adjudication, run `judge record --surface hive.review.finding --question-id review_finding_disposition` with a blind subject ref and one-key `{"result":"ACCEPT|PARTIAL|DECLINE"}` answer; retain its incumbent decision ID. Build a separate blind observation from the substantive finding text and cited code at `reviewed_sha` (`git show <sha>:<path>`); require a full SHA and repo-relative tracked path, and leave the ask unattempted if either cannot be resolved. Remove reviewer severity badges/headers and never include the Reconciler rationale. Run `judge ask --surface hive.review.finding --source-decision-id <record_id>` with the blind observation and typed Choice question in shadow only when the project and surface pass egress policy; its answer never changes the fix list. After the round settles, attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees with the disposition. Put `evidence_tier`, commit/test or thread/reply IDs in outcome `note`. A resolved thread alone supplies no truth label; contested/superseded findings remain unjoined until verified."#;
+        let queen_step = if has_judge_tool {
+            format!("{validate_step}{judge_steps}")
+        } else {
+            validate_step.to_string()
+        };
         let (indent, before_command) = if has_evaluator {
             ("   ", "\n\n   ```bash\n\n")
         } else {
@@ -4559,6 +4567,7 @@ Last updated: {timestamp}
         session_id: &str,
         session_root: &Path,
         has_evaluator: bool,
+        has_judge_tool: bool,
     ) -> String {
         let milestone_ready_path =
             Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
@@ -4573,6 +4582,7 @@ Last updated: {timestamp}
                 "external review comments and integrity findings"
             },
             has_evaluator,
+            has_judge_tool,
         );
 
         if !has_evaluator {
@@ -5356,8 +5366,12 @@ Do not run the debate. Stop after writing the plan.
         } else {
             String::new()
         };
-        let post_workers_protocol =
-            Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
+        let post_workers_protocol = Self::queen_post_workers_protocol(
+            session_id,
+            &session_root,
+            has_evaluator,
+            Self::project_has_judge_tool(project_path),
+        );
         let status_reporting_lines = if has_evaluator {
             r#"[TIMESTAMP] QUEEN: Variant N (name) - COMPLETED/IN_PROGRESS/FAILED
 [TIMESTAMP] QUEEN: All variants complete - spawning Judge
@@ -6779,8 +6793,12 @@ This tests that:
         } else {
             String::new()
         };
-        let post_workers_protocol =
-            Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
+        let post_workers_protocol = Self::queen_post_workers_protocol(
+            session_id,
+            &session_root,
+            has_evaluator,
+            Self::project_has_judge_tool(project_path),
+        );
         let queen_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
             session_id,
@@ -7565,8 +7583,12 @@ Awaiting task assignment from the Queen."#,
         let (project_root, project_dna_path, project_learnings_path) =
             Self::project_knowledge_prompt_paths(queen_cli, project_path);
         let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
-        let post_workers_protocol =
-            Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
+        let post_workers_protocol = Self::queen_post_workers_protocol(
+            session_id,
+            &session_root,
+            has_evaluator,
+            Self::project_has_judge_tool(project_path),
+        );
 
         // Build planner info section (what Queen will spawn)
         let mut planner_info = String::new();
@@ -7607,6 +7629,11 @@ If you find yourself about to edit code, STOP. Assign work to a Planner instead.
             Self::build_qa_milestone_handoff(session_id, &session_root, "workers/planners")
         } else {
             String::new()
+        };
+        let judge_tool_row = if Self::project_has_judge_tool(project_path) {
+            "| Judge | `judge.md` | Record and compare blind shadow judgments with the gated Jev CLI |\n"
+        } else {
+            ""
         };
 
         format!(
@@ -7672,8 +7699,7 @@ Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files f
 | Spawn Worker | `spawn-worker.md` | Reference only - Planners use this to spawn workers |
 | List Workers | `list-workers.md` | Get list of all workers and their status |
 | Mark Worker Status | `mark-worker-status.md` | Mark each independently verified worker complete |
-| Judge | `judge.md` | Record and compare blind shadow judgments with the gated Jev CLI |
-| Submit Learning | `submit-learning.md` | Record a learning via HTTP API |
+{judge_tool_row}| Submit Learning | `submit-learning.md` | Record a learning via HTTP API |
 | List Learnings | `list-learnings.md` | Get all learnings for this session |
 | Delete Learning | `delete-learning.md` | Remove a learning by ID |
 
@@ -7781,6 +7807,7 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
             cli = planner_spawn_cli,
             planner_info = planner_info,
             planner_count = planner_count,
+            judge_tool_row = judge_tool_row,
             project_root = project_root,
             project_dna_path = project_dna_path,
             project_learnings_path = project_learnings_path,
@@ -7900,6 +7927,18 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
                 "Failed to serialize worker context sidecar; spawn will continue: {error}"
             ),
         }
+    }
+
+    /// `judge.md` drives `tools/judgment/judge.py`, which ships only in hive-manager
+    /// itself. Checking for the script (not the git origin) means forks and clones
+    /// without a remote still get the doc, and other projects never see a tool
+    /// they cannot run.
+    fn project_has_judge_tool(project_path: &Path) -> bool {
+        project_path
+            .join("tools")
+            .join("judgment")
+            .join("judge.py")
+            .is_file()
     }
 
     /// Write a tool documentation file to the session's tools directory
@@ -8285,7 +8324,9 @@ Live egress is limited to the git-origin project `rdfitted/hive-manager` and all
 
 Every command prints one JSON object with `status`, `decision_id`, `sent`, `answer`, `model`, `latency_ms`, `usage`, `error`, and `redaction` (counts and reason classes only when blocked). Exit `0` means a row was written, including `dry-run` or `no-key`; exit `2` means invalid input; exit `3` means policy, redaction, or size blocked after a row; exit `4` means transport failed after a row; exit `5` means the ledger write failed. Treat a Jev result only as shadow evidence for later audit.
 "#;
-        Self::write_tool_file(project_path, session_id, "judge.md", judge_tool)?;
+        if Self::project_has_judge_tool(project_path) {
+            Self::write_tool_file(project_path, session_id, "judge.md", judge_tool)?;
+        }
 
         // Submit Learning tool
         let submit_learning_tool = r#"# Submit Learning Tool
@@ -18822,6 +18863,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                 "session-123",
                 session_root,
                 has_evaluator,
+                true,
             );
             assert_eq!(
                 rendered,
@@ -18840,6 +18882,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         let protocol = SessionController::queen_post_workers_protocol(
             "session-123",
             Path::new("/repo/.hive-manager/session-123"),
+            true,
             true,
         );
         for blocked_step in [
@@ -18876,6 +18919,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             "session-123",
             session_root,
             false,
+            true,
         );
         assert!(qa_off.contains("QA is disabled for this session"));
         assert!(qa_off.contains("milestone QA gate will not run before push"));
@@ -18883,6 +18927,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         let qa_on = SessionController::queen_post_workers_protocol(
             "session-123",
             session_root,
+            true,
             true,
         );
         assert!(!qa_on.contains("QA is disabled for this session"));
@@ -18896,6 +18941,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                 "session-123",
                 session_root,
                 has_evaluator,
+                true,
             );
             assert!(protocol.contains("notes/review-round-N.md` plus sibling `review-round-N.json`"));
             assert!(protocol.contains("`finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE)"));
@@ -18910,6 +18956,20 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             assert!(protocol.contains("its answer never changes the fix list"));
             assert!(protocol.contains("attach `judge outcome --decision-id <record_id> --source downstream` to the incumbent ID only when a fix has a named red→green test or a reviewer explicitly agrees"));
             assert!(protocol.contains("A resolved thread alone supplies no truth label"));
+
+            // Projects without tools/judgment/judge.py keep the adjudication flow but get no judge steps.
+            let no_judge = SessionController::queen_post_workers_protocol(
+                "session-123",
+                session_root,
+                has_evaluator,
+                false,
+            );
+            assert!(no_judge.contains("notes/review-round-N.md` plus sibling `review-round-N.json`"));
+            assert!(no_judge.contains("and full coverage before assigning Resolver work.\n"));
+            assert!(!no_judge.contains("judge record"));
+            assert!(!no_judge.contains("judge ask"));
+            assert!(!no_judge.contains("judge outcome"));
+            assert!(!no_judge.contains("hive.review.finding"));
         }
         assert!(include_str!("controller.rs").contains("for external PR findings emit the paired review-round-N.md and review-round-N.json adjudication artifacts, with one disposition per finding and rationale only in markdown"));
     }
@@ -19372,12 +19432,24 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             "keeps agent liveness fresh for stall detection but does not extend the session's 10-minute quiescence window"
         ));
 
+        // The temp project has no `tools/judgment/judge.py`, so it gets no judge doc.
         let judge_tool_path = temp_dir
             .path()
             .join(".hive-manager")
             .join("session-123")
             .join("tools")
             .join("judge.md");
+        assert!(!judge_tool_path.exists());
+
+        let judge_script_dir = temp_dir.path().join("tools").join("judgment");
+        std::fs::create_dir_all(&judge_script_dir).expect("create judgment dir");
+        std::fs::write(judge_script_dir.join("judge.py"), "").expect("write judge.py");
+        SessionController::write_tool_files(
+            &PathBuf::from(temp_dir.path()),
+            "session-123",
+            "claude",
+        )
+        .expect("rewrite tool files");
         let judge_content = std::fs::read_to_string(judge_tool_path).expect("read judge tool doc");
         assert!(judge_content.contains("python tools/judgment/judge.py"));
         assert!(judge_content.contains("`ui.slop` is shadow / never-gating"));
@@ -20194,8 +20266,41 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         );
 
         assert!(hardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
-        assert!(hardened_queen_prompt.contains("| Judge | `judge.md` |"));
         assert!(!unhardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
+    }
+
+    #[test]
+    fn swarm_queen_lists_judge_tool_only_when_project_ships_judge_py() {
+        let other_project = tempfile::tempdir().expect("temp dir");
+        let other_prompt = SessionController::build_swarm_queen_prompt(
+            "claude",
+            "claude",
+            other_project.path(),
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+        assert!(!other_prompt.contains("| Judge | `judge.md` |"));
+        assert!(other_prompt.contains("| Mark Worker Status | `mark-worker-status.md` |"));
+        assert!(other_prompt.contains("| Submit Learning | `submit-learning.md` |"));
+
+        let hive_project = tempfile::tempdir().expect("temp dir");
+        let judge_script_dir = hive_project.path().join("tools").join("judgment");
+        std::fs::create_dir_all(&judge_script_dir).expect("create judgment dir");
+        std::fs::write(judge_script_dir.join("judge.py"), "").expect("write judge.py");
+        let hive_prompt = SessionController::build_swarm_queen_prompt(
+            "claude",
+            "claude",
+            hive_project.path(),
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+        assert!(hive_prompt.contains(
+            "| Mark Worker Status | `mark-worker-status.md` | Mark each independently verified worker complete |\n| Judge | `judge.md` |"
+        ));
     }
 
     #[test]
