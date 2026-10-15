@@ -46,6 +46,24 @@ pub fn launch_env(
     if let Some(cwd) = cwd {
         let dot_git = cwd.join(".git");
         if dot_git.is_file() {
+            // These inherited keys redirect Git even when our seven overrides are
+            // correct. Stop before touching the command; never clear operator state.
+            for key in ["GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"] {
+                if inherited.iter().any(|(name, value)| {
+                    name.to_string_lossy().eq_ignore_ascii_case(key) && !value.is_empty()
+                }) {
+                    return Err(format!("WSL launch would overwrite operator environment entry {key}"));
+                }
+                if inherited.iter().any(|(name, value)| {
+                    name.to_string_lossy().eq_ignore_ascii_case("WSLENV")
+                        && value.to_string_lossy().split(':').any(|entry| {
+                            entry.split('/').next().is_some_and(|name| name.eq_ignore_ascii_case(key))
+                        })
+                }) {
+                    return Err(format!("WSL launch would overwrite operator WSLENV entry {key}"));
+                }
+            }
             let contents = std::fs::read_to_string(&dot_git)
                 .map_err(|error| format!("Cannot read worktree .git file: {error}"))?;
             let gitdir = contents.trim().strip_prefix("gitdir:")
@@ -181,6 +199,65 @@ mod tests {
             launch_env("wsl", Some(root.path()), &identity(), &inherited).unwrap_err(),
             "WSL launch would overwrite operator WSLENV entry GIT_DIR"
         );
+    }
+
+    #[test]
+    fn worktree_rejects_inherited_git_context_before_command_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".git"), "gitdir: D:/repo/.git/worktrees/worker").unwrap();
+        let main = tempfile::tempdir().unwrap();
+        std::fs::create_dir(main.path().join(".git")).unwrap();
+        let mut missed = Vec::new();
+        for key in ["GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"] {
+            for name in [key.to_string(), key.to_ascii_lowercase(), key.replacen("GIT_", "gIt_", 1)] {
+                let inherited = [(name.clone().into(), "private-operator-context".into())];
+                let mut command = CommandBuilder::new("wsl");
+                command.env(&name, "private-operator-context");
+                command.env("HIVE_FUTURE_INHERITED", "preserve-before-validation");
+                let result = apply_launch_env(&mut command, "wsl", Some(root.path()), &identity(), &inherited);
+                if result != Err(format!("WSL launch would overwrite operator environment entry {key}")) {
+                    missed.push(name.clone());
+                }
+                assert_eq!(command.get_env(&name).unwrap(), "private-operator-context");
+                assert_eq!(command.get_env("HIVE_FUTURE_INHERITED").unwrap(), "preserve-before-validation");
+                // Empty values cannot redirect Git's context.
+                assert!(launch_env("wsl", Some(root.path()), &identity(), &[(key.into(), OsString::new())]).is_ok());
+                let main_env = launch_env("wsl", Some(main.path()), &identity(), &inherited).unwrap();
+                assert!(!main_env.iter().any(|(name, _)| name.starts_with("GIT_")));
+                assert_eq!(launch_env("codex", Some(root.path()), &identity(), &inherited).unwrap(), identity());
+            }
+        }
+        assert!(missed.is_empty(), "unrejected Git context keys: {}", missed.join(", "));
+    }
+
+    #[test]
+    fn worktree_rejects_operator_git_context_forwarding_without_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".git"), "gitdir: D:/repo/.git/worktrees/worker").unwrap();
+        let main = tempfile::tempdir().unwrap();
+        std::fs::create_dir(main.path().join(".git")).unwrap();
+        let mut missed = Vec::new();
+        for key in ["GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"] {
+            for entry in [key.to_string(), format!("{}/p", key.to_ascii_lowercase()), format!("{}/p", key.replacen("GIT_", "gIt_", 1))] {
+                let forwarding = format!("OPERATOR_PATH/p:{entry}");
+                let inherited = [("WSLENV".into(), OsString::from(&forwarding))];
+                let mut command = CommandBuilder::new("wsl");
+                command.env("WSLENV", &forwarding);
+                let result = apply_launch_env(&mut command, "wsl", Some(root.path()), &identity(), &inherited);
+                if result != Err(format!("WSL launch would overwrite operator WSLENV entry {key}")) {
+                    missed.push(entry);
+                }
+                if result.is_err() {
+                    assert_eq!(command.get_env("WSLENV").unwrap(), forwarding.as_str());
+                }
+                let env: HashMap<_, _> = launch_env("wsl", Some(main.path()), &identity(), &inherited).unwrap().into_iter().collect();
+                assert!(env["WSLENV"].starts_with(&format!("{forwarding}:")));
+                assert_eq!(launch_env("codex", Some(root.path()), &identity(), &inherited).unwrap(), identity());
+            }
+        }
+        assert!(missed.is_empty(), "unrejected Git forwarding keys: {}", missed.join(", "));
     }
 
     #[test]

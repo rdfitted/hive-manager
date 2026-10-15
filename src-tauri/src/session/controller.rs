@@ -13265,30 +13265,67 @@ The backend composed and persisted the following authoritative skeleton before l
         Ok(())
     }
 
-    /// Apply the optional API launch setting to the existing persisted session.
+    /// Apply the API launch setting in memory, then attempt to persist it.
+    /// A save error leaves the running session's requested setting active.
     pub(crate) fn set_session_qa_timeout(
         &self,
         session_id: &str,
         timeout_secs: Option<u64>,
     ) -> Result<Session, String> {
         let _resolution = Self::lock_qa_resolution();
-        let updated = {
+        let (updated, persistence) = {
             let mut sessions = self.sessions.write();
             let session = sessions.get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
-            let previous = session.qa_timeout_secs;
             session.qa_timeout_secs = timeout_secs.unwrap_or_else(default_qa_timeout_secs);
-            if let Some(storage) = self.storage.as_ref() {
+            let persistence = if let Some(storage) = self.storage.as_ref() {
                 let snapshot = Self::session_to_persisted_snapshot(session);
-                if let Err(error) = storage.save_session(&snapshot) {
-                    session.qa_timeout_secs = previous;
-                    return Err(format!("Failed to persist QA timeout: {}", error));
-                }
-            }
-            session.clone()
+                self.persist_session_qa_timeout(storage, &snapshot)
+                    .map_err(|error| format!("Failed to persist QA timeout: {}", error))
+            } else {
+                Ok(())
+            };
+            (session.clone(), persistence)
         };
         self.emit_session_update(session_id);
+        persistence?;
         Ok(updated)
+    }
+
+    fn persist_session_qa_timeout(
+        &self,
+        storage: &SessionStorage,
+        snapshot: &crate::storage::PersistedSession,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some((attempts, fail)) = Self::qa_timeout_persistence_test_seams()
+            .lock().get_mut(storage.base_dir())
+        {
+            *attempts += 1;
+            if *fail {
+                return Err("injected QA timeout save failure: private-storage-detail".to_string());
+            }
+        }
+        storage.save_session(snapshot).map_err(|error| error.to_string())
+    }
+
+    // Scope injection to one isolated test store and only the optional launch save.
+    #[cfg(test)]
+    fn qa_timeout_persistence_test_seams() -> &'static Mutex<HashMap<PathBuf, (usize, bool)>> {
+        static SEAMS: std::sync::OnceLock<Mutex<HashMap<PathBuf, (usize, bool)>>> = std::sync::OnceLock::new();
+        SEAMS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fail_qa_timeout_persistence(&self) {
+        let storage = self.storage.as_ref().expect("QA timeout seam requires isolated storage");
+        Self::qa_timeout_persistence_test_seams().lock().insert(storage.base_dir().clone(), (0, true));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_take_qa_timeout_save_attempts(&self) -> usize {
+        let storage = self.storage.as_ref().expect("QA timeout seam requires isolated storage");
+        Self::qa_timeout_persistence_test_seams().lock().remove(storage.base_dir()).unwrap().0
     }
 
     /// Whether a QA timeout is currently armed for this session.
@@ -23259,7 +23296,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     }
 
     #[test]
-    fn qa_launch_timeout_persistence_failure_restores_runtime_setting() {
+    fn qa_launch_timeout_persistence_failure_keeps_runtime_setting() {
         let temp = tempfile::tempdir().unwrap();
         let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
         let mut controller = test_controller();
@@ -23269,7 +23306,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         std::fs::create_dir(storage.session_dir("qa-setting-write-failure").join("session.json")).unwrap();
         let error = controller.set_session_qa_timeout("qa-setting-write-failure", Some(720)).unwrap_err();
         assert!(error.contains("Failed to persist QA timeout"));
-        assert_eq!(controller.get_session("qa-setting-write-failure").unwrap().qa_timeout_secs, 300);
+        assert_eq!(controller.get_session("qa-setting-write-failure").unwrap().qa_timeout_secs, 720);
     }
 
     #[test]
@@ -23347,6 +23384,26 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         .await
         .expect("original expired window must finish after respawn restores QA");
         controller.cancel_qa_timeout("qa-queued-respawn");
+    }
+
+    #[test]
+    fn qa_launch_persistence_failure_keeps_requested_runtime_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        let id = "qa-explicit-persistence-warning";
+        let session = qa_session_with(id, SessionState::Running, temp.path().join("project"), false);
+        storage.save_session(&SessionController::session_to_persisted_snapshot(&session)).unwrap();
+        controller.insert_test_session(session);
+        controller.test_fail_qa_timeout_persistence();
+        let error = controller.set_session_qa_timeout(id, Some(720)).unwrap_err();
+        assert!(error.contains("Failed to persist QA timeout"));
+        assert_eq!(controller.test_take_qa_timeout_save_attempts(), 1);
+        assert_eq!(storage.load_session(id).unwrap().qa_timeout_secs, 300);
+        assert_eq!(controller.get_session(id).unwrap().qa_timeout_secs, 720,
+            "a running launch keeps the requested setting even when persistence fails");
+        assert!(matches!(controller.get_session(id).unwrap().state, SessionState::Running));
     }
 
 }
