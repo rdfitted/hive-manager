@@ -283,7 +283,66 @@ async fn check_cursor_health(cli: &str, wsl_path: PathBuf) -> CliHealth {
     ];
 
     let probe = run_bounded_command(&wsl_path, &args, CURSOR_PROBE_TIMEOUT).await;
-    cursor_health_from_probe(cli, wsl_path, &distro, &binary_path, probe)
+    let health = cursor_health_from_probe(cli, wsl_path.clone(), &distro, &binary_path, probe);
+    cursor_api_health_with_probe(health, &distro, |args, timeout| async move {
+        run_bounded_command(&wsl_path, &args, timeout).await
+    })
+    .await
+}
+
+async fn cursor_api_health_with_probe<F, Fut>(
+    mut health: CliHealth,
+    distro: &str,
+    probe: F,
+) -> CliHealth
+where
+    F: FnOnce(Vec<String>, Duration) -> Fut,
+    Fut: std::future::Future<Output = BoundedProcessResult>,
+{
+    if !health.resolved {
+        return health;
+    }
+    // HTTP errors (including /api/health returning 404) still prove transport reachability.
+    // Each curl has a one-second limit; the whole WSL command has its own hard deadline.
+    let script = concat!(
+        "for client in curl curl.exe; do ",
+        "if \"$client\" --disable --noproxy '*' -s --max-time 1 ",
+        "http://localhost:18800/api/health >/dev/null 2>&1; ",
+        "then printf '%s=reachable\\n' \"$client\"; ",
+        "else printf '%s=unreachable\\n' \"$client\"; fi; done"
+    );
+    let args = vec![
+        "-d".to_string(),
+        distro.to_string(),
+        "--".to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        script.to_string(),
+    ];
+    let detail = match probe(args, CURSOR_PROBE_TIMEOUT).await {
+        BoundedProcessResult::Exited { status, stdout, .. }
+            if status.success() && !stdout.truncated => {
+            let output = String::from_utf8_lossy(&stdout.bytes);
+            let curl = output.lines().find_map(|line| line.strip_prefix("curl="));
+            let interop = output.lines().find_map(|line| line.strip_prefix("curl.exe="));
+            match (curl, interop) {
+                (Some("unreachable"), Some("reachable")) =>
+                    "WARNING: Hive API unreachable from WSL with curl; curl.exe works",
+                (Some("reachable"), Some("reachable")) =>
+                    "Hive API reachable from WSL with curl and curl.exe",
+                (Some("reachable"), Some("unreachable")) =>
+                    "WARNING: Hive API reachable from WSL with curl; curl.exe is unreachable",
+                (Some("unreachable"), Some("unreachable")) =>
+                    "WARNING: Hive API unreachable from WSL with curl and curl.exe",
+                _ => "WARNING: Hive API reachability probe returned an unexpected result",
+            }
+        }
+        BoundedProcessResult::TimedOut => "WARNING: Hive API reachability probe timed out in WSL",
+        _ => "WARNING: Hive API reachability probe could not run in WSL",
+    };
+    health.detail.push_str("; ");
+    health.detail.push_str(detail);
+    health
 }
 
 fn cursor_health_from_probe(
@@ -448,18 +507,12 @@ async fn capture_bounded(
         return BoundedProcessResult::RunError("failed to capture child stderr".to_string());
     };
 
-    let mut stdout_reader = tokio::spawn(read_capped(stdout, per_pipe_cap));
-    let mut stderr_reader = tokio::spawn(read_capped(stderr, per_pipe_cap));
+    let mut stdout_reader = Some(tokio::spawn(read_capped(stdout, per_pipe_cap)));
+    let mut stderr_reader = Some(tokio::spawn(read_capped(stderr, per_pipe_cap)));
     let completed = tokio::time::timeout(timeout, async {
         let status = child.wait().await.map_err(|error| error.to_string())?;
-        let stdout = (&mut stdout_reader)
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
-        let stderr = (&mut stderr_reader)
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
+        let stdout = finish_reader(&mut stdout_reader).await?;
+        let stderr = finish_reader(&mut stderr_reader).await?;
         Ok::<_, String>((status, stdout, stderr))
     })
     .await;
@@ -510,14 +563,28 @@ async fn terminate_and_reap(child: &mut tokio::process::Child) {
     }
 }
 
-async fn abort_readers(
-    stdout_reader: &mut tokio::task::JoinHandle<std::io::Result<CappedBytes>>,
-    stderr_reader: &mut tokio::task::JoinHandle<std::io::Result<CappedBytes>>,
-) {
-    stdout_reader.abort();
-    stderr_reader.abort();
-    let _ = stdout_reader.await;
-    let _ = stderr_reader.await;
+type ProbeReader = Option<tokio::task::JoinHandle<std::io::Result<CappedBytes>>>;
+
+async fn finish_reader(reader: &mut ProbeReader) -> Result<CappedBytes, String> {
+    let result = reader.as_mut().expect("reader is still pending").await;
+    // Keep a pending handle available to timeout cleanup, but never poll a completed one again.
+    reader.take();
+    result
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+async fn abort_readers(stdout_reader: &mut ProbeReader, stderr_reader: &mut ProbeReader) {
+    for reader in [&mut *stdout_reader, &mut *stderr_reader] {
+        if let Some(reader) = reader.as_ref() {
+            reader.abort();
+        }
+    }
+    for reader in [stdout_reader, stderr_reader] {
+        if let Some(reader) = reader.take() {
+            let _ = reader.await;
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -1205,6 +1272,103 @@ mod tests {
         assert_eq!(stderr.bytes.len(), 1024);
         assert!(stdout.truncated);
         assert!(stderr.truncated);
+    }
+
+    #[tokio::test]
+    async fn bounded_readers_timeout_after_stdout_closes_does_not_double_await() {
+        let (stdout, stdout_writer) = tokio::io::duplex(64);
+        let (stderr, _stderr_writer) = tokio::io::duplex(64);
+        drop(stdout_writer);
+        let mut stdout_reader = Some(tokio::spawn(read_capped(stdout, 64)));
+        let mut stderr_reader = Some(tokio::spawn(read_capped(stderr, 64)));
+        let completed = tokio::time::timeout(Duration::from_millis(50), async {
+            finish_reader(&mut stdout_reader).await.unwrap();
+            finish_reader(&mut stderr_reader).await.unwrap();
+        })
+        .await;
+        assert!(
+            completed.is_err(),
+            "stderr must remain open past the deadline"
+        );
+        // This is the production timeout cleanup path; a consumed stdout handle must be absent.
+        abort_readers(&mut stdout_reader, &mut stderr_reader).await;
+        assert!(stdout_reader.is_none());
+        assert!(stderr_reader.is_none());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn cursor_api_reachability_is_bounded_and_only_warns() {
+        for (output, expected) in [
+            (
+                "curl=unreachable\ncurl.exe=reachable\n",
+                "WARNING: Hive API unreachable from WSL with curl; curl.exe works",
+            ),
+            (
+                "curl=reachable\ncurl.exe=reachable\n",
+                "Hive API reachable from WSL with curl and curl.exe",
+            ),
+            (
+                "curl=reachable\ncurl.exe=unreachable\n",
+                "WARNING: Hive API reachable from WSL with curl; curl.exe is unreachable",
+            ),
+            (
+                "curl=unreachable\ncurl.exe=unreachable\n",
+                "WARNING: Hive API unreachable from WSL with curl and curl.exe",
+            ),
+            (
+                "unexpected",
+                "WARNING: Hive API reachability probe returned an unexpected result",
+            ),
+        ] {
+            let health = cursor_health_from_probe(
+                "cursor",
+                PathBuf::from("wsl"),
+                "Test Distro",
+                "/agent",
+                exited_probe(0, b"", b""),
+            );
+            let health =
+                cursor_api_health_with_probe(health, "Test Distro", |args, timeout| async move {
+                    assert_eq!(&args[..5], ["-d", "Test Distro", "--", "sh", "-c"]);
+                    assert!(args[5].contains("for client in curl curl.exe"));
+                    assert!(args[5].contains("--max-time 1"));
+                    assert!(args[5].contains("http://localhost:18800/api/health"));
+                    assert_eq!(timeout, CURSOR_PROBE_TIMEOUT);
+                    exited_probe(0, output.as_bytes(), b"")
+                })
+                .await;
+            assert!(health.resolved);
+            assert_eq!(health.logged_in, LoginStatus::Unknown);
+            assert!(health.detail.ends_with(expected), "{}", health.detail);
+        }
+        for result in [
+            BoundedProcessResult::TimedOut,
+            BoundedProcessResult::RunError("missing".into()),
+        ] {
+            let health = cursor_health_from_probe(
+                "cursor",
+                PathBuf::from("wsl"),
+                "Ubuntu",
+                "/agent",
+                exited_probe(0, b"", b""),
+            );
+            let health = cursor_api_health_with_probe(health, "Ubuntu", |_, _| async { result }).await;
+            assert!(health.resolved);
+            assert!(health.detail.contains("WARNING:"));
+        }
+        let missing = cursor_health_from_probe(
+            "cursor",
+            PathBuf::from("wsl"),
+            "Ubuntu",
+            "/agent",
+            exited_probe(1, b"", b""),
+        );
+        let missing = cursor_api_health_with_probe(missing, "Ubuntu", |_, _| async {
+            panic!("missing agents must not run the reachability probe")
+        })
+        .await;
+        assert!(!missing.resolved);
     }
 
     #[cfg(windows)]
