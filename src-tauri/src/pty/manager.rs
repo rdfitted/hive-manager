@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::output_ring::{clamp_replay_capacity, OutputSnapshot, DEFAULT_REPLAY_CAPACITY};
 use super::session::{AgentRole, AgentStatus, PtyError, PtySession, read_from_reader};
@@ -318,8 +319,17 @@ const CODEX_SPAWN_GAP: Duration = Duration::from_millis(750);
 #[cfg(test)]
 const CODEX_SPAWN_GAP: Duration = Duration::from_millis(10);
 
+// Deliberately neither Debug nor Serialize: credentials never enter diagnostics or disk.
+struct HeartbeatCredential {
+    session_id: String,
+    digest: [u8; 32],
+    queen: bool,
+}
+
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
+    heartbeat_credentials: RwLock<HashMap<String, HeartbeatCredential>>,
+    heartbeat_verify_when_present: RwLock<HashMap<String, bool>>,
     /// Serialize create/kill so a same-id kill cannot pass between process spawn and
     /// insertion, and a duplicate create cannot replace a still-live process handle.
     lifecycle: Mutex<()>,
@@ -344,6 +354,8 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            heartbeat_credentials: RwLock::new(HashMap::new()),
+            heartbeat_verify_when_present: RwLock::new(HashMap::new()),
             lifecycle: Mutex::new(()),
             last_codex_spawn: Mutex::new(None),
             app_handle: None,
@@ -374,6 +386,51 @@ impl PtyManager {
 
     pub fn emitter_stats(&self) -> Arc<EmitterStats> {
         Arc::clone(&self.emitter_stats)
+    }
+
+    /// Operator H-5 policy: every session verifies credentials when present.
+    /// No UI, request or environment switch can disable verification of a supplied token.
+    pub(crate) fn heartbeat_verifies_when_present(&self, session_id: &str) -> bool {
+        self.heartbeat_verify_when_present.read().get(session_id).copied().unwrap_or(true)
+    }
+
+    /// Server-controlled only: never selected by an incoming heartbeat body/header.
+    #[cfg(test)]
+    pub(crate) fn set_heartbeat_verify_when_present(&self, session_id: &str, enabled: bool) {
+        self.heartbeat_verify_when_present.write().insert(session_id.to_string(), enabled);
+    }
+
+    fn new_heartbeat_token() -> String {
+        format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+    }
+
+    fn bind_heartbeat_token(&self, id: &str, session_id: &str, queen: bool, token: &str) {
+        self.heartbeat_credentials.write().insert(id.to_string(), HeartbeatCredential {
+            session_id: session_id.to_string(),
+            digest: Sha256::digest(token.as_bytes()).into(),
+            queen,
+        });
+    }
+
+    /// Resolve caller authority from a spawn credential, never a request body claim.
+    pub(crate) fn authenticate_heartbeat(&self, session_id: &str, token: &str) -> Option<(String, bool)> {
+        if token.len() != 64 {
+            return None;
+        }
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        self.heartbeat_credentials.read().iter().find_map(|(id, credential)| {
+            let difference = credential.digest.iter().zip(digest.iter())
+                .fold(0u8, |difference, (left, right)| difference | (left ^ right));
+            (credential.session_id == session_id && difference == 0)
+                .then(|| (id.clone(), credential.queen))
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mint_heartbeat_token_for_test(&self, id: &str, session_id: &str, queen: bool) -> String {
+        let token = Self::new_heartbeat_token();
+        self.bind_heartbeat_token(id, session_id, queen, &token);
+        token
     }
 
     pub fn create_session(
@@ -467,7 +524,13 @@ impl PtyManager {
             .chain(args.iter().copied())
             .collect();
 
-        let identity_env = agent_identity_env(&id, &role);
+        let mut identity_env = agent_identity_env(&id, &role);
+        let credential = identity_env.first().map(|(_, session_id)| {
+            (session_id.clone(), matches!(&role, AgentRole::Queen), Self::new_heartbeat_token())
+        });
+        if let Some((_, _, token)) = &credential {
+            identity_env.push(("HIVE_AGENT_TOKEN".to_string(), token.clone()));
+        }
         let session = Arc::new(PtySession::new(
             id.clone(),
             role,
@@ -480,6 +543,11 @@ impl PtyManager {
             rows,
             self.replay_capacity,
         )?);
+
+        // Install only after spawn succeeds. A duplicate live spawn must not rotate its token.
+        if let Some((session_id, queen, token)) = credential {
+            self.bind_heartbeat_token(&id, &session_id, queen, &token);
+        }
 
         // Insert session BEFORE spawning reader thread (fixes race condition)
         {
@@ -625,6 +693,7 @@ impl PtyManager {
                 .is_some_and(|current| Arc::ptr_eq(current, &session))
             {
                 sessions.remove(id);
+                self.heartbeat_credentials.write().remove(id);
             }
         }
         Ok(())
@@ -892,14 +961,19 @@ mod tests {
             )
             .unwrap();
 
+        let env = manager.spawn_env_for_test(&id).unwrap();
         assert_eq!(
-            manager.spawn_env_for_test(&id).unwrap(),
+            &env[..3],
             vec![
                 ("HIVE_SESSION_ID".to_string(), SESSION_ID.to_string()),
-                ("HIVE_AGENT_ID".to_string(), id),
+                ("HIVE_AGENT_ID".to_string(), id.clone()),
                 ("HIVE_ROLE".to_string(), "worker".to_string()),
-            ]
+            ].as_slice()
         );
+        let token = env.iter().find(|(key, _)| key == "HIVE_AGENT_TOKEN")
+            .map(|(_, value)| value).expect("spawn credential exists");
+        assert!(manager.authenticate_heartbeat(SESSION_ID, token)
+            .is_some_and(|(owner, queen)| owner == id && !queen));
     }
 
     #[test]
@@ -1581,4 +1655,28 @@ mod transport_tests {
         manager.set_replay_capacity(usize::MAX);
         assert_eq!(manager.replay_capacity(), super::super::output_ring::MAX_REPLAY_CAPACITY);
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_credentials_are_session_scoped_and_revoked_on_kill() {
+        const SESSION_ID: &str = "3dc17391-88d6-46c7-93ba-037f37d36894";
+        let manager = PtyManager::new();
+        let id = format!("{SESSION_ID}-queen");
+        manager.create_session(id.clone(), AgentRole::Queen, "claude", &[], None, 80, 24).unwrap();
+        let env = manager.spawn_env_for_test(&id).unwrap();
+        let token = env.iter().find(|(key, _)| key == "HIVE_AGENT_TOKEN").unwrap().1.clone();
+        assert!(manager.authenticate_heartbeat(SESSION_ID, &token)
+            .is_some_and(|(owner, queen)| owner == id && queen));
+        assert!(manager.authenticate_heartbeat("other-session", &token).is_none());
+        assert!(manager.create_session(id.clone(), AgentRole::Queen, "claude", &[], None, 80, 24).is_err());
+        assert!(manager.authenticate_heartbeat(SESSION_ID, &token).is_some());
+        manager.kill(&id).unwrap();
+        assert!(manager.authenticate_heartbeat(SESSION_ID, &token).is_none());
+        manager.create_session(id.clone(), AgentRole::Queen, "claude", &[], None, 80, 24).unwrap();
+        assert!(manager.authenticate_heartbeat(SESSION_ID, &token).is_none());
+        let next = manager.spawn_env_for_test(&id).unwrap();
+        let next_token = &next.iter().find(|(key, _)| key == "HIVE_AGENT_TOKEN").unwrap().1;
+        assert!(manager.authenticate_heartbeat(SESSION_ID, next_token).is_some());
+    }
+
 }

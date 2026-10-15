@@ -509,8 +509,13 @@ fn make_test_session_for_completion(
     session
 }
 
+fn heartbeat_fixture_token(controller: &Arc<RwLock<SessionController>>, session_id: &str, agent_id: &str) -> String {
+    controller.read().heartbeat_token_for_test(session_id, agent_id)
+}
+
 async fn post_test_heartbeat(
     app: &axum::Router,
+    controller: &Arc<RwLock<SessionController>>,
     session_id: &str,
     agent_id: &str,
     status: &str,
@@ -520,6 +525,7 @@ async fn post_test_heartbeat(
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{session_id}/heartbeat"))
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(controller, session_id, agent_id))
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
@@ -688,7 +694,7 @@ async fn test_preset_catalogue_returns_all_entries_with_matching_expansions() {
     let presets = json["presets"]
         .as_array()
         .expect("presets should be an array");
-    assert_eq!(presets.len(), 76);
+    assert_eq!(presets.len(), 77);
 
     for preset in presets {
         let provider = preset["provider"]
@@ -8100,6 +8106,7 @@ async fn test_post_heartbeat_updates_timestamp() {
             Request::builder()
                 .method("POST")
                 .uri("/api/sessions/session-hb/heartbeat")
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, "session-hb", "worker-1"))
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"agent_id":"worker-1","status":"working","summary":"3/5 files done"}"#,
@@ -8134,6 +8141,7 @@ async fn test_post_heartbeat_rejects_invalid_status() {
             Request::builder()
                 .method("POST")
                 .uri("/api/sessions/session-hb-inv/heartbeat")
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, "session-hb-inv", "worker-1"))
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"agent_id":"worker-1","status":"invalid","summary":"x"}"#,
@@ -8176,6 +8184,7 @@ async fn test_completed_heartbeat_is_excluded_from_stall_sweep() {
                 Request::builder()
                     .method("POST")
                     .uri("/api/sessions/session-hb-completed/heartbeat")
+                    .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, "session-hb-completed", agent_id))
                     .header("Content-Type", "application/json")
                     .body(Body::from(
                         serde_json::json!({ "agent_id": agent_id, "status": status })
@@ -8266,6 +8275,7 @@ async fn test_get_active_sessions_includes_heartbeat_after_post() {
             Request::builder()
                 .method("POST")
                 .uri("/api/sessions/session-active-hb/heartbeat")
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, "session-active-hb", "worker-1"))
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"agent_id":"worker-1","status":"working","summary":"2/3 done"}"#,
@@ -8340,6 +8350,7 @@ async fn test_list_sessions_reflects_fresh_heartbeat_activity_and_persists_it() 
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, &session_id, "worker-1"))
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     r#"{"agent_id":"worker-1","status":"working","summary":"fresh activity"}"#,
@@ -8473,7 +8484,7 @@ async fn test_completed_heartbeat_does_not_extend_quiescence() {
     for _ in 0..3 {
         for worker_id in [&worker_1, &worker_2] {
             let heartbeat =
-                post_test_heartbeat(&app, &session_id, worker_id, "completed").await;
+                post_test_heartbeat(&app, &controller, &session_id, worker_id, "completed").await;
             assert_eq!(heartbeat.status(), StatusCode::OK);
         }
         assert!(
@@ -8518,7 +8529,7 @@ async fn test_working_heartbeat_still_extends_quiescence() {
             )],
         ));
 
-    let heartbeat = post_test_heartbeat(&app, &session_id, &worker_id, "working").await;
+    let heartbeat = post_test_heartbeat(&app, &controller, &session_id, &worker_id, "working").await;
     assert_eq!(heartbeat.status(), StatusCode::OK);
 
     let response = post_test_completion(&app, &session_id).await;
@@ -8565,7 +8576,7 @@ async fn test_completed_heartbeat_still_refreshes_agent_liveness() {
         .is_empty());
 
     let heartbeat_started = chrono::Utc::now();
-    let heartbeat = post_test_heartbeat(&app, &session_id, &worker_id, "completed").await;
+    let heartbeat = post_test_heartbeat(&app, &controller, &session_id, &worker_id, "completed").await;
     assert_eq!(heartbeat.status(), StatusCode::OK);
 
     let heartbeat_info = controller.read().get_heartbeat_info(&session_id);
@@ -8635,7 +8646,7 @@ async fn test_list_sessions_ignores_completed_heartbeats_for_activity() {
     let quiet_since = session.last_activity_at;
     controller.read().insert_test_session(session);
 
-    let heartbeat = post_test_heartbeat(&app, &session_id, &worker_id, "completed").await;
+    let heartbeat = post_test_heartbeat(&app, &controller, &session_id, &worker_id, "completed").await;
     assert_eq!(heartbeat.status(), StatusCode::OK);
 
     let response = app
@@ -8708,10 +8719,10 @@ async fn test_queen_working_heartbeat_holds_session_open_while_workers_completed
         ));
 
     for worker_id in [&worker_1, &worker_2] {
-        let heartbeat = post_test_heartbeat(&app, &session_id, worker_id, "completed").await;
+        let heartbeat = post_test_heartbeat(&app, &controller, &session_id, worker_id, "completed").await;
         assert_eq!(heartbeat.status(), StatusCode::OK);
     }
-    let queen_heartbeat = post_test_heartbeat(&app, &session_id, &queen_id, "working").await;
+    let queen_heartbeat = post_test_heartbeat(&app, &controller, &session_id, &queen_id, "working").await;
     assert_eq!(queen_heartbeat.status(), StatusCode::OK);
 
     let response = post_test_completion(&app, &session_id).await;
@@ -8763,7 +8774,7 @@ async fn test_queen_completed_heartbeat_releases_session() {
         ));
 
     for agent_id in [&worker_1, &worker_2, &queen_id] {
-        let heartbeat = post_test_heartbeat(&app, &session_id, agent_id, "completed").await;
+        let heartbeat = post_test_heartbeat(&app, &controller, &session_id, agent_id, "completed").await;
         assert_eq!(heartbeat.status(), StatusCode::OK);
     }
 
@@ -8789,7 +8800,7 @@ async fn test_prince_idle_heartbeat_still_extends_quiescence() {
             vec![make_test_agent(&prince_id, AgentRole::Prince)],
         ));
 
-    let heartbeat = post_test_heartbeat(&app, &session_id, &prince_id, "idle").await;
+    let heartbeat = post_test_heartbeat(&app, &controller, &session_id, &prince_id, "idle").await;
     assert_eq!(heartbeat.status(), StatusCode::OK);
 
     let response = post_test_completion(&app, &session_id).await;
@@ -10575,6 +10586,7 @@ async fn heartbeat_rejects_a_fully_unknown_agent() {
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, &session_id, &ghost))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({"agent_id": ghost, "status": "completed"}).to_string(),
@@ -10595,6 +10607,7 @@ async fn heartbeat_rejects_a_fully_unknown_agent() {
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, &session_id, &real))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({"agent_id": real, "status": "working"}).to_string(),
@@ -10644,6 +10657,7 @@ async fn heartbeat_accepts_the_bare_queen_alias_and_canonicalizes_it() {
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, &session_id, "queen"))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
@@ -10741,6 +10755,7 @@ async fn heartbeat_accepts_every_managed_agent_id_shape() {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                    .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, &session_id, id))
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({"agent_id": id, "status": "working"}).to_string(),
@@ -10780,6 +10795,7 @@ async fn heartbeat_accepts_an_agent_whose_roster_push_has_not_landed() {
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, &session_id, &evaluator))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({"agent_id": evaluator, "status": "working"}).to_string(),
@@ -10837,6 +10853,7 @@ async fn test_heartbeat_advances_queue_counters() {
                 Request::builder()
                     .method("POST")
                     .uri("/api/sessions/session-queue-hb/heartbeat")
+                    .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, "session-queue-hb", "session-queue-hb-worker-2"))
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_string(&hb).unwrap()))
                     .unwrap(),
@@ -10875,6 +10892,7 @@ async fn test_heartbeat_advances_queue_counters() {
             Request::builder()
                 .method("POST")
                 .uri("/api/sessions/session-queue-hb/heartbeat")
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, "session-queue-hb", "session-queue-hb-worker-2"))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&completed).unwrap()))
                 .unwrap(),

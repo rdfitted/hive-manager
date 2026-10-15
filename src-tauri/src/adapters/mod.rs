@@ -9,6 +9,7 @@ mod cursor;
 mod droid;
 mod opencode;
 mod qwen;
+pub mod wsl;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

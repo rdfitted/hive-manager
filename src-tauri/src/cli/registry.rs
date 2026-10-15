@@ -171,11 +171,14 @@ impl CliRegistry {
     ///
     /// Older Hive Manager builds persisted `gpt-5.6`, while Codex sessions
     /// authenticated through a ChatGPT account require the concrete Sol catalog
-    /// ID. Keep arbitrary operator-selected model IDs untouched.
+    /// ID. Retired Cursor Composer IDs resolve to their current equivalents.
+    /// Keep arbitrary operator-selected model IDs untouched.
     pub fn normalize_model<'a>(cli: &str, model: &'a str) -> &'a str {
         match (cli, model) {
             ("codex", "gpt-6") => "gpt-6-sol",
             ("codex", "gpt-5.6") => "gpt-5.6-sol",
+            ("cursor", "composer-1" | "composer-2") => "composer-2.5",
+            ("cursor", "composer-2-fast") => "composer-2.5-fast",
             _ => model,
         }
     }
@@ -193,7 +196,9 @@ impl CliRegistry {
     ) -> (Option<String>, Vec<String>) {
         if cli != "codex" {
             return (
-                configured_model.or(default_model).map(ToString::to_string),
+                configured_model
+                    .or(default_model)
+                    .map(|model| Self::normalize_model(cli, model).to_string()),
                 flags.to_vec(),
             );
         }
@@ -358,7 +363,7 @@ mod tests {
             CliConfig {
                 command: "wsl".to_string(),
                 auto_approve_flag: Some("--force".to_string()),
-                model_flag: None, // Cursor uses global model setting
+                model_flag: Some("--model".to_string()),
                 default_model: "composer-2.5".to_string(),
                 env: None,
             },
@@ -483,6 +488,39 @@ mod tests {
         let built = registry.build_command(&config).unwrap();
         assert_eq!(built.command, "wsl");
         assert!(built.args.contains(&"--force".to_string()));
+        assert!(built
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--model".to_string(), "composer-2.5".to_string()]));
+    }
+
+    #[test]
+    fn test_cursor_legacy_models_are_normalized_at_launch() {
+        let registry = CliRegistry::new(test_config());
+        for (legacy, current) in [
+            ("composer-1", "composer-2.5"),
+            ("composer-2", "composer-2.5"),
+            ("composer-2-fast", "composer-2.5-fast"),
+        ] {
+            let config = AgentConfig {
+                cli: "cursor".to_string(),
+                model: Some(legacy.to_string()),
+                flags: vec!["--trust".to_string()],
+                ..AgentConfig::default()
+            };
+            let built = registry.build_command(&config).unwrap();
+            assert!(built
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--model", current]));
+            assert!(!built.args.iter().any(|arg| arg == legacy));
+            assert!(built.args.contains(&"--trust".to_string()));
+            assert_eq!(CliRegistry::normalize_model("codex", legacy), legacy);
+
+            let (model, _) =
+                CliRegistry::resolve_model_and_flags("cursor", None, Some(legacy), &[]);
+            assert_eq!(model.as_deref(), Some(current));
+        }
     }
 
     #[test]
@@ -680,6 +718,14 @@ mod tests {
             "operator-selected-model"
         );
         assert_eq!(CliRegistry::normalize_model("claude", "gpt-5.6"), "gpt-5.6");
+        assert_eq!(
+            CliRegistry::normalize_model("cursor", "gemini-4-argon-high"),
+            "gemini-4-argon-high"
+        );
+        assert_eq!(
+            CliRegistry::normalize_model("cursor", "operator-selected-model"),
+            "operator-selected-model"
+        );
     }
 
     #[test]

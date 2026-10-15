@@ -100,6 +100,7 @@ fn launch_response_from_action_output(
     Ok(LaunchResponse {
         session_id,
         message: message.to_string(),
+        qa_timeout_secs: value.get("qa_timeout_secs").and_then(Value::as_u64),
     })
 }
 
@@ -313,6 +314,9 @@ pub struct CreateSessionRequest {
     pub evaluator_cli: Option<String>,
     pub evaluator_model: Option<String>,
     pub qa_workers: Option<Vec<QaWorkerConfig>>,
+    /// QA inactivity window; omitted/null uses the persisted 300-second default.
+    #[serde(default)]
+    pub qa_timeout_secs: Option<u64>,
     pub smoke_test: Option<bool>,
     #[serde(default)]
     pub work_graph_archetype: Option<String>,
@@ -354,6 +358,8 @@ pub struct SelectFusionWinnerRequest {
 pub struct LaunchResponse {
     pub session_id: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qa_timeout_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -395,6 +401,7 @@ pub async fn create_session(
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
     let mode = req.mode.trim().to_ascii_lowercase();
+    let qa_timeout_secs = req.qa_timeout_secs;
     let has_shared_agent_override = req.default_cli.is_some() || req.default_model.is_some();
     let default_cli = req
         .default_cli
@@ -402,7 +409,7 @@ pub async fn create_session(
         .unwrap_or_else(|| "claude".to_string());
     validate_cli(&default_cli)?;
 
-    match mode.as_str() {
+    let (status, Json(mut response)) = match mode.as_str() {
         "hive" => {
             let queen_model = req
                 .default_model
@@ -670,7 +677,18 @@ pub async fn create_session(
         _ => Err(ApiError::bad_request(
             "Unsupported mode. Valid options: hive, fusion, debate",
         )),
-    }
+    }?;
+    let launch_state = Arc::clone(&state);
+    let session_id = response.session_id.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        launch_state.session_controller.read()
+            .set_session_qa_timeout(&session_id, qa_timeout_secs)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("QA launch setting task failed: {}", error)))?
+    .map_err(ApiError::internal)?;
+    response.qa_timeout_secs = Some(session.qa_timeout_secs);
+    Ok((status, Json(response)))
 }
 
 /// POST /api/sessions/{id}/launch - Launch a previously created draft session.
@@ -1387,5 +1405,58 @@ mod tier_policy_launch_tests {
             fresh["codex"], snapshot["codex"],
             "the post-launch override would have changed a fresh resolve"
         );
+    }
+}
+
+#[cfg(test)]
+mod qa_timeout_launch_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn create_session_qa_timeout_round_trips_custom_and_omitted_default() {
+        for (requested, expected) in [(None, 300u64), (Some(720u64), 720u64)] {
+            let project = tempfile::tempdir().unwrap();
+            for args in [
+                vec!["init", "-q"],
+                vec!["-c", "user.email=hive@example.com", "-c", "user.name=Hive Test", "commit", "--allow-empty", "-q", "-m", "launch fixture"],
+            ] {
+                let output = std::process::Command::new("git").args(&args).current_dir(project.path()).output().unwrap();
+                assert!(output.status.success(), "git fixture {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            }
+            let storage_root = tempfile::tempdir().unwrap();
+            let (app, controller, storage) = crate::http::tests::setup_test_app_with_controller_at(storage_root.path().to_path_buf()).await;
+            let mut body = serde_json::json!({
+                "project_path": project.path().to_string_lossy(), "mode": "hive",
+                "objective": "QA setting launch fixture", "worker_count": 1,
+                "with_evaluator": false, "smoke_test": true,
+            });
+            if let Some(timeout) = requested {
+                body["qa_timeout_secs"] = serde_json::json!(timeout);
+            }
+            let response = app.oneshot(Request::builder().method("POST").uri("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(status, StatusCode::CREATED, "launch must execute setting assertions: {}", String::from_utf8_lossy(&bytes));
+            let projection: Value = serde_json::from_slice(&bytes).unwrap();
+            let id = projection["session_id"].as_str().unwrap();
+            assert_eq!(projection["qa_timeout_secs"], expected);
+            assert_eq!(controller.read().get_session(id).unwrap().qa_timeout_secs, expected);
+            assert_eq!(storage.load_session(id).unwrap().qa_timeout_secs, expected);
+        }
+    }
+
+    #[test]
+    fn optional_qa_timeout_request_accepts_null_and_rejects_non_integer() {
+        let base = serde_json::json!({"project_path":"project", "mode":"hive", "qa_timeout_secs":null});
+        assert!(serde_json::from_value::<CreateSessionRequest>(base.clone()).unwrap().qa_timeout_secs.is_none());
+        for bad in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("720")] {
+            let mut body = base.clone();
+            body["qa_timeout_secs"] = bad;
+            assert!(serde_json::from_value::<CreateSessionRequest>(body).is_err());
+        }
     }
 }

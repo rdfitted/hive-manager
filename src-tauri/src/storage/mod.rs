@@ -879,7 +879,7 @@ impl SessionStorage {
             CliConfig {
                 command: "wsl".to_string(),
                 auto_approve_flag: Some("--force".to_string()),
-                model_flag: None, // Cursor uses global model setting
+                model_flag: Some("--model".to_string()),
                 default_model: "composer-2.5".to_string(),
                 env: None,
             },

@@ -1,13 +1,15 @@
 //! Cursor CLI adapter implementation.
 
+use crate::cli::CliRegistry;
+
 use super::{AgentLaunchSpec, AgentSignal, BootstrapContext, CliAdapter, LaunchCommand};
 
 /// Cursor Agent adapter.
 ///
 /// Cursor-specific behavior:
 /// - Binary: `wsl`
-/// - Base args: `-d Ubuntu /root/.local/bin/agent --force`
-/// - Model: uses Cursor global configuration, no CLI flag
+/// - Base args: `-d Ubuntu /root/.local/bin/agent --force --trust`
+/// - Model flag: `--model`
 /// - Prompts: positional argument after the WSL agent command
 pub struct CursorAdapter;
 
@@ -43,9 +45,19 @@ impl CliAdapter for CursorAdapter {
             .arg("-d")
             .arg("Ubuntu")
             .arg("/root/.local/bin/agent")
-            .arg("--force");
+            .arg("--force")
+            .arg("--trust");
 
-        cmd = cmd.args(spec.flags.iter().cloned());
+        let (model, flags) = CliRegistry::resolve_model_and_flags(
+            "cursor",
+            spec.model.as_deref(),
+            CliRegistry::default_model("cursor"),
+            &spec.flags,
+        );
+        if let Some(model) = model {
+            cmd = cmd.arg("--model").arg(model);
+        }
+        cmd = cmd.args(flags);
         cmd = cmd.envs(spec.env.iter().map(|(k, v)| (k.clone(), v.clone())));
 
         if let Some(ref task) = spec.inline_task {
@@ -56,6 +68,10 @@ impl CliAdapter for CursorAdapter {
         }
 
         cmd
+    }
+
+    fn model_flag(&self) -> Option<&'static str> {
+        Some("--model")
     }
 
     fn detect_status_signal(&self, line: &str) -> Option<AgentSignal> {
@@ -160,5 +176,18 @@ mod tests {
     fn test_cli_name() {
         let adapter = CursorAdapter;
         assert_eq!(adapter.cli_name(), "cursor");
+    }
+
+    #[test]
+    fn cursor_adapter_forwards_model_and_keeps_prompt_last() {
+        let mut spec = make_spec();
+        spec.model = Some("gemini-4-argon-high".to_string());
+        spec.flags = vec!["--custom-flag".to_string()];
+        let cmd = CursorAdapter.build_launch_command(&spec);
+        assert_eq!(CursorAdapter.model_flag(), Some("--model"));
+        assert_eq!(&cmd.args[..4], ["-d", "Ubuntu", "/root/.local/bin/agent", "--force"]);
+        assert!(cmd.args.iter().any(|arg| arg == "--trust"));
+        assert!(cmd.args.windows(2).any(|pair| pair == ["--model", "gemini-4-argon-high"]));
+        assert_eq!(cmd.args.last().unwrap(), "Read /project/task.md and execute.");
     }
 }

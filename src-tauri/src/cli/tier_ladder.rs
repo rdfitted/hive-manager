@@ -732,15 +732,34 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
         "composer-2.5",
         0
     ),
-    preset!("cursor", "composer-2", "Composer 2.0", "composer-2", 0),
     preset!(
         "cursor",
-        "composer-2-fast",
-        "Composer 2.0 Fast",
-        "composer-2-fast",
+        "composer-2.5-fast",
+        "Composer 2.5 Fast",
+        "composer-2.5-fast",
         0
     ),
-    preset!("cursor", "composer-1", "Composer 1", "composer-1", 0),
+    preset!(
+        "cursor",
+        "gemini-4-argon-low",
+        "Gemini 4 Argon (Low)",
+        "gemini-4-argon-low",
+        0
+    ),
+    preset!(
+        "cursor",
+        "gemini-4-argon-medium",
+        "Gemini 4 Argon (Medium)",
+        "gemini-4-argon-medium",
+        1
+    ),
+    preset!(
+        "cursor",
+        "gemini-4-argon-high",
+        "Gemini 4 Argon (High)",
+        "gemini-4-argon-high",
+        2
+    ),
     preset!("droid", "glm-5.1", "GLM 5.1", "glm-5.1", 0),
     preset!("droid", "glm-4.7", "GLM 4.7", "glm-4.7", 0),
     preset!(
@@ -1257,7 +1276,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_covers_all_76_unique_presets_and_every_entry_expands() {
+    fn catalogue_covers_all_77_unique_presets_and_every_entry_expands() {
         let mut ids = std::collections::HashSet::new();
         let mut provider_counts = std::collections::BTreeMap::new();
 
@@ -1275,13 +1294,13 @@ mod tests {
             assert_eq!(expansion.resolved.flags, preset.flags.to_vec());
         }
 
-        assert_eq!(preset_catalogue().len(), 76);
+        assert_eq!(preset_catalogue().len(), 77);
         assert_eq!(
             provider_counts,
             std::collections::BTreeMap::from([
                 ("claude", 12),
                 ("codex", 54),
-                ("cursor", 4),
+                ("cursor", 5),
                 ("droid", 2),
                 ("opencode", 2),
                 ("qwen", 2),
@@ -1310,6 +1329,38 @@ mod tests {
                 .model,
             "gpt-5.6-sol"
         );
+    }
+
+    #[test]
+    fn cursor_catalogue_contains_only_live_models_with_ordered_argon_ranks() {
+        let cursor_ids: Vec<_> = preset_catalogue()
+            .iter()
+            .filter(|preset| preset.provider == "cursor")
+            .map(|preset| preset.id)
+            .collect();
+        assert_eq!(
+            cursor_ids,
+            vec![
+                "composer-2.5",
+                "composer-2.5-fast",
+                "gemini-4-argon-low",
+                "gemini-4-argon-medium",
+                "gemini-4-argon-high",
+            ]
+        );
+        for (id, rank) in [
+            ("gemini-4-argon-low", 0),
+            ("gemini-4-argon-medium", 1),
+            ("gemini-4-argon-high", 2),
+        ] {
+            let expansion = expand_preset("cursor", id).unwrap();
+            assert_eq!(expansion.resolved.model, id);
+            assert!(expansion.resolved.flags.is_empty());
+            assert_eq!(expansion.cost_rank, rank);
+        }
+        for retired in ["composer-1", "composer-2", "composer-2-fast"] {
+            assert!(expand_preset("cursor", retired).is_none());
+        }
     }
 
     #[test]

@@ -103,6 +103,10 @@ impl EventBus {
         file.write_all(line.as_bytes())
             .await
             .map_err(|e| format!("Failed to write event: {e}"))?;
+        // Tokio File buffers a blocking write; wait before reporting persistence.
+        file.flush()
+            .await
+            .map_err(|e| format!("Failed to flush event: {e}"))?;
 
         Ok(())
     }
@@ -236,5 +240,47 @@ mod tests {
         let e2: Event = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(e1.event_type, EventType::SessionCreated);
         assert_eq!(e2.event_type, EventType::AgentLaunched);
+    }
+
+    #[test]
+    fn publish_waits_for_the_file_write_before_broadcast_and_return() {
+        use std::future::Future;
+        use std::task::Poll;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all().max_blocking_threads(1).build().unwrap();
+        runtime.block_on(async {
+            let tmp = TempDir::new().unwrap();
+            let bus = EventBus::new(tmp.path().to_path_buf());
+            let path = tmp.path().join("sess-flush/events.jsonl");
+            bus.publish(make_event("sess-flush", EventType::ArtifactUpdated)).await.unwrap();
+            let seed = tokio::fs::read_to_string(&path).await.unwrap();
+            assert_eq!(seed.lines().count(), 1);
+
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let occupied = tokio::task::spawn_blocking(move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+            });
+            entered_rx.await.unwrap();
+            let mut rx = bus.subscribe();
+            let event = make_event("sess-flush", EventType::ArtifactUpdated);
+            let mut publishing = Box::pin(bus.publish(event));
+            // Force a poll with the blocking worker occupied; no scheduling/timeout assumption.
+            let first_poll = std::future::poll_fn(|cx| Poll::Ready(publishing.as_mut().poll(cx))).await;
+            let returned_early = first_poll.is_ready();
+            let broadcast_early = rx.try_recv().is_ok();
+            // Release before assertions so the broken implementation cannot hang teardown.
+            let _ = release_tx.send(());
+            occupied.await.unwrap();
+            match first_poll {
+                Poll::Ready(result) => result.unwrap(),
+                Poll::Pending => publishing.await.unwrap(),
+            }
+            assert!(!returned_early, "publish returned before its pending file write finished");
+            assert!(!broadcast_early, "publish broadcast before its pending file write finished");
+            let contents = std::fs::read_to_string(path).unwrap();
+            assert_eq!(contents.lines().count(), 2);
+        });
     }
 }
