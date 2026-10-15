@@ -55,7 +55,7 @@
 
                 {#if output.hybrid_integration_plan}
                     <div class="section hybrid lattice-panel">
-                        <h4>Hybrid Integration Plan</h4>
+                        <h4>Hybrid Integration Plan <span class="status-badge status-warning lattice-forced-colors-boundary">Integration required</span></h4>
                         <div class="plan-content">
                             {output.hybrid_integration_plan}
                         </div>
@@ -157,7 +157,7 @@
     .hybrid {
         background: var(--bg-sunken);
         padding: 12px;
-        border-left: 3px solid var(--status-warning);
+        border: 1px solid var(--status-warning);
     }
 
     .plan-content {

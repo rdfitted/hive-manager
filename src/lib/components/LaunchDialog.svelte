@@ -947,7 +947,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         </div>
 
         {#if mode === 'hive' || mode === 'research' || mode === 'fusion' || mode === 'debate'}
-          <div class="form-section queen-section">
+          <div class="form-section queen-section lattice-forced-colors-boundary">
             <div class="section-heading-copy">
               <h3>Queen</h3>
               <p>Sets direction, coordinates the visible principals, and owns the final integration.</p>
@@ -1829,7 +1829,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .queen-section {
-    border-left: 3px solid var(--accent-amber);
+    border: 1px solid var(--border-structural);
   }
 
   .hive-policy-section {
@@ -1984,7 +1984,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .principal-card {
-    border-left: 3px solid var(--accent-cyan);
+    border: 1px solid var(--border-structural);
   }
 
   .advanced-disclosure {
@@ -2056,7 +2056,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .qa-worker-card {
-    border-left: 3px solid var(--accent-cyan);
+    border: 1px solid var(--border-structural);
   }
 
   .card-header {
