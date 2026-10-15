@@ -16,6 +16,7 @@ const presets = [
   { provider: 'codex', id: 'codex-gpt-5-6-sol-max', label: 'GPT-5.6 Sol (Max effort)', model: 'gpt-5.6-sol', flags: ['-c', 'model_reasoning_effort="max"'] },
   { provider: 'codex', id: 'codex-gpt-5-6-sol-ultra', label: 'GPT-5.6 Sol (Ultra effort)', model: 'gpt-5.6-sol', flags: ['-c', 'model_reasoning_effort="ultra"'] },
   { provider: 'cursor', id: 'composer-2.5', label: 'Composer 2.5 (latest)', model: 'composer-2.5', flags: [] },
+  { provider: 'cursor', id: 'gemini-4-argon-high', label: 'Gemini 4 Argon (High)', model: 'gemini-4-argon-high', flags: [] },
   { provider: 'droid', id: 'glm-5.1', label: 'GLM 5.1', model: 'glm-5.1', flags: [] },
   { provider: 'opencode', id: 'opencode/big-pickle', label: 'BigPickle', model: 'opencode/big-pickle', flags: [] },
   { provider: 'qwen', id: 'qwen3-coder', label: 'Qwen3 Coder', model: 'qwen3-coder', flags: [] },
@@ -198,6 +199,15 @@ describe('AgentConfigEditor', () => {
       cli: 'cursor',
       presetId: 'composer-2.5',
       model: 'composer-2.5',
+      flags: [],
+    });
+  });
+
+  it('round-trips a Cursor Argon preset from the server catalogue', async () => {
+    await expectServerPresetRoundTrip({
+      cli: 'cursor',
+      presetId: 'gemini-4-argon-high',
+      model: 'gemini-4-argon-high',
       flags: [],
     });
   });

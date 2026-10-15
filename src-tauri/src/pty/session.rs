@@ -421,12 +421,13 @@ impl PtySession {
             cmd
         };
 
-        for key in ["HIVE_SESSION_ID", "HIVE_AGENT_ID", "HIVE_ROLE"] {
-            cmd.env_remove(key);
-        }
-        for (key, value) in identity_env {
-            cmd.env(key, value);
-        }
+        crate::adapters::wsl::apply_launch_env(
+            &mut cmd,
+            command,
+            cwd.map(std::path::Path::new),
+            identity_env,
+            &std::env::vars_os().collect::<Vec<_>>(),
+        ).map_err(PtyError::SpawnError)?;
 
         if let Some(dir) = cwd {
             cmd.cwd(dir);
