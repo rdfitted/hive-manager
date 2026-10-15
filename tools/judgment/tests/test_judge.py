@@ -210,7 +210,8 @@ class JudgeTests(unittest.TestCase):
             ]
             self.assertEqual("rdfitted/hive-manager", judge._project_identity(self.root))
         self.assertEqual(["git", "rev-parse", "--show-toplevel"], git.call_args_list[0].args[0])
-        self.assertEqual(self.root, git.call_args_list[0].kwargs["cwd"])
+        # The identity lookup is keyed by the resolved cwd (8.3 short paths expand on Windows CI).
+        self.assertEqual(self.root.resolve(), git.call_args_list[0].kwargs["cwd"])
         self.assertEqual(["git", "remote", "get-url", "origin"], git.call_args_list[1].args[0])
         self.assertEqual(str(self.root), git.call_args_list[1].kwargs["cwd"])
         self.assertEqual("owner/repo", judge.GITHUB_REMOTE.fullmatch(
