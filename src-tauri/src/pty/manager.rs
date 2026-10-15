@@ -485,6 +485,7 @@ impl PtyManager {
                 .is_some_and(|current| Arc::ptr_eq(current, &existing))
             {
                 sessions.remove(&id);
+                self.heartbeat_credentials.write().remove(&id);
             }
         }
 
@@ -530,6 +531,11 @@ impl PtyManager {
         });
         if let Some((_, _, token)) = &credential {
             identity_env.push(("HIVE_AGENT_TOKEN".to_string(), token.clone()));
+        }
+        // Fail at the constructor boundary without changing the shared PTY stub.
+        #[cfg(test)]
+        if args.contains(&"--stub-create-fails") {
+            return Err(PtyError::CreateError("injected PTY constructor failure".to_string()));
         }
         let session = Arc::new(PtySession::new(
             id.clone(),
@@ -1677,6 +1683,44 @@ mod transport_tests {
         let next = manager.spawn_env_for_test(&id).unwrap();
         let next_token = &next.iter().find(|(key, _)| key == "HIVE_AGENT_TOKEN").unwrap().1;
         assert!(manager.authenticate_heartbeat(SESSION_ID, next_token).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_same_id_respawn_revokes_reaped_session_credential() {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let id = format!("{session_id}-queen");
+        let manager = PtyManager::new();
+        manager.create_session(id.clone(), AgentRole::Queen, "claude", &["--stub-die-on-start"], None, 80, 24).unwrap();
+        let env = manager.spawn_env_for_test(&id).unwrap();
+        let token = &env.iter().find(|(key, _)| key == "HIVE_AGENT_TOKEN").unwrap().1;
+        assert!(manager.authenticate_heartbeat(&session_id, token).is_some());
+        assert!(!manager.sessions.read()[&id].is_alive());
+        assert!(manager.create_session(id.clone(), AgentRole::Queen, "claude", &["--stub-create-fails"], None, 80, 24).is_err());
+        assert!(!manager.sessions.read().contains_key(&id));
+        assert!(manager.authenticate_heartbeat(&session_id, token).is_none(), "reaped credential must be revoked even when replacement fails");
+        manager.kill(&id).unwrap();
+        assert!(!manager.sessions.read().contains_key(&id));
+        assert!(manager.authenticate_heartbeat(&session_id, token).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn successful_dead_same_id_respawn_rotates_credential_and_duplicate_preserves_it() {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let id = format!("{session_id}-queen");
+        let manager = PtyManager::new();
+        manager.create_session(id.clone(), AgentRole::Queen, "claude", &["--stub-die-on-start"], None, 80, 24).unwrap();
+        let env = manager.spawn_env_for_test(&id).unwrap();
+        let old = &env.iter().find(|(key, _)| key == "HIVE_AGENT_TOKEN").unwrap().1;
+        manager.create_session(id.clone(), AgentRole::Queen, "claude", &[], None, 80, 24).unwrap();
+        let env = manager.spawn_env_for_test(&id).unwrap();
+        let new = &env.iter().find(|(key, _)| key == "HIVE_AGENT_TOKEN").unwrap().1;
+        assert!(manager.authenticate_heartbeat(&session_id, old).is_none());
+        assert!(manager.authenticate_heartbeat(&session_id, new).is_some_and(|(owner, queen)| owner == id && queen));
+        assert!(manager.create_session(id.clone(), AgentRole::Queen, "claude", &[], None, 80, 24).is_err());
+        assert!(manager.authenticate_heartbeat(&session_id, new).is_some());
+        manager.kill(&id).unwrap();
     }
 
 }

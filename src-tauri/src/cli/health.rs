@@ -94,19 +94,28 @@ pub(crate) struct PresetCatalogueResponse {
 
 pub struct CliHealthRegistry;
 
+#[cfg(test)]
+tokio::task_local! {
+    static HEALTH_PORT_PROBE: Arc<dyn Fn(u16) -> CliHealthResponse + Send + Sync>;
+}
+
 impl CliHealthRegistry {
-    pub async fn check_all() -> CliHealthResponse {
+    pub async fn check_all(api_port: u16) -> CliHealthResponse {
+        #[cfg(test)]
+        if let Ok(response) = HEALTH_PORT_PROBE.try_with(|probe| probe(api_port)) {
+            return response;
+        }
         let refreshed_path = refreshed_windows_path().await;
         let checks = VALID_CLIS
             .iter()
             .copied()
-            .map(|cli| Self::check_cli(cli, refreshed_path.as_deref()));
+            .map(|cli| Self::check_cli(cli, refreshed_path.as_deref(), api_port));
         CliHealthResponse {
             clis: join_all(checks).await,
         }
     }
 
-    async fn check_cli(cli: &str, refreshed_path: Option<&OsStr>) -> CliHealth {
+    async fn check_cli(cli: &str, refreshed_path: Option<&OsStr>, api_port: u16) -> CliHealth {
         if cli == "cursor" {
             if let Some(reason) = CursorAdapter::cursor_unsupported_reason() {
                 return CliHealth {
@@ -127,7 +136,7 @@ impl CliHealthRegistry {
         };
 
         if cli == "cursor" {
-            return check_cursor_health(cli, bin_path).await;
+            return check_cursor_health(cli, bin_path, api_port).await;
         }
 
         let (logged_in, detail) = match cli {
@@ -178,13 +187,25 @@ fn resolved_cli_health(
     }
 }
 
-#[tauri::command]
-pub async fn get_cli_health() -> CliHealthResponse {
-    CliHealthRegistry::check_all().await
+/// Use the same managed state as HTTP, with a constructible argument for tests.
+pub struct CliHealthState(Arc<AppState>);
+
+impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for CliHealthState {
+    fn from_command(command: tauri::ipc::CommandItem<'de, R>) -> Result<Self, tauri::ipc::InvokeError> {
+        let state = <tauri::State<'de, Arc<AppState>> as tauri::ipc::CommandArg<'de, R>>::from_command(command)?;
+        Ok(Self(Arc::clone(state.inner())))
+    }
 }
 
-pub async fn get_cli_health_http() -> Json<CliHealthResponse> {
-    Json(CliHealthRegistry::check_all().await)
+#[tauri::command]
+pub async fn get_cli_health(state: CliHealthState) -> CliHealthResponse {
+    let api_port = state.0.config.read().await.api.port;
+    CliHealthRegistry::check_all(api_port).await
+}
+
+pub async fn get_cli_health_http(State(state): State<Arc<AppState>>) -> Json<CliHealthResponse> {
+    let api_port = state.config.read().await.api.port;
+    Json(CliHealthRegistry::check_all(api_port).await)
 }
 
 pub(crate) async fn get_preset_catalogue_http() -> Json<PresetCatalogueResponse> {
@@ -264,7 +285,7 @@ fn executable_for_cli(cli: &str) -> &str {
     }
 }
 
-async fn check_cursor_health(cli: &str, wsl_path: PathBuf) -> CliHealth {
+async fn check_cursor_health(cli: &str, wsl_path: PathBuf, api_port: u16) -> CliHealth {
     let distro = std::env::var("HIVE_WSL_DISTRO")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -284,7 +305,7 @@ async fn check_cursor_health(cli: &str, wsl_path: PathBuf) -> CliHealth {
 
     let probe = run_bounded_command(&wsl_path, &args, CURSOR_PROBE_TIMEOUT).await;
     let health = cursor_health_from_probe(cli, wsl_path.clone(), &distro, &binary_path, probe);
-    cursor_api_health_with_probe(health, &distro, |args, timeout| async move {
+    cursor_api_health_with_probe(health, &distro, api_port, |args, timeout| async move {
         run_bounded_command(&wsl_path, &args, timeout).await
     })
     .await
@@ -293,6 +314,7 @@ async fn check_cursor_health(cli: &str, wsl_path: PathBuf) -> CliHealth {
 async fn cursor_api_health_with_probe<F, Fut>(
     mut health: CliHealth,
     distro: &str,
+    api_port: u16,
     probe: F,
 ) -> CliHealth
 where
@@ -304,13 +326,13 @@ where
     }
     // HTTP errors (including /api/health returning 404) still prove transport reachability.
     // Each curl has a one-second limit; the whole WSL command has its own hard deadline.
-    let script = concat!(
+    let script = format!(concat!(
         "for client in curl curl.exe; do ",
         "if \"$client\" --disable --noproxy '*' -s --max-time 1 ",
-        "http://localhost:18800/api/health >/dev/null 2>&1; ",
+        "http://localhost:{}/api/health >/dev/null 2>&1; ",
         "then printf '%s=reachable\\n' \"$client\"; ",
         "else printf '%s=unreachable\\n' \"$client\"; fi; done"
-    );
+    ), api_port);
     let args = vec![
         "-d".to_string(),
         distro.to_string(),
@@ -890,10 +912,10 @@ mod tests {
     const PROCESS_FIXTURE_LOCK: &str = "HIVE_CLI_HEALTH_PROCESS_LOCK";
     const PROCESS_FIXTURE_TEST: &str = "cli::health::tests::bounded_process_fixture";
 
-    async fn tier_ladder_test_app(
+    async fn health_test_state(
         storage_root: &Path,
         institutional_wiki_root: Option<&Path>,
-    ) -> axum::Router {
+    ) -> Arc<AppState> {
         let storage = Arc::new(
             crate::storage::SessionStorage::new_with_base(storage_root.join("storage")).unwrap(),
         );
@@ -933,7 +955,51 @@ mod tests {
         ));
         state.set_registry(Arc::new(crate::actions::build_registry()));
 
-        crate::http::routes::create_router(state)
+        state
+    }
+
+    async fn tier_ladder_test_app(
+        storage_root: &Path,
+        institutional_wiki_root: Option<&Path>,
+    ) -> axum::Router {
+        crate::http::routes::create_router(health_test_state(storage_root, institutional_wiki_root).await)
+    }
+
+    async fn assert_health_entrypoint_port(desktop: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let state = health_test_state(root.path(), None).await;
+        for api_port in [18800, 18837] {
+            state.config.write().await.api.port = api_port;
+            let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let probe_called = called.clone();
+            let probe_state = state.clone();
+            let probe: Arc<dyn Fn(u16) -> CliHealthResponse + Send + Sync> = Arc::new(move |port| {
+                probe_called.store(true, std::sync::atomic::Ordering::SeqCst);
+                assert!(probe_state.config.try_write().is_ok(), "config lock must be released before probing");
+                assert_eq!(port, api_port, "health entrypoint ignored configured API port");
+                CliHealthResponse { clis: Vec::new() }
+            });
+            HEALTH_PORT_PROBE.scope(probe, async {
+                if desktop {
+                    assert!(get_cli_health(CliHealthState(state.clone())).await.clis.is_empty());
+                } else {
+                    let app = crate::http::routes::create_router(state.clone());
+                    let response = app.oneshot(Request::builder().uri("/api/cli-health").body(Body::empty()).unwrap()).await.unwrap();
+                    assert_eq!(response.status(), StatusCode::OK);
+                }
+            }).await;
+            assert!(called.load(std::sync::atomic::Ordering::SeqCst), "entrypoint must reach the registry probe");
+        }
+    }
+
+    #[tokio::test]
+    async fn tauri_health_propagates_configured_api_port_without_holding_lock() {
+        assert_health_entrypoint_port(true).await;
+    }
+
+    #[tokio::test]
+    async fn http_health_propagates_configured_api_port_without_holding_lock() {
+        assert_health_entrypoint_port(false).await;
     }
 
     fn percent_encoded_query_value(value: &Path) -> String {
@@ -1090,7 +1156,7 @@ mod tests {
     #[cfg(not(windows))]
     #[tokio::test]
     async fn cursor_health_is_unavailable_before_wsl_lookup() {
-        let health = CliHealthRegistry::check_cli("cursor", None).await;
+        let health = CliHealthRegistry::check_cli("cursor", None, 18800).await;
         assert!(!health.resolved);
         assert!(health.bin_path.is_none());
         assert!(!health.stale_hint);
@@ -1299,7 +1365,7 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn cursor_api_reachability_is_bounded_and_only_warns() {
-        for (output, expected) in [
+        for (api_port, output, expected) in [
             (
                 "curl=unreachable\ncurl.exe=reachable\n",
                 "WARNING: Hive API unreachable from WSL with curl; curl.exe works",
@@ -1320,7 +1386,9 @@ mod tests {
                 "unexpected",
                 "WARNING: Hive API reachability probe returned an unexpected result",
             ),
-        ] {
+        ].into_iter().flat_map(|(output, expected)| {
+            [18800, 18837].map(|api_port| (api_port, output, expected))
+        }) {
             let health = cursor_health_from_probe(
                 "cursor",
                 PathBuf::from("wsl"),
@@ -1329,11 +1397,12 @@ mod tests {
                 exited_probe(0, b"", b""),
             );
             let health =
-                cursor_api_health_with_probe(health, "Test Distro", |args, timeout| async move {
+                cursor_api_health_with_probe(health, "Test Distro", api_port, |args, timeout| async move {
                     assert_eq!(&args[..5], ["-d", "Test Distro", "--", "sh", "-c"]);
                     assert!(args[5].contains("for client in curl curl.exe"));
                     assert!(args[5].contains("--max-time 1"));
-                    assert!(args[5].contains("http://localhost:18800/api/health"));
+                    assert!(args[5].contains(&format!("http://localhost:{api_port}/api/health")));
+                    if api_port != 18800 { assert!(!args[5].contains("localhost:18800")); }
                     assert_eq!(timeout, CURSOR_PROBE_TIMEOUT);
                     exited_probe(0, output.as_bytes(), b"")
                 })
@@ -1353,7 +1422,7 @@ mod tests {
                 "/agent",
                 exited_probe(0, b"", b""),
             );
-            let health = cursor_api_health_with_probe(health, "Ubuntu", |_, _| async { result }).await;
+            let health = cursor_api_health_with_probe(health, "Ubuntu", 18800, |_, _| async { result }).await;
             assert!(health.resolved);
             assert!(health.detail.contains("WARNING:"));
         }
@@ -1364,7 +1433,7 @@ mod tests {
             "/agent",
             exited_probe(1, b"", b""),
         );
-        let missing = cursor_api_health_with_probe(missing, "Ubuntu", |_, _| async {
+        let missing = cursor_api_health_with_probe(missing, "Ubuntu", 18800, |_, _| async {
             panic!("missing agents must not run the reachability probe")
         })
         .await;

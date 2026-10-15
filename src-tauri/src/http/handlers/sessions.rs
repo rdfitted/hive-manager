@@ -101,6 +101,7 @@ fn launch_response_from_action_output(
         session_id,
         message: message.to_string(),
         qa_timeout_secs: value.get("qa_timeout_secs").and_then(Value::as_u64),
+        warnings: Vec::new(),
     })
 }
 
@@ -360,6 +361,8 @@ pub struct LaunchResponse {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qa_timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -678,16 +681,34 @@ pub async fn create_session(
             "Unsupported mode. Valid options: hive, fusion, debate",
         )),
     }?;
-    let launch_state = Arc::clone(&state);
-    let session_id = response.session_id.clone();
-    let session = tokio::task::spawn_blocking(move || {
-        launch_state.session_controller.read()
-            .set_session_qa_timeout(&session_id, qa_timeout_secs)
-    })
-    .await
-    .map_err(|error| ApiError::internal(format!("QA launch setting task failed: {}", error)))?
-    .map_err(ApiError::internal)?;
-    response.qa_timeout_secs = Some(session.qa_timeout_secs);
+    if let Some(timeout_secs) = qa_timeout_secs {
+        let launch_state = Arc::clone(&state);
+        let session_id = response.session_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            launch_state.session_controller.read()
+                .set_session_qa_timeout(&session_id, Some(timeout_secs))
+        }).await;
+        match result {
+            Ok(Ok(session)) => response.qa_timeout_secs = Some(session.qa_timeout_secs),
+            failure => {
+                // A launched session must remain recoverable by its returned id.
+                // Storage/join errors can include private paths; expose only the failure kind.
+                let warning = if failure.is_err() {
+                    "Could not confirm QA timeout persistence after launch; the session was created."
+                } else {
+                    "Failed to persist QA timeout after launch; the session was created."
+                };
+                tracing::warn!(session_id = %response.session_id, "{}", warning);
+                response.warnings.push(warning.to_string());
+                response.qa_timeout_secs = state.session_controller.read()
+                    .get_session(&response.session_id).map(|session| session.qa_timeout_secs)
+                    .or(response.qa_timeout_secs);
+            }
+        }
+    } else {
+        // Every launch mode already initializes/persists the effective default.
+        response.qa_timeout_secs = Some(response.qa_timeout_secs.unwrap_or(300));
+    }
     Ok((status, Json(response)))
 }
 
@@ -1458,5 +1479,91 @@ mod qa_timeout_launch_tests {
             body["qa_timeout_secs"] = bad;
             assert!(serde_json::from_value::<CreateSessionRequest>(body).is_err());
         }
+    }
+
+    async fn assert_qa_timeout_persistence_launch(mode: &str, requested: Option<u64>) {
+        let project = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["-c", "user.email=hive@example.com", "-c", "user.name=Hive Test", "commit", "--allow-empty", "-q", "-m", "QA persistence fixture"],
+        ] {
+            let output = std::process::Command::new("git").args(&args).current_dir(project.path()).output().unwrap();
+            assert!(output.status.success(), "git fixture {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        let storage_root = tempfile::tempdir().unwrap();
+        let (app, controller, storage) = crate::http::tests::setup_test_app_with_controller_at(storage_root.path().to_path_buf()).await;
+        controller.read().test_fail_qa_timeout_persistence();
+        let mut body = serde_json::json!({
+            "project_path": project.path().to_string_lossy(), "mode": mode,
+            "objective": "QA persistence launch fixture", "worker_count": 1,
+            "with_evaluator": false, "smoke_test": true,
+            "variants": [{"name": "candidate"}],
+            "debaters": [{"name": "affirmative", "stance": "Support the proposal"}],
+            "rounds": 1,
+        });
+        if let Some(timeout) = requested {
+            body["qa_timeout_secs"] = serde_json::json!(timeout);
+        }
+        let response = app.oneshot(Request::builder().method("POST").uri("/api/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let attempts = controller.read().test_take_qa_timeout_save_attempts();
+        assert_eq!(status, StatusCode::CREATED,
+            "{mode}: a launched session must remain reported after an optional save failure: {}",
+            String::from_utf8_lossy(&bytes));
+        let projection: Value = serde_json::from_slice(&bytes).unwrap();
+        let id = projection["session_id"].as_str().expect("launch must return its session id");
+        assert!(!id.is_empty());
+        assert_eq!(projection["message"], "Session created");
+        assert_eq!(controller.read().list_sessions().len(), 1, "every launched session must be reported");
+        let expected = requested.unwrap_or(300);
+        assert_eq!(projection["qa_timeout_secs"], expected);
+        assert_eq!(controller.read().get_session(id).unwrap().qa_timeout_secs, expected,
+            "the running session must retain the requested inactivity window");
+        assert_eq!(storage.load_session(id).unwrap().qa_timeout_secs, 300,
+            "the seam must fail only the optional save, after successful launch persistence");
+        assert_eq!(attempts, usize::from(requested.is_some()), "omitted settings must skip the setter/save entirely");
+        if requested.is_some() {
+            let warnings = projection["warnings"].as_array().expect("persistence failure must be visible");
+            assert_eq!(warnings.len(), 1);
+            let warning = warnings[0].as_str().unwrap();
+            assert!(warning.contains("persist") && warning.contains("QA timeout"), "{warning}");
+            assert!(!String::from_utf8_lossy(&bytes).contains("private-storage-detail"),
+                "storage error details must not be returned to callers");
+        } else {
+            assert!(projection.get("warnings").is_none(), "omitted setting must produce no persistence warning");
+        }
+    }
+
+    #[tokio::test]
+    async fn qa_launch_persistence_omitted_hive_skips_save() {
+        assert_qa_timeout_persistence_launch("hive", None).await;
+    }
+
+    #[tokio::test]
+    async fn qa_launch_persistence_omitted_fusion_skips_save() {
+        assert_qa_timeout_persistence_launch("fusion", None).await;
+    }
+
+    #[tokio::test]
+    async fn qa_launch_persistence_omitted_debate_skips_save() {
+        assert_qa_timeout_persistence_launch("debate", None).await;
+    }
+
+    #[tokio::test]
+    async fn qa_launch_persistence_failure_hive_returns_created_with_warning() {
+        assert_qa_timeout_persistence_launch("hive", Some(720)).await;
+    }
+
+    #[tokio::test]
+    async fn qa_launch_persistence_failure_fusion_returns_created_with_warning() {
+        assert_qa_timeout_persistence_launch("fusion", Some(720)).await;
+    }
+
+    #[tokio::test]
+    async fn qa_launch_persistence_failure_debate_returns_created_with_warning() {
+        assert_qa_timeout_persistence_launch("debate", Some(720)).await;
     }
 }

@@ -630,6 +630,96 @@ async fn reassign_nodes(
     caller_id: &str,
     requests: &[NodeReassignment],
 ) -> Result<(), ApiError> {
+    reassign_nodes_with_persistence(state, session_id, caller_id, requests,
+        &ReassignmentPersistence::default()).await
+}
+
+/// Local persistence seam: production always uses the real atomic file writes.
+#[derive(Default)]
+struct ReassignmentPersistence {
+    #[cfg(test)]
+    fail_composition: bool,
+    #[cfg(test)]
+    fail_restore: bool,
+    #[cfg(test)]
+    fail_outcome_audit: bool,
+    #[cfg(test)]
+    outcome_attempts: std::sync::atomic::AtomicUsize,
+}
+
+impl ReassignmentPersistence {
+    fn write_composition(&self, manager: &StateManager,
+        composition: &crate::orchestrator::work_graph::runtime::GraphCompositionState,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        if self.fail_composition {
+            assert!(manager.read_work_graph().unwrap().is_some(), "standalone write must precede injected failure");
+            return Err("injected composition persistence failure".to_string());
+        }
+        manager.write_graph_composition_state(composition).map_err(|error| error.to_string())
+    }
+
+    fn restore_graph(&self, manager: &StateManager, path: &std::path::Path,
+        original: Option<&crate::orchestrator::work_graph::TaskGraph>,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        if self.fail_restore {
+            return Err("injected graph rollback failure".to_string());
+        }
+        if let Some(original) = original {
+            manager.write_work_graph(original).map_err(|error| error.to_string())
+        } else {
+            // This operation created the standalone projection; absence is its prior state.
+            match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.to_string()),
+            }
+        }
+    }
+
+    async fn publish_outcome(&self, state: &AppState, event: Event) -> Result<(), String> {
+        #[cfg(test)]
+        {
+            self.outcome_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.fail_outcome_audit {
+                return Err("injected reassignment outcome audit failure".to_string());
+            }
+        }
+        state.event_bus.publish(event).await
+    }
+}
+
+async fn audit_reassignment_outcome(
+    state: &AppState,
+    persistence: &ReassignmentPersistence,
+    session_id: &str,
+    caller_id: &str,
+    changes: &[serde_json::Value],
+    applied: bool,
+    rolled_back: bool,
+) {
+    let kind = if applied { "node_reassignment_applied" } else { "node_reassignment_failed" };
+    let event = Event {
+        id: uuid::Uuid::new_v4().to_string(), session_id: session_id.to_string(), cell_id: None,
+        agent_id: Some(caller_id.to_string()), event_type: EventType::ArtifactUpdated,
+        timestamp: chrono::Utc::now(), severity: if applied { Severity::Info } else { Severity::Warning },
+        payload: serde_json::json!({"kind": kind, "actor_agent_id": caller_id,
+            "changes": changes, "rolled_back": rolled_back}),
+    };
+    // An outcome audit cannot turn a committed mutation into an ambiguous HTTP failure.
+    if let Err(error) = persistence.publish_outcome(state, event).await {
+        tracing::warn!(session_id, caller_id, kind, "Failed to audit reassignment outcome: {error}");
+    }
+}
+
+async fn reassign_nodes_with_persistence(
+    state: &AppState,
+    session_id: &str,
+    caller_id: &str,
+    requests: &[NodeReassignment],
+    persistence: &ReassignmentPersistence,
+) -> Result<(), ApiError> {
     let manager = StateManager::new(state.storage.session_dir(session_id));
     let mut composition = manager.read_graph_composition_state()
         .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -689,17 +779,23 @@ async fn reassign_nodes(
         timestamp: chrono::Utc::now(), severity: Severity::Info,
         payload: serde_json::json!({"kind": "node_reassignment_requested", "actor_agent_id": caller_id, "changes": changes}),
     }).await.map_err(ApiError::internal)?;
-    manager.write_work_graph(&graph).map_err(|error| ApiError::internal(error.to_string()))?;
+    if let Err(error) = manager.write_work_graph(&graph) {
+        audit_reassignment_outcome(state, persistence, session_id, caller_id, &changes, false, true).await;
+        return Err(ApiError::internal(error.to_string()));
+    }
     if let Some(composition) = composition.as_mut() {
         composition.graph = graph;
-        if let Err(error) = manager.write_graph_composition_state(composition) {
-            if let Some(original) = &original {
-                manager.write_work_graph(original).map_err(|rollback| ApiError::internal(
-                    format!("Reassignment failed: {error}; graph rollback failed: {rollback}")))?;
-            }
-            return Err(ApiError::internal(error.to_string()));
+        if let Err(error) = persistence.write_composition(&manager, composition) {
+            let rollback = persistence.restore_graph(&manager,
+                &state.storage.session_dir(session_id).join("state/work-graph.json"), original.as_ref());
+            audit_reassignment_outcome(state, persistence, session_id, caller_id, &changes, false, rollback.is_ok()).await;
+            return Err(ApiError::internal(match rollback {
+                Ok(()) => format!("Reassignment failed: {error}; graph rolled back"),
+                Err(rollback) => format!("Reassignment failed: {error}; graph rollback failed: {rollback}"),
+            }));
         }
     }
+    audit_reassignment_outcome(state, persistence, session_id, caller_id, &changes, true, false).await;
     Ok(())
 }
 
@@ -2256,6 +2352,101 @@ test "$with_header" = 200 && test "$without_header" = 200 && test "$wrong_token"
         assert_eq!(mark["payload"]["target_agent_id"], WORKER_ID);
         assert_eq!(mark["payload"]["queen_mark"], true);
         assert_eq!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID)[WORKER_ID].status, "completed");
+    }
+
+    fn reassignment_persistence_fixture(standalone: bool) -> (HeartbeatFixture, StateManager) {
+        let fixture = fixture();
+        let manager = write_graph_and_worker_principal(&fixture,
+            TaskGraph::new(vec![work_node("T-transfer", "P3")], Vec::new()), Some("P1"));
+        let composition = serde_json::from_value::<crate::orchestrator::work_graph::runtime::GraphCompositionState>(serde_json::json!({
+            "graph": manager.read_work_graph().unwrap().unwrap(),
+            "codegraph": {"available": false, "touches": {}, "unresolved_task_ids": [], "module_node_count": 0, "touch_edge_count": 0},
+            "context": {"gotchas": [], "hub_lints": [], "source_fingerprints": [], "knowledge_available": false, "touches_available": false, "knowledge_edge_count": 0},
+            "reviews": crate::orchestrator::work_graph::review::ReviewExpansionSidecar::default(),
+        })).unwrap();
+        manager.write_graph_composition_state(&composition).unwrap();
+        if standalone {
+            // The standalone projection may differ from the authoritative composition.
+            manager.write_work_graph(&TaskGraph::new(vec![work_node("T-transfer", "P2")], Vec::new())).unwrap();
+        } else {
+            std::fs::remove_file(fixture.state.storage.session_dir(SESSION_ID).join("state/work-graph.json")).unwrap();
+        }
+        (fixture, manager)
+    }
+
+    async fn run_reassignment(fixture: &HeartbeatFixture, persistence: &ReassignmentPersistence) -> Result<(), ApiError> {
+        reassign_nodes_with_persistence(&fixture.state, SESSION_ID, QUEEN_ID,
+            &[NodeReassignment { node_id: "T-transfer".to_string(), agent_id: WORKER_ID.to_string() }], persistence).await
+    }
+
+    #[tokio::test]
+    async fn reassignment_composition_failure_removes_new_standalone_graph() {
+        let (fixture, manager) = reassignment_persistence_fixture(false);
+        let path = fixture.state.storage.session_dir(SESSION_ID).join("state/work-graph-composition.json");
+        let before = std::fs::read(&path).unwrap();
+        let persistence = ReassignmentPersistence { fail_composition: true, ..Default::default() };
+        let error = run_reassignment(&fixture, &persistence).await.unwrap_err();
+        assert!(error.message.contains("injected composition persistence failure"));
+        assert!(manager.read_work_graph().unwrap().is_none(), "failed reassignment must remove its new standalone graph");
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        let events = security_events(&fixture);
+        let failure = events.iter().find(|event| event["payload"]["kind"] == "node_reassignment_failed").expect("failed outcome audit");
+        assert_eq!(failure["payload"]["rolled_back"], true);
+        assert!(!events.iter().any(|event| event["payload"]["kind"] == "node_reassignment_applied"));
+    }
+
+    #[tokio::test]
+    async fn reassignment_composition_failure_restores_prior_graph_and_audits_failure() {
+        let (fixture, manager) = reassignment_persistence_fixture(true);
+        let original = manager.read_work_graph().unwrap();
+        let path = fixture.state.storage.session_dir(SESSION_ID).join("state/work-graph-composition.json");
+        let before = std::fs::read(&path).unwrap();
+        let persistence = ReassignmentPersistence { fail_composition: true, ..Default::default() };
+        assert!(run_reassignment(&fixture, &persistence).await.is_err());
+        assert_eq!(manager.read_work_graph().unwrap(), original);
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        let events = security_events(&fixture);
+        assert!(events.iter().any(|event| event["payload"]["kind"] == "node_reassignment_failed"
+            && event["payload"]["rolled_back"] == true), "restored mutation needs a failed outcome audit");
+        assert!(!events.iter().any(|event| event["payload"]["kind"] == "node_reassignment_applied"));
+    }
+
+    #[tokio::test]
+    async fn reassignment_restore_failure_preserves_both_errors() {
+        for standalone in [false, true] {
+            let (fixture, _) = reassignment_persistence_fixture(standalone);
+            let persistence = ReassignmentPersistence { fail_composition: true, fail_restore: true, ..Default::default() };
+            let error = run_reassignment(&fixture, &persistence).await.unwrap_err();
+            assert!(error.message.contains("injected composition persistence failure"));
+            assert!(error.message.contains("injected graph rollback failure"), "both persistence and rollback failures must survive");
+            let events = security_events(&fixture);
+            assert!(events.iter().any(|event| event["payload"]["kind"] == "node_reassignment_failed"
+                && event["payload"]["rolled_back"] == false));
+        }
+    }
+
+    #[tokio::test]
+    async fn reassignment_applied_outcome_follows_committed_bindings() {
+        let (fixture, manager) = reassignment_persistence_fixture(false);
+        run_reassignment(&fixture, &ReassignmentPersistence::default()).await.unwrap_or_else(|error| panic!("{}", error.message));
+        let graph = manager.read_work_graph().unwrap().unwrap();
+        assert_eq!(graph.nodes[0].binding, BindingRef::Role("P1".to_string()));
+        assert_eq!(manager.read_graph_composition_state().unwrap().unwrap().graph, graph);
+        let events = security_events(&fixture);
+        let kinds: Vec<_> = events.iter().map(|event| event["payload"]["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, vec!["node_reassignment_requested", "node_reassignment_applied"]);
+    }
+
+    #[tokio::test]
+    async fn reassignment_outcome_audit_failure_does_not_report_committed_mutation_as_failed() {
+        let (fixture, manager) = reassignment_persistence_fixture(false);
+        let persistence = ReassignmentPersistence { fail_outcome_audit: true, ..Default::default() };
+        run_reassignment(&fixture, &persistence).await.unwrap_or_else(|error| panic!("committed binding must remain successful: {}", error.message));
+        assert_eq!(persistence.outcome_attempts.load(std::sync::atomic::Ordering::Relaxed), 1, "exercise the injected outcome-audit failure");
+        let graph = manager.read_work_graph().unwrap().unwrap();
+        assert_eq!(graph.nodes[0].binding, BindingRef::Role("P1".to_string()));
+        assert_eq!(manager.read_graph_composition_state().unwrap().unwrap().graph, graph);
+        assert!(!security_events(&fixture).iter().any(|event| event["payload"]["kind"] == "node_reassignment_failed"));
     }
 
 }
