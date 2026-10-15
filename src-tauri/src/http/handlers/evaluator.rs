@@ -1377,7 +1377,46 @@ pub(crate) fn apply_verdict(
     };
 
     let controller = state.session_controller.read();
+    let _resolution = is_override.then(SessionController::lock_qa_resolution);
     require_qa_overridable(&controller, session_id, action)?;
+    if is_override {
+        let session = controller
+            .get_session(session_id)
+            .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+        let state_manager =
+            StateManager::new(session.project_path.join(".hive-manager").join(session_id));
+        let queen_id = format!("{session_id}-queen");
+        let at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let reason = format!("operator {action}");
+        let forced_verdict = if action == "force-pass" { "PASS" } else { "FAIL" };
+        let qa_content = json!({
+            "kind": "qa-verdict",
+            "verdict": forced_verdict,
+            "reason": reason,
+            "forced_by": "operator",
+            "at": at,
+            "rationale": rationale,
+        });
+        // Publish the replacement QA verdict before writing the Prince file
+        // that releases the pinned Queen wait loop.
+        state_manager
+            .write_qa_verdict("operator", &queen_id, &qa_content.to_string(), None)
+            .map_err(|error| {
+                ApiError::internal(format!("Failed to persist forced QA verdict: {error}"))
+            })?;
+        let prince_content = json!({
+            "kind": "prince-verdict",
+            "verdict": "SKIPPED",
+            "reason": reason,
+            "forced_by": "operator",
+            "at": at,
+        });
+        state_manager
+            .write_prince_verdict("operator", &queen_id, &prince_content.to_string(), None)
+            .map_err(|error| {
+                ApiError::internal(format!("Failed to persist forced Prince verdict: {error}"))
+            })?;
+    }
     let new_state = controller
         .on_qa_verdict(session_id, verdict)
         .map_err(ApiError::internal)?;
@@ -1390,6 +1429,21 @@ pub(crate) fn apply_verdict(
     }
 
     Ok(new_state)
+}
+
+async fn apply_operator_override(
+    state: Arc<AppState>,
+    session_id: String,
+    verdict: &'static str,
+    rationale: Option<String>,
+) -> Result<SessionState, ApiError> {
+    // Atomic peer persistence and the controller transition both use blocking
+    // filesystem APIs. Keep the whole override off the async request thread.
+    tokio::task::spawn_blocking(move || {
+        apply_verdict(&state, &session_id, verdict, true, rationale.as_deref())
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("Operator override task failed: {error}")))?
 }
 
 pub async fn post_verdict(
@@ -1968,13 +2022,13 @@ pub async fn force_pass(
     validate_session_id(&session_id)?;
     let req = require_confirmation(body, "force-pass")?;
 
-    let new_state = apply_verdict(
-        &state,
-        &session_id,
+    let new_state = apply_operator_override(
+        state.clone(),
+        session_id.clone(),
         "QA_VERDICT: PASS",
-        true,
-        req.rationale.as_deref(),
-    )?;
+        req.rationale.clone(),
+    )
+    .await?;
 
     Ok(Json(json!({
         "session_id": session_id,
@@ -1992,13 +2046,13 @@ pub async fn force_fail(
     validate_session_id(&session_id)?;
     let req = require_confirmation(body, "force-fail")?;
 
-    let new_state = apply_verdict(
-        &state,
-        &session_id,
+    let new_state = apply_operator_override(
+        state.clone(),
+        session_id.clone(),
         "QA_VERDICT: FAIL",
-        true,
-        req.rationale.as_deref(),
-    )?;
+        req.rationale.clone(),
+    )
+    .await?;
 
     Ok(Json(json!({
         "session_id": session_id,
@@ -2959,5 +3013,218 @@ mod tests {
             .to_string()
             .contains("Failed to persist review expansion sidecar after QA verdict"));
         assert!(manager.read_node_completion_facts().unwrap().is_empty());
+    }
+
+    async fn assert_operator_override_peer_artifacts(action: &str, verdict: &str) {
+        for existing_files in [false, true] {
+            let storage = TempDir::new().unwrap();
+            let project = TempDir::new().unwrap();
+            let (app, controller, _) =
+                setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+            let session_id = format!("force-peer-{}", uuid::Uuid::new_v4());
+            let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+            session.state = SessionState::QaInconclusive;
+            controller.write().insert_test_session(session);
+            let session_root = project.path().join(".hive-manager").join(&session_id);
+            if existing_files {
+                let manager = StateManager::new(session_root.clone());
+                manager
+                    .write_qa_verdict("old-evaluator", "old-queen", "stale QA", Some("old-sha"))
+                    .unwrap();
+                manager
+                    .write_prince_verdict("old-prince", "old-queen", "stale Prince", Some("old-sha"))
+                    .unwrap();
+            }
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/sessions/{session_id}/qa/{action}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"confirm":true,"rationale":"Operator reviewed the evidence"}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let response_body: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
+            assert_eq!(response_body["action"], action);
+            assert_eq!(
+                response_body["new_state"],
+                if verdict == "PASS" { "QaPassed" } else { "QaFailed { iteration: 1 }" }
+            );
+            let new_state = controller.read().get_session(&session_id).unwrap().state;
+            if verdict == "PASS" {
+                assert!(matches!(new_state, SessionState::QaPassed));
+            } else {
+                assert!(matches!(new_state, SessionState::QaFailed { iteration: 1 }));
+            }
+
+            let peer_dir = session_root.join("peer");
+            let prince_path = peer_dir.join("prince-verdict.json");
+            assert!(
+                prince_path.is_file(),
+                "the pinned Queen while [ ! -f .../peer/prince-verdict.json ] wait must end"
+            );
+            assert!(peer_dir.join("qa-verdict.json").is_file());
+            let mut timestamps = Vec::new();
+            for (kind, expected_verdict) in [("qa-verdict", verdict), ("prince-verdict", "SKIPPED")] {
+                let record: crate::coordination::PeerMessageRecord = serde_json::from_slice(
+                    &std::fs::read(peer_dir.join(format!("{kind}.json"))).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(record.kind, kind);
+                assert_eq!(record.from, "operator");
+                assert_eq!(record.to, format!("{session_id}-queen"));
+                assert!(record.commit_sha.is_none(), "old evaluator SHA must not survive");
+                let content: serde_json::Value = serde_json::from_str(&record.content).unwrap();
+                assert_eq!(content["kind"], kind);
+                assert_eq!(content["verdict"], expected_verdict);
+                assert_eq!(content["forced_by"], "operator");
+                assert_eq!(content["reason"], format!("operator {action}"));
+                let at = content["at"].as_str().expect("forced provenance has a timestamp");
+                chrono::DateTime::parse_from_rfc3339(at).unwrap();
+                timestamps.push(at.to_string());
+                if kind == "qa-verdict" {
+                    assert_eq!(content["rationale"], "Operator reviewed the evidence");
+                }
+            }
+            assert_eq!(timestamps[0], timestamps[1]);
+        }
+    }
+
+    #[tokio::test]
+    async fn force_pass_publishes_peer_artifacts_and_releases_pinned_queen_wait() {
+        assert_operator_override_peer_artifacts("force-pass", "PASS").await;
+    }
+
+    #[tokio::test]
+    async fn force_fail_publishes_peer_artifacts_and_releases_pinned_queen_wait() {
+        assert_operator_override_peer_artifacts("force-fail", "FAIL").await;
+    }
+
+    #[tokio::test]
+    async fn force_override_peer_write_failure_preserves_state_and_allows_retry() {
+        for blocked_file in ["qa-verdict.json", "prince-verdict.json"] {
+            let storage = TempDir::new().unwrap();
+            let project = TempDir::new().unwrap();
+            let (app, controller, _) =
+                setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+            let session_id = format!("force-peer-failure-{}", uuid::Uuid::new_v4());
+            let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+            session.state = SessionState::QaInconclusive;
+            controller.write().insert_test_session(session);
+            let peer_dir = project.path().join(".hive-manager").join(&session_id).join("peer");
+            let blocked_path = peer_dir.join(blocked_file);
+            std::fs::create_dir_all(&blocked_path).unwrap();
+            let request = || {
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/qa/force-pass"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"confirm":true}"#))
+                    .unwrap()
+            };
+
+            let response = app.clone().oneshot(request()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(matches!(
+                controller.read().get_session(&session_id).unwrap().state,
+                SessionState::QaInconclusive
+            ));
+            assert!(!peer_dir.join("prince-verdict.json").is_file());
+
+            std::fs::remove_dir(&blocked_path).unwrap();
+            let response = app.oneshot(request()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(peer_dir.join("qa-verdict.json").is_file());
+            assert!(peer_dir.join("prince-verdict.json").is_file());
+            assert!(matches!(
+                controller.read().get_session(&session_id).unwrap().state,
+                SessionState::QaPassed
+            ));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn force_override_waits_for_timeout_resolution_then_replaces_blocked_peer_record() {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, _) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("force-resolution-{}", uuid::Uuid::new_v4());
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = SessionState::QaInconclusive;
+        controller.write().insert_test_session(session);
+        let session_root = project.path().join(".hive-manager").join(&session_id);
+        let peer_dir = session_root.join("peer");
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{session_id}/qa/force-pass"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"confirm":true}"#))
+            .unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let response_task;
+        {
+            let resolution = crate::session::SessionController::lock_qa_resolution();
+            response_task = tokio::spawn(async move {
+                started_tx.send(()).unwrap();
+                let response = app.oneshot(request).await.unwrap();
+                let _ = finished_tx.send(());
+                response
+            });
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("force request starts on the second runtime worker");
+            let finished_while_locked =
+                finished_rx.recv_timeout(std::time::Duration::from_millis(250));
+            let state_while_locked = controller.read().get_session(&session_id).unwrap().state;
+            let prince_written_while_locked = peer_dir.join("prince-verdict.json").is_file();
+
+            // Model the timeout's final publication while it owns the shared
+            // resolution guard. The pending operator must publish after it.
+            StateManager::new(session_root)
+                .write_qa_verdict(
+                    "evaluator",
+                    &format!("{session_id}-queen"),
+                    r#"{"kind":"qa-verdict","verdict":"BLOCKED","blocked_reason":"timeout"}"#,
+                    None,
+                )
+                .unwrap();
+            drop(resolution);
+            assert!(matches!(finished_while_locked, Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+            assert!(matches!(state_while_locked, SessionState::QaInconclusive));
+            assert!(!prince_written_while_locked);
+        }
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), response_task)
+            .await
+            .expect("force override proceeds after timeout resolution unlocks")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(matches!(
+            controller.read().get_session(&session_id).unwrap().state,
+            SessionState::QaPassed
+        ));
+        for (kind, verdict) in [("qa-verdict", "PASS"), ("prince-verdict", "SKIPPED")] {
+            let record: crate::coordination::PeerMessageRecord = serde_json::from_slice(
+                &std::fs::read(peer_dir.join(format!("{kind}.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(record.from, "operator");
+            let content: serde_json::Value = serde_json::from_str(&record.content).unwrap();
+            assert_eq!(content["verdict"], verdict);
+            assert_eq!(content["forced_by"], "operator");
+            assert_eq!(content["reason"], "operator force-pass");
+            chrono::DateTime::parse_from_rfc3339(content["at"].as_str().unwrap()).unwrap();
+        }
     }
 }

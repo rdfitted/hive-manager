@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,7 @@ use std::sync::Arc;
 use super::validate_agent_id;
 use super::validate_session_id;
 use crate::coordination::StateManager;
+use crate::domain::event::{Event, EventType, Severity};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::orchestrator::org_graph::retrieval_ledger::record_ack_outcomes;
@@ -19,11 +20,11 @@ use crate::orchestrator::work_graph::completion_ledger::{
 use crate::orchestrator::work_graph::knowledge_ack::{
     append_knowledge_ack, is_valid_knowledge_ack_tag,
 };
-use crate::orchestrator::work_graph::BindingRef;
+use crate::orchestrator::work_graph::{BindingRef, NodeStatus};
 
 use super::workers::ExecutedAs;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub(crate) enum CompletedNodeEntry {
     Legacy(String),
@@ -46,9 +47,15 @@ impl CompletedNodeEntry {
 }
 
 /// POST /api/sessions/{id}/heartbeat - Body
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PostHeartbeatRequest {
     pub agent_id: String,
+    /// Explicit Queen-only cross-agent status mark; agent_id remains the authenticated Queen.
+    #[serde(default)]
+    pub mark_agent_id: Option<String>,
+    /// Explicit Queen direction; never inferred from a worker's completion claim.
+    #[serde(default)]
+    pub reassign_nodes: Vec<NodeReassignment>,
     pub status: String,
     #[serde(default)]
     pub summary: Option<String>,
@@ -63,6 +70,12 @@ pub struct PostHeartbeatRequest {
     /// `None` is undecided; `Some([])` is a decided answer that none were relevant.
     #[serde(default)]
     pub knowledge_ack: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct NodeReassignment {
+    pub node_id: String,
+    pub agent_id: String,
 }
 
 /// Response for POST heartbeat
@@ -97,12 +110,15 @@ pub struct ActiveSessionsResponse {
 }
 
 const VALID_HEARTBEAT_STATUSES: &[&str] = &["working", "idle", "completed"];
+// Keep binding authorization and durable completion effects in the same critical section.
+static HEARTBEAT_MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// POST /api/sessions/{id}/heartbeat
 pub async fn post_heartbeat(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
-    Json(req): Json<PostHeartbeatRequest>,
+    headers: HeaderMap,
+    Json(mut req): Json<PostHeartbeatRequest>,
 ) -> Result<(StatusCode, Json<PostHeartbeatResponse>), ApiError> {
     validate_session_id(&session_id)?;
     validate_agent_id(&req.agent_id)?;
@@ -111,6 +127,49 @@ pub async fn post_heartbeat(
         return Err(ApiError::bad_request(
             "Status must be one of: working, idle, completed",
         ));
+    }
+
+    let (caller_id, caller_is_queen) = headers
+        .get("X-Hive-Agent-Token")
+        .and_then(|header| header.to_str().ok())
+        .and_then(|token| state.pty_manager.read().authenticate_heartbeat(&session_id, token))
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED,
+            "Missing or invalid X-Hive-Agent-Token; restart this agent to receive its spawn credential"))?;
+    // A confused agent must not persist its own credential in a summary, provenance or target ID.
+    let token = headers.get("X-Hive-Agent-Token").and_then(|header| header.to_str().ok()).unwrap_or_default();
+    let payload = serde_json::to_string(&req).map_err(|_| ApiError::bad_request("Invalid heartbeat payload"))?;
+    if payload.contains(token) {
+        return Err(ApiError::bad_request("Heartbeat payload must not contain a credential value"));
+    }
+    if req.agent_id != caller_id
+        && super::canonical_agent_id(&session_id, &req.agent_id) != caller_id
+    {
+        return Err(ApiError::new(StatusCode::FORBIDDEN,
+            "X-Hive-Agent-Token may update only its owning agent; Queen cross-agent marks require mark_agent_id"));
+    }
+    if let Some(target_id) = req.mark_agent_id.as_ref() {
+        if !caller_is_queen {
+            return Err(ApiError::new(StatusCode::FORBIDDEN,
+                "mark_agent_id requires a Queen-scoped X-Hive-Agent-Token"));
+        }
+        if req.knowledge_ack.is_some() {
+            return Err(ApiError::bad_request("A Queen cross-agent mark cannot acknowledge another agent's knowledge"));
+        }
+        validate_agent_id(target_id)?;
+        req.agent_id = target_id.clone();
+    }
+    let _mutation_guard = HEARTBEAT_MUTATIONS.lock().await;
+    if !req.reassign_nodes.is_empty() {
+        if !caller_is_queen {
+            return Err(ApiError::new(StatusCode::FORBIDDEN, "reassign_nodes requires a Queen-scoped X-Hive-Agent-Token"));
+        }
+        if req.mark_agent_id.is_some() || !req.completed_nodes.is_empty()
+            || req.assignment_id.is_some() || req.knowledge_ack.is_some() || req.status == "completed"
+        {
+            return Err(ApiError::bad_request("reassign_nodes cannot be combined with completion, marking, assignment_id or knowledge_ack"));
+        }
+        reassign_nodes(&state, &session_id, &caller_id, &req.reassign_nodes).await?;
+        return Ok((StatusCode::OK, Json(PostHeartbeatResponse { message: "Node bindings reassigned".to_string() })));
     }
     if req
         .assignment_id
@@ -198,6 +257,13 @@ pub async fn post_heartbeat(
         }
     };
 
+    // Raw roster IDs take precedence over aliases. Check the resolved target too, so an
+    // alias collision cannot turn an owning credential into a cross-agent write.
+    if req.mark_agent_id.is_none() && agent_id != caller_id {
+        return Err(ApiError::new(StatusCode::FORBIDDEN,
+            "X-Hive-Agent-Token does not own the resolved agent"));
+    }
+
     // Validate the whole declared set before the queue or controller is mutated. Exact ids are
     // deliberate: aliases and labels are not node identity, and a mixed valid/invalid request
     // must apply none of its declarations.
@@ -262,13 +328,17 @@ pub async fn post_heartbeat(
                 "Failed to read hierarchy for completed_nodes validation: {error}"
             ))
         })?;
-        if let Some(agent_principal) = hierarchy
+        let agent_principal = hierarchy
             .iter()
             .find(|node| node.id == agent_id)
             .and_then(|node| node.principal.as_deref())
             .map(str::trim)
-            .filter(|principal| !principal.is_empty())
-        {
+            .filter(|principal| !principal.is_empty());
+        if agent_principal.is_none() && !(caller_is_queen && agent_id == caller_id) {
+            return Err(ApiError::new(StatusCode::FORBIDDEN,
+                "completed_nodes requires an authenticated agent with a current principal binding"));
+        }
+        if let Some(agent_principal) = agent_principal {
             let ownership_conflicts = graph
                 .as_ref()
                 .into_iter()
@@ -293,8 +363,8 @@ pub async fn post_heartbeat(
                 )));
             }
         }
-        // A missing principal remains valid for legacy completion facts, but cannot
-        // authorize a queue prerequisite that has no row of its own.
+        // An authenticated Queen may retain legacy attestation facts, but a row-less
+        // queue prerequisite still requires actual ownership of the node below.
         let external_principal = hierarchy
             .iter()
             .find(|node| node.id == agent_id)
@@ -320,6 +390,35 @@ pub async fn post_heartbeat(
             .collect::<Vec<_>>();
         (normalized.into_iter().collect::<Vec<_>>(), external_completion_ids)
     };
+
+    // Neutral audit events do not infer work-graph completion, unlike AgentCompleted.
+    // Persist before changing status so a failed audit write cannot silently erase evidence.
+    let previous = state.session_controller.read().get_heartbeat_info(&session_id)
+        .get(&agent_id).cloned();
+    if req.mark_agent_id.is_some() || req.status == "completed"
+        || previous.as_ref().is_some_and(|heartbeat| heartbeat.status == "completed")
+    {
+        state.event_bus.publish(Event {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.clone(),
+            cell_id: None,
+            agent_id: Some(caller_id.clone()),
+            event_type: EventType::ArtifactUpdated,
+            timestamp: chrono::Utc::now(),
+            payload: serde_json::json!({
+                "kind": "heartbeat_status_requested",
+                "actor_agent_id": caller_id,
+                "target_agent_id": agent_id,
+                "queen_mark": req.mark_agent_id.is_some(),
+                "status": req.status,
+                "summary": req.summary,
+                "completed_nodes": req.completed_nodes,
+                "previous_status": previous.as_ref().map(|heartbeat| &heartbeat.status),
+                "previous_summary": previous.as_ref().and_then(|heartbeat| heartbeat.summary.as_ref()),
+            }),
+            severity: Severity::Info,
+        }).await.map_err(ApiError::internal)?;
+    }
 
     // A supplied assignment identity is an exact durable fence. Check it before
     // mutating controller liveness so a stale worker cannot report a completion
@@ -426,6 +525,87 @@ pub async fn post_heartbeat(
             message: "Heartbeat recorded".to_string(),
         }),
     ))
+}
+
+/// Rebind incomplete, row-less work. Queue-backed transfers require their assignment lifecycle,
+/// rather than silently retaining an old worker's durable fence.
+async fn reassign_nodes(
+    state: &AppState,
+    session_id: &str,
+    caller_id: &str,
+    requests: &[NodeReassignment],
+) -> Result<(), ApiError> {
+    let manager = StateManager::new(state.storage.session_dir(session_id));
+    let mut composition = manager.read_graph_composition_state()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let original = manager.read_work_graph().map_err(|error| ApiError::internal(error.to_string()))?;
+    let mut graph = composition.as_ref().map(|value| value.graph.clone()).or_else(|| original.clone())
+        .ok_or_else(|| ApiError::not_found("No work graph to reassign"))?;
+    let hierarchy = manager.read_hierarchy().map_err(|error| ApiError::internal(error.to_string()))?;
+    let rows = state.queue_manager.repo().rows_for_session(session_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let facts = manager.read_node_completion_facts().map_err(|error| ApiError::internal(error.to_string()))?;
+    let external = state.queue_manager.repo().external_completion_task_ids(session_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let roster = state.session_controller.read().get_session(session_id)
+        .ok_or_else(|| ApiError::not_found("Session not found"))?;
+    let mut seen = BTreeSet::new();
+    let mut changes = Vec::new();
+    // Validate the whole set before touching either graph representation or the audit log.
+    for request in requests {
+        validate_agent_id(&request.agent_id)?;
+        if !seen.insert(&request.node_id) {
+            return Err(ApiError::bad_request("Duplicate node in reassign_nodes"));
+        }
+        let node = graph.nodes.iter_mut().find(|node| node.id == request.node_id)
+            .ok_or_else(|| ApiError::bad_request(format!("Unknown reassignment node {}", request.node_id)))?;
+        if node.status == NodeStatus::Completed || facts.iter().any(|fact| fact.task_id == node.id)
+            || external.contains(&node.id)
+        {
+            return Err(ApiError::new(StatusCode::CONFLICT, "Reassignment does not reopen completed work"));
+        }
+        if rows.iter().any(|row| row.task_id.as_deref() == Some(node.id.as_str())) {
+            return Err(ApiError::new(StatusCode::CONFLICT,
+                "Queue-backed reassignment must transfer its durable assignment before rebinding"));
+        }
+        let target_id = if roster.agents.iter().any(|agent| agent.id == request.agent_id) {
+            request.agent_id.clone()
+        } else {
+            super::canonical_agent_id(session_id, &request.agent_id)
+        };
+        if !roster.agents.iter().any(|agent| agent.id == target_id) {
+            return Err(ApiError::bad_request("Reassignment target is not a session agent"));
+        }
+        let principal = hierarchy.iter().find(|node| node.id == target_id)
+            .and_then(|node| node.principal.as_deref()).map(str::trim)
+            .filter(|principal| !principal.is_empty())
+            .ok_or_else(|| ApiError::bad_request("Reassignment target has no current principal binding"))?;
+        let previous = node.binding.clone();
+        node.binding = match &previous {
+            BindingRef::Role(_) => BindingRef::Role(principal.to_string()),
+            BindingRef::Zone(_) => BindingRef::Zone(principal.to_string()),
+        };
+        changes.push(serde_json::json!({"node_id": node.id, "agent_id": target_id,
+            "previous_binding": previous, "binding": node.binding}));
+    }
+    state.event_bus.publish(Event {
+        id: uuid::Uuid::new_v4().to_string(), session_id: session_id.to_string(), cell_id: None,
+        agent_id: Some(caller_id.to_string()), event_type: EventType::ArtifactUpdated,
+        timestamp: chrono::Utc::now(), severity: Severity::Info,
+        payload: serde_json::json!({"kind": "node_reassignment_requested", "actor_agent_id": caller_id, "changes": changes}),
+    }).await.map_err(ApiError::internal)?;
+    manager.write_work_graph(&graph).map_err(|error| ApiError::internal(error.to_string()))?;
+    if let Some(composition) = composition.as_mut() {
+        composition.graph = graph;
+        if let Err(error) = manager.write_graph_composition_state(composition) {
+            if let Some(original) = &original {
+                manager.write_work_graph(original).map_err(|rollback| ApiError::internal(
+                    format!("Reassignment failed: {error}; graph rollback failed: {rollback}")))?;
+            }
+            return Err(ApiError::internal(error.to_string()));
+        }
+    }
+    Ok(())
 }
 
 /// Retrieval outcomes are local observations and must never change the heartbeat response.
@@ -705,11 +885,14 @@ mod tests {
         assignment_id: Option<i64>,
         completed_nodes: Vec<CompletedNodeEntry>,
     ) -> Result<(StatusCode, Json<PostHeartbeatResponse>), ApiError> {
+        let headers = authenticated_headers(&state, agent_id);
         post_heartbeat(
             State(state),
             Path(SESSION_ID.to_string()),
+            headers,
             Json(PostHeartbeatRequest {
                 agent_id: agent_id.to_string(),
+                mark_agent_id: None, reassign_nodes: Vec::new(),
                 status: status.to_string(),
                 summary: Some(format!("{status} from handler test")),
                 assignment_id,
@@ -726,11 +909,14 @@ mod tests {
         status: &str,
         knowledge_ack: Option<Vec<String>>,
     ) -> Result<(StatusCode, Json<PostHeartbeatResponse>), ApiError> {
+        let headers = authenticated_headers(&state, agent_id);
         post_heartbeat(
             State(state),
             Path(SESSION_ID.to_string()),
+            headers,
             Json(PostHeartbeatRequest {
                 agent_id: agent_id.to_string(),
+                mark_agent_id: None, reassign_nodes: Vec::new(),
                 status: status.to_string(),
                 summary: Some(format!("{status} knowledge acknowledgement")),
                 assignment_id: None,
@@ -739,6 +925,16 @@ mod tests {
             }),
         )
         .await
+    }
+
+    fn authenticated_headers(state: &AppState, agent_id: &str) -> HeaderMap {
+        let id = super::super::canonical_agent_id(SESSION_ID, agent_id);
+        let token = state.pty_manager.read().mint_heartbeat_token_for_test(
+            &id, SESSION_ID, id == QUEEN_ID,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Hive-Agent-Token", token.parse().expect("header-safe credential"));
+        headers
     }
 
     fn stored_knowledge_acks(fixture: &HeartbeatFixture) -> Vec<KnowledgeAckRecord> {
@@ -1297,38 +1493,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_agent_principal_allows_a_bound_node_completion() {
+    async fn missing_agent_principal_rejects_a_bound_node_completion() {
         let fixture = fixture();
-        let state_manager = write_graph_and_worker_principal(
-            &fixture,
-            TaskGraph::new(vec![work_node("T-bound", "P2")], Vec::new()),
-            None,
-        );
-
-        // Most spawn paths intentionally persist no principal. This is the normal fail-open case,
-        // not evidence that the agent contradicts the node's recorded binding.
-        let response = expect_success(
-            heartbeat_with_completed_nodes(
-                Arc::clone(&fixture.state),
-                "worker-1",
-                "completed",
-                None,
-                &["T-bound"],
-            )
-            .await,
-            "completion from an agent with no recorded principal",
-        );
-
-        assert_eq!(response.0, StatusCode::OK);
-        let facts = state_manager
-            .read_node_completion_facts()
-            .expect("completion ledger");
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].task_id, "T-bound");
-        assert_eq!(
-            facts[0].agent_id, WORKER_ID,
-            "the fact must retain the resolved full agent id"
-        );
+        let manager = write_graph_and_worker_principal(&fixture,
+            TaskGraph::new(vec![work_node("T-bound", "P2")], Vec::new()), None);
+        let result = heartbeat_with_completed_nodes(Arc::clone(&fixture.state), "worker-1",
+            "completed", None, &["T-bound"]).await;
+        assert_eq!(result.err().expect("missing principal cannot prove ownership").status, StatusCode::FORBIDDEN);
+        assert!(manager.read_node_completion_facts().unwrap().is_empty());
+        assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
     }
 
     #[tokio::test]
@@ -1465,4 +1638,218 @@ mod tests {
             .get_heartbeat_info(SESSION_ID)
             .is_empty());
     }
+
+    fn auth_request(agent_id: &str, status: &str) -> PostHeartbeatRequest {
+        PostHeartbeatRequest {
+            agent_id: agent_id.to_string(), mark_agent_id: None, reassign_nodes: Vec::new(), status: status.to_string(),
+            summary: Some("verified gate evidence".to_string()), assignment_id: None,
+            completed_nodes: Vec::new(), knowledge_ack: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn forged_heartbeat_cannot_mutate_queue_liveness_or_external_completion() {
+        let fixture = fixture();
+        fixture.state.queue_manager.repo().enqueue(&running_row()).expect("queue row");
+        let manager = write_graph_and_worker_principal(&fixture,
+            TaskGraph::new(vec![work_node("T-review-3", "P1")], Vec::new()), Some("P1"));
+        let mut request = auth_request(WORKER_ID, "completed");
+        request.assignment_id = Some(ASSIGNMENT_ID);
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T-review-3".to_string())];
+        let wrong_headers = authenticated_headers(&fixture.state, "worker-2");
+        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+            wrong_headers, Json(request)).await;
+        let error = result.err().expect("forgery must be rejected");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        let row = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
+        assert_eq!(row.status, QueueStatus::Running);
+        assert!(row.heartbeat_at.is_none());
+        assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+        assert!(fixture.state.queue_manager.repo().external_completion_task_ids(SESSION_ID).unwrap().is_empty());
+        assert!(manager.read_node_completion_facts().unwrap().is_empty());
+        assert!(!fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn tokenless_heartbeat_names_required_header_without_mutation() {
+        let fixture = fixture();
+        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+            HeaderMap::new(), Json(auth_request(WORKER_ID, "working"))).await;
+        let error = result.err().expect("legacy tokenless request must be rejected");
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert!(error.message.contains("X-Hive-Agent-Token"));
+        assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_queen_mark_is_authorized_and_audited_but_worker_mark_is_forbidden() {
+        let fixture = fixture();
+        let mut forbidden = auth_request(WORKER_ID, "completed");
+        forbidden.mark_agent_id = Some(QUEEN_ID.to_string());
+        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+            authenticated_headers(&fixture.state, WORKER_ID), Json(forbidden)).await;
+        assert_eq!(result.err().expect("worker cannot cross-mark").status, StatusCode::FORBIDDEN);
+        let mut request = auth_request("queen", "completed");
+        request.mark_agent_id = Some(WORKER_ID.to_string());
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await, "Queen explicit mark");
+        assert_eq!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID)[WORKER_ID].status, "completed");
+        let events = std::fs::read_to_string(fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl")).unwrap();
+        let audit: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
+        assert_eq!(audit["event_type"], "artifact_updated");
+        assert_eq!(audit["payload"]["actor_agent_id"], QUEEN_ID);
+        assert_eq!(audit["payload"]["target_agent_id"], WORKER_ID);
+        assert_eq!(audit["payload"]["queen_mark"], true);
+        assert_eq!(audit["payload"]["summary"], "verified gate evidence");
+    }
+
+    #[tokio::test]
+    async fn overwritten_completed_summary_preserves_previous_evidence() {
+        let fixture = fixture();
+        let _ = expect_success(heartbeat(Arc::clone(&fixture.state), WORKER_ID, "completed", None).await, "completed");
+        let _ = expect_success(heartbeat(Arc::clone(&fixture.state), WORKER_ID, "working", None).await, "overwrite");
+        let events = std::fs::read_to_string(fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl")).unwrap();
+        let last: serde_json::Value = serde_json::from_str(events.lines().last().unwrap()).unwrap();
+        assert_eq!(last["payload"]["previous_status"], "completed");
+        assert_eq!(last["payload"]["previous_summary"], "completed from handler test");
+        assert_eq!(last["payload"]["summary"], "working from handler test");
+    }
+
+
+    #[tokio::test]
+    async fn queen_reassignment_accepts_new_principal_and_rejects_old_principal() {
+        let fixture = fixture();
+        let new_id = format!("{SESSION_ID}-worker-2");
+        let manager = write_graph_and_worker_principal(&fixture,
+            TaskGraph::new(vec![work_node("T-transfer", "P3")], Vec::new()), Some("P3"));
+        let composition = serde_json::from_value::<crate::orchestrator::work_graph::runtime::GraphCompositionState>(serde_json::json!({
+            "graph": manager.read_work_graph().unwrap().unwrap(),
+            "codegraph": {"available": false, "touches": {}, "unresolved_task_ids": [], "module_node_count": 0, "touch_edge_count": 0},
+            "context": {"gotchas": [], "hub_lints": [], "source_fingerprints": [], "knowledge_available": false, "touches_available": false, "knowledge_edge_count": 0},
+            "reviews": crate::orchestrator::work_graph::review::ReviewExpansionSidecar::default(),
+        })).unwrap();
+        manager.write_graph_composition_state(&composition).unwrap();
+        manager.update_hierarchy(&[
+            HierarchyNode { id: WORKER_ID.to_string(), role: "Worker-1".to_string(),
+                principal: Some("P3".to_string()), parent_id: Some(QUEEN_ID.to_string()), children: Vec::new() },
+            HierarchyNode { id: new_id.clone(), role: "Worker-2".to_string(),
+                principal: Some("P1".to_string()), parent_id: Some(QUEEN_ID.to_string()), children: Vec::new() },
+        ]).unwrap();
+        let controller = fixture.state.session_controller.read();
+        let mut session = controller.get_session(SESSION_ID).unwrap();
+        session.agents.push(agent(&new_id, AgentRole::Worker { index: 2, parent: Some(QUEEN_ID.to_string()) }, Some(QUEEN_ID)));
+        controller.insert_test_session(session);
+        drop(controller);
+        let mut request = auth_request(QUEEN_ID, "working");
+        request.reassign_nodes.push(NodeReassignment { node_id: "T-transfer".to_string(), agent_id: new_id.clone() });
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await, "Queen transfer");
+        let graph = manager.read_work_graph().unwrap().unwrap();
+        assert_eq!(graph.nodes[0].binding, BindingRef::Role("P1".to_string()));
+        assert_eq!(manager.read_graph_composition_state().unwrap().unwrap().graph, graph);
+        let old_result = heartbeat_with_completed_nodes(Arc::clone(&fixture.state), WORKER_ID,
+            "completed", None, &["T-transfer"]).await;
+        assert_eq!(old_result.err().expect("old principal must be rejected").status, StatusCode::BAD_REQUEST);
+        let _ = expect_success(heartbeat_with_completed_nodes(Arc::clone(&fixture.state), &new_id,
+            "completed", None, &["T-transfer"]).await, "new principal completion");
+        let facts = manager.read_node_completion_facts().unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].agent_id, new_id);
+        assert!(fixture.state.queue_manager.repo().external_completion_task_ids(SESSION_ID).unwrap().contains("T-transfer"));
+        let events = std::fs::read_to_string(fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl")).unwrap();
+        assert!(events.contains("node_reassignment_requested"));
+        assert!(events.contains("P3"));
+        assert!(events.contains("P1"));
+    }
+
+
+    #[tokio::test]
+    async fn unknown_token_cannot_complete_its_claimed_owner_or_release_dependents() {
+        let fixture = fixture();
+        fixture.state.queue_manager.repo().enqueue(&running_row()).unwrap();
+        let manager = write_graph_and_worker_principal(&fixture,
+            TaskGraph::new(vec![work_node("T-review-3", "P1")], Vec::new()), Some("P1"));
+        let _registered_headers = authenticated_headers(&fixture.state, WORKER_ID);
+        let unknown = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Hive-Agent-Token", unknown.parse().unwrap());
+        let mut request = auth_request(WORKER_ID, "completed");
+        request.assignment_id = Some(ASSIGNMENT_ID);
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T-review-3".to_string())];
+        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()), headers, Json(request)).await;
+        assert_eq!(result.err().expect("unregistered token must be rejected").status, StatusCode::UNAUTHORIZED);
+        let row = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
+        assert_eq!(row.status, QueueStatus::Running);
+        assert!(row.heartbeat_at.is_none());
+        assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+        assert!(manager.read_node_completion_facts().unwrap().is_empty());
+        assert!(fixture.state.queue_manager.repo().external_completion_task_ids(SESSION_ID).unwrap().is_empty());
+        assert!(!fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_rejects_credential_in_summary_before_any_persistence() {
+        let fixture = fixture();
+        let headers = authenticated_headers(&fixture.state, WORKER_ID);
+        let mut request = auth_request(WORKER_ID, "completed");
+        request.summary = Some(headers["X-Hive-Agent-Token"].to_str().unwrap().to_string());
+        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()), headers, Json(request)).await;
+        assert_eq!(result.err().expect("credential-bearing payload must be rejected").status, StatusCode::BAD_REQUEST);
+        assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+        assert!(!fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "live WSL Ubuntu integration; run explicitly after C I1 and H authorization gates"]
+    async fn live_wsl_environment_and_authenticated_heartbeat() {
+        let fixture = fixture();
+        let token = fixture.state.pty_manager.read().mint_heartbeat_token_for_test(WORKER_ID, SESSION_ID, false);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = crate::http::routes::create_router(Arc::clone(&fixture.state));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let injected = vec![("HIVE_SESSION_ID".to_string(), SESSION_ID.to_string()),
+            ("HIVE_AGENT_ID".to_string(), WORKER_ID.to_string()), ("HIVE_AGENT_TOKEN".to_string(), token)];
+        let inherited = std::env::vars_os().collect::<Vec<_>>();
+        let environment = crate::adapters::wsl::launch_env("wsl.exe", None, &injected, &inherited).unwrap();
+        let script = format!(r#"test -n "$HIVE_AGENT_TOKEN" || exit 21
+with_header=$(curl.exe -sS -o NUL -w '%{{http_code}}' -X POST 'http://localhost:{port}/api/sessions/{SESSION_ID}/heartbeat' -H 'Content-Type: application/json' -H "X-Hive-Agent-Token: $HIVE_AGENT_TOKEN" -d '{{"agent_id":"{WORKER_ID}","status":"completed","summary":"WSL live development-server check"}}') || exit 22
+without_header=$(curl.exe -sS -o NUL -w '%{{http_code}}' -X POST 'http://localhost:{port}/api/sessions/{SESSION_ID}/heartbeat' -H 'Content-Type: application/json' -d '{{"agent_id":"{WORKER_ID}","status":"completed"}}') || exit 23
+printf 'env_present=yes with_header=%s without_header=%s\n' "$with_header" "$without_header"
+test "$with_header" = 200 && test "$without_header" = 401
+"#);
+        let mut command = tokio::process::Command::new("wsl.exe");
+        command.args(["-d", "Ubuntu", "bash", "--noprofile", "--norc", "-c", &script]).envs(environment);
+        command.kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(45), command.output()).await;
+        server.abort();
+        let output = output.expect("WSL check timeout").expect("WSL process launch");
+        // Only the fixed presence/status summary is printed; stderr/command arguments remain private.
+        assert!(output.status.success(), "WSL live check failed (no command/environment output printed)");
+        let summary = String::from_utf8(output.stdout).unwrap();
+        assert!(summary.contains("env_present=yes with_header=200 without_header=401"));
+        println!("WSL new-code ephemeral server: env_present=yes with_header=200 without_header=401");
+        assert_eq!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID)[WORKER_ID].status, "completed");
+    }
+
+
+    #[tokio::test]
+    async fn queen_queue_backed_reassignment_is_explicit_conflict_without_mutation() {
+        let fixture = fixture();
+        fixture.state.queue_manager.repo().enqueue(&running_row()).unwrap();
+        let manager = write_graph_and_worker_principal(&fixture,
+            TaskGraph::new(vec![work_node("T-review-3", "P3")], Vec::new()), Some("P3"));
+        let before = manager.read_work_graph().unwrap();
+        let mut request = auth_request(QUEEN_ID, "working");
+        request.reassign_nodes.push(NodeReassignment { node_id: "T-review-3".to_string(), agent_id: WORKER_ID.to_string() });
+        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await;
+        let error = result.err().expect("queue-backed transfer must retain its assignment fence");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert!(error.message.contains("durable assignment"));
+        assert_eq!(manager.read_work_graph().unwrap(), before);
+        assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+    }
+
 }

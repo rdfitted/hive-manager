@@ -47,7 +47,7 @@ use crate::session::prompt_contract::{
     render_role_kernel, render_workspace_contract, AssignmentSpec, ContractRole,
 };
 use crate::storage::{SessionStorage, StorageError};
-use crate::templates::{heartbeat_snippet, PromptContext, TemplateEngine};
+use crate::templates::{heartbeat_snippet_for_cli, PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
 use crate::workspace::git::{
     cleanup_session_worktrees, create_session_worktree, current_head, remove_session_worktree_cell,
@@ -280,6 +280,7 @@ impl From<String> for SessionError {
 
 pub const DEFAULT_MAX_QA_ITERATIONS: u8 = 20;
 const DEFAULT_QA_TIMEOUT_SECS: u64 = 300;
+const MAX_QA_WINDOW_SECS: u64 = 45 * 60;
 const MAX_PRIMARY_CELL_BRANCHES: usize = 4;
 const MAX_PRIMARY_CELL_DIFF_SUMMARY_LEN: usize = 4_096;
 const MAX_DEBATE_ROUNDS: u8 = 20;
@@ -436,6 +437,83 @@ fn default_session_qa_settings() -> (u8, u64, AuthStrategy) {
         default_qa_timeout_secs(),
         AuthStrategy::dev_bypass(),
     )
+}
+
+/// Process-local, monotonic QA deadlines. Only the review roster can refresh
+/// inactivity; ordinary workers and the Queen cannot keep an idle review alive.
+struct QaTimeoutWindow {
+    inactivity: std::time::Duration,
+    session_timeout_secs: u64,
+    last_progress: std::time::Duration,
+    agents: HashMap<String, AgentStatus>,
+    activity: HashMap<String, DateTime<Utc>>,
+}
+
+impl QaTimeoutWindow {
+    fn new(
+        timeout_secs: u64,
+        session: &Session,
+        heartbeats: Option<&HashMap<String, AgentHeartbeatInfo>>,
+    ) -> Self {
+        let mut window = Self {
+            inactivity: std::time::Duration::from_secs(timeout_secs),
+            session_timeout_secs: session.qa_timeout_secs,
+            last_progress: std::time::Duration::ZERO,
+            agents: HashMap::new(),
+            activity: HashMap::new(),
+        };
+        window.observe(std::time::Duration::ZERO, session, heartbeats);
+        window
+    }
+
+    fn observe(
+        &mut self,
+        elapsed: std::time::Duration,
+        session: &Session,
+        heartbeats: Option<&HashMap<String, AgentHeartbeatInfo>>,
+    ) {
+        let mut progressed = false;
+        for agent in &session.agents {
+            if !matches!(agent.role, AgentRole::Evaluator | AgentRole::QaWorker { .. }) {
+                continue;
+            }
+            if self.agents.get(&agent.id) != Some(&agent.status) {
+                self.agents.insert(agent.id.clone(), agent.status.clone());
+                progressed = true;
+            }
+            if let Some(heartbeat) = heartbeats.and_then(|entries| entries.get(&agent.id)) {
+                if self.activity.get(&agent.id).is_none_or(|at| heartbeat.last_activity > *at) {
+                    self.activity.insert(agent.id.clone(), heartbeat.last_activity);
+                    progressed = true;
+                }
+            }
+        }
+        if progressed {
+            self.last_progress = elapsed;
+        }
+    }
+
+    fn expired(
+        &mut self,
+        elapsed: std::time::Duration,
+        session: &Session,
+        heartbeats: Option<&HashMap<String, AgentHeartbeatInfo>>,
+    ) -> Option<&'static str> {
+        // The API launch setting can arrive just after a very fast milestone.
+        // Apply it without re-arming (and resetting) the absolute deadline.
+        if self.session_timeout_secs != session.qa_timeout_secs {
+            self.session_timeout_secs = session.qa_timeout_secs;
+            self.inactivity = std::time::Duration::from_secs(session.qa_timeout_secs);
+        }
+        self.observe(elapsed, session, heartbeats);
+        if elapsed >= std::time::Duration::from_secs(MAX_QA_WINDOW_SECS) {
+            Some("absolute ceiling")
+        } else if elapsed.saturating_sub(self.last_progress) >= self.inactivity {
+            Some("inactivity")
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1869,6 +1947,21 @@ impl SessionController {
     }
 
     // --- Heartbeat / Stall Detection ---
+
+    /// Seed a real server credential for HTTP fixtures without bypassing authorization.
+    #[cfg(test)]
+    pub(crate) fn heartbeat_token_for_test(&self, session_id: &str, agent_id: &str) -> String {
+        let qualified = crate::http::handlers::canonical_agent_id(session_id, agent_id);
+        let session = self.get_session(session_id);
+        let agent = session.as_ref().and_then(|session| session.agents.iter()
+            .find(|agent| agent.id == agent_id)
+            .or_else(|| session.agents.iter().find(|agent| agent.id == qualified)));
+        let id = agent.map(|agent| agent.id.as_str()).unwrap_or_else(|| {
+            if self.pty_manager.read().is_alive(agent_id) { agent_id } else { &qualified }
+        });
+        let queen = agent.is_some_and(|agent| matches!(agent.role, AgentRole::Queen));
+        self.pty_manager.read().mint_heartbeat_token_for_test(id, session_id, queen)
+    }
 
     /// Update heartbeat for an agent. Emits Tauri event if status changed.
     pub fn update_heartbeat(
@@ -3332,7 +3425,11 @@ impl SessionController {
                 args.push("Ubuntu".to_string());
                 args.push("/root/.local/bin/agent".to_string());
                 args.push("--force".to_string()); // Auto-approve commands
-                                                  // Cursor uses global model setting, no --model flag
+                args.push("--trust".to_string());
+                if let Some(ref model) = effective_model {
+                    args.push("--model".to_string());
+                    args.push(model.to_string());
+                }
             }
             "droid" => {
                 // Droid CLI - interactive TUI mode
@@ -3466,7 +3563,17 @@ impl SessionController {
                 args.push("-d".to_string());
                 args.push("Ubuntu".to_string());
                 args.push("/root/.local/bin/agent".to_string());
-                args.push("--force".to_string());
+                args.push("--force".to_string()); // Auto-approve commands
+                args.push("--trust".to_string());
+                if let Some(ref model) = effective_model {
+                    args.push("--model".to_string());
+                    args.push(model.to_string());
+                }
+                args.extend(extra_flags);
+                if let Some(task) = task {
+                    Self::add_inline_task_to_args(&config.cli, &mut args, task);
+                }
+                return ("wsl".to_string(), args);
             }
             "droid" => {
                 // No auto-approve flag available
@@ -3502,12 +3609,15 @@ impl SessionController {
         project_path: &Path,
         execution_workspace: &str,
         task: Option<&str>,
+        cli: &str,
     ) -> String {
-        let session_root = Self::session_root_path(project_path, session_id);
+        let api_curl = Self::api_curl(cli);
+        let session_root = Self::session_prompt_root(project_path, session_id, cli);
         let qa_handoff = Self::build_qa_milestone_handoff(
             session_id,
             &session_root,
             "the Solo implementation and its focused validation",
+            cli,
         );
         let qa_verdict = Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
         let prince_verdict =
@@ -3545,8 +3655,10 @@ Prince as verification peers; do not spawn either one.
 
 ```bash
 while [ ! -f "{qa_verdict}" ]; do
-  curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+  # Bash only: Windows Codex must select installed Git Bash; PowerShell uses $env:HIVE_AGENT_TOKEN.
+  {api_curl} -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
     -H "Content-Type: application/json" \
+    -H "X-Hive-Agent-Token: $HIVE_AGENT_TOKEN" \
     -d '{{"agent_id":"{session_id}-worker-1","status":"working","summary":"Waiting for Evaluator verdict"}}'
   sleep 30
 done
@@ -3558,8 +3670,10 @@ if grep -Eq '{qa_blocked_pattern}' "{qa_verdict}"; then
 fi
 
 while [ ! -f "{prince_verdict}" ]; do
-  curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+  # Bash only: Windows Codex must select installed Git Bash; PowerShell uses $env:HIVE_AGENT_TOKEN.
+  {api_curl} -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
     -H "Content-Type: application/json" \
+    -H "X-Hive-Agent-Token: $HIVE_AGENT_TOKEN" \
     -d '{{"agent_id":"{session_id}-worker-1","status":"working","summary":"Waiting for Prince remediation"}}'
   sleep 30
 done
@@ -3932,12 +4046,14 @@ Last updated: {timestamp}
         task_description: &str,
         cli: &str,
     ) -> String {
+        // Task files are written inside this Fusion worktree, so keep this relative.
         let task_file = format!(
             ".hive-manager/tasks/fusion-variant-{}-task.md",
             variant_index
         );
         let agent_id = format!("{}-fusion-{}", session_id, variant_index);
-        let startup_heartbeat = heartbeat_snippet(
+        let startup_heartbeat = heartbeat_snippet_for_cli(
+            cli,
             "http://localhost:18800",
             session_id,
             &agent_id,
@@ -3945,7 +4061,8 @@ Last updated: {timestamp}
             "Starting fusion variant",
             &[],
         );
-        let heartbeat_command = heartbeat_snippet(
+        let heartbeat_command = heartbeat_snippet_for_cli(
+            cli,
             "http://localhost:18800",
             session_id,
             &agent_id,
@@ -3953,7 +4070,8 @@ Last updated: {timestamp}
             "Waiting for task activation",
             &[],
         );
-        let completed_heartbeat = heartbeat_snippet(
+        let completed_heartbeat = heartbeat_snippet_for_cli(
+            cli,
             "http://localhost:18800",
             session_id,
             &agent_id,
@@ -4013,7 +4131,9 @@ Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}
         session_id: &str,
         variants: &[FusionVariantMetadata],
         decision_file: &str,
+        cli: &str,
     ) -> String {
+        let api_curl = Self::api_curl(cli);
         let variant_list = variants
             .iter()
             .map(|v| format!("- {}: {}", v.name, v.worktree_path))
@@ -4056,12 +4176,12 @@ After writing the evaluation report, submit learnings about what you observed.
 
 ### Step 1: Read existing learnings to avoid duplicates
 ```bash
-curl -s "http://localhost:18800/api/sessions/{session_id}/learnings"
+{api_curl} -s "http://localhost:18800/api/sessions/{session_id}/learnings"
 ```
 
 ### Step 2: Submit learnings (one per insight)
 ```bash
-curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
+{api_curl} -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
   -H "Content-Type: application/json" \
   -d '{{"content": "YOUR LEARNING HERE", "category": "CATEGORY", "source": "fusion-judge"}}'
 ```
@@ -4229,6 +4349,7 @@ Last updated: {timestamp}
         wiki_state: crate::wiki::WikiState,
     ) -> String {
         let mut variables = HashMap::new();
+        variables.insert("cli".to_string(), (&debater.config.cli).to_string());
         let agent_id = Self::debate_round_agent_id(session_id, debater.index, round);
         variables.insert(
             "api_base_url".to_string(),
@@ -4293,8 +4414,10 @@ Last updated: {timestamp}
         wiki_root: &Path,
         judge_cli: &str,
         wiki_state: crate::wiki::WikiState,
+        project_path: &Path,
     ) -> String {
         let mut variables = HashMap::new();
+        variables.insert("cli".to_string(), (judge_cli).to_string());
         variables.insert(
             "api_base_url".to_string(),
             "http://localhost:18800".to_string(),
@@ -4325,12 +4448,14 @@ Last updated: {timestamp}
             .join("\n");
         variables.insert("debater_list".to_string(), debater_list);
 
+        let session_root = Self::session_prompt_root(project_path, session_id, judge_cli);
+        let session_root = &session_root;
         let round_files = (1..=metadata.rounds)
             .flat_map(|round| {
                 metadata.debaters.iter().map(move |debater| {
                     format!(
-                        "- Round {} / {}: .hive-manager/{}/debate/rounds/round-{}/{}.md",
-                        round, debater.name, session_id, round, debater.slug
+                        "- Round {} / {}: {}",
+                        round, debater.name, Self::prompt_path(&session_root.join("debate").join("rounds").join(format!("round-{round}")).join(format!("{}.md", debater.slug)))
                     )
                 })
             })
@@ -4360,6 +4485,22 @@ Last updated: {timestamp}
         path.to_string_lossy().replace('\\', "/")
     }
 
+    fn prompt_path_for_cli(path: &Path, cli: &str) -> String {
+        let path = Self::prompt_path(path);
+        if Self::cli_runs_under_wsl(cli) {
+            Self::to_wsl_path(&path)
+        } else {
+            path
+        }
+    }
+
+    fn session_prompt_root(project_path: &Path, session_id: &str, cli: &str) -> PathBuf {
+        PathBuf::from(Self::prompt_path_for_cli(
+            &Self::session_root_path(project_path, session_id),
+            cli,
+        ))
+    }
+
     fn project_knowledge_prompt_paths(cli: &str, project_path: &Path) -> (String, String, String) {
         let project_knowledge_dir = project_path.join(".ai-docs");
         let prompt_path_for_cli = |path: &Path| {
@@ -4384,8 +4525,33 @@ Last updated: {timestamp}
     /// spellings must answer yes. Centralized so the "runs under WSL" set is defined
     /// once instead of being re-`matches!`-ed at every site that needs to translate a
     /// host path (the divergence class behind #159 and #169).
-    fn cli_runs_under_wsl(cli: &str) -> bool {
+    pub(crate) fn cli_runs_under_wsl(cli: &str) -> bool {
         matches!(cli.trim(), "cursor" | "wsl")
+    }
+
+    /// WSL reaches the loopback-only Hive API through Windows curl interop.
+    pub(crate) fn api_curl(cli: &str) -> &'static str {
+        if Self::cli_runs_under_wsl(cli) {
+            "curl.exe"
+        } else {
+            "curl"
+        }
+    }
+
+    /// Render API examples in generated tool documents before they are written.
+    /// The caller supplies the document consumer, independently of spawn defaults.
+    fn api_commands_for_cli(cli: &str, content: &str) -> String {
+        let curl = Self::api_curl(cli);
+        if curl == "curl" {
+            return content.to_string();
+        }
+        content.split_inclusive('\n').map(|line| {
+            if line.contains("localhost:18800") || line.contains("api_base_url") {
+                line.replace("curl ", &format!("{curl} "))
+            } else {
+                line.to_string()
+            }
+        }).collect()
     }
 
     /// Normalize a configured global wiki path for embedding in the **quoted shell
@@ -4498,28 +4664,30 @@ Last updated: {timestamp}
         )
     }
 
-    fn evaluator_required_protocol(session_id: &str) -> String {
+    fn evaluator_required_protocol(session_id: &str, session_root: &Path) -> String {
+        let session_root_prompt = Self::prompt_path(session_root);
         format!(
             r#"## Required Protocol
 ```text
 1. You MUST follow every numbered protocol in this prompt exactly as written.
 2. You MUST use the inline bash polling commands shown in this prompt. You MUST NOT use `/loop`.
 3. The backend already launched you as `AgentRole::Evaluator`. You MUST NOT spawn another Evaluator or ask the Queen to create one.
-4. The Queen signals you via `.hive-manager/{session_id}/peer/milestone-ready.json`. You MUST wait for that handoff before you read the contract or grade criteria.
+4. The Queen signals you via `{session_root_prompt}/peer/milestone-ready.json`. You MUST wait for that handoff before you read the contract or grade criteria.
 5. You MUST submit the verdict via `POST /api/sessions/{session_id}/qa/verdict`. You MUST NOT write shadow verdict files.
 ```"#,
             session_id = session_id,
         )
     }
 
-    fn prince_required_protocol(session_id: &str) -> String {
+    fn prince_required_protocol(session_id: &str, session_root: &Path) -> String {
+        let session_root_prompt = Self::prompt_path(session_root);
         format!(
             r#"## Required Protocol
 ```text
 1. You MUST follow every numbered protocol in this prompt exactly as written.
 2. You MUST use the inline bash polling commands shown in this prompt. You MUST NOT use `/loop`.
 3. The backend already launched you as `AgentRole::Prince`. You MUST NOT spawn another Prince or an Evaluator.
-4. You MUST wait for `.hive-manager/{session_id}/peer/qa-verdict.json` before you plan or spawn fixers.
+4. You MUST wait for `{session_root_prompt}/peer/qa-verdict.json` before you plan or spawn fixers.
 5. You MUST spawn fixers via `POST /api/sessions/{session_id}/workers` using the session CLI, and self-certify via `POST /api/sessions/{session_id}/prince/verdict`.
 6. You MUST NOT push the PR or call `/complete` — the Queen pushes after you certify.
 ```"#,
@@ -4532,9 +4700,13 @@ Last updated: {timestamp}
         scope_phrase: &str,
         has_evaluator: bool,
         has_judge_tool: bool,
+        session_root: &Path,
+        cli: &str,
     ) -> String {
+        let api_curl = Self::api_curl(cli);
+        let session_root_prompt = Self::prompt_path(session_root);
         let schema_step = format!(
-            "For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work."
+            "For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `{session_root_prompt}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work."
         );
         let validate_step = "Queen: wait for the Reconciler's markdown and JSON, then validate unique finding IDs, the round and reviewed SHA, allowed dispositions, and full coverage before assigning Resolver work.";
         // The judge commands drive tools/judgment/judge.py, which ships only in hive-manager.
@@ -4554,7 +4726,7 @@ Last updated: {timestamp}
         };
         let before_command = before_command.replace("{session_id}", session_id);
         format!(
-            r#"{indent}{schema_step}{before_command}   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+            r#"{indent}{schema_step}{before_command}   {api_curl} -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
      -H "Content-Type: application/json" \
      -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate {scope_phrase} into one fix list. Produce review-round-N.md and review-round-N.json with one structured disposition per finding."}}'
    ```
@@ -4568,7 +4740,9 @@ Last updated: {timestamp}
         session_root: &Path,
         has_evaluator: bool,
         has_judge_tool: bool,
+        cli: &str,
     ) -> String {
+        let api_curl = Self::api_curl(cli);
         let milestone_ready_path =
             Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
         let qa_verdict_path = Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
@@ -4583,6 +4757,8 @@ Last updated: {timestamp}
             },
             has_evaluator,
             has_judge_tool,
+            session_root,
+            cli,
         );
 
         if !has_evaluator {
@@ -4598,7 +4774,7 @@ QA is disabled for this session. Tell the operator that the milestone QA gate wi
    gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
    ```
 {review_round_protocol}   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+   {api_curl} -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
      -H "Content-Type: application/json" \
      -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM findings from the reconciled list"}}'
    ```
@@ -4617,8 +4793,9 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
 2. You MUST wait for the Evaluator verdict by polling `{qa_verdict_path}` inline. You MUST NOT use `/loop`.
    ```bash
    while [ ! -f "{qa_verdict_path}" ]; do
-     curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+     {api_curl} -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
        -H "Content-Type: application/json" \
+       -H "X-Hive-Agent-Token: $HIVE_AGENT_TOKEN" \
        -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Evaluator verdict"}}'
      sleep 30
    done
@@ -4630,8 +4807,9 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
 4. You MUST wait for the Prince to finish remediation by polling `{prince_verdict_path}` inline. The Prince reads the QA findings, fixes them with its OWN fix team, and self-certifies. You MUST NOT spawn Reconciler or Resolver workers for QA findings — remediating QA findings is the Prince's job, not yours.
    ```bash
    while [ ! -f "{prince_verdict_path}" ]; do
-     curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+     {api_curl} -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
        -H "Content-Type: application/json" \
+       -H "X-Hive-Agent-Token: $HIVE_AGENT_TOKEN" \
        -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Prince remediation"}}'
      sleep 30
    done
@@ -4647,7 +4825,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
    ```
 
 {review_round_protocol}   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+   {api_curl} -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
      -H "Content-Type: application/json" \
      -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM external PR review comments from the reconciled list"}}'
    ```
@@ -4676,6 +4854,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         qa_workers: &[QaWorkerConfig],
         worker_count: u8,
     ) -> (String, String, String, String) {
+        let api_curl = Self::api_curl(&default_config.cli);
         let mut configured_workers = if qa_workers.is_empty() {
             vec![
                 QaWorkerConfig {
@@ -4739,7 +4918,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                 .replace('\'', "'\\''");
 
             command_block.push_str(&format!(
-                "   # {}. {} worker\n   curl -X POST \"{{{{api_base_url}}}}/api/sessions/{{{{session_id}}}}/qa-workers\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{}'\n\n",
+                "   # {}. {} worker\n   {api_curl} -X POST \"{{{{api_base_url}}}}/api/sessions/{{{{session_id}}}}/qa-workers\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{}'\n\n",
                 index + 1,
                 label,
                 payload,
@@ -4781,6 +4960,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         worker_count: u8,
         execution_workspace: &str,
         smoke_test: bool,
+        project_path: &Path,
     ) -> String {
         let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
             "You MUST grade the milestone against the contract, spawn QA workers when direct evidence is missing, and return a strict PASS/FAIL verdict with criterion-numbered evidence.",
@@ -4798,9 +4978,11 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         };
         let (qa_worker_intro, qa_worker_spawn_plan, qa_worker_count, qa_worker_coverage_rule) =
             Self::build_evaluator_qa_plan(config, qa_workers, worker_count);
-        let required_protocol = Self::evaluator_required_protocol(session_id);
+        let required_protocol = Self::evaluator_required_protocol(session_id, &Self::session_prompt_root(project_path, session_id, &config.cli),);
 
         let mut variables = HashMap::new();
+        variables.insert("cli".to_string(), (&config.cli).to_string());
+        variables.insert("session_root".to_string(), Self::prompt_path(&Self::session_prompt_root(project_path, session_id, &config.cli)));
         variables.insert(
             "custom_instructions".to_string(),
             custom_instructions.to_string(),
@@ -4885,6 +5067,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         execution_workspace: &str,
         workspace_strategy: WorkspaceStrategy,
         smoke_test: bool,
+        project_path: &Path,
     ) -> String {
         let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
             "You MUST resolve every QA finding with your fix team before the Queen pushes, then self-certify PASS (or BLOCKED if you cannot).",
@@ -4932,6 +5115,8 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         };
 
         let mut variables = HashMap::new();
+        variables.insert("cli".to_string(), (&config.cli).to_string());
+        variables.insert("session_root".to_string(), Self::prompt_path(&Self::session_prompt_root(project_path, session_id, &config.cli)));
         variables.insert(
             "custom_instructions".to_string(),
             custom_instructions.to_string(),
@@ -4952,7 +5137,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         variables.insert("integration_protocol".to_string(), integration_protocol);
         variables.insert(
             "required_protocol".to_string(),
-            Self::prince_required_protocol(session_id),
+            Self::prince_required_protocol(session_id, &Self::session_prompt_root(project_path, session_id, &config.cli),),
         );
 
         let (idle_secs, active_secs) = if smoke_test {
@@ -4980,6 +5165,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         config: &AgentConfig,
         auth: &AuthStrategy,
         execution_workspace: &str,
+        project_path: &Path,
     ) -> String {
         let (template_name, default_guidance) = match specialization {
             "ui" => (
@@ -5007,12 +5193,15 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         let custom_instructions = config.initial_prompt.as_deref().unwrap_or(default_guidance);
 
         let mut variables = HashMap::new();
+        variables.insert("cli".to_string(), (&config.cli).to_string());
+        variables.insert("session_root".to_string(), Self::prompt_path(&Self::session_prompt_root(project_path, session_id, &config.cli)));
         variables.insert("qa_worker_index".to_string(), index.to_string());
         let qa_worker_agent_id = format!("{}-qa-worker-{}", session_id, index);
         variables.insert("qa_worker_agent_id".to_string(), qa_worker_agent_id.clone());
         variables.insert(
             "qa_worker_completed_heartbeat".to_string(),
-            heartbeat_snippet(
+            heartbeat_snippet_for_cli(
+                &config.cli,
                 "http://localhost:18800",
                 session_id,
                 &qa_worker_agent_id,
@@ -5081,6 +5270,8 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         cli: &str,
         project_path: &Path,
     ) -> String {
+        let session_root = Self::session_prompt_root(project_path, session_id, cli);
+        let session_root_prompt = Self::prompt_path(&session_root);
         let (project_root, project_dna_path, project_learnings_path) =
             Self::project_knowledge_prompt_paths(cli, project_path);
         let variant_count = variants.len();
@@ -5170,7 +5361,7 @@ You are the **Master Planner** for a Fusion session. Your job is to analyze the 
 
 - **Session ID**: {session_id}
 - **Mode**: Fusion (competing variants)
-- **Plan Output**: `.hive-manager/{session_id}/plan.md`
+- **Plan Output**: `{session_root_prompt}/plan.md`
 - **Runtime CWD**: `{project_root}`
 - **Worktree topology**: Runtime CWD may be an isolated git worktree; the main checkout is `{project_root}`. Read project knowledge from the absolute main-checkout paths below, even when they are outside Runtime CWD. Write code only inside Runtime CWD.
 
@@ -5195,7 +5386,7 @@ Before investigating, read:
 1. **Analyze the task** — understand what needs to be done, identify key decisions
 2. **Document expected approaches** — for each variant, describe what strategies or patterns they might use. Since each variant works independently, they may naturally take different approaches.
 3. **Identify evaluation criteria** — what should the Judge look for when comparing results? (correctness, code quality, performance, test coverage, etc.)
-4. **Write the plan** to `.hive-manager/{session_id}/plan.md`
+4. **Write the plan** to `{session_root_prompt}/plan.md`
 
 ## Plan Format
 
@@ -5233,7 +5424,7 @@ Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[
 `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
 
 ## IMPORTANT
-- Write the plan to `.hive-manager/{session_id}/plan.md` and then STOP
+- Write the plan to `{session_root_prompt}/plan.md` and then STOP
 - Do NOT implement anything — you are a planner, not a coder
 - Keep the plan concise — variants will each receive the same task description
 "#,
@@ -5252,7 +5443,11 @@ Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[
         topic: &str,
         debaters: &[DebateDebaterConfig],
         rounds: u8,
+        project_path: &Path,
+        cli: &str,
     ) -> String {
+        let session_root = Self::session_prompt_root(project_path, session_id, cli);
+        let session_root_prompt = Self::prompt_path(&session_root);
         let debater_table = debaters
             .iter()
             .enumerate()
@@ -5282,7 +5477,7 @@ You are the Master Planner for a Debate session.
 - Session ID: {session_id}
 - Mode: Debate
 - Rounds: {rounds}
-- Plan Output: `.hive-manager/{session_id}/plan.md`
+- Plan Output: `{session_root_prompt}/plan.md`
 
 ## Topic
 
@@ -5296,7 +5491,7 @@ You are the Master Planner for a Debate session.
 
 ## Mission
 
-Write a concise debate plan to `.hive-manager/{session_id}/plan.md`:
+Write a concise debate plan to `{session_root_prompt}/plan.md`:
 
 ```markdown
 # Debate Plan
@@ -5346,7 +5541,9 @@ Do not run the debate. Stop after writing the plan.
         task_description: &str,
         has_evaluator: bool,
     ) -> String {
-        let session_root = Self::session_root_path(project_path, session_id);
+        let api_curl = Self::api_curl(cli);
+        let session_root = Self::session_prompt_root(project_path, session_id, cli);
+        let session_root_prompt = Self::prompt_path(&session_root);
         let variant_count = variants.len();
         let mut variant_info = String::new();
         let mut task_files = String::new();
@@ -5362,7 +5559,7 @@ Do not run the debate. Stop after writing the plan.
         }
         let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
         let qa_milestone_handoff = if has_evaluator {
-            Self::build_qa_milestone_handoff(session_id, &session_root, "winner integration work")
+            Self::build_qa_milestone_handoff(session_id, &session_root, "winner integration work", cli,)
         } else {
             String::new()
         };
@@ -5371,6 +5568,7 @@ Do not run the debate. Stop after writing the plan.
             &session_root,
             has_evaluator,
             Self::project_has_judge_tool(project_path),
+            cli,
         );
         let status_reporting_lines = if has_evaluator {
             r#"[TIMESTAMP] QUEEN: Variant N (name) - COMPLETED/IN_PROGRESS/FAILED
@@ -5428,8 +5626,8 @@ You are the **Queen** monitoring a Fusion session where {variant_count} variants
 
 - **Session ID**: {session_id}
 - **Mode**: Fusion (competing variants)
-- **Plan**: `.hive-manager/{session_id}/plan.md`
-- **Tools Directory**: `.hive-manager/{session_id}/tools/`
+- **Plan**: `{session_root_prompt}/plan.md`
+- **Tools Directory**: `{session_root_prompt}/tools/`
 
 ## Task
 
@@ -5462,7 +5660,7 @@ A variant is complete when its task file contains `Status: COMPLETED`.
 When ALL {variant_count} variants have COMPLETED status, spawn the Judge:
 
 ```bash
-curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+{api_curl} -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
   -d '{{"cli": "{cli}", "role": "judge"}}'
 ```
@@ -5470,7 +5668,7 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 ### Phase 3: Monitor Judge
 
 After spawning the Judge, monitor the evaluation directory:
-- Decision file: `.hive-manager/{session_id}/evaluation/decision.md`
+- Decision file: `{session_root_prompt}/evaluation/decision.md`
 - When the decision file exists and is non-empty, report completion
 
 {qa_milestone_handoff}
@@ -5479,14 +5677,14 @@ After spawning the Judge, monitor the evaluation directory:
 
 ## Status Reporting
 
-Write status updates to `.hive-manager/{session_id}/coordination.log`:
+Write status updates to `{session_root_prompt}/coordination.log`:
 ```
 {status_reporting_lines}
 ```
 
 ## Learning Tools
 
-Read tool docs in `.hive-manager/{session_id}/tools/` for:
+Read tool docs in `{session_root_prompt}/tools/` for:
 - `mark-worker-status.md` — Mark each independently verified variant complete
 - `submit-learning.md` — Record observations
 - `list-learnings.md` — View existing learnings
@@ -5510,7 +5708,9 @@ Read tool docs in `.hive-manager/{session_id}/tools/` for:
         _session_id: &str,
         session_root: &Path,
         completion_scope: &str,
+        cli: &str,
     ) -> String {
+        let api_curl = Self::api_curl(cli);
         let peer_dir = Self::prompt_path(&session_root.join("peer"));
         let milestone_ready_path =
             Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
@@ -5553,7 +5753,7 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
 
 3. You MUST then signal the backend that the milestone is ready. This is what opens the QA review window and starts the QA clock — the clock does NOT run before this point, so there is no time pressure on the work above.
    ```bash
-   curl -sS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/milestone-ready"
+   {api_curl} -sS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/milestone-ready"
    ```
 
 4. You MUST NOT spawn an Evaluator here. The backend already launched it. After this handoff exists, continue with the Post-Workers Protocol and wait for `{qa_verdict_path}`."#,
@@ -5759,6 +5959,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         cli: &str,
         project_path: &Path,
     ) -> String {
+        let session_root = Self::session_prompt_root(project_path, session_id, cli);
+        let session_root_prompt = Self::prompt_path(&session_root);
         let (project_root, project_dna_path, project_learnings_path) =
             Self::project_knowledge_prompt_paths(cli, project_path);
         let workers_per = workers_per_planner.len();
@@ -5883,7 +6085,7 @@ You are the **Master Planner** orchestrating a Swarm investigation to create a d
 
 - **Session ID**: {session_id}
 - **Mode**: Swarm (hierarchical)
-- **Plan Output**: `.hive-manager/{session_id}/plan.md`
+- **Plan Output**: `{session_root_prompt}/plan.md`
 - **Runtime CWD**: `{project_root}`
 - **Worktree topology**: Runtime CWD may be an isolated git worktree; the main checkout is `{project_root}`. Read project knowledge from the absolute main-checkout paths below, even when they are outside Runtime CWD. Write code only inside Runtime CWD.
 
@@ -5955,7 +6157,7 @@ Merge findings from all scouts:
 
 ## PHASE 3: Write Plan
 
-Write to `.hive-manager/{session_id}/plan.md`:
+Write to `{session_root_prompt}/plan.md`:
 
 ```markdown
 # Implementation Plan
@@ -6013,7 +6215,7 @@ Priority brackets express scheduling urgency; tier controls effort/model routing
 1. Gather task (ask user or fetch GitHub issue)
 2. Launch ALL 3 scout agents in PARALLEL
 3. Synthesize findings and partition into {planner_count} domains
-4. Write plan to `.hive-manager/{session_id}/plan.md`
+4. Write plan to `{session_root_prompt}/plan.md`
 5. Say "PLAN READY FOR REVIEW""#,
             session_id = session_id,
             phase0 = phase0,
@@ -6046,7 +6248,7 @@ Priority brackets express scheduling urgency; tier controls effort/model routing
                 "claude",
                 Path::new("/repo"),
             ),
-            Self::build_debate_master_planner_prompt("test-debate", "test topic", &[], 2),
+            Self::build_debate_master_planner_prompt("test-debate", "test topic", &[], 2, Path::new("/repo"), "claude",),
             Self::build_master_planner_prompt(
                 "test-hive",
                 "test objective",
@@ -6064,8 +6266,8 @@ Priority brackets express scheduling urgency; tier controls effort/model routing
                 "claude",
                 Path::new("/repo"),
             ),
-            Self::build_smoke_test_prompt("test-hive-smoke", &smoke_workers, false, None),
-            Self::build_swarm_smoke_test_prompt("test-swarm-smoke", 4, &[], false, None),
+            Self::build_smoke_test_prompt("test-hive-smoke", &smoke_workers, false, None, Path::new("/repo"), "claude", None,),
+            Self::build_swarm_smoke_test_prompt("test-swarm-smoke", 4, &[], false, None, Path::new("/repo"), "claude",),
         ]
     }
 
@@ -6075,7 +6277,16 @@ Priority brackets express scheduling urgency; tier controls effort/model routing
         workers: &[AgentConfig],
         with_evaluator: bool,
         qa_workers: Option<&[QaWorkerConfig]>,
+        project_path: &Path,
+        cli: &str,
+        evaluator_cli: Option<&str>,
     ) -> String {
+        let worker_one_curl = Self::api_curl(workers.first().map(|worker| worker.cli.as_str()).unwrap_or(cli));
+        let worker_two_curl = Self::api_curl(workers.get(1).map(|worker| worker.cli.as_str()).unwrap_or(cli));
+        let api_curl = Self::api_curl(cli);
+        let evaluator_curl = Self::api_curl(evaluator_cli.filter(|cli| !cli.trim().is_empty()).unwrap_or(cli));
+        let session_root = Self::session_prompt_root(project_path, session_id, cli);
+        let session_root_prompt = Self::prompt_path(&session_root);
         // Build worker table and task list based on configured workers
         let mut worker_table = String::new();
         let mut task_list = String::new();
@@ -6136,6 +6347,7 @@ Priority brackets express scheduling urgency; tier controls effort/model routing
             let mut qa_table = String::new();
             let mut qa_tasks = String::new();
             for (i, qw) in qa_list.iter().enumerate() {
+                let api_curl = Self::api_curl(&qw.cli);
                 let idx = i + 1;
                 let label = qw
                     .label
@@ -6147,7 +6359,7 @@ Priority brackets express scheduling urgency; tier controls effort/model routing
                 ));
                 qa_tasks.push_str(&format!(
                     "### QA Worker {} ({} - {}):\n\
-                     1. Read the evaluator prompt: `curl -s \"http://localhost:18800/api/sessions/{}/evaluators\"`\n\
+                     1. Read the evaluator prompt: `{api_curl} -s \"http://localhost:18800/api/sessions/{}/evaluators\"`\n\
                      2. Exercise the {} endpoint smoke test\n\
                      3. Post QA findings to shared conversation\n\
                      4. Mark task file as COMPLETED\n\n",
@@ -6175,20 +6387,20 @@ pushed, so the QA verdict gates through Prince clearance.
 ## Evaluator Smoke Test Tasks
 
 After all worker tasks complete, the Evaluator will:
-1. List evaluators: `curl -s "http://localhost:18800/api/sessions/{session_id}/evaluators"`
+1. List evaluators: `{evaluator_curl} -s "http://localhost:18800/api/sessions/{session_id}/evaluators"`
 2. Review worker task files for COMPLETED status
 3. Coordinate QA workers (if any) to validate
 
 {qa_tasks}### Evaluator Verdict:
 1. Collect QA worker results
-2. Submit verdict via HTTP endpoint: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/qa/verdict" -H "Content-Type: application/json" -d '{{"verdict":"PASS","rationale":"smoke test validated"}}'`
+2. Submit verdict via HTTP endpoint: `{evaluator_curl} -s -X POST "http://localhost:18800/api/sessions/{session_id}/qa/verdict" -H "Content-Type: application/json" -d '{{"verdict":"PASS","rationale":"smoke test validated"}}'`
 
 ### Prince Remediation (auto-spawned peer):
 The QA verdict transitions the session to **PrinceRemediation** (not QaPassed). The Prince peer
-reads the verdict from `.hive-manager/{session_id}/peer/qa-verdict.json`. For a clean smoke PASS there
+reads the verdict from `{session_root_prompt}/peer/qa-verdict.json`. For a clean smoke PASS there
 are no findings, so the Prince self-certifies immediately, clearing the gate to QaPassed:
-1. `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/prince/verdict" -H "Content-Type: application/json" -d '{{"verdict":"PASS","rationale":"smoke - no findings to remediate"}}'`
-The Queen waits for `.hive-manager/{session_id}/peer/prince-verdict.json` before completing.
+1. `{api_curl} -s -X POST "http://localhost:18800/api/sessions/{session_id}/prince/verdict" -H "Content-Type: application/json" -d '{{"verdict":"PASS","rationale":"smoke - no findings to remediate"}}'`
+The Queen waits for `{session_root_prompt}/peer/prince-verdict.json` before completing.
 "#,
                 qa_table = qa_table.trim_end(),
                 qa_tasks = qa_tasks,
@@ -6234,7 +6446,7 @@ Do NOT analyze the codebase. Just create a simple plan to test the flow.
 
 ## Write This Plan Now
 
-Write the following to `.hive-manager/{session_id}/plan.md`:
+Write the following to `{session_root_prompt}/plan.md`:
 
 ```markdown
 # Smoke Test Plan
@@ -6273,8 +6485,8 @@ Workers MUST use curl to exercise the conversation and heartbeat APIs.
    ```bash
    {smoke_worker_start_heartbeat}
    ```
-2. Post message to queen: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/{session_id}-queen/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 reporting in. Smoke test task started."}}'`
-3. Post to shared (reserved session-wide broadcast key): `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 completed conversation smoke test."}}'`
+2. Post message to queen: `{worker_one_curl} -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/{session_id}-queen/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 reporting in. Smoke test task started."}}'`
+3. Post to shared (reserved session-wide broadcast key): `{worker_one_curl} -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 completed conversation smoke test."}}'`
 4. Send completed heartbeat:
    ```bash
    {smoke_worker_completed_heartbeat}
@@ -6282,8 +6494,8 @@ Workers MUST use curl to exercise the conversation and heartbeat APIs.
 
 ### Task 2 (Worker 2, if present):
 1. Send heartbeat with working status
-2. Read queen conversation: `curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/{session_id}-queen"`
-3. Read shared conversation (reserved session-wide broadcast key): `curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/shared"`
+2. Read queen conversation: `{worker_two_curl} -s "http://localhost:18800/api/sessions/{session_id}/conversations/{session_id}-queen"`
+3. Read shared conversation (reserved session-wide broadcast key): `{worker_two_curl} -s "http://localhost:18800/api/sessions/{session_id}/conversations/shared"`
 4. Post message to queen confirming what was read
 5. Send completed heartbeat
 
@@ -6318,7 +6530,8 @@ This tests that:
             dependencies = dependencies.trim_end(),
             evaluator_section = evaluator_section,
             evaluator_test_items = evaluator_test_items,
-            smoke_worker_start_heartbeat = heartbeat_snippet(
+            smoke_worker_start_heartbeat = heartbeat_snippet_for_cli(
+                workers.first().map(|worker| worker.cli.as_str()).unwrap_or("claude"),
                 "http://localhost:18800",
                 session_id,
                 &format!("{session_id}-worker-1"),
@@ -6326,7 +6539,8 @@ This tests that:
                 "Starting smoke test",
                 &[],
             ),
-            smoke_worker_completed_heartbeat = heartbeat_snippet(
+            smoke_worker_completed_heartbeat = heartbeat_snippet_for_cli(
+                workers.first().map(|worker| worker.cli.as_str()).unwrap_or("claude"),
                 "http://localhost:18800",
                 session_id,
                 &format!("{session_id}-worker-1"),
@@ -6344,7 +6558,11 @@ This tests that:
         workers_per_planner: &[AgentConfig],
         with_evaluator: bool,
         qa_workers: Option<&[QaWorkerConfig]>,
+        project_path: &Path,
+        cli: &str,
     ) -> String {
+        let session_root = Self::session_prompt_root(project_path, session_id, cli);
+        let session_root_prompt = Self::prompt_path(&session_root);
         let workers_per = workers_per_planner.len();
         let total_workers = planner_count as usize * workers_per;
 
@@ -6500,7 +6718,7 @@ Each planner will then break their domain task into {workers_per} worker tasks.
 
 ## Write This Plan Now
 
-Write the following to `.hive-manager/{session_id}/plan.md`:
+Write the following to `{session_root_prompt}/plan.md`:
 
 ```markdown
 # Swarm Smoke Test Plan
@@ -6553,7 +6771,6 @@ This tests that:
 3. Flow continues to spawn Queen who spawns {planner_count} Planners sequentially
 4. Each Planner spawns {workers_per} Workers sequentially
 5. Queen commits between each Planner completion{evaluator_test_items}"#,
-            session_id = session_id,
             planner_count = planner_count,
             workers_per = workers_per,
             total_workers = total_workers,
@@ -6579,6 +6796,8 @@ This tests that:
         workers: &[AgentConfig],
         user_prompt: Option<&str>,
         extra_vars: HashMap<String, String>,
+        project_path: &Path,
+        cli: &str,
     ) -> String {
         const API_BASE_URL: &str = "http://localhost:18800";
 
@@ -6606,11 +6825,14 @@ This tests that:
         }
 
         let mut variables = HashMap::new();
+        variables.insert("cli".to_string(), (cli).to_string());
+        variables.insert("session_root".to_string(), Self::prompt_path(&Self::session_prompt_root(project_path, session_id, cli)));
         variables.insert("api_base_url".to_string(), API_BASE_URL.to_string());
         variables.insert("workers_list".to_string(), workers_list);
         variables.insert(
             "queen_heartbeat_snippet".to_string(),
-            heartbeat_snippet(
+            heartbeat_snippet_for_cli(
+                cli,
                 API_BASE_URL,
                 session_id,
                 "queen",
@@ -6649,6 +6871,8 @@ This tests that:
         has_evaluator: bool,
         execution_policy: &HiveExecutionPolicy,
     ) -> String {
+        let path_for_cli = |path: &Path| Self::prompt_path_for_cli(path, &queen_config.cli);
+        let api_curl = Self::api_curl(&queen_config.cli);
         let role = ContractRole::Queen;
         let policy = &execution_policy.queen_delegation;
         let card = CliRegistry::infer_capabilities(&queen_config.cli);
@@ -6668,15 +6892,15 @@ This tests that:
         let workspace_contract =
             render_workspace_contract(role, &execution_policy.workspace_strategy);
 
-        let session_root = Self::session_root_path(project_path, session_id);
-        let plan_path = Self::prompt_path(&session_root.join("plan.md"));
-        let tools_dir = Self::prompt_path(&session_root.join("tools"));
-        let coordination_log_path = Self::prompt_path(&session_root.join("coordination.log"));
-        let queen_workspace = Self::prompt_path(queen_workspace_path);
+        let session_root = Self::session_prompt_root(project_path, session_id, &queen_config.cli);
+        let plan_path = path_for_cli(&session_root.join("plan.md"));
+        let tools_dir = path_for_cli(&session_root.join("tools"));
+        let coordination_log_path = path_for_cli(&session_root.join("coordination.log"));
+        let queen_workspace = path_for_cli(queen_workspace_path);
         let queen_conversation =
-            Self::prompt_path(&session_root.join("conversations").join("queen.md"));
+            path_for_cli(&session_root.join("conversations").join("queen.md"));
         let shared_conversation =
-            Self::prompt_path(&session_root.join("conversations").join("shared.md"));
+            path_for_cli(&session_root.join("conversations").join("shared.md"));
 
         let objective = user_prompt
             .map(str::trim)
@@ -6757,8 +6981,8 @@ This tests that:
                     .join(format!("worker-{index}")),
                 WorkspaceStrategy::None => project_path.to_path_buf(),
             };
-            let principal_workspace = Self::prompt_path(&principal_workspace);
-            let task_file = Self::prompt_path(
+            let principal_workspace = path_for_cli(&principal_workspace);
+            let task_file = path_for_cli(
                 &PathBuf::from(&principal_workspace)
                     .join(".hive-manager")
                     .join("tasks")
@@ -6789,7 +7013,7 @@ This tests that:
 
         let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
         let qa_milestone_handoff = if has_evaluator {
-            Self::build_qa_milestone_handoff(session_id, &session_root, "managed principals")
+            Self::build_qa_milestone_handoff(session_id, &session_root, "managed principals", &queen_config.cli,)
         } else {
             String::new()
         };
@@ -6798,8 +7022,10 @@ This tests that:
             &session_root,
             has_evaluator,
             Self::project_has_judge_tool(project_path),
+            &queen_config.cli,
         );
-        let queen_heartbeat = heartbeat_snippet(
+        let queen_heartbeat = heartbeat_snippet_for_cli(
+            &queen_config.cli,
             "http://localhost:18800",
             session_id,
             "queen",
@@ -6807,7 +7033,8 @@ This tests that:
             "Coordinating managed principals",
             &[],
         );
-        let queen_completed_heartbeat = heartbeat_snippet(
+        let queen_completed_heartbeat = heartbeat_snippet_for_cli(
+            &queen_config.cli,
             "http://localhost:18800",
             session_id,
             "queen",
@@ -6861,7 +7088,7 @@ Managed principals are visible Hive agents with their own lifecycle and task con
 6. Keep native Queen children read-only for planning, scouting, and review. Delegate implementation to managed principals.
 7. The Queen coordinates and integrates; do not become a coding principal.
 
-When you finish a Queen-owned plan task, post a `completed` heartbeat with its exact plan node ID in `completed_nodes`, for example `{{"agent_id":"queen","status":"completed","completed_nodes":["T0"]}}` to `/api/sessions/{session_id}/heartbeat`. Then retry the same `task_id` spawn. This task completion heartbeat does not end the Queen's session; keep coordinating and send `working` heartbeats while further work remains.
+When you finish a Queen-owned plan task, post a `completed` heartbeat with its exact plan node ID in `completed_nodes`, for example `{{"agent_id":"queen","status":"completed","completed_nodes":["T0"]}}` to `/api/sessions/{session_id}/heartbeat` with `X-Hive-Agent-Token` from your process environment. Then retry the same `task_id` spawn. This task completion heartbeat does not end the Queen's session; keep coordinating and send `working` heartbeats while further work remains.
 
 Heartbeat while coordinating:
 {queen_heartbeat}
@@ -6873,7 +7100,7 @@ Heartbeat while coordinating:
 With the default `"submit":true`, the sender delivers the payload inside one bracketed-paste envelope, then presses Enter as a discrete bare carriage-return write outside the envelope after the adapter's configured gap. The closed envelope is what lets composers with paste-coalescing (codex) register the Enter as a keystroke instead of swallowing it into the paste. Trailing `\r`/`\n` on the message are always stripped before writing, so a payload can never self-submit. Use `"submit":false` only when intentionally leaving text in the composer; text already staged in a composer can be flushed with `{{"message":"","submit":true}}`, which writes only the bare Enter.
 
 ```bash
-curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
+{api_curl} -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
   -H "Content-Type: application/json" \\
   -d '{{"target_agent_id":"{session_id}-worker-N","message":"your message here"}}'
 ```
@@ -7052,10 +7279,10 @@ When the objective and every configured gate are complete, send this `completed`
         let workspace_contract =
             render_workspace_contract(contract_role, &execution_policy.workspace_strategy);
 
-        let session_root = Self::session_root_path(project_path, session_id);
+        let session_root = Self::session_prompt_root(project_path, session_id, &config.cli);
         let (project_root, project_dna_path, _) =
             Self::project_knowledge_prompt_paths(&config.cli, project_path);
-        let workspace_path = Self::prompt_path(workspace_path);
+        let workspace_path = Self::prompt_path_for_cli(workspace_path, &config.cli);
         let task_file_path = if execution_policy.workspace_strategy == WorkspaceStrategy::None {
             Self::session_task_file_path(project_path, session_id, index as usize)
         } else {
@@ -7064,7 +7291,7 @@ When the objective and every configured gate are complete, send this `completed`
                 .join("tasks")
                 .join(format!("worker-{index}-task.md"))
         };
-        let task_file = Self::prompt_path(&task_file_path);
+        let task_file = Self::prompt_path_for_cli(&task_file_path, &config.cli);
         let worker_conversation = Self::prompt_path(
             &session_root
                 .join("conversations")
@@ -7202,7 +7429,8 @@ When the objective and every configured gate are complete, send this `completed`
             (false, render_composed_context(&composition.context))
         };
         let rendered_knowledge_chars = rendered_knowledge_section_chars(&composed_context);
-        let activation_wait_heartbeat = heartbeat_snippet(
+        let activation_wait_heartbeat = heartbeat_snippet_for_cli(
+            &config.cli,
             "http://localhost:18800",
             session_id,
             &agent_id,
@@ -7216,7 +7444,8 @@ When the objective and every configured gate are complete, send this `completed`
             resolved_role.definition.as_ref(),
             Some(&activation_wait_heartbeat),
         );
-        let working_heartbeat = heartbeat_snippet(
+        let working_heartbeat = heartbeat_snippet_for_cli(
+            &config.cli,
             "http://localhost:18800",
             session_id,
             &agent_id,
@@ -7224,7 +7453,8 @@ When the objective and every configured gate are complete, send this `completed`
             "Executing assigned workstream",
             &[],
         );
-        let completed_heartbeat = heartbeat_snippet(
+        let completed_heartbeat = heartbeat_snippet_for_cli(
+            &config.cli,
             "http://localhost:18800",
             session_id,
             &agent_id,
@@ -7305,6 +7535,7 @@ When the objective and every configured gate are complete, send this `completed`
             completion_protocol.push_str(&slop_gate_contract);
         }
 
+        // The pending-learning fallback is workspace-local to respect the worker write boundary.
         let learnings_section = if is_research {
             String::new()
         } else {
@@ -7429,6 +7660,10 @@ treated as stuck and requeued.
         queen_id: &str,
         session_id: &str,
     ) -> String {
+        let api_curl = Self::api_curl(cli);
+        let session_root = Self::session_prompt_root(project_path, session_id, cli);
+        let session_root_prompt = Self::prompt_path(&session_root);
+        // Worker task paths below are local to each worker worktree; observer paths are absolute.
         let worker_count = config.workers.len();
 
         // Build worker info section
@@ -7493,7 +7728,7 @@ You are a **Planner** in a multi-agent Swarm session, managing the {domain} doma
 - **Session ID**: {session_id}
 - **Queen**: {queen_id}
 - **Your ID**: {session_id}-planner-{index}
-- **Tools Directory**: `.hive-manager/{session_id}/tools/`
+- **Tools Directory**: `{session_root_prompt}/tools/`
 
 ## Your Domain
 
@@ -7509,12 +7744,12 @@ You will spawn {worker_count} workers SEQUENTIALLY. Each worker runs in its own 
 
 ## HTTP API for Spawning Workers
 
-Read `.hive-manager/{session_id}/tools/spawn-worker.md` for detailed documentation.
+Read `{session_root_prompt}/tools/spawn-worker.md` for detailed documentation.
 
 **Quick Reference:**
 ```bash
 # Spawn a worker
-curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+{api_curl} -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
   -d '{{"role_type": "ROLE", "cli": "{cli}", "name": "Worker N (Role)", "description": "TASK", "initial_task": "TASK", "parent_id": "{session_id}-planner-{index}"}}'
 ```
@@ -7578,8 +7813,10 @@ Awaiting task assignment from the Queen."#,
         user_prompt: Option<&str>,
         has_evaluator: bool,
     ) -> String {
+        let api_curl = Self::api_curl(queen_cli);
         let planner_count = planners.len();
-        let session_root = Self::session_root_path(project_path, session_id);
+        let session_root = Self::session_prompt_root(project_path, session_id, queen_cli);
+        let session_root_prompt = Self::prompt_path(&session_root);
         let (project_root, project_dna_path, project_learnings_path) =
             Self::project_knowledge_prompt_paths(queen_cli, project_path);
         let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
@@ -7588,6 +7825,7 @@ Awaiting task assignment from the Queen."#,
             &session_root,
             has_evaluator,
             Self::project_has_judge_tool(project_path),
+            queen_cli,
         );
 
         // Build planner info section (what Queen will spawn)
@@ -7626,7 +7864,7 @@ If you find yourself about to edit code, STOP. Assign work to a Planner instead.
             ""
         };
         let qa_milestone_handoff = if has_evaluator {
-            Self::build_qa_milestone_handoff(session_id, &session_root, "workers/planners")
+            Self::build_qa_milestone_handoff(session_id, &session_root, "workers/planners", queen_cli,)
         } else {
             String::new()
         };
@@ -7647,8 +7885,8 @@ You are the **Queen** orchestrating a multi-agent Swarm session. You spawn and c
 
 - **Session ID**: {session_id}
 - **Mode**: Swarm (hierarchical with sequential spawning)
-- **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
-- **Tools Directory**: `.hive-manager/{session_id}/tools/`
+- **Prompts Directory**: `{session_root_prompt}/prompts/`
+- **Tools Directory**: `{session_root_prompt}/tools/`
 - **Runtime CWD**: `{project_root}`
 - **Worktree topology**: Runtime CWD may be an isolated git worktree; the main checkout is `{project_root}`. Read project knowledge from the absolute main-checkout paths below, even when they are outside Runtime CWD. Write code only inside Runtime CWD.
 
@@ -7668,12 +7906,12 @@ You will spawn {planner_count} planners SEQUENTIALLY. Each planner spawns their 
 
 ## HTTP API for Spawning Planners
 
-Read `.hive-manager/{session_id}/tools/spawn-planner.md` for detailed documentation.
+Read `{session_root_prompt}/tools/spawn-planner.md` for detailed documentation.
 
 **Quick Reference:**
 ```bash
 # Spawn a planner
-curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
+{api_curl} -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
   -H "Content-Type: application/json" \
   -d '{{"domain": "DOMAIN", "cli": "{cli}", "worker_count": N}}'
 ```
@@ -7690,7 +7928,7 @@ You have full access to all Claude Code tools:
 
 ### Swarm-Specific Tools (HTTP API)
 
-Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files for detailed usage:
+Tool documentation is in `{session_root_prompt}/tools/`. Read these files for detailed usage:
 
 | Tool | File | Purpose |
 |------|------|---------|
@@ -7709,12 +7947,12 @@ Workers and planners record learnings during task completion. Your curation resp
 
 1. **Review learnings periodically**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{session_id}/learnings"
+   {api_curl} "http://localhost:18800/api/sessions/{session_id}/learnings"
    ```
 
 2. **Review current project DNA**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{session_id}/project-dna"
+   {api_curl} "http://localhost:18800/api/sessions/{session_id}/project-dna"
    ```
 
 3. **Curate useful learnings** into the session-scoped `project-dna.md` via the API:
@@ -7725,7 +7963,7 @@ Workers and planners record learnings during task completion. Your curation resp
 
 ### Session-Scoped Lessons Structure
 ```
-.hive-manager/{session_id}/lessons/
+{session_root_prompt}/lessons/
 ├── learnings.jsonl      # Raw learnings for this session (append-only)
 └── project-dna.md       # Curated patterns, conventions, insights
 ```
@@ -7767,10 +8005,10 @@ You MUST spawn planners ONE AT A TIME and COMMIT between each:
 Check planner status via HTTP API or look for signals:
 ```bash
 # List planners
-curl "http://localhost:18800/api/sessions/{session_id}/planners"
+{api_curl} "http://localhost:18800/api/sessions/{session_id}/planners"
 
 # Check coordination log for [DOMAIN_COMPLETE] signals
-cat .hive-manager/{session_id}/coordination/coordination.log | grep "DOMAIN_COMPLETE"
+cat {session_root_prompt}/coordination/coordination.log | grep "DOMAIN_COMPLETE"
 ```
 
 ### Git Commit Pattern
@@ -7793,7 +8031,7 @@ git commit -m "feat(DOMAIN): Brief description of what this domain accomplished"
 
 {post_workers_protocol}
 
-Log each iteration to `.hive-manager/{session_id}/coordination.log`:
+Log each iteration to `{session_root_prompt}/coordination.log`:
 ```
 {queen_quality_log}
 ```
@@ -7947,6 +8185,7 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
         session_id: &str,
         filename: &str,
         content: &str,
+        executor_cli: &str,
     ) -> Result<PathBuf, String> {
         let tools_dir = project_path
             .join(".hive-manager")
@@ -7956,7 +8195,7 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
             .map_err(|e| format!("Failed to create tools directory: {}", e))?;
 
         let file_path = tools_dir.join(filename);
-        std::fs::write(&file_path, content)
+        std::fs::write(&file_path, Self::api_commands_for_cli(executor_cli, content))
             .map_err(|e| format!("Failed to write tool file: {}", e))?;
 
         Ok(file_path)
@@ -7967,10 +8206,15 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
         project_path: &PathBuf,
         session_id: &str,
         default_cli: &str,
+        executor_cli: &str,
     ) -> Result<(), String> {
+        // Shared session docs are consumed by the Queen; other roles have CLI-specific inline commands.
+        let session_root = Self::session_prompt_root(project_path, session_id, executor_cli);
+        let session_root_prompt = Self::prompt_path(&session_root);
+        // Shared/isolated worker task examples stay relative to their execution worktrees.
         let worker_task_file_example = "<absolute task path returned by the backend>".to_string();
         let qa_task_file_example =
-            format!(".hive-manager/{}/tasks/qa-worker-N-task.md", session_id);
+            Self::prompt_path(&session_root.join("tasks").join("qa-worker-N-task.md"));
         let worker_one_task_file_example = "<absolute task path returned for worker 1>".to_string();
 
         // Spawn Worker tool
@@ -8074,10 +8318,10 @@ running, use `DELETE /api/sessions/{session_id}/agents/{{agent_id}}` instead.
 - Workers spawn in a new Windows Terminal tab (visible window)
 - Treat the absolute `task_file` returned by the API as authoritative; do not reconstruct it from the worker ID
 - When spawning a plan task, send its exact `task_id` from `plan.md`. Never guess, fuzzy-match, or derive it from `initial_task`; explicit or null is the safe contract.
-- If a prerequisite is Queen-owned, finish that task and POST `{{"agent_id":"queen","status":"completed","completed_nodes":["T0"]}}` to `/api/sessions/{session_id}/heartbeat` using its exact node ID. Then retry the same `task_id` spawn. A `working` heartbeat does not satisfy the prerequisite; the Queen session remains open after this task completion heartbeat.
+- If a prerequisite is Queen-owned, finish that task and POST `{{"agent_id":"queen","status":"completed","completed_nodes":["T0"]}}` to `/api/sessions/{session_id}/heartbeat` with `X-Hive-Agent-Token` from the Queen process environment, using its exact node ID. Then retry the same `task_id` spawn. A `working` heartbeat does not satisfy the prerequisite; the Queen session remains open after this task completion heartbeat.
 - Shared-cell Hive: the task file is under `.hive-manager/tasks/` in the shared primary workspace
 - Isolated-cell Hive: the task file is under `.hive-manager/tasks/` in that worker's isolated workspace
-- Research/no-worktree Hive: the task file is under `.hive-manager/{session_id}/tasks/` in the operator project
+- Research/no-worktree Hive: the task file is under `{session_root_prompt}/tasks/` in the operator project
 - Workers re-read the returned task file for new direction; durable queue readiness, not markdown polling, controls activation
 - Dynamic principals are supported by Hive/Research sessions. Fusion variants use their pre-created Fusion task files instead of this endpoint
 - Heartbeat status remains the closed `working` / `idle` / `completed` vocabulary. `awaiting_injected_turn` is server-authored because an inject-blocked receiver cannot take a turn to self-report it.
@@ -8097,6 +8341,7 @@ running, use `DELETE /api/sessions/{session_id}/agents/{{agent_id}}` instead.
             session_id,
             "spawn-worker.md",
             &spawn_worker_tool,
+            executor_cli,
         )?;
 
         let spawn_qa_worker_tool = format!(
@@ -8167,6 +8412,7 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/qa-workers" \
             session_id,
             "spawn-qa-worker.md",
             &spawn_qa_worker_tool,
+            executor_cli,
         )?;
 
         // List Workers tool
@@ -8213,16 +8459,18 @@ curl "http://localhost:18800/api/sessions/{session_id}/workers"
             session_id,
             "list-workers.md",
             &list_workers_tool,
+            executor_cli,
         )?;
 
-        let completed_status_example = heartbeat_snippet(
+        let completed_status_example = heartbeat_snippet_for_cli(
+            executor_cli,
             "http://localhost:18800",
             session_id,
-            "<exact-agent-id>",
+            "queen",
             "completed",
             "Queen verified completion: replace with concise gate evidence",
             &[],
-        );
+        ).replacen(r#""agent_id":"queen""#, r#""agent_id":"queen","mark_agent_id":"<exact-agent-id>""#, 1);
         let mark_worker_status_tool = format!(
             r#"# Mark Worker Status Tool
 
@@ -8235,13 +8483,16 @@ Record an agent heartbeat/status after independently verifying its state. The Qu
 **Headers:**
 ```text
 Content-Type: application/json
+X-Hive-Agent-Token: <read HIVE_AGENT_TOKEN from the Queen process environment>
 ```
 
 ## Request Body
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| agent_id | string | Yes | Exact full agent ID from the roster or worker API, such as `{session_id}-worker-2` or `{session_id}-fusion-1` |
+| agent_id | string | Yes | The authenticated Queen ID (`queen` alias or exact roster ID) |
+| mark_agent_id | string | Yes for cross-agent marking | Exact full target agent ID from the roster or worker API, such as `{session_id}-worker-2` or `{session_id}-fusion-1`. Requires the Queen-scoped credential; worker credentials cannot mark peers. |
+| reassign_nodes | object[] | No | Separate Queen command: `[{{"node_id":"T-node","agent_id":"<new-agent-id>"}}]` transfers an incomplete row-less node to the target's server-resolved principal. Cannot be mixed with marks/completion/assignment/knowledge acknowledgement; queue-backed transfers require the queue assignment lifecycle. The binding change is logged. |
 | status | string | Yes | `working` = doing work or holding the session open; `idle` = alive and blocked on another actor; `completed` = this actor is finished |
 | summary | string | No | Concise evidence-backed status summary |
 | completed_nodes | (string \| object)[] | No | Exact work-graph completions; valid only with `status: completed`. Bare node-ID strings remain valid for legacy agents and reporting-parent execution. Native-child work should use `{{"node_id":"<exact-work-graph-node-id>","executed_as":{{"provider":"codex","tier":"low","model":"gpt-6-luna","flags":["-c","model_reasoning_effort=\"medium\""],"channel":"native","source":"node"}}}}`. `source` is `node`, `fallback`, or `override` and must reflect the actual selection. Keep `agent_id` at the top level; do not add it per entry. Omit when no node binding is known. |
@@ -8254,7 +8505,9 @@ Replace `<exact-agent-id>` with the verified agent's exact full ID and replace t
 {completed_status_example}
 ```
 
-For a Fusion variant or another agent type, keep the request identical and use the exact ID shown in the Queen roster.
+For a Fusion variant or another agent type, keep `agent_id` as the Queen and set `mark_agent_id` to the exact target ID shown in the roster. Node completion declarations are checked against the target's current principal binding. Do not send knowledge_ack on someone else's behalf.
+
+These are Bash blocks. Windows Codex must run them in installed Git Bash. In native PowerShell use curl.exe with `$env:HIVE_AGENT_TOKEN`. Never print the token, enable tracing, use verbose curl or write its value to a file.
 
 ## Verification Rule
 
@@ -8272,6 +8525,7 @@ For a Fusion variant or another agent type, keep the request identical and use t
             session_id,
             "mark-worker-status.md",
             &mark_worker_status_tool,
+            executor_cli,
         )?;
 
         let judge_tool = r#"# Judge Tool
@@ -8325,7 +8579,7 @@ Live egress is limited to the git-origin project `rdfitted/hive-manager` and all
 Every command prints one JSON object with `status`, `decision_id`, `sent`, `answer`, `model`, `latency_ms`, `usage`, `error`, and `redaction` (counts and reason classes only when blocked). Exit `0` means a row was written, including `dry-run` or `no-key`; exit `2` means invalid input; exit `3` means policy, redaction, or size blocked after a row; exit `4` means transport failed after a row; exit `5` means the ledger write failed. Treat a Jev result only as shadow evidence for later audit.
 "#;
         if Self::project_has_judge_tool(project_path) {
-            Self::write_tool_file(project_path, session_id, "judge.md", judge_tool)?;
+            Self::write_tool_file(project_path, session_id, "judge.md", judge_tool, executor_cli,)?;
         }
 
         // Submit Learning tool
@@ -8379,6 +8633,7 @@ curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/learnings" \
             session_id,
             "submit-learning.md",
             submit_learning_tool,
+            executor_cli,
         )?;
 
         // List Learnings tool
@@ -8416,6 +8671,7 @@ curl "http://localhost:18800/api/sessions/{{session_id}}/learnings?keywords=api,
             session_id,
             "list-learnings.md",
             list_learnings_tool,
+            executor_cli,
         )?;
 
         // Delete Learning tool
@@ -8450,6 +8706,7 @@ curl -X DELETE "http://localhost:18800/api/sessions/{{session_id}}/learnings/abc
             session_id,
             "delete-learning.md",
             delete_learning_tool,
+            executor_cli,
         )?;
 
         Ok(())
@@ -8461,9 +8718,12 @@ curl -X DELETE "http://localhost:18800/api/sessions/{{session_id}}/learnings/abc
         session_id: &str,
         planner_count: u8,
         default_cli: &str,
+        executor_cli: &str,
     ) -> Result<(), String> {
+        let session_root = Self::session_prompt_root(project_path, session_id, executor_cli);
+        let session_root_prompt = Self::prompt_path(&session_root);
         // First write standard worker tools
-        Self::write_tool_files(project_path, session_id, default_cli)?;
+        Self::write_tool_files(project_path, session_id, default_cli, executor_cli,)?;
 
         // Spawn Planner tool
         let spawn_planner_tool = format!(
@@ -8531,8 +8791,8 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
   "cli": "{default_cli}",
   "status": "Running",
   "worker_count": 2,
-  "prompt_file": ".hive-manager/{session_id}/prompts/planner-N-prompt.md",
-  "tools_dir": ".hive-manager/{session_id}/tools/"
+  "prompt_file": "{session_root_prompt}/prompts/planner-N-prompt.md",
+  "tools_dir": "{session_root_prompt}/tools/"
 }}
 ```
 
@@ -8562,6 +8822,7 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
             session_id,
             "spawn-planner.md",
             &spawn_planner_tool,
+            executor_cli,
         )?;
 
         // List Planners tool
@@ -8592,7 +8853,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
       "cli": "{default_cli}",
       "label": "Backend Planner",
       "status": "Running",
-      "prompt_file": ".hive-manager/{session_id}/prompts/planner-1-prompt.md"
+      "prompt_file": "{session_root_prompt}/prompts/planner-1-prompt.md"
     }}
   ],
   "count": 1
@@ -8608,6 +8869,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
             session_id,
             "list-planners.md",
             &list_planners_tool,
+            executor_cli,
         )?;
 
         Ok(())
@@ -8860,6 +9122,7 @@ Last updated: {timestamp}
                 &project_path,
                 &solo_cwd,
                 task_description.as_deref(),
+                &solo_config.cli,
             );
             let prompt_file = match Self::write_prompt_file(
                 &project_path,
@@ -8955,6 +9218,7 @@ Last updated: {timestamp}
             &project_path,
             &session_id,
             Self::session_principal_cli(&session),
+            &session.default_cli,
         ) {
             self.rollback_launch_allocations(
                 &project_path,
@@ -9172,6 +9436,8 @@ Last updated: {timestamp}
                 &config.workers,
                 config.prompt.as_deref(),
                 extra_queen_vars,
+                &project_path,
+                &config.queen_config.cli,
             )
         } else {
             Self::build_queen_master_prompt(
@@ -9212,7 +9478,7 @@ Last updated: {timestamp}
             .first()
             .map(|principal| principal.cli.as_str())
             .unwrap_or("codex");
-        if let Err(err) = Self::write_tool_files(&project_path, &session_id, principal_cli) {
+        if let Err(err) = Self::write_tool_files(&project_path, &session_id, principal_cli, &config.queen_config.cli,) {
             self.rollback_launch_allocations(
                 &project_path,
                 &session_id,
@@ -10856,6 +11122,9 @@ The backend composed and persisted the following authoritative skeleton before l
                 &config.workers,
                 config.with_evaluator,
                 config.qa_workers.as_deref(),
+                &project_path,
+                &config.queen_config.cli,
+                config.evaluator_config.as_ref().map(|config| config.cli.as_str()),
             )
         } else {
             let prompt = config.prompt.as_deref().unwrap_or("");
@@ -11179,6 +11448,8 @@ The backend composed and persisted the following authoritative skeleton before l
             &config.topic,
             &config.debaters,
             config.rounds,
+            Path::new(&config.project_path),
+            &config.queen_config.as_ref().unwrap_or(&config.judge_config).cli,
         );
 
         {
@@ -11417,6 +11688,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 &session.project_path,
                 session_id,
                 Self::session_principal_cli(&session),
+                &queen_cfg.cli,
             )?;
 
             tracing::info!("Launching Fusion Queen: {} {:?} in {:?}", cmd, args, cwd);
@@ -11778,6 +12050,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 &config.workers_per_planner,
                 config.with_evaluator,
                 config.qa_workers.as_deref(),
+                &project_path,
+                &config.queen_config.cli,
             )
         } else {
             // Pass planners and workers info to Master Planner so it knows the full scope
@@ -12964,6 +13238,14 @@ The backend composed and persisted the following authoritative skeleton before l
     /// Evaluator deliberately does not, because that happens at session launch,
     /// long before there is anything to review.
     pub(crate) fn begin_qa_window(&self, session_id: &str) -> Result<(), String> {
+        let _resolution = Self::lock_qa_resolution();
+        // QA-worker spawns and duplicate milestone signals are progress within
+        // the same window. Re-arming here would reset its absolute ceiling.
+        if self.sessions.read().get(session_id).is_some_and(|session| {
+            matches!(session.state, SessionState::QaInProgress { .. } | SessionState::SpawningEvaluator)
+        }) && self.qa_timeout_handles.lock().get(session_id).is_some_and(|handle| !handle.is_finished()) {
+            return Ok(());
+        }
         let (timeout_secs, changes) = {
             let mut sessions = self.sessions.write();
             let session = sessions
@@ -12981,6 +13263,32 @@ The backend composed and persisted the following authoritative skeleton before l
         self.emit_cell_status_changes(session_id, changes);
         self.start_qa_timeout(session_id, timeout_secs);
         Ok(())
+    }
+
+    /// Apply the optional API launch setting to the existing persisted session.
+    pub(crate) fn set_session_qa_timeout(
+        &self,
+        session_id: &str,
+        timeout_secs: Option<u64>,
+    ) -> Result<Session, String> {
+        let _resolution = Self::lock_qa_resolution();
+        let updated = {
+            let mut sessions = self.sessions.write();
+            let session = sessions.get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            let previous = session.qa_timeout_secs;
+            session.qa_timeout_secs = timeout_secs.unwrap_or_else(default_qa_timeout_secs);
+            if let Some(storage) = self.storage.as_ref() {
+                let snapshot = Self::session_to_persisted_snapshot(session);
+                if let Err(error) = storage.save_session(&snapshot) {
+                    session.qa_timeout_secs = previous;
+                    return Err(format!("Failed to persist QA timeout: {}", error));
+                }
+            }
+            session.clone()
+        };
+        self.emit_session_update(session_id);
+        Ok(updated)
     }
 
     /// Whether a QA timeout is currently armed for this session.
@@ -13218,9 +13526,16 @@ The backend composed and persisted the following authoritative skeleton before l
 
     fn qa_timeout_reason(timeout_secs: u64) -> String {
         format!(
-            "QA verdict timed out after {}s with no response. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Queen: surface the reason, fix the cause if it is yours, then rewrite peer/milestone-ready.json to re-enter QA (a newer mtime counts as fresh; HTTP POST /milestone-ready is always fresh). Re-entry counts against the iteration limit. At QaMaxRetriesExceeded, stop and surface to the operator. Force-pass and force-fail are operator-only.",
+            "QA verdict timed out after {}s of inactivity or the 45-minute absolute ceiling. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Queen: surface the reason, fix the cause if it is yours, then rewrite peer/milestone-ready.json to re-enter QA (a newer mtime counts as fresh; HTTP POST /milestone-ready is always fresh). Re-entry counts against the iteration limit. At QaMaxRetriesExceeded, stop and surface to the operator. Force-pass and force-fail are operator-only.",
             timeout_secs
         )
+    }
+
+    /// Serialize timeout publication and explicit operator overrides so a
+    /// timeout cannot overwrite the operator's peer verdict after cancellation.
+    pub(crate) fn lock_qa_resolution() -> parking_lot::MutexGuard<'static, ()> {
+        static RESOLUTION: Mutex<()> = Mutex::new(());
+        RESOLUTION.lock()
     }
 
     #[cfg(test)]
@@ -13249,6 +13564,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
         let sid = session_id.to_string();
         let sessions = Arc::clone(&self.sessions);
+        let agent_heartbeats = Arc::clone(&self.agent_heartbeats);
         let app_handle = self.app_handle.clone();
         let event_emitter = self.event_emitter.clone();
         let storage = self.storage.clone();
@@ -13256,23 +13572,48 @@ The backend composed and persisted the following authoritative skeleton before l
         let armed_qa_generation = self.sessions.read().get(session_id).and_then(|session| {
             session.qa_inconclusive_at.clone()
         });
+        let mut window = {
+            let sessions = self.sessions.read();
+            let Some(session) = sessions.get(session_id) else { return };
+            let heartbeats = self.agent_heartbeats.read();
+            QaTimeoutWindow::new(timeout_secs, session, heartbeats.get(session_id))
+        };
+        let started = tokio::time::Instant::now();
 
         let handle = tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)).await;
-
-            // Check if still QaInProgress before timing out
-            let is_qa = {
-                let sessions = sessions.read();
-                sessions
-                    .get(&sid)
-                    .map(|s| matches!(s.state, SessionState::QaInProgress { .. }))
-                    .unwrap_or(false)
+            let expired_by = loop {
+                let expired = {
+                    let sessions = sessions.read();
+                    let Some(session) = sessions.get(&sid) else { return };
+                    if !matches!(session.state, SessionState::QaInProgress { .. } | SessionState::SpawningEvaluator)
+                        || session.qa_inconclusive_at != armed_qa_generation
+                    {
+                        return;
+                    }
+                    let heartbeats = agent_heartbeats.read();
+                    let expired = window.expired(started.elapsed(), session, heartbeats.get(&sid));
+                    // Respawning temporarily changes state, but is still part
+                    // of this review. Preserve elapsed time until launch restores
+                    // QaInProgress, where the normal timeout transition applies.
+                    if matches!(session.state, SessionState::SpawningEvaluator) {
+                        None
+                    } else {
+                        expired
+                    }
+                };
+                if let Some(reason) = expired {
+                    break reason;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             };
 
-            if is_qa {
+            {
+                let _resolution = SessionController::lock_qa_resolution();
+                let timeout_secs = window.inactivity.as_secs();
                 tracing::warn!(
-                    "QA timeout fired for session {} after {}s — marking QA inconclusive (no auto-pass)",
+                    "QA timeout fired for session {} ({}; inactivity limit {}s) — marking QA inconclusive (no auto-pass)",
                     sid,
+                    expired_by,
                     timeout_secs
                 );
 
@@ -13351,6 +13692,7 @@ The backend composed and persisted the following authoritative skeleton before l
                         "kind": "qa-verdict",
                         "verdict": "BLOCKED",
                         "blocked_reason": "timeout",
+                        "timeout_kind": expired_by,
                         "rationale": reason,
                     })
                     .to_string();
@@ -13533,10 +13875,19 @@ The backend composed and persisted the following authoritative skeleton before l
         }
         self.emit_session_update(session_id);
 
+        let mut judge_config = metadata.judge_config.clone();
+        if judge_config.cli.trim().is_empty() {
+            judge_config.cli = session.default_cli.clone();
+        }
+        if judge_config.model.is_none() {
+            judge_config.model = session.default_model.clone();
+        }
+
         let judge_prompt = Self::build_fusion_judge_prompt(
             session_id,
             &metadata.variants,
             &metadata.decision_file,
+            &judge_config.cli,
         );
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
@@ -13545,14 +13896,6 @@ The backend composed and persisted the following authoritative skeleton before l
             &judge_prompt,
         )?;
         let prompt_path = prompt_file.to_string_lossy().to_string();
-
-        let mut judge_config = metadata.judge_config.clone();
-        if judge_config.cli.trim().is_empty() {
-            judge_config.cli = session.default_cli.clone();
-        }
-        if judge_config.model.is_none() {
-            judge_config.model = session.default_model.clone();
-        }
 
         let (cmd, mut args) = Self::build_command(&judge_config);
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -13885,6 +14228,7 @@ The backend composed and persisted the following authoritative skeleton before l
             &wiki_batch.root,
             &judge_config.cli,
             wiki_batch.state,
+            &session.project_path,
         );
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
@@ -14368,7 +14712,7 @@ The backend composed and persisted the following authoritative skeleton before l
             .first()
             .map(|principal| principal.cli.as_str())
             .unwrap_or("codex");
-        if let Err(error) = Self::write_tool_files(&session.project_path, session_id, principal_cli)
+        if let Err(error) = Self::write_tool_files(&session.project_path, session_id, principal_cli, &config.queen_config.cli,)
         {
             self.rollback_launch_allocations(
                 &session.project_path,
@@ -15155,6 +15499,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 session_id,
                 planners.len() as u8,
                 &default_cli,
+                &config.queen_config.cli,
             )?;
 
             tracing::info!("Launching Queen agent (swarm - sequential planner spawning, after planning): {} {:?} in {:?}", cmd, args, cwd);
@@ -15297,6 +15642,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 &session_id,
                 planners.len() as u8,
                 &default_cli,
+                &config.queen_config.cli,
             )?;
 
             tracing::info!(
@@ -16181,6 +16527,7 @@ The backend composed and persisted the following authoritative skeleton before l
             &session.project_path,
             session_id,
             Self::session_principal_cli(&session),
+            &session.default_cli,
         )?;
 
         let worker_count = match session.session_type {
@@ -16195,6 +16542,7 @@ The backend composed and persisted the following authoritative skeleton before l
             worker_count,
             &execution_workspace,
             smoke_test,
+            &session.project_path,
         );
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
@@ -16348,7 +16696,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let principal_defaults = self
             .get_session_principal_defaults(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
-        Self::write_tool_files(&session.project_path, session_id, &principal_defaults.cli)?;
+        Self::write_tool_files(&session.project_path, session_id, &principal_defaults.cli, &session.default_cli,)?;
         let execution_workspace = Self::execution_workspace(&session);
         let prince_prompt = Self::build_prince_prompt(
             session_id,
@@ -16357,6 +16705,7 @@ The backend composed and persisted the following authoritative skeleton before l
             &execution_workspace,
             session.execution_policy.workspace_strategy,
             smoke_test,
+            &session.project_path,
         );
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
@@ -16481,6 +16830,7 @@ The backend composed and persisted the following authoritative skeleton before l
             &config,
             &session.auth_strategy,
             &Self::execution_workspace(&session),
+            &session.project_path,
         );
         // QA workers spawned after evaluator launch run from the project root, not
         // isolated worker worktrees, so their prompts stay in the session prompt dir.
@@ -16624,6 +16974,7 @@ The backend composed and persisted the following authoritative skeleton before l
             &session.project_path,
             session_id,
             Self::session_principal_cli(&session),
+            &session.default_cli,
         )?;
 
         tracing::info!(
@@ -17359,6 +17710,7 @@ mod tests {
             "typed-contract-test",
             Path::new("/tmp/typed-contract-test"),
             "workers",
+            "claude",
         );
         let contract_start = handoff
             .rfind("# Sprint Contract:")
@@ -18642,6 +18994,7 @@ mod tests {
             &AgentConfig::default(),
             &AuthStrategy::default(),
             "/repo/execution",
+            Path::new("/repo"),
         );
 
         assert!(prompt.contains("Accessibility Tester"));
@@ -18665,6 +19018,7 @@ mod tests {
                 &AgentConfig::default(),
                 &AuthStrategy::default(),
                 "/repo/execution",
+                Path::new("/repo"),
             );
 
             let completion =
@@ -18688,6 +19042,7 @@ mod tests {
             Path::new("/repo"),
             "/repo/.hive-manager/worktrees/solo-123/worker-1",
             Some("Fix the bounded bug"),
+            "claude",
         );
 
         assert!(prompt.contains("Fix the bounded bug"));
@@ -18737,6 +19092,7 @@ mod tests {
         session_root: &Path,
         has_evaluator: bool,
     ) -> String {
+        let session_root_prompt = SessionController::prompt_path(session_root);
         let milestone_ready_path =
             SessionController::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
         let qa_verdict_path = SessionController::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
@@ -18755,7 +19111,7 @@ QA is disabled for this session. Tell the operator that the milestone QA gate wi
    gh api repos/<owner>/<repo>/issues/<pr-number>/comments
    gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
    ```
-For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work.
+For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `{session_root_prompt}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work.
 3. If unresolved findings remain, you MUST spawn a Reconciler worker via `POST /api/sessions/{session_id}/workers`, wait for and validate its paired adjudication artifacts, then spawn the required Resolver workers, integrate their fixes, and return to Step 1.
    ```bash
    curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
@@ -18785,6 +19141,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
    while [ ! -f "{qa_verdict_path}" ]; do
      curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
        -H "Content-Type: application/json" \
+       -H "X-Hive-Agent-Token: $HIVE_AGENT_TOKEN" \
        -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Evaluator verdict"}}'
      sleep 30
    done
@@ -18798,6 +19155,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
    while [ ! -f "{prince_verdict_path}" ]; do
      curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
        -H "Content-Type: application/json" \
+       -H "X-Hive-Agent-Token: $HIVE_AGENT_TOKEN" \
        -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Prince remediation"}}'
      sleep 30
    done
@@ -18812,7 +19170,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
    gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
    ```
 
-   For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `.hive-manager/{session_id}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work.
+   For review round N, give the Reconciler the external finding IDs, paths, cited lines and reviewed push SHA. Require `{session_root_prompt}/notes/review-round-N.md` plus sibling `review-round-N.json` with `schema_version: hive.review-adjudications/v1`, PR number, round, and one `finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE) per finding. Keep rationale and severity out of JSON. Validate that every finding is represented before assigning Resolver work.
 
    ```bash
 
@@ -18856,14 +19214,15 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
 
         let session_root = Path::new("/repo/.hive-manager/session-123");
         for (has_evaluator, original_sha256) in [
-            (false, "710fcb803684fc5dd4c3957a5a9cfcf55908b590f758ccd3af4328c032f88eea"),
-            (true, "ce010744ca1ab392a93d875d57ca736acb028aead54017df0cedb1b246c0b1ef"),
+            (false, "7e752b4f540f76b2e2b58a4485c8f6c2a77f372dfcd0a61a195eceb72d95e609"),
+            (true, "c0d95e1bfa0d2910b7ccc29eeded36a531a11b3986283b00867528bd74aea1e7"),
         ] {
             let rendered = SessionController::queen_post_workers_protocol(
                 "session-123",
                 session_root,
                 has_evaluator,
                 true,
+                "claude",
             );
             assert_eq!(
                 rendered,
@@ -18884,6 +19243,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             Path::new("/repo/.hive-manager/session-123"),
             true,
             true,
+            "claude",
         );
         for blocked_step in [
             protocol
@@ -18920,6 +19280,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             session_root,
             false,
             true,
+            "claude",
         );
         assert!(qa_off.contains("QA is disabled for this session"));
         assert!(qa_off.contains("milestone QA gate will not run before push"));
@@ -18929,6 +19290,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             session_root,
             true,
             true,
+            "claude",
         );
         assert!(!qa_on.contains("QA is disabled for this session"));
     }
@@ -18942,6 +19304,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                 session_root,
                 has_evaluator,
                 true,
+                "claude",
             );
             assert!(protocol.contains("notes/review-round-N.md` plus sibling `review-round-N.json`"));
             assert!(protocol.contains("`finding_id`, `thread_id_or_url`, `path`, `line`, `reviewed_sha`, and `disposition` (ACCEPT/PARTIAL/DECLINE)"));
@@ -18963,6 +19326,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                 session_root,
                 has_evaluator,
                 false,
+                "claude",
             );
             assert!(no_judge.contains("notes/review-round-N.md` plus sibling `review-round-N.json`"));
             assert!(no_judge.contains("and full coverage before assigning Resolver work.\n"));
@@ -19372,6 +19736,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             &PathBuf::from(temp_dir.path()),
             "session-123",
             "claude",
+            "claude",
         )
         .expect("write tool files");
 
@@ -19416,7 +19781,9 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         let status_content =
             std::fs::read_to_string(status_tool_path).expect("read status tool doc");
         assert!(status_content.contains("Queen MUST use this tool"));
-        assert!(status_content.contains(r#""agent_id":"<exact-agent-id>""#));
+        assert!(status_content.contains(r#""agent_id":"queen""#));
+        assert!(status_content.contains(r#""mark_agent_id":"<exact-agent-id>""#));
+        assert!(status_content.contains("X-Hive-Agent-Token"));
         assert!(status_content.contains(r#""status":"completed""#));
         assert!(status_content.contains("shortened ID such as `worker-N`"));
         assert!(status_content.contains("placeholder fails validation"));
@@ -19447,6 +19814,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         SessionController::write_tool_files(
             &PathBuf::from(temp_dir.path()),
             "session-123",
+            "claude",
             "claude",
         )
         .expect("rewrite tool files");
@@ -20316,12 +20684,14 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             0,
             "/repo/execution",
             false,
+            Path::new("/repo"),
         );
 
         let required_protocol = extract_markdown_section(&prompt, "## Required Protocol");
         assert!(
             required_protocol.starts_with(&SessionController::evaluator_required_protocol(
-                "session-123"
+                "session-123",
+                Path::new("/repo/.hive-manager/session-123"),
             ))
         );
         assert!(prompt.contains(".hive-manager/session-123/peer/qa-verdict.json"));
@@ -20352,12 +20722,14 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             0,
             "/repo/execution",
             false,
+            Path::new("/repo"),
         );
 
         let required_protocol = extract_markdown_section(&prompt, "## Required Protocol");
         assert!(
             required_protocol.starts_with(&SessionController::evaluator_required_protocol(
-                "session-123"
+                "session-123",
+                Path::new("/repo/.hive-manager/session-123"),
             ))
         );
         assert!(
@@ -20587,12 +20959,14 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             0,
             "/repo/execution",
             false,
+            Path::new("/repo"),
         );
         let required_protocol = extract_markdown_section(&evaluator_prompt, "## Required Protocol");
 
         assert!(
             required_protocol.starts_with(&SessionController::evaluator_required_protocol(
-                "session-123"
+                "session-123",
+                Path::new("/repo/.hive-manager/session-123"),
             ))
         );
         assert!(!required_protocol.contains("signal the existing Evaluator"));
@@ -21592,9 +21966,11 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
                     flags: None,
                 },
             ],
-            4, // ceil(4/2) = 2 adversarial agents expected
+            4,
+            // ceil(4/2) = 2 adversarial agents expected
             "/repo/execution",
             false,
+            Path::new("/repo"),
         );
         assert_eq!(
             prompt.matches(r#""specialization":"adversarial""#).count(),
@@ -21977,6 +22353,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             workspace,
             WorkspaceStrategy::SharedCell,
             false,
+            Path::new("/repo"),
         );
         assert!(shared.contains(r#""cli":"codex""#));
         assert!(shared.contains(r#""parent_id":"session-prince""#));
@@ -21992,6 +22369,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             workspace,
             WorkspaceStrategy::IsolatedCell,
             false,
+            Path::new("/repo"),
         );
         assert!(isolated.contains("git -C"));
         assert!(isolated.contains("cherry-pick <sha>"));
@@ -22202,6 +22580,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             &wiki_batch.root,
             "claude",
             wiki_batch.state,
+            Path::new("/repo"),
         );
 
         assert!(
@@ -22241,6 +22620,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
                 &wiki_batch.root,
                 "claude",
                 wiki_batch.state,
+                Path::new("/repo"),
             );
 
             assert_no_dangling_wiki_read(&prompt, "judge");
@@ -22274,6 +22654,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             &[AgentConfig::default()],
             Some("Investigate prompt path handling"),
             extra_vars,
+            Path::new("/repo"),
+            queen_cli,
         )
     }
 
@@ -22322,6 +22704,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
                     &wiki_batch.root,
                     "claude",
                     wiki_batch.state,
+                    Path::new("/repo"),
                 ),
             ),
         ];
@@ -22519,4 +22902,363 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert_eq!(variables["has_global_wiki"], "true");
         drop(restore);
     }
+    #[test]
+    fn cursor_commands_forward_argon_model_and_trust() {
+        let config = AgentConfig {
+            cli: "cursor".to_string(),
+            model: Some("gemini-4-argon-high".to_string()),
+            flags: vec!["--custom-flag".to_string()],
+            ..AgentConfig::default()
+        };
+        for (command, args) in [
+            SessionController::build_command(&config),
+            SessionController::build_solo_command(&config, None),
+        ] {
+            assert_eq!(command, "wsl");
+            assert_eq!(&args[..4], ["-d", "Ubuntu", "/root/.local/bin/agent", "--force"]);
+            assert!(args.iter().any(|arg| arg == "--trust"));
+            assert!(args.windows(2).any(|pair| pair == ["--model", "gemini-4-argon-high"]));
+        }
+        let (_, args) = SessionController::build_solo_command(&config, Some("Do the task"));
+        assert_eq!(args.last().unwrap(), "Do the task");
+    }
+
+    #[test]
+    fn api_curl_uses_windows_interop_only_for_wsl_clis() {
+        for cli in ["cursor", "wsl", " cursor ", " wsl "] {
+            assert_eq!(SessionController::api_curl(cli), "curl.exe", "{cli}");
+        }
+        for cli in ["claude", "codex", "gemini", "", "other"] {
+            assert_eq!(SessionController::api_curl(cli), "curl", "{cli}");
+        }
+    }
+
+    #[test]
+    fn g_qa_live_evaluator_survives_twenty_minutes_but_hits_absolute_ceiling() {
+        let session = qa_session_with("qa-live", SessionState::QaInProgress { iteration: Some(1) }, PathBuf::from("."), false);
+        let at = Utc::now();
+        let mut heartbeats = HashMap::new();
+        let mut window = super::QaTimeoutWindow::new(300, &session, Some(&heartbeats));
+        for seconds in (120..=2640).step_by(120) {
+            heartbeats.insert("qa-live-evaluator".to_string(), super::AgentHeartbeatInfo {
+                last_activity: at + Duration::seconds(seconds),
+                status: "working".to_string(),
+                summary: None,
+            });
+            assert_eq!(window.expired(std::time::Duration::from_secs(seconds as u64), &session, Some(&heartbeats)), None,
+                "live evaluator must survive at {seconds}s, including 20 simulated minutes");
+        }
+        heartbeats.get_mut("qa-live-evaluator").unwrap().last_activity = at + Duration::seconds(2700);
+        assert_eq!(window.expired(std::time::Duration::from_secs(2700), &session, Some(&heartbeats)), Some("absolute ceiling"));
+    }
+
+    #[test]
+    fn g_qa_live_silent_and_unrelated_heartbeats_expire_at_inactivity_limit() {
+        let session = qa_session_with("qa-silent", SessionState::QaInProgress { iteration: None }, PathBuf::from("."), true);
+        let mut heartbeats = HashMap::new();
+        let mut window = super::QaTimeoutWindow::new(300, &session, Some(&heartbeats));
+        for id in ["qa-silent-queen", "qa-silent-worker-1", "qa-silent-prince"] {
+            heartbeats.insert(id.to_string(), super::AgentHeartbeatInfo {
+                last_activity: Utc::now(), status: "working".to_string(), summary: None,
+            });
+        }
+        assert_eq!(window.expired(std::time::Duration::from_secs(299), &session, Some(&heartbeats)), None);
+        assert_eq!(window.expired(std::time::Duration::from_secs(300), &session, Some(&heartbeats)), Some("inactivity"));
+    }
+
+    #[test]
+    fn g_qa_live_worker_spawn_progress_and_heartbeat_refresh_inactivity() {
+        let mut session = qa_session_with("qa-progress", SessionState::QaInProgress { iteration: None }, PathBuf::from("."), false);
+        let at = Utc::now();
+        let mut heartbeats = HashMap::new();
+        let mut window = super::QaTimeoutWindow::new(300, &session, Some(&heartbeats));
+        let mut worker = session.agents[0].clone();
+        worker.id = "qa-progress-qa-worker-1".to_string();
+        worker.role = AgentRole::QaWorker { index: 1, parent: Some("qa-progress-evaluator".to_string()) };
+        session.agents.push(worker);
+        assert_eq!(window.expired(std::time::Duration::from_secs(240), &session, Some(&heartbeats)), None);
+        heartbeats.insert("qa-progress-qa-worker-1".to_string(), super::AgentHeartbeatInfo {
+            last_activity: at + Duration::seconds(480), status: "working".to_string(), summary: None,
+        });
+        assert_eq!(window.expired(std::time::Duration::from_secs(480), &session, Some(&heartbeats)), None);
+        session.agents[1].status = AgentStatus::Completed;
+        assert_eq!(window.expired(std::time::Duration::from_secs(720), &session, Some(&heartbeats)), None);
+        assert_eq!(window.expired(std::time::Duration::from_secs(1019), &session, Some(&heartbeats)), None);
+        assert_eq!(window.expired(std::time::Duration::from_secs(1020), &session, Some(&heartbeats)), Some("inactivity"));
+    }
+
+    #[tokio::test]
+    async fn qa_window_progress_keeps_existing_timer_and_timeout_writes_blocked() {
+        let project = tempfile::tempdir().unwrap();
+        let controller = test_controller();
+        let mut session = qa_session_with("qa-real-timer", SessionState::Running, project.path().to_path_buf(), false);
+        session.qa_timeout_secs = 1;
+        controller.insert_test_session(session);
+        controller.begin_qa_window("qa-real-timer").unwrap();
+        let original_timer = controller.qa_timeout_handles.lock()["qa-real-timer"].id();
+        controller.begin_qa_window("qa-real-timer").unwrap();
+        assert_eq!(controller.qa_timeout_handles.lock()["qa-real-timer"].id(), original_timer);
+        let verdict = project.path().join(".hive-manager/qa-real-timer/peer/qa-verdict.json");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !verdict.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.expect("original one-second timeout must still fire");
+        assert_eq!(controller.get_session("qa-real-timer").unwrap().state, SessionState::QaInconclusive);
+        let record: serde_json::Value = serde_json::from_slice(&std::fs::read(verdict).unwrap()).unwrap();
+        let content: serde_json::Value = serde_json::from_str(record["content"].as_str().unwrap()).unwrap();
+        assert_eq!(content["verdict"], "BLOCKED");
+        assert_eq!(content["timeout_kind"], "inactivity");
+        controller.cancel_qa_timeout("qa-real-timer");
+    }
+
+    #[tokio::test]
+    async fn qa_timeout_preserves_deadline_through_evaluator_respawn() {
+        let project = tempfile::tempdir().unwrap();
+        let controller = test_controller();
+        let mut session = qa_session_with("qa-respawn-clock", SessionState::QaInProgress { iteration: Some(1) }, project.path().to_path_buf(), false);
+        session.qa_timeout_secs = 1;
+        controller.insert_test_session(session);
+        controller.begin_qa_window("qa-respawn-clock").unwrap();
+        let original_timer = controller.qa_timeout_handles.lock()["qa-respawn-clock"].id();
+        controller.sessions.write().get_mut("qa-respawn-clock").unwrap().state = SessionState::SpawningEvaluator;
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert!(!controller.qa_timeout_handles.lock()["qa-respawn-clock"].is_finished(), "temporary respawn must retain the review clock");
+        {
+            let mut sessions = controller.sessions.write();
+            let session = sessions.get_mut("qa-respawn-clock").unwrap();
+            session.state = SessionState::QaInProgress { iteration: Some(1) };
+        }
+        controller.begin_qa_window("qa-respawn-clock").unwrap();
+        assert_eq!(controller.qa_timeout_handles.lock()["qa-respawn-clock"].id(), original_timer);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !matches!(controller.get_session("qa-respawn-clock").unwrap().state, SessionState::QaInconclusive) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.expect("elapsed inactivity deadline must survive respawn");
+        controller.cancel_qa_timeout("qa-respawn-clock");
+    }
+
+    fn p_prompt_matrix(cli: &str) -> Vec<(&'static str, String)> {
+        let project = Path::new("D:/Project Root");
+        let workspace = Path::new("D:/Project Root/.hive-manager/worktrees/p-session/primary");
+        let config = AgentConfig { cli: cli.to_string(), ..AgentConfig::default() };
+        let workers = vec![config.clone(), config.clone()];
+        let planner = super::PlannerConfig {
+            config: config.clone(), domain: "Backend".to_string(), workers: workers.clone(),
+        };
+        let variants = vec![FusionVariantMetadata {
+            index: 1, name: "Variant".to_string(), slug: "variant".to_string(),
+            branch: "fusion/p-session/variant".to_string(), worktree_path: "D:/Variant".to_string(),
+            task_file: "D:/Variant/.hive-manager/tasks/fusion-variant-1-task.md".to_string(),
+            agent_id: "p-session-fusion-1".to_string(),
+        }];
+        let variant_configs = vec![super::FusionVariantConfig {
+            name: "Variant".to_string(), cli: cli.to_string(), model: None, flags: vec![],
+        }];
+        let policy = HiveExecutionPolicy::default();
+        let role = crate::orchestrator::org_graph::definitions::resolve_role_definition(project, None, "backend");
+        let spawn = SpawnContext::default();
+        let root = SessionController::session_prompt_root(project, "p-session", cli);
+        let mut debate = debate_test_metadata();
+        debate.judge_config = config.clone();
+        let mut debater = debate_test_debater_with_cli(cli);
+        debater.config = config.clone();
+        let mut prompts = vec![
+            ("solo", SessionController::build_solo_evaluator_prompt("p-session", project, "D:/Workspace", None, cli)),
+            ("fusion-worker", SessionController::build_fusion_worker_prompt("p-session", 1, "Variant", "fusion/p-session/variant", "D:/Variant", "Implement", cli)),
+            ("fusion-judge", SessionController::build_fusion_judge_prompt("p-session", &variants, "D:/Decision.md", cli,)),
+            ("debater", SessionController::build_debate_debater_prompt("p-session", &debater, "Topic", 1, 2, Path::new("D:/argument.md"), None, "Prior arguments", Path::new("D:/task.md"), Path::new(""), crate::wiki::WikiState::Absent)),
+            ("debate-judge", SessionController::build_debate_judge_prompt("p-session", &debate, Path::new(""), cli, crate::wiki::WikiState::Absent, project)),
+            ("evaluator", SessionController::build_evaluator_prompt("p-session", &config, &[], 2, "D:/Workspace", false, project)),
+            ("prince", SessionController::build_prince_prompt("p-session", &config, &config, "D:/Workspace", WorkspaceStrategy::SharedCell, false, project)),
+            ("fusion-planner", SessionController::build_fusion_master_planner_prompt("p-session", "Task", &variant_configs, cli, project)),
+            ("debate-planner", SessionController::build_debate_master_planner_prompt("p-session", "Topic", &[], 2, project, cli)),
+            ("fusion-queen", SessionController::build_fusion_queen_prompt(cli, project, "p-session", &variants, "Task", true)),
+            ("master-planner", SessionController::build_master_planner_prompt("p-session", "Task", &config, &workers, &policy, project, workspace)),
+            ("swarm-master-planner", SessionController::build_swarm_master_planner_prompt("p-session", "Task", 2, &workers, cli, project)),
+            ("smoke", SessionController::build_smoke_test_prompt("p-session", &workers, true, None, project, cli, None,)),
+            ("swarm-smoke", SessionController::build_swarm_smoke_test_prompt("p-session", 2, &workers, true, None, project, cli)),
+            ("templated-queen", SessionController::build_templated_queen_prompt("queen-research", "p-session", &workers, Some("Task"), HashMap::new(), project, cli)),
+            ("queen", SessionController::build_queen_master_prompt(&config, project, workspace, "p-session", &workers, Some("Task"), true, true, &policy)),
+            ("worker", SessionController::build_worker_prompt(1, &config, &role, &spawn, "p-session-queen", "p-session", project, workspace, &policy)),
+            ("worker-tier", SessionController::build_worker_prompt_with_tier(1, &config, &role, &spawn, Some(TaskTier::Medium), "p-session-queen", "p-session", project, workspace, &policy)),
+            ("worker-artifact", SessionController::build_worker_prompt_artifact_with_tier(1, &config, &role, &spawn, false, &[], Some(TaskTier::Medium), "p-session-queen", "p-session", project, workspace, &policy, crate::session::slop_gate::SlopGateMode::Report, Some("T1")).prompt),
+            ("planner", SessionController::build_planner_prompt_with_http(&project.to_path_buf(), cli, 1, &planner, "p-session-queen", "p-session")),
+            ("swarm-queen", SessionController::build_swarm_queen_prompt(cli, "codex", project, "p-session", &[planner], Some("Task"), true)),
+            ("post-workers-on", SessionController::queen_post_workers_protocol("p-session", &root, true, false, cli)),
+            ("post-workers-off", SessionController::queen_post_workers_protocol("p-session", &root, false, false, cli)),
+            ("milestone-handoff", SessionController::build_qa_milestone_handoff("p-session", &root, "all workers", cli,)),
+        ];
+        for specialization in ["ui", "api", "a11y", "adversarial", "unknown"] {
+            prompts.push(("qa-worker", SessionController::build_qa_worker_prompt("p-session", 1, specialization, &config, &AuthStrategy::default(), "D:/Workspace", project)));
+        }
+        prompts
+    }
+
+    #[test]
+    fn p_main_checkout_prompt_paths_are_absolute_for_every_builder() {
+        for cli in ["claude", "codex", "cursor"] {
+            let expected = if cli == "cursor" { "/mnt/d/Project Root/.hive-manager/p-session" } else { "D:/Project Root/.hive-manager/p-session" };
+            for (name, prompt) in p_prompt_matrix(cli) {
+                assert!(!prompt.contains("failed to render"), "{name}/{cli}: {prompt}");
+                for relative in ["`.hive-manager/p-session/", "\".hive-manager/p-session/", "cat .hive-manager/p-session/", "\n.hive-manager/p-session/"] {
+                    assert!(!prompt.contains(relative), "{name}/{cli} has relative main-checkout path {relative}");
+                }
+                if ["solo", "fusion-planner", "debate-planner", "fusion-queen", "swarm-master-planner", "smoke", "swarm-smoke", "evaluator", "prince", "qa-worker", "queen", "planner", "swarm-queen", "post-workers-on", "post-workers-off", "milestone-handoff"].contains(&name) {
+                    assert!(prompt.contains(expected), "{name}/{cli} must use {expected}");
+                }
+                if name == "worker" {
+                    assert!(prompt.contains(".hive-manager/p-session/learnings.pending.jsonl in this workspace"));
+                }
+                if name == "fusion-worker" {
+                    assert!(prompt.contains(".hive-manager/tasks/fusion-variant-1-task.md"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn p_peer_handoff_readers_use_the_same_main_root_as_writers() {
+        let root = SessionController::session_prompt_root(Path::new("D:/Project Root"), "p-session", "cursor");
+        let handoff = SessionController::build_qa_milestone_handoff("p-session", &root, "all workers", "cursor",);
+        let evaluator = SessionController::evaluator_required_protocol("p-session", &root);
+        let prince = SessionController::prince_required_protocol("p-session", &root);
+        let queen = SessionController::queen_post_workers_protocol("p-session", &root, true, false, "cursor");
+        for (reader, file) in [(&evaluator, "milestone-ready.json"), (&prince, "qa-verdict.json"), (&queen, "qa-verdict.json")] {
+            let path = format!("/mnt/d/Project Root/.hive-manager/p-session/peer/{file}");
+            assert!(reader.contains(&path), "reader must use {path}");
+            assert!(handoff.contains(&path), "writer must use {path}");
+        }
+        assert!(queen.contains("/mnt/d/Project Root/.hive-manager/p-session/peer/prince-verdict.json"));
+    }
+
+    #[test]
+    fn p_api_curl_renders_every_controller_builder() {
+        for cli in ["cursor", "wsl", "claude", "codex"] {
+            let prompts = p_prompt_matrix(cli);
+            assert_eq!(prompts.len(), 29, "update coverage when the builder catalog changes");
+            let mut command_count = 0;
+            for (name, prompt) in prompts {
+                assert!(!prompt.contains("failed to render"), "{name}/{cli}: {prompt}");
+                let commands = prompt.lines().filter(|line| {
+                    (line.contains("localhost:18800") || line.contains("api_base_url"))
+                        && (line.contains("curl ") || line.contains("curl.exe "))
+                }).collect::<Vec<_>>();
+                command_count += commands.len();
+                if !["fusion-planner", "debate-planner", "master-planner", "swarm-master-planner", "swarm-smoke"].contains(&name) {
+                    assert!(!commands.is_empty(), "{name}/{cli} must exercise API commands");
+                }
+                for command in commands {
+                    if cli == "cursor" || cli == "wsl" {
+                        assert!(!command.contains("curl "), "{name}/{cli}: {command}");
+                    } else {
+                        assert!(!command.contains("curl.exe "), "{name}/{cli}: native command drift: {command}");
+                    }
+                }
+            }
+            assert!(command_count > 75, "fixture lost commands: {cli}: {command_count}");
+        }
+    }
+
+    #[test]
+    fn p_curl_selection_uses_the_executor_in_mixed_cli_sessions() {
+        let project = Path::new("D:/Project Root");
+        let cursor = AgentConfig { cli: "cursor".to_string(), ..AgentConfig::default() };
+        let codex = AgentConfig { cli: "codex".to_string(), ..AgentConfig::default() };
+        for (queen_cli, spawn_cli, expected, forbidden) in [
+            ("cursor", "codex", "curl.exe ", "curl "),
+            ("codex", "cursor", "curl ", "curl.exe "),
+        ] {
+            let prompt = SessionController::build_swarm_queen_prompt(queen_cli, spawn_cli, project, "p-session", &[], None, true);
+            let commands = prompt.lines().filter(|line| line.contains("localhost:18800") && line.contains(" -X POST ")).collect::<Vec<_>>();
+            assert!(!commands.is_empty());
+            for command in commands {
+                assert!(command.contains(expected), "{queen_cli}/{spawn_cli}: {command}");
+                assert!(!command.contains(forbidden), "{queen_cli}/{spawn_cli}: {command}");
+            }
+        }
+        let qa = [QaWorkerConfig { specialization: "api".to_string(), cli: "codex".to_string(), model: None, label: None, flags: None }];
+        let evaluator = SessionController::build_evaluator_prompt("p-session", &cursor, &qa, 0, "D:/Workspace", true, project);
+        assert!(evaluator.contains("curl.exe -X POST"));
+        assert!(evaluator.contains("\"cli\":\"codex\""));
+        let prince = SessionController::build_prince_prompt("p-session", &cursor, &codex, "D:/Workspace", WorkspaceStrategy::SharedCell, true, project);
+        for line in prince.lines().filter(|line| line.contains("localhost:18800")) {
+            assert!(!line.contains("curl "), "Prince executor must win over fixer CLI: {line}");
+        }
+    }
+
+    #[test]
+    fn p_tool_api_commands_use_document_executor_and_preserve_native_bytes() {
+        let legacy = "curl -X POST \"http://localhost:18800/api/sessions/s/workers\" \\\n  -H \"Content-Type: application/json\"\nOther curl examples stay unchanged.\n";
+        for cli in ["claude", "codex"] {
+            assert_eq!(SessionController::api_commands_for_cli(cli, legacy), legacy);
+        }
+        for (executor, spawn, expected, forbidden) in [
+            ("cursor", "codex", "curl.exe ", "curl "),
+            ("codex", "cursor", "curl ", "curl.exe "),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            SessionController::write_swarm_tool_files(&temp.path().to_path_buf(), "p-tools", 2, spawn, executor).unwrap();
+            let directory = temp.path().join(".hive-manager/p-tools/tools");
+            let mut command_count = 0;
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                let text = std::fs::read_to_string(entry.path()).unwrap();
+                for command in text.lines().filter(|line| line.contains("localhost:18800") && (line.contains("curl ") || line.contains("curl.exe "))) {
+                    command_count += 1;
+                    assert!(command.contains(expected), "{}: {command}", entry.path().display());
+                    assert!(!command.contains(forbidden), "{}: {command}", entry.path().display());
+                }
+                assert!(!text.contains("\".hive-manager/p-tools/"), "tool response paths must be absolute");
+            }
+            assert!(command_count >= 15, "tool fixtures lost API commands: {command_count}");
+        }
+    }
+
+    #[test]
+    fn qa_launch_timeout_setting_persists_and_defaults_without_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        for (id, requested, expected) in [("qa-default-setting", None, 300), ("qa-custom-setting", Some(720), 720)] {
+            controller.insert_test_session(qa_session_with(id, SessionState::Running, temp.path().join("project"), false));
+            let projection = controller.set_session_qa_timeout(id, requested).unwrap();
+            assert_eq!(projection.qa_timeout_secs, expected);
+            assert_eq!(controller.get_session(id).unwrap().qa_timeout_secs, expected);
+            let persisted = storage.load_session(id).unwrap();
+            assert_eq!(persisted.qa_timeout_secs, expected);
+            let mut legacy = serde_json::to_value(persisted).unwrap();
+            legacy.as_object_mut().unwrap().remove("qa_timeout_secs");
+            let legacy: crate::storage::PersistedSession = serde_json::from_value(legacy).unwrap();
+            assert_eq!(legacy.qa_timeout_secs, 300, "old sessions need no migration");
+        }
+    }
+
+    #[test]
+    fn qa_launch_timeout_persistence_failure_restores_runtime_setting() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        controller.insert_test_session(qa_session_with("qa-setting-write-failure", SessionState::Running, temp.path().join("project"), false));
+        storage.create_session_dir("qa-setting-write-failure").unwrap();
+        std::fs::create_dir(storage.session_dir("qa-setting-write-failure").join("session.json")).unwrap();
+        let error = controller.set_session_qa_timeout("qa-setting-write-failure", Some(720)).unwrap_err();
+        assert!(error.contains("Failed to persist QA timeout"));
+        assert_eq!(controller.get_session("qa-setting-write-failure").unwrap().qa_timeout_secs, 300);
+    }
+
+    #[test]
+    fn qa_launch_setting_updates_armed_inactivity_without_resetting_ceiling() {
+        let mut session = qa_session_with("qa-fast-milestone", SessionState::QaInProgress { iteration: None }, PathBuf::from("."), false);
+        let mut window = super::QaTimeoutWindow::new(300, &session, None);
+        session.qa_timeout_secs = 720;
+        assert_eq!(window.expired(std::time::Duration::from_secs(300), &session, None), None);
+        assert_eq!(window.expired(std::time::Duration::from_secs(720), &session, None), Some("inactivity"));
+        session.qa_timeout_secs = u64::MAX;
+        assert_eq!(window.expired(std::time::Duration::from_secs(2700), &session, None), Some("absolute ceiling"));
+    }
+
 }

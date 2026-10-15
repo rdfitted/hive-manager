@@ -2052,17 +2052,23 @@ async fn post_task_worker(app: &axum::Router, task_id: &str) -> axum::response::
         .unwrap()
 }
 
+fn heartbeat_fixture_token(controller: &Arc<RwLock<SessionController>>, session_id: &str, agent_id: &str) -> String {
+    controller.read().heartbeat_token_for_test(session_id, agent_id)
+}
+
 async fn post_heartbeat(
     app: &axum::Router,
+    controller: &Arc<RwLock<SessionController>>,
     session_id: &str,
     agent_id: &str,
     status: &str,
 ) -> axum::response::Response {
-    post_heartbeat_with_assignment(app, session_id, agent_id, status, None).await
+    post_heartbeat_with_assignment(app, controller, session_id, agent_id, status, None).await
 }
 
 async fn post_heartbeat_with_assignment(
     app: &axum::Router,
+    controller: &Arc<RwLock<SessionController>>,
     session_id: &str,
     agent_id: &str,
     status: &str,
@@ -2081,6 +2087,7 @@ async fn post_heartbeat_with_assignment(
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{session_id}/heartbeat"))
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(controller, session_id, agent_id))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&payload).unwrap()))
                 .unwrap(),
@@ -2091,16 +2098,18 @@ async fn post_heartbeat_with_assignment(
 
 async fn post_heartbeat_with_completed_nodes(
     app: &axum::Router,
+    controller: &Arc<RwLock<SessionController>>,
     session_id: &str,
     agent_id: &str,
     completed_nodes: &[&str],
 ) -> axum::response::Response {
-    post_heartbeat_with_completed_node_entries(app, session_id, agent_id, json!(completed_nodes))
+    post_heartbeat_with_completed_node_entries(app, controller, session_id, agent_id, json!(completed_nodes))
         .await
 }
 
 async fn post_heartbeat_with_completed_node_entries(
     app: &axum::Router,
+    controller: &Arc<RwLock<SessionController>>,
     session_id: &str,
     agent_id: &str,
     completed_nodes: serde_json::Value,
@@ -2110,6 +2119,7 @@ async fn post_heartbeat_with_completed_node_entries(
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{session_id}/heartbeat"))
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(controller, session_id, agent_id))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
@@ -2161,9 +2171,13 @@ async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
         role_definition_version: None,
     });
     controller.read().insert_test_session(session);
+    StateManager::new(session_dir.clone()).update_hierarchy(&[crate::coordination::HierarchyNode {
+        id: worker_id.clone(), role: "Worker-1".to_string(), principal: Some("worker".to_string()),
+        parent_id: Some(format!("{session_id}-queen")), children: Vec::new(),
+    }]).unwrap();
 
     let rejected =
-        post_heartbeat_with_completed_nodes(&app, session_id, "worker-1", &["T2", "UNKNOWN"]).await;
+        post_heartbeat_with_completed_nodes(&app, &controller, session_id, "worker-1", &["T2", "UNKNOWN"]).await;
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
     let rejected_body = String::from_utf8(
         to_bytes(rejected.into_body(), usize::MAX)
@@ -2184,6 +2198,7 @@ async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
 
     let conflicting = post_heartbeat_with_completed_node_entries(
         &app,
+        &controller,
         session_id,
         "worker-1",
         json!([
@@ -2253,6 +2268,7 @@ async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
     });
     let accepted = post_heartbeat_with_completed_node_entries(
         &app,
+        &controller,
         session_id,
         "worker-1",
         json!([
@@ -2421,7 +2437,7 @@ async fn http_reassignment_refreshes_finalized_liveness_and_restores_stall_cover
 
     // Post a bare alias so the HTTP handler must resolve it to the roster/queue identity.
     assert_eq!(
-        post_heartbeat(&app, session_id, "worker-1", "completed")
+        post_heartbeat(&app, &controller, session_id, "worker-1", "completed")
             .await
             .status(),
         StatusCode::OK
@@ -2471,6 +2487,7 @@ async fn http_reassignment_refreshes_finalized_liveness_and_restores_stall_cover
     assert_eq!(
         post_heartbeat_with_assignment(
             &app,
+            &controller,
             session_id,
             "worker-1",
             "working",
@@ -3450,13 +3467,13 @@ async fn queen_completed_node_unblocks_the_same_task_spawn_only_after_ownership_
 
     state_manager.update_hierarchy(&hierarchy).unwrap();
     let wrong_owner =
-        post_heartbeat_with_completed_nodes(&app, session_id, &principal_id, &["T0"]).await;
+        post_heartbeat_with_completed_nodes(&app, &controller, session_id, &principal_id, &["T0"]).await;
     assert_eq!(wrong_owner.status(), StatusCode::BAD_REQUEST);
     assert_eq!(repo.pending_dependencies(&queued_id).unwrap(), vec!["T0"]);
-    assert_eq!(post_heartbeat(&app, session_id, "queen", "working").await.status(), StatusCode::OK);
+    assert_eq!(post_heartbeat(&app, &controller, session_id, "queen", "working").await.status(), StatusCode::OK);
     assert_eq!(repo.pending_dependencies(&queued_id).unwrap(), vec!["T0"]);
     assert_eq!(
-        post_heartbeat_with_completed_nodes(&app, session_id, "queen", &["T2"])
+        post_heartbeat_with_completed_nodes(&app, &controller, session_id, "queen", &["T2"])
             .await
             .status(),
         StatusCode::OK
@@ -3464,7 +3481,7 @@ async fn queen_completed_node_unblocks_the_same_task_spawn_only_after_ownership_
     assert_eq!(repo.pending_dependencies(&queued_id).unwrap(), vec!["T0"]);
 
     assert_eq!(
-        post_heartbeat_with_completed_nodes(&app, session_id, "queen", &["T0"])
+        post_heartbeat_with_completed_nodes(&app, &controller, session_id, "queen", &["T0"])
             .await
             .status(),
         StatusCode::OK
@@ -3601,7 +3618,7 @@ async fn queen_external_completion_keeps_dependent_code_conflict_serialized() {
         StatusCode::CREATED
     );
     assert_eq!(
-        post_heartbeat_with_completed_nodes(&app, session_id, "queen", &["T0"])
+        post_heartbeat_with_completed_nodes(&app, &controller, session_id, "queen", &["T0"])
             .await
             .status(),
         StatusCode::OK
@@ -3714,6 +3731,7 @@ async fn queen_legacy_completion_for_another_principal_does_not_unblock() {
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{session_id}/heartbeat"))
+                .header("X-Hive-Agent-Token", heartbeat_fixture_token(&controller, session_id, "queen"))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"agent_id":"queen","status":"completed","completed_nodes":["T0"]}"#,
