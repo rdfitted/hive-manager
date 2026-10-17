@@ -154,14 +154,17 @@ pub(crate) fn bounded_probe_with_timeout(
     root: &Path,
     timeout: Duration,
 ) -> Option<Vec<u8>> {
-    let mut child = match Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(args)
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+        .stderr(Stdio::null());
+    // These probes run on every launch, round, and judge batch; without this,
+    // a windowed build opens a console for each git/gh call.
+    crate::process::hide_std_console_window(&mut command);
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(_) => return None,
     };
