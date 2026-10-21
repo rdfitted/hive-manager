@@ -1,6 +1,22 @@
 import { writable } from 'svelte/store';
 
-export type RightPanelTab = 'status' | 'plan' | 'graph' | 'logs' | 'chat' | 'timeline' | 'files' | 'review';
+export type RightPanelTab = 'overview' | 'activity' | 'changes';
+
+export function migrateRightTab(raw: unknown): RightPanelTab {
+  switch (raw) {
+    case 'activity':
+    case 'logs':
+    case 'chat':
+    case 'timeline':
+      return 'activity';
+    case 'changes':
+    case 'review':
+    case 'files':
+      return 'changes';
+    default:
+      return 'overview';
+  }
+}
 
 export interface LayoutState {
   leftCollapsed: boolean;
@@ -12,6 +28,7 @@ export interface LayoutState {
   recentCollapsed: boolean;
   agentsCollapsed: boolean;
   maximizedTerminalId: string | null;
+  sessionViewMode: 'focus' | 'grid';
 }
 
 const STORAGE_KEY = 'hive-manager-layout';
@@ -27,11 +44,12 @@ const defaultLayout: LayoutState = {
   leftWidth: 250,
   rightCollapsed: false,
   rightWidth: 320,
-  rightTab: 'status',
+  rightTab: 'overview',
   sessionsCollapsed: false,
   recentCollapsed: true,
   agentsCollapsed: false,
   maximizedTerminalId: null,
+  sessionViewMode: 'focus',
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -47,6 +65,8 @@ function loadInitial(): LayoutState {
     return {
       ...defaultLayout,
       ...parsed,
+      sessionViewMode: parsed.sessionViewMode === 'grid' ? 'grid' : 'focus',
+      rightTab: migrateRightTab(parsed.rightTab),
       leftWidth: clamp(parsed.leftWidth ?? defaultLayout.leftWidth, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX),
       rightWidth: clamp(parsed.rightWidth ?? defaultLayout.rightWidth, RIGHT_WIDTH_MIN, RIGHT_WIDTH_MAX),
       // Maximizing is intentionally transient: reopening the app always restores the grid.
@@ -111,6 +131,15 @@ export function createLayoutStore() {
       updateAndPersist((s) => ({
         ...s,
         maximizedTerminalId: s.maximizedTerminalId === id ? null : id,
+      }));
+    },
+    setSessionViewMode(mode: LayoutState['sessionViewMode']) {
+      updateAndPersist((s) => ({ ...s, sessionViewMode: mode }));
+    },
+    toggleSessionViewMode() {
+      updateAndPersist((s) => ({
+        ...s,
+        sessionViewMode: s.sessionViewMode === 'focus' ? 'grid' : 'focus',
       }));
     },
   };
