@@ -1,26 +1,16 @@
 <script lang="ts">
-  import { ChartBar, ChatCenteredText, ClockCounterClockwise, FileText, Graph, ListBullets, NotePencil, SidebarSimple } from 'phosphor-svelte';
+  import { ChartBar, ChatCenteredText, FileText, SidebarSimple } from 'phosphor-svelte';
   import { layout, RAIL_WIDTH, type RightPanelTab } from '$lib/stores/layout';
   import { shortcutLabel } from '$lib/platform';
-  import StatusPanel from './StatusPanel.svelte';
-  import PlanView from './PlanView.svelte';
-  import WorkGraphView from './workgraph/WorkGraphView.svelte';
-  import CoordinationPanel from './CoordinationPanel.svelte';
-  import ConversationViewer from './ConversationViewer.svelte';
-  import TimelineView from './timeline/TimelineView.svelte';
-  import SessionFilesView from './SessionFilesView.svelte';
-  import ReviewView from './review/ReviewView.svelte';
+  import OverviewTab from './rail/OverviewTab.svelte';
+  import ActivityTab from './rail/ActivityTab.svelte';
+  import ChangesTab from './rail/ChangesTab.svelte';
   import ResizeHandle from './ResizeHandle.svelte';
 
   const TABS: Array<{ id: RightPanelTab; label: string; icon: typeof ChartBar }> = [
-    { id: 'status', label: 'Status', icon: ChartBar },
-    { id: 'plan', label: 'Plan', icon: NotePencil },
-    { id: 'graph', label: 'Graph', icon: Graph },
-    { id: 'review', label: 'Review', icon: FileText },
-    { id: 'files', label: 'Files', icon: FileText },
-    { id: 'logs', label: 'Logs', icon: ListBullets },
-    { id: 'chat', label: 'Chat', icon: ChatCenteredText },
-    { id: 'timeline', label: 'Timeline', icon: ClockCounterClockwise },
+    { id: 'overview', label: 'Overview', icon: ChartBar },
+    { id: 'activity', label: 'Activity', icon: ChatCenteredText },
+    { id: 'changes', label: 'Changes', icon: FileText },
   ];
 
   let collapsed = $derived($layout.rightCollapsed);
@@ -49,6 +39,7 @@
         onclick={() => layout.activateRightTab(tab.id)}
         title={tab.label}
         aria-label={tab.label}
+        aria-pressed={activeTab === tab.id && !collapsed}
       >
         <Icon size={18} weight="light" />
       </button>
@@ -87,22 +78,12 @@
     </div>
 
     <div class="tab-content">
-      {#if activeTab === 'status'}
-        <StatusPanel />
-      {:else if activeTab === 'plan'}
-        <PlanView />
-      {:else if activeTab === 'graph'}
-        <WorkGraphView />
-      {:else if activeTab === 'logs'}
-        <CoordinationPanel />
-      {:else if activeTab === 'timeline'}
-        <TimelineView />
-      {:else if activeTab === 'review'}
-        <ReviewView />
-      {:else if activeTab === 'files'}
-        <SessionFilesView />
+      {#if activeTab === 'overview'}
+        <OverviewTab />
+      {:else if activeTab === 'activity'}
+        <ActivityTab />
       {:else}
-        <ConversationViewer />
+        <ChangesTab />
       {/if}
     </div>
 

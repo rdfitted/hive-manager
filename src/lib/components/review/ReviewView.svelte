@@ -7,6 +7,7 @@
   interface FileDiff { path: string; unified: string; binary: boolean; truncated: boolean }
   interface ReviewDiff { base: string; agent_id: string; files: FileDiff[]; truncated: boolean }
   interface Draft { file: string; line: number | undefined; comment: string }
+  let { preferredAgentId }: { preferredAgentId?: string } = $props();
   let cells = $state<Cell[]>([]);
   let cellId = $state('');
   let agentId = $state('');
@@ -44,6 +45,15 @@
         }).catch((cause: Error) => { if (current) error = cause.message; });
     }
     return () => { current = false; };
+  });
+
+  $effect(() => {
+    const preferred = preferredAgentId;
+    const matchingCell = preferred ? cells.find((cell) => cell.agents.includes(preferred)) : undefined;
+    if (matchingCell) {
+      cellId = matchingCell.id;
+      agentId = preferred!;
+    }
   });
 
   $effect(() => {
