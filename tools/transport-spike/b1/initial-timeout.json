@@ -1,0 +1,16 @@
+{
+  "version": "codex-cli 0.163.0",
+  "schema_files": 318,
+  "schema_sha256": "b889535466ed1da1b0a456d38cda727fbf6e54f58f69dc217606a2d5cba56cba",
+  "transport": "stdio JSONL",
+  "events": [],
+  "responses": [],
+  "cwd_matches": null,
+  "command_cwd_matches": null,
+  "sqlite_home_contains_databases": true,
+  "approval_policy_never": null,
+  "sandbox_danger_full_access": null,
+  "stopped": "timeout",
+  "sqlite_database_count": 5,
+  "duration_ms": 190964.82
+}
