@@ -223,9 +223,13 @@ impl InjectionManager {
 
         let mut results = Vec::new();
         for worker_id in worker_ids {
+            // Shell control commands must not receive conversational nonce decoration.
             let result = self
-                .write_to_agent(worker_id, &git_command, true)
-                .map(|_| ());
+                .pty_manager
+                .read()
+                .submit(worker_id, git_command.as_bytes())
+                .map(|_| ())
+                .map_err(|e| InjectionError::PtyError(format!("Failed to write: {}", e)));
 
             let status = if result.is_ok() { "initiated" } else { "failed" };
             let log_msg = format!(
@@ -541,6 +545,39 @@ fn format_agent_display(agent_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn branch_switch_submits_without_nonce_but_messages_keep_nonce() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = SessionStorage::new_with_base(root.path().to_path_buf()).unwrap();
+        storage.create_session_dir("test").unwrap();
+        let pty = Arc::new(RwLock::new(PtyManager::new()));
+        pty.read().create_session(
+            "test-worker-1".into(),
+            crate::pty::AgentRole::Worker { index: 1, parent: None },
+            "claude", &[], None, 80, 24,
+        ).unwrap();
+        let manager = InjectionManager::new(Arc::clone(&pty), storage);
+        assert!(matches!(manager.queen_switch_branch("test", "test-worker-1", &[], "topic"),
+            Err(InjectionError::NotAuthorized(_))));
+        let results = manager.queen_switch_branch("test", "test-queen",
+            &["test-worker-1".into(), "missing-worker-2".into()], "topic").unwrap();
+        assert!(results[0].1.is_ok());
+        assert!(matches!(results[1].1, Err(InjectionError::PtyError(_))));
+        let writes = pty.read().write_records_for_test("test-worker-1").unwrap();
+        let payload = writes.concat();
+        let payload = String::from_utf8(payload).unwrap();
+        assert!(payload.contains("git switch topic"));
+        assert!(!payload.contains("[hive-msg:"));
+        assert_eq!(writes.last().unwrap(), b"\r");
+
+        let receipt = manager.write_to_agent("test-worker-1", "ordinary message", true).unwrap();
+        let nonce = receipt.nonce.unwrap();
+        let writes = pty.read().write_records_for_test("test-worker-1").unwrap();
+        assert!(String::from_utf8(writes.concat()).unwrap().contains(&nonce));
+        assert_eq!(writes.last().unwrap(), b"\r");
+    }
 
     #[test]
     fn test_format_agent_display() {

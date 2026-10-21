@@ -26,17 +26,27 @@ def main():
     project.mkdir()
     store = root / 'sqlite'
     store.mkdir()
-    subprocess.run(['git', 'init', '--quiet', str(project)], check=True, capture_output=True)
+    try:
+        subprocess.run(['git', 'init', '--quiet', str(project)], check=True,
+                       capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise SystemExit('Git initialization timed out (details withheld)') from None
     # This is a throwaway git init, never a branch/worktree of the application.
     schema = root / 'schema'
-    subprocess.run([args.codex, 'app-server', 'generate-json-schema', '--out', str(schema)],
-                   check=True, capture_output=True)
+    try:
+        subprocess.run([args.codex, 'app-server', 'generate-json-schema', '--out', str(schema)],
+                       check=True, capture_output=True, timeout=args.timeout)
+    except subprocess.TimeoutExpired:
+        raise SystemExit('Schema generation timed out (details withheld)') from None
     digest = hashlib.sha256()
     schema_files = sorted(schema.rglob('*.json'))
     for path in schema_files:
         digest.update(path.relative_to(schema).as_posix().encode())
         digest.update(path.read_bytes())
-    version = subprocess.check_output([args.codex, '--version'], text=True).strip()
+    try:
+        version = subprocess.check_output([args.codex, '--version'], text=True, timeout=60).strip()
+    except subprocess.TimeoutExpired:
+        raise SystemExit('Version lookup timed out (details withheld)') from None
     child_env = os.environ.copy()
     if args.isolated_startup or args.isolated_home:
         empty_home = root / 'empty-home'
