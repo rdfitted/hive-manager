@@ -1,0 +1,33 @@
+{
+  "version": "codex-cli 0.163.0",
+  "schema_files": 318,
+  "schema_sha256": "b889535466ed1da1b0a456d38cda727fbf6e54f58f69dc217606a2d5cba56cba",
+  "transport": "stdio JSONL",
+  "events": [],
+  "responses": [
+    {
+      "method": "initialize",
+      "elapsed_ms": 677.82,
+      "ok": true,
+      "error_code": null
+    }
+  ],
+  "cwd_matches": null,
+  "command_cwd_matches": null,
+  "sqlite_home_contains_databases": true,
+  "approval_policy_never": null,
+  "sandbox_danger_full_access": null,
+  "isolated_startup_only": true,
+  "invalid_json_lines": 0,
+  "stopped": "initialize-only diagnostic complete",
+  "stderr_category_counts": {
+    "error": 0,
+    "warn": 1,
+    "mcp": 0,
+    "config": 0,
+    "hook": 0,
+    "auth": 0
+  },
+  "sqlite_database_count": 5,
+  "duration_ms": 775.05
+}

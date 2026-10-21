@@ -1,0 +1,235 @@
+{
+  "version": "codex-cli 0.163.0",
+  "schema_files": 318,
+  "schema_sha256": "b889535466ed1da1b0a456d38cda727fbf6e54f58f69dc217606a2d5cba56cba",
+  "transport": "stdio JSONL",
+  "events": [
+    {
+      "method": "configWarning",
+      "elapsed_ms": 255080.95
+    },
+    {
+      "method": "remoteControl/status/changed",
+      "elapsed_ms": 255080.98
+    },
+    {
+      "method": "account/updated",
+      "elapsed_ms": 255711.93
+    },
+    {
+      "method": "thread/started",
+      "elapsed_ms": 261129.5
+    },
+    {
+      "method": "warning",
+      "elapsed_ms": 261129.68
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 261129.75
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 261129.77
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 261129.78
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 261129.79
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 261129.82
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 261129.85
+    },
+    {
+      "method": "thread/status/changed",
+      "elapsed_ms": 261280.31
+    },
+    {
+      "method": "turn/started",
+      "elapsed_ms": 261293.64,
+      "thread_matches": true
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 261898.36
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 262191.01
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 262388.24
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 262499.64
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 262771.27
+    },
+    {
+      "method": "mcpServer/startupStatus/updated",
+      "elapsed_ms": 263560.04
+    },
+    {
+      "method": "item/started",
+      "elapsed_ms": 264266.17,
+      "thread_matches": true,
+      "item_type": "userMessage"
+    },
+    {
+      "method": "item/completed",
+      "elapsed_ms": 264266.32,
+      "thread_matches": true,
+      "item_type": "userMessage"
+    },
+    {
+      "method": "item/started",
+      "elapsed_ms": 267797.51,
+      "thread_matches": true,
+      "item_type": "commandExecution",
+      "cwd_matches": true
+    },
+    {
+      "method": "item/commandExecution/outputDelta",
+      "elapsed_ms": 268577.32,
+      "thread_matches": true
+    },
+    {
+      "method": "item/commandExecution/outputDelta",
+      "elapsed_ms": 268631.93,
+      "thread_matches": true
+    },
+    {
+      "method": "item/commandExecution/outputDelta",
+      "elapsed_ms": 268632.36,
+      "thread_matches": true
+    },
+    {
+      "method": "item/commandExecution/outputDelta",
+      "elapsed_ms": 268634.09,
+      "thread_matches": true
+    },
+    {
+      "method": "item/commandExecution/outputDelta",
+      "elapsed_ms": 268634.18,
+      "thread_matches": true
+    },
+    {
+      "method": "item/commandExecution/outputDelta",
+      "elapsed_ms": 268634.6,
+      "thread_matches": true
+    },
+    {
+      "method": "item/commandExecution/outputDelta",
+      "elapsed_ms": 268634.66,
+      "thread_matches": true
+    },
+    {
+      "method": "item/commandExecution/outputDelta",
+      "elapsed_ms": 268636.66,
+      "thread_matches": true
+    },
+    {
+      "method": "item/completed",
+      "elapsed_ms": 268890.96,
+      "thread_matches": true,
+      "item_type": "commandExecution",
+      "cwd_matches": true
+    },
+    {
+      "method": "thread/tokenUsage/updated",
+      "elapsed_ms": 268897.62
+    },
+    {
+      "method": "account/rateLimits/updated",
+      "elapsed_ms": 268897.71
+    },
+    {
+      "method": "item/started",
+      "elapsed_ms": 271137.41,
+      "thread_matches": true,
+      "item_type": "agentMessage"
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "elapsed_ms": 271142.87,
+      "thread_matches": true
+    },
+    {
+      "method": "item/completed",
+      "elapsed_ms": 271193.82,
+      "thread_matches": true,
+      "item_type": "agentMessage"
+    },
+    {
+      "method": "thread/tokenUsage/updated",
+      "elapsed_ms": 271228.3
+    },
+    {
+      "method": "account/rateLimits/updated",
+      "elapsed_ms": 271228.92
+    },
+    {
+      "method": "thread/status/changed",
+      "elapsed_ms": 271280.0
+    },
+    {
+      "method": "turn/completed",
+      "elapsed_ms": 271280.5,
+      "thread_matches": true
+    }
+  ],
+  "responses": [
+    {
+      "method": "initialize",
+      "elapsed_ms": 255080.6,
+      "ok": true,
+      "error_code": null
+    },
+    {
+      "method": "thread/start",
+      "elapsed_ms": 6048.24,
+      "ok": true,
+      "error_code": null
+    },
+    {
+      "method": "turn/start",
+      "elapsed_ms": 150.03,
+      "ok": true,
+      "error_code": null
+    }
+  ],
+  "cwd_matches": true,
+  "command_cwd_matches": true,
+  "sqlite_home_contains_databases": true,
+  "approval_policy_never": true,
+  "sandbox_danger_full_access": true,
+  "ack_has_turn_id": true,
+  "turn_started_ms": 163.52,
+  "started_turn_id_present": true,
+  "started_id_matches_ack": true,
+  "command_exit_zero": true,
+  "completion_status": "completed",
+  "completed_turn_matches": true,
+  "stderr_category_counts": {
+    "error": 2,
+    "warn": 0,
+    "mcp": 1,
+    "config": 3,
+    "hook": 0,
+    "auth": 1
+  },
+  "sqlite_database_count": 5,
+  "duration_ms": 271497.26
+}

@@ -292,6 +292,10 @@ pub enum SessionTypeInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct PersistedAgentInfo {
+    #[serde(default)]
+    pub transcript_spawned_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub transcript_session_id: Option<String>,
     pub id: String,
     pub role: String,
     pub config: PersistedAgentConfig,
@@ -2057,6 +2061,8 @@ mod tests {
             created_at: Utc::now(),
             last_activity_at: Some(Utc::now()),
             agents: vec![PersistedAgentInfo {
+                transcript_spawned_at: None,
+                transcript_session_id: None,
                 id: format!("{session_id}-worker-1"),
                 role: "Worker(1)".to_string(),
                 config: PersistedAgentConfig {
@@ -2255,6 +2261,8 @@ mod tests {
     #[test]
     fn a33_populated_persisted_agent_role_reference_round_trips() {
         let agent = PersistedAgentInfo {
+            transcript_spawned_at: None,
+            transcript_session_id: None,
             id: "agent-reviewer".to_string(),
             role: "Worker(1)".to_string(),
             config: PersistedAgentConfig {

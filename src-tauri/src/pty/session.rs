@@ -283,14 +283,31 @@ fn resolve_submit_gap(
     override_gap.unwrap_or(policy.default_gap)
 }
 
-fn submit_gap(policy: PtySubmitPolicy) -> Duration {
+const CODEX_SUBMIT_GAP_BASE: Duration = Duration::from_millis(150);
+
+fn resolve_payload_submit_gap(
+    policy: PtySubmitPolicy,
+    override_gap: Option<Duration>,
+    payload_len: usize,
+) -> Duration {
+    if let Some(gap) = override_gap {
+        return gap;
+    }
+    if policy.adapter == Some("codex") {
+        crate::adapters::CodexAdapter::codex_scaled_submit_gap(CODEX_SUBMIT_GAP_BASE, payload_len)
+    } else {
+        resolve_submit_gap(policy, None)
+    }
+}
+
+fn submit_gap(policy: PtySubmitPolicy, payload_len: usize) -> Duration {
     let override_value = std::env::var_os(SUBMIT_GAP_ENV);
     let override_gap = cached_submit_gap_override(
         &RUNTIME_SUBMIT_GAP,
         override_value.as_deref(),
         warn_rejected_submit_gap_override,
     );
-    resolve_submit_gap(policy, override_gap)
+    resolve_payload_submit_gap(policy, override_gap, payload_len)
 }
 // END SHARED SUBMIT GAP OVERRIDE POLICY
 
@@ -538,7 +555,7 @@ impl PtySession {
         };
         // Keep the per-session writer locked so no concurrent write can be
         // interleaved and accidentally submitted by this Enter.
-        std::thread::sleep(submit_gap(self.submit_policy));
+        std::thread::sleep(submit_gap(self.submit_policy, payload_bytes_written));
         let submit_bytes_written = Self::write_submit_keystroke_locked(&mut writer)?;
         Ok(PtySubmitResult {
             payload_bytes_written,

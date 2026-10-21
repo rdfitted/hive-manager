@@ -1,0 +1,134 @@
+{
+  "version": "codex-cli 0.163.0",
+  "schema_files": 318,
+  "schema_sha256": "b889535466ed1da1b0a456d38cda727fbf6e54f58f69dc217606a2d5cba56cba",
+  "transport": "stdio JSONL",
+  "events": [
+    {
+      "method": "remoteControl/status/changed",
+      "elapsed_ms": 473.8
+    },
+    {
+      "method": "thread/started",
+      "elapsed_ms": 585.43
+    },
+    {
+      "method": "thread/status/changed",
+      "elapsed_ms": 617.13
+    },
+    {
+      "method": "turn/started",
+      "elapsed_ms": 617.8,
+      "thread_matches": true
+    },
+    {
+      "method": "item/started",
+      "elapsed_ms": 783.74,
+      "thread_matches": true,
+      "item_type": "userMessage"
+    },
+    {
+      "method": "item/completed",
+      "elapsed_ms": 783.8,
+      "thread_matches": true,
+      "item_type": "userMessage"
+    },
+    {
+      "method": "error",
+      "elapsed_ms": 1059.14
+    },
+    {
+      "method": "error",
+      "elapsed_ms": 1497.13
+    },
+    {
+      "method": "error",
+      "elapsed_ms": 2281.72
+    },
+    {
+      "method": "error",
+      "elapsed_ms": 4012.48
+    },
+    {
+      "method": "warning",
+      "elapsed_ms": 7302.9
+    },
+    {
+      "method": "error",
+      "elapsed_ms": 7475.33
+    },
+    {
+      "method": "error",
+      "elapsed_ms": 7860.82
+    },
+    {
+      "method": "error",
+      "elapsed_ms": 8430.71
+    },
+    {
+      "method": "error",
+      "elapsed_ms": 9469.84
+    },
+    {
+      "method": "error",
+      "elapsed_ms": 11227.9
+    },
+    {
+      "method": "thread/status/changed",
+      "elapsed_ms": 14408.68
+    },
+    {
+      "method": "error",
+      "elapsed_ms": 14409.06
+    },
+    {
+      "method": "turn/completed",
+      "elapsed_ms": 14409.15,
+      "thread_matches": true
+    }
+  ],
+  "responses": [
+    {
+      "method": "initialize",
+      "elapsed_ms": 473.43,
+      "ok": true,
+      "error_code": null
+    },
+    {
+      "method": "thread/start",
+      "elapsed_ms": 111.01,
+      "ok": true,
+      "error_code": null
+    },
+    {
+      "method": "turn/start",
+      "elapsed_ms": 31.09,
+      "ok": true,
+      "error_code": null
+    }
+  ],
+  "cwd_matches": true,
+  "command_cwd_matches": null,
+  "sqlite_home_contains_databases": true,
+  "approval_policy_never": true,
+  "sandbox_danger_full_access": true,
+  "isolated_startup_only": false,
+  "isolated_home": true,
+  "invalid_json_lines": 0,
+  "ack_has_turn_id": true,
+  "turn_started_ms": 31.92,
+  "started_turn_id_present": true,
+  "started_id_matches_ack": true,
+  "completion_status": "failed",
+  "completed_turn_matches": true,
+  "stderr_category_counts": {
+    "error": 7,
+    "warn": 1,
+    "mcp": 0,
+    "config": 0,
+    "hook": 0,
+    "auth": 7
+  },
+  "sqlite_database_count": 5,
+  "duration_ms": 14437.21
+}

@@ -1,0 +1,30 @@
+{
+  "source": "codex-cli 0.163.0 app-server generate-json-schema (non-experimental bundle)",
+  "interpretation": "Schema inspection only; not live behavior",
+  "thread_start": {
+    "file": "v2/ThreadStartParams.json",
+    "fields": ["cwd", "approvalPolicy", "sandbox", "model", "ephemeral"],
+    "approvalPolicy_accepts_never": true,
+    "sandbox_accepts_danger_full_access": true
+  },
+  "turn_start_response": {
+    "file": "v2/TurnStartResponse.json",
+    "required": ["turn"],
+    "turn_required": ["id", "items", "status"]
+  },
+  "turn_started": {
+    "file": "v2/TurnStartedNotification.json",
+    "required": ["threadId", "turn"],
+    "client_message_id_echo": false
+  },
+  "approval_requests": {
+    "file": "ServerRequest.json",
+    "methods": ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"],
+    "correlation_fields": ["threadId", "turnId", "itemId"]
+  },
+  "delegation": {
+    "schema_has_collab_agent_tool_call": true,
+    "live_native_delegation": "UNMEASURED",
+    "assignment_contract_confinement": "UNMEASURED"
+  }
+}

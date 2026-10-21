@@ -6,7 +6,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+use crate::delivery::{self, Confirmation, Delivery};
 
 use super::{validate_agent_id, validate_session_id};
 use crate::coordination::{InjectionError, InjectionReceipt};
@@ -17,7 +18,10 @@ fn default_submit() -> bool {
     true
 }
 
-const INJECTION_EVIDENCE_SCOPE: &str = "These facts prove only that bytes were written and the PTY output ring was observed for bounded windows; they do not prove that the agent took a turn. submit_confirmed is heuristic: true means sustained post-submit ring activity consistent with the composer accepting Enter from a receiver that was quiet before the payload write, false means Enter produced no observable reaction within the confirmation window, null means unknown or not applicable. Sustained pre-write receiver activity makes an otherwise positive observation indeterminate.";
+const INJECTION_EVIDENCE_SCOPE: &str = "submit_confirmed true means a nonce-matched user message and following turn start were recorded in the agent transcript. null means unknown, pending, unavailable or not requested. false requires transcript timeout and visibly staged text. PTY screen activity is advisory and never confirms delivery. Transcript evidence does not identify who pressed Enter.";
+const TRANSCRIPT_SYNC_WAIT: Duration = Duration::from_secs(8);
+const TRANSCRIPT_WATCH_LIMIT: Duration = Duration::from_secs(60);
+const TRANSCRIPT_POLL: Duration = Duration::from_millis(250);
 const INJECTION_ACTIVITY_OBSERVATION_WINDOW: Duration = Duration::from_millis(250);
 const INJECTION_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SUBMIT_KEYSTROKE: &[u8] = b"\r";
@@ -53,6 +57,8 @@ struct InjectionObservation {
 }
 
 struct InjectionMeasurement {
+    delivery: Delivery,
+    delivery_elapsed_ms: u64,
     pre_write_baseline: PreWriteActivityBaseline,
     observation: InjectionObservation,
     submit_attempts: usize,
@@ -147,7 +153,7 @@ impl InjectionObservation {
 /// reaction, which a live TUI never does for an accepted submit. Changes spanning at least
 /// half the fixed pre-write baseline identify an already-streaming receiver; only a
 /// would-be positive is downgraded because that output cannot be attributed to Enter.
-fn classify_submit_confirmation(
+fn classify_screen_activity(
     post_submit_change_offsets: &[Duration],
     pre_write_change_offsets: &[Duration],
 ) -> (Option<bool>, &'static str) {
@@ -277,7 +283,7 @@ async fn observe_submit(
     let (submit_confirmed, submit_confirmation_basis) = if ring_lost {
         (None, "pty-unobservable")
     } else {
-        classify_submit_confirmation(&change_offsets, pre_write_change_offsets)
+        classify_screen_activity(&change_offsets, pre_write_change_offsets)
     };
 
     // The legacy activity fields keep their pre-#256 meaning: did the ring change within
@@ -302,75 +308,270 @@ async fn observe_submit(
     }
 }
 
+/// An active composer prompt and exact trailing marker are necessary. Raw echo
+/// or unrelated activity elsewhere in the terminal cannot justify another Enter.
+fn staged_text_visible(output: Option<&str>, nonce: &str) -> bool {
+    let Some(output) = output else { return false };
+    if nonce.is_empty() { return false; }
+    let prompt = output.lines().enumerate().filter_map(|(index, line)| {
+        let line = line.trim_start();
+        (line.starts_with('\u{203a}') || line.starts_with('\u{276f}') || line.starts_with("> "))
+            .then_some(index)
+    }).last();
+    let Some(prompt) = prompt else { return false };
+    output.lines().skip(prompt).collect::<Vec<_>>().join("\n").trim_end().ends_with(nonce)
+}
+
+fn confirmation_cwd(session: &crate::session::Session, agent: &crate::session::AgentInfo) -> std::path::PathBuf {
+    use crate::pty::AgentRole;
+    use crate::domain::WorkspaceStrategy;
+    if session.no_git { return session.project_path.clone(); }
+    if session.execution_policy.workspace_strategy == WorkspaceStrategy::SharedCell
+        && matches!(agent.role, AgentRole::Queen | AgentRole::Worker { .. }) {
+        return session.worktree_path.as_ref().map(std::path::PathBuf::from)
+            .unwrap_or_else(|| session.project_path.clone());
+    }
+    let worktrees = session.project_path.join(".hive-manager/worktrees").join(&session.id);
+    match &agent.role {
+        AgentRole::Worker { index, .. } => worktrees.join(format!("worker-{index}")),
+        AgentRole::Queen if matches!(session.session_type, crate::session::SessionType::Hive { .. }) => worktrees.join("queen"),
+        _ => session.worktree_path.as_ref().map(std::path::PathBuf::from)
+            .unwrap_or_else(|| session.project_path.clone()),
+    }
+}
+
+fn confirmation_reader(state: &AppState, session_id: &str, agent_id: &str, _since: SystemTime) -> Confirmation {
+    let Some(session) = state.session_controller.read().get_session(session_id) else {
+        return Confirmation::Unavailable;
+    };
+    let Some(agent) = session.agents.iter().find(|agent| agent.id == agent_id) else {
+        return Confirmation::Unavailable;
+    };
+    let cwd = confirmation_cwd(&session, agent);
+    #[cfg(not(test))]
+    let root = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from);
+    #[cfg(test)]
+    let root = Some(state.storage.base_dir().join("transcript-test-home"));
+    let Some(root) = root else { return Confirmation::Unavailable };
+    let spawned_at = SystemTime::from(agent.transcript_spawned_at.unwrap_or(session.created_at));
+    Confirmation::new(&agent.config.cli, agent.transcript_session_id.as_deref(), &cwd, spawned_at,
+        root.join(".codex/sessions"), root.join(".claude/projects"))
+}
+
+#[derive(Clone)]
+struct PendingNonce {
+    nonce: String,
+    since: chrono::DateTime<chrono::Utc>,
+    submitted_at: chrono::DateTime<chrono::Utc>,
+    expires: Instant,
+    state: Weak<AppState>,
+}
+
+type PendingNonceKey = (usize, String, String);
+fn pending_nonces() -> &'static parking_lot::Mutex<HashMap<PendingNonceKey, PendingNonce>> {
+    static PENDING: OnceLock<parking_lot::Mutex<HashMap<PendingNonceKey, PendingNonce>>> = OnceLock::new();
+    PENDING.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
+
+fn pending_nonce_key(state: &AppState, session_id: &str, agent_id: &str) -> PendingNonceKey {
+    (state as *const AppState as usize, session_id.to_owned(), agent_id.to_owned())
+}
+
+/// Empty flushes carry no marker. Reuse evidence only from an unexpired watch in
+/// this runtime/session/agent, never another agent with the same workspace.
+fn inherit_pending_nonce(state: &Arc<AppState>, session_id: &str, agent_id: &str, receipt: &mut InjectionReceipt) {
+    if receipt.nonce.is_some() || !receipt.submit_keystroke_issued { return; }
+    let mut pending = pending_nonces().lock();
+    pending.retain(|_, value| value.expires > Instant::now() && value.state.strong_count() > 0);
+    if let Some(previous) = pending.get(&pending_nonce_key(state, session_id, agent_id)) {
+        let still_pending = state.session_controller.read().get_session(session_id)
+            .and_then(|session| session.agents.into_iter().find(|agent| agent.id == agent_id))
+            .is_some_and(|agent| matches!(agent.status, crate::pty::AgentStatus::WaitingForInput(reason)
+                if reason == format!("awaiting_injected_turn:{}", previous.submitted_at.to_rfc3339())));
+        if still_pending {
+            receipt.nonce = Some(previous.nonce.clone());
+            receipt.confirmation_since = Some(previous.since);
+            receipt.confirmation_expires = Some(previous.expires);
+        }
+    }
+}
+
+type SharedConfirmation = Arc<parking_lot::Mutex<Confirmation>>;
+
+async fn poll_transcript(reader: &SharedConfirmation, nonce: &str, since: SystemTime) -> (Delivery, bool) {
+    let reader = Arc::clone(reader);
+    let nonce = nonce.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let mut reader = reader.lock();
+        let result = delivery::confirm(&mut reader, &nonce, since);
+        let recorded = reader.message_recorded(&nonce);
+        (result, recorded)
+    }).await.unwrap_or_else(|_| (Delivery::unavailable(), false))
+}
+
+async fn wait_for_transcript(reader: &SharedConfirmation, nonce: &str, since: SystemTime,
+    deadline: Instant) -> (Delivery, bool) {
+    let mut last = (Delivery::pending(), false);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return last; }
+        last = match tokio::time::timeout(remaining, poll_transcript(reader, nonce, since)).await {
+            Ok(result) => result,
+            // Unknown in-flight I/O suppresses retry; ordinary polling expiry below
+            // preserves the actual last observed absent/recorded verdict instead.
+            Err(_) => return (Delivery::pending(), true),
+        };
+        if last.0.confirmed == Some(true) || last.0.basis == delivery::TRANSCRIPT_UNAVAILABLE
+            || Instant::now() >= deadline { return last; }
+        tokio::time::sleep(TRANSCRIPT_POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
+    }
+}
+
+fn record_delivery(state: &AppState, session_id: &str, agent_id: &str,
+    receipt: &InjectionReceipt, delivery: &Delivery) {
+    if delivery.basis != delivery::TRANSCRIPT_PENDING {
+        let key = pending_nonce_key(state, session_id, agent_id);
+        let mut pending = pending_nonces().lock();
+        if pending.get(&key).is_some_and(|value| value.submitted_at == receipt.submitted_at) {
+            pending.remove(&key);
+        }
+    }
+    if let Err(error) = state.session_controller.read().record_injection_delivery(
+        session_id, agent_id, receipt.submitted_at, delivery) {
+        tracing::debug!("Delivery watch stopped for {session_id}/{agent_id}: {error}");
+    }
+}
+
+fn watch_pending_delivery(state: &Arc<AppState>, session_id: &str, agent_id: &str,
+    receipt: &InjectionReceipt, reader: SharedConfirmation, watch_limit: Duration) {
+    let weak = Arc::downgrade(state);
+    let session_id = session_id.to_owned();
+    let agent_id = agent_id.to_owned();
+    let receipt = receipt.clone();
+    let nonce = receipt.nonce.clone().expect("submitted nonce");
+    let since = SystemTime::from(receipt.confirmation_since.unwrap_or(receipt.write_started_at));
+    tokio::spawn(async move {
+        let deadline = Instant::now() + watch_limit;
+        let mut message_recorded = false;
+        loop {
+            let Some(state) = weak.upgrade() else { return };
+            if !state.pty_manager.read().is_alive(&agent_id)
+                || !state.session_controller.read().get_session(&session_id)
+                    .is_some_and(|session| session.agents.iter().any(|agent| agent.id == agent_id
+                        && matches!(&agent.status, crate::pty::AgentStatus::WaitingForInput(reason)
+                            if reason == &format!("awaiting_injected_turn:{}", receipt.submitted_at.to_rfc3339())))) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                let output = state.pty_manager.read().recent_output(&agent_id);
+                let result = Delivery::timeout(!message_recorded && staged_text_visible(output.as_deref(), &nonce));
+                record_delivery(&state, &session_id, &agent_id, &receipt, &result);
+                return;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let polled = tokio::time::timeout(remaining, poll_transcript(&reader, &nonce, since)).await;
+            let (mut result, recorded) = match polled {
+                Ok(result) => result,
+                Err(_) => {
+                    // A blocking filesystem read cannot be cancelled. End this watch
+                    // instead of piling more tasks onto the same reader mutex.
+                    record_delivery(&state, &session_id, &agent_id, &receipt, &Delivery::unavailable());
+                    return;
+                }
+            };
+            message_recorded |= recorded;
+            if result.basis == delivery::TRANSCRIPT_UNAVAILABLE {
+                record_delivery(&state, &session_id, &agent_id, &receipt, &result);
+                return;
+            }
+            if result.confirmed == Some(true) {
+                record_delivery(&state, &session_id, &agent_id, &receipt, &result);
+                return;
+            }
+            if Instant::now() >= deadline {
+                let output = state.pty_manager.read().recent_output(&agent_id);
+                result = Delivery::timeout(!recorded && staged_text_visible(output.as_deref(), &nonce));
+                record_delivery(&state, &session_id, &agent_id, &receipt, &result);
+                return;
+            }
+            drop(state);
+            tokio::time::sleep(TRANSCRIPT_POLL).await;
+        }
+    });
+}
+
 async fn observe_injection_with_retry(
-    state: &AppState,
-    agent_id: &str,
-    receipt: &InjectionReceipt,
-    pre_write_baseline: PreWriteActivityBaseline,
+    state: &Arc<AppState>, session_id: &str, agent_id: &str,
+    receipt: &InjectionReceipt, pre_write_baseline: PreWriteActivityBaseline,
 ) -> InjectionMeasurement {
-    let mut observation = observe_submit(
-        state,
-        agent_id,
-        receipt.submit_keystroke_issued,
-        receipt.pty_output_after_write.as_deref(),
-        &pre_write_baseline.change_offsets,
-    )
-    .await;
+    let started = Instant::now();
+    let since = SystemTime::from(receipt.confirmation_since.unwrap_or(receipt.write_started_at));
+    let reader = Arc::new(parking_lot::Mutex::new(if receipt.nonce.is_some() {
+        confirmation_reader(state, session_id, agent_id, since)
+    } else { Confirmation::Unavailable }));
+    let nonce = receipt.nonce.as_deref().unwrap_or("");
+    let screen = observe_submit(state, agent_id, receipt.submit_keystroke_issued,
+        receipt.pty_output_after_write.as_deref(), &pre_write_baseline.change_offsets);
+    let transcript = async {
+        if receipt.submit_keystroke_issued {
+            let deadline = receipt.confirmation_expires.map(|expires| expires.min(started + TRANSCRIPT_SYNC_WAIT))
+                .unwrap_or(started + TRANSCRIPT_SYNC_WAIT);
+            wait_for_transcript(&reader, nonce, since, deadline).await
+        } else { (Delivery::unavailable(), false) }
+    };
+    let (observation, (mut verdict, recorded)) = tokio::join!(screen, transcript);
     let mut submit_attempts = usize::from(receipt.submit_keystroke_issued);
     let mut submit_bytes_written = receipt.submit_bytes_written;
     let mut submit_retry_failure = None;
-
-    if observation.submit_confirmed == Some(false) {
-        let first_confirmation_elapsed_ms = observation.submit_confirmation_elapsed_ms;
-        #[cfg(all(test, windows))]
-        run_before_submit_retry_hook(state).await;
-
-        let pty_manager = Arc::clone(&state.pty_manager);
-        let retry_agent_id = agent_id.to_string();
-        let retry_result = tokio::task::spawn_blocking(move || {
-            pty_manager.read().write(&retry_agent_id, SUBMIT_KEYSTROKE)
-        })
-        .await;
-        let retry_result = retry_result
-            .map_err(|error| format!("Submit retry task failed: {error}"))
-            .and_then(|result| result.map_err(|error| format!("Submit retry failed: {error}")));
-
-        match retry_result {
-            Ok(()) => {
-                submit_attempts += 1;
-                submit_bytes_written += SUBMIT_KEYSTROKE.len();
-
-                // Capture the new baseline after the retry write. PTYs with local echo
-                // (including the Windows test stub) mirror the CR into the ring; observing
-                // from the old baseline would misclassify that self-echo as receiver activity.
-                let retry_baseline = state.pty_manager.read().recent_output(agent_id);
-                let mut retry_observation = observe_submit(
-                    state,
-                    agent_id,
-                    true,
-                    retry_baseline.as_deref(),
-                    &pre_write_baseline.change_offsets,
-                )
-                .await;
-                retry_observation.submit_confirmation_elapsed_ms = first_confirmation_elapsed_ms
-                    .saturating_add(retry_observation.submit_confirmation_elapsed_ms);
-                observation = retry_observation;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    "Initial injection succeeded but its bounded submit retry failed for {agent_id}: {error}"
-                );
-                submit_retry_failure = Some(error);
+    let output = state.pty_manager.read().recent_output(agent_id);
+    if receipt.submit_keystroke_issued && verdict.basis == delivery::TRANSCRIPT_PENDING
+        && !recorded && staged_text_visible(output.as_deref(), nonce) {
+        let latest = poll_transcript(&reader, nonce, since).await;
+        verdict = latest.0;
+        let current_output = state.pty_manager.read().recent_output(agent_id);
+        if verdict.basis == delivery::TRANSCRIPT_PENDING && !latest.1
+            && staged_text_visible(current_output.as_deref(), nonce) {
+            #[cfg(all(test, windows))]
+            run_before_submit_retry_hook(state).await;
+            let manager = Arc::clone(&state.pty_manager);
+            let target = agent_id.to_owned();
+            let result = tokio::task::spawn_blocking(move || manager.read().write(&target, SUBMIT_KEYSTROKE)).await;
+            match result {
+                Ok(Ok(())) => { submit_attempts += 1; submit_bytes_written += SUBMIT_KEYSTROKE.len(); }
+                other => submit_retry_failure = Some(format!("Submit retry failed: {other:?}")),
             }
         }
     }
-
+    if verdict.basis == delivery::TRANSCRIPT_PENDING
+        && receipt.confirmation_expires.is_some_and(|expires| expires <= Instant::now()) {
+        verdict = Delivery::timeout(false);
+    }
+    if receipt.submit_keystroke_issued {
+        let key = pending_nonce_key(state, session_id, agent_id);
+        let mut pending = pending_nonces().lock();
+        pending.retain(|_, value| value.expires > Instant::now() && value.state.strong_count() > 0);
+        pending.remove(&key);
+        if verdict.basis == delivery::TRANSCRIPT_PENDING {
+            pending.insert(key, PendingNonce {
+                nonce: nonce.to_owned(), since: receipt.confirmation_since.unwrap_or(receipt.write_started_at),
+                submitted_at: receipt.submitted_at,
+                expires: receipt.confirmation_expires.unwrap_or_else(|| Instant::now() + TRANSCRIPT_WATCH_LIMIT),
+                state: Arc::downgrade(state),
+            });
+        }
+    }
+    if receipt.submit_keystroke_issued {
+        record_delivery(state, session_id, agent_id, receipt, &verdict);
+        if verdict.basis == delivery::TRANSCRIPT_PENDING {
+            let limit = receipt.confirmation_expires.map(|expires| expires.saturating_duration_since(Instant::now()))
+                .unwrap_or(TRANSCRIPT_WATCH_LIMIT);
+            watch_pending_delivery(state, session_id, agent_id, receipt, reader, limit);
+        }
+    }
     InjectionMeasurement {
-        pre_write_baseline,
-        observation,
-        submit_attempts,
-        submit_bytes_written,
-        submit_retry_failure,
+        delivery: verdict, delivery_elapsed_ms: started.elapsed().as_millis() as u64,
+        pre_write_baseline, observation, submit_attempts, submit_bytes_written, submit_retry_failure,
     }
 }
 
@@ -423,10 +624,16 @@ fn measured_response(
         "pty_activity_observed": observation.pty_activity_observed,
         "observation_window_ms": observation.observation_window_ms,
         "observation_elapsed_ms": observation.observation_elapsed_ms,
-        "submit_confirmed": observation.submit_confirmed,
-        "submit_confirmation_basis": observation.submit_confirmation_basis,
-        "submit_confirmation_window_ms": observation.submit_confirmation_window_ms,
-        "submit_confirmation_elapsed_ms": observation.submit_confirmation_elapsed_ms,
+        "submit_confirmed": measurement.delivery.confirmed,
+        "submit_confirmation_source": measurement.delivery.source,
+        "turn_id": measurement.delivery.turn_id,
+        "submit_screen_activity": observation.submit_confirmed,
+        "submit_screen_activity_basis": observation.submit_confirmation_basis,
+        "submit_screen_activity_window_ms": observation.submit_confirmation_window_ms,
+        "submit_screen_activity_elapsed_ms": observation.submit_confirmation_elapsed_ms,
+        "submit_confirmation_basis": measurement.delivery.basis,
+        "submit_confirmation_window_ms": TRANSCRIPT_SYNC_WAIT.as_millis() as u64,
+        "submit_confirmation_elapsed_ms": measurement.delivery_elapsed_ms,
         "evidence_scope": INJECTION_EVIDENCE_SCOPE,
     })
 }
@@ -482,10 +689,11 @@ pub async fn operator_inject(
     })
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
-    let receipt = injection_result.map_err(|error| ApiError::internal(error.to_string()))?;
-    let measurement =
-        observe_injection_with_retry(&state, &target_agent_id, &receipt, pre_write_baseline).await;
+    let mut receipt = injection_result.map_err(|error| ApiError::internal(error.to_string()))?;
+    inherit_pending_nonce(&state, &id, &target_agent_id, &mut receipt);
     record_injection_submission(&state, &id, &target_agent_id, &receipt);
+    let measurement =
+        observe_injection_with_retry(&state, &id, &target_agent_id, &receipt, pre_write_baseline).await;
 
     Ok(Json(measured_response(
         format!("Operator injection sent to session {}", id),
@@ -521,10 +729,11 @@ pub async fn queen_inject(
     })
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
-    let receipt = injection_result.map_err(map_injection_error)?;
-    let measurement =
-        observe_injection_with_retry(&state, &target_worker_id, &receipt, pre_write_baseline).await;
+    let mut receipt = injection_result.map_err(map_injection_error)?;
+    inherit_pending_nonce(&state, &id, &target_worker_id, &mut receipt);
     record_injection_submission(&state, &id, &target_worker_id, &receipt);
+    let measurement =
+        observe_injection_with_retry(&state, &id, &target_worker_id, &receipt, pre_write_baseline).await;
 
     Ok(Json(measured_response(
         format!("Queen injection sent to session {}", id),
@@ -560,10 +769,11 @@ pub async fn evaluator_inject(
     })
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
-    let receipt = injection_result.map_err(map_injection_error)?;
-    let measurement =
-        observe_injection_with_retry(&state, &target_agent_id, &receipt, pre_write_baseline).await;
+    let mut receipt = injection_result.map_err(map_injection_error)?;
+    inherit_pending_nonce(&state, &id, &target_agent_id, &mut receipt);
     record_injection_submission(&state, &id, &target_agent_id, &receipt);
+    let measurement =
+        observe_injection_with_retry(&state, &id, &target_agent_id, &receipt, pre_write_baseline).await;
 
     Ok(Json(measured_response(
         format!("Evaluator injection sent to session {}", id),
@@ -623,6 +833,8 @@ mod tests {
             role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
+            transcript_spawned_at: None,
+            transcript_session_id: None,
         }
     }
 
@@ -780,588 +992,402 @@ mod tests {
         (status, json)
     }
 
+    fn support_codex(state: &AppState) {
+        let mut session = state.session_controller.read().get_session(SESSION_ID).unwrap();
+        session.agents.iter_mut().find(|agent| agent.id == AGENT_ID).unwrap().config.cli = "codex".into();
+        state.session_controller.read().insert_test_session(session);
+    }
+
+    fn writes(state: &AppState) -> Vec<Vec<u8>> {
+        state.pty_manager.read().write_records_for_test(AGENT_ID).unwrap()
+    }
+
+    async fn written_nonce(state: &AppState) -> String {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                for write in writes(state) {
+                    let text = String::from_utf8_lossy(&write);
+                    if let Some(start) = text.find("[hive-msg:") {
+                        let rest = &text[start..];
+                        if let Some(end) = rest.find(']') { return rest[..=end].to_owned(); }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("submitted dynamic nonce")
+    }
+
+    fn transcript_path(state: &AppState) -> std::path::PathBuf {
+        let dir = state.storage.base_dir().join("transcript-test-home/.codex/sessions")
+            .join(chrono::Local::now().format("%Y/%m/%d").to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("rollout-http-fixture.jsonl")
+    }
+
+    fn write_transcript(state: &AppState, nonce: &str, started: bool) {
+        let timestamp = Utc::now().to_rfc3339();
+        let mut text = format!("{}\n", json!({"timestamp": timestamp, "type":"response_item", "payload":{
+            "role":"user", "content":[{"type":"input_text","text":format!("Fixture request\n{nonce}")}]}}));
+        if started {
+            text.push_str(&format!("{}\n", json!({"timestamp":timestamp,"type":"event_msg","payload":{
+                "type":"task_started","turn_attribution":{"turn_id":"http-fixture-turn"}}})));
+        }
+        std::fs::write(transcript_path(state), text).unwrap();
+    }
+
+    fn stage_after_write(state: Arc<AppState>) -> tokio::task::JoinHandle<String> {
+        tokio::spawn(async move {
+            let nonce = written_nonce(&state).await;
+            // Explicit composer prompt is required: raw stdin echo is insufficient.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            state.pty_manager.read().record_output_for_test(AGENT_ID, format!("\n> {nonce}").as_bytes());
+            nonce
+        })
+    }
+
     #[tokio::test]
     async fn operator_inject_omitted_submit_defaults_to_true() {
-        let (_temp_dir, app, state) = setup_test_app();
-
-        let (status, response) = post_inject(
-            app,
-            "/api/sessions/inject-test/inject",
-            json!({ "target_agent_id": AGENT_ID, "message": "hello\r\n" }),
-        )
-        .await;
-
+        let (_temp, app, state) = setup_test_app();
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"hello\r\n"})).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(response["payload_bytes_written"], 5);
         assert_eq!(response["submit_attempted"], true);
         assert_eq!(response["submit_keystroke_issued"], true);
-        assert_eq!(response["submit_bytes_written"], 2);
-        assert_eq!(response["submit_attempts"], 2);
+        assert_eq!(response["submit_attempts"], 1);
+        assert_eq!(response["submit_bytes_written"], 1);
+        assert_eq!(response["submit_confirmed"], Value::Null);
+        assert_eq!(response["submit_confirmation_basis"], "transcript-unavailable");
+        assert_eq!(response["submit_confirmation_source"], "none");
         assert_eq!(response["submit_retry_failed"], false);
-        assert_eq!(response["submit_retry_failure"], Value::Null);
-        assert_eq!(response["pre_write_pty_observation_available"], true);
-        assert_eq!(response["pre_write_activity_change_count"], 0);
-        assert_eq!(response["receiver_busy_before_write"], false);
-        assert_eq!(response["pre_write_observation_window_ms"], 250);
-        assert!(
-            response["pre_write_observation_elapsed_ms"]
-                .as_u64()
-                .unwrap()
-                >= 240
-        );
-        assert_eq!(response["pty_observation_available"], true);
-        assert_eq!(response["pty_output_bytes_before"], 0);
-        // The stub mirrors stdin into the ring: 6-byte start marker + 5-byte payload
-        // + 6-byte end marker + the initial Enter. The retry adds one more byte.
-        assert_eq!(response["pty_output_bytes_after_write"], 18);
-        assert_eq!(response["pty_output_bytes_after"], 19);
-        assert_eq!(response["pty_activity_observed"], false);
-        assert_eq!(response["observation_window_ms"], 250);
-        // Neither bounded observation saw receiver activity. Capturing the retry baseline
-        // after its self-echo preserves the second confident negative as false.
-        assert_eq!(response["submit_confirmed"], false);
-        assert_eq!(
-            response["submit_confirmation_basis"],
-            "no-post-submit-activity"
-        );
-        assert_eq!(response["submit_confirmation_window_ms"], 1500);
-        assert!(
-            response["submit_confirmation_elapsed_ms"].as_u64().unwrap() >= 2800,
-            "two quiet confirmation windows must report cumulative elapsed time: {response}"
-        );
+        let records = writes(&state);
+        assert_eq!(records[0], b"\x1b[200~");
+        assert_eq!(records[2], b"\x1b[201~");
+        assert_eq!(records[3], b"\r");
+        let payload = String::from_utf8(records[1].clone()).unwrap();
+        assert!(payload.starts_with("hello\n[hive-msg:"));
+        assert_eq!(response["payload_bytes_written"], payload.len());
         assert!(response["write_started_at"].is_string());
         assert!(response["submitted_at"].is_string());
-        assert!(response["evidence_scope"]
-            .as_str()
-            .unwrap()
-            .contains("do not prove that the agent took a turn"));
-        assert_eq!(
-            state
-                .pty_manager
-                .read()
-                .write_records_for_test(AGENT_ID)
-                .unwrap(),
-            vec![
-                b"\x1b[200~".to_vec(),
-                b"hello".to_vec(),
-                b"\x1b[201~".to_vec(),
-                b"\r".to_vec(),
-                b"\r".to_vec()
-            ]
-        );
     }
 
     #[tokio::test]
-    async fn operator_inject_submit_false_writes_payload_without_enter() {
-        let (_temp_dir, app, state) = setup_test_app();
-
-        let (status, response) = post_inject(
-            app,
-            "/api/sessions/inject-test/inject",
-            json!({
-                "target_agent_id": AGENT_ID,
-                "message": "draft\r\n",
-                "submit": false
-            }),
-        )
-        .await;
-
+    async fn operator_inject_submit_false_writes_payload_without_enter_or_nonce() {
+        let (_temp, app, state) = setup_test_app();
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"draft\r\n","submit":false})).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["payload_bytes_written"], 5);
-        assert_eq!(response["submit_attempted"], false);
+        assert_eq!(response["submit_attempts"], 0);
         assert_eq!(response["submit_keystroke_issued"], false);
         assert_eq!(response["submit_bytes_written"], 0);
-        assert_eq!(response["submit_attempts"], 0);
-        assert_eq!(response["submit_retry_failed"], false);
-        assert_eq!(response["submit_retry_failure"], Value::Null);
-        assert_eq!(response["observation_window_ms"], 0);
-        assert_eq!(response["observation_elapsed_ms"], 0);
-        assert_eq!(response["pty_activity_observed"], Value::Null);
         assert_eq!(response["submit_confirmed"], Value::Null);
-        assert_eq!(response["submit_confirmation_basis"], "not-submitted");
-        assert_eq!(response["submit_confirmation_window_ms"], 0);
-        assert_eq!(
-            state
-                .pty_manager
-                .read()
-                .write_records_for_test(AGENT_ID)
-                .unwrap(),
-            vec![b"draft".to_vec()]
-        );
+        assert_eq!(response["submit_confirmation_basis"], "transcript-unavailable");
+        assert_eq!(writes(&state), vec![b"draft".to_vec()]);
     }
 
     #[tokio::test]
-    async fn operator_inject_multiline_preserves_newlines_and_retries_one_confident_negative() {
-        let (_temp_dir, app, state) = setup_test_app();
-
-        let (status, response) = post_inject(
-            app,
-            "/api/sessions/inject-test/inject",
-            json!({
-                "target_agent_id": AGENT_ID,
-                "message": "line one\nline two\r\n"
-            }),
-        )
-        .await;
-
+    async fn operator_inject_large_multiline_payload_brackets_once_and_reports_sanitized_bytes() {
+        let (_temp, app, state) = setup_test_app();
+        let payload = format!("{}\nline two\u{1b}[201~safe\r\n", "p".repeat(1287));
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":payload})).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(response["submit_attempts"], 2);
-        assert_eq!(response["submit_bytes_written"], 2);
-        let writes = state
-            .pty_manager
-            .read()
-            .write_records_for_test(AGENT_ID)
-            .unwrap();
-        assert_eq!(
-            writes,
-            vec![
-                b"\x1b[200~".to_vec(),
-                b"line one\nline two".to_vec(),
-                b"\x1b[201~".to_vec(),
-                b"\r".to_vec(),
-                b"\r".to_vec()
-            ]
-        );
-        assert_eq!(
-            writes
-                .iter()
-                .filter(|write| write.as_slice() == b"\r")
-                .count(),
-            2
-        );
-        assert!(!writes.last().unwrap().contains(&b'\n'));
+        let records = writes(&state);
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[0], b"\x1b[200~");
+        assert_eq!(records[2], b"\x1b[201~");
+        assert_eq!(records[3], b"\r");
+        let actual = String::from_utf8(records[1].clone()).unwrap();
+        assert!(actual.starts_with(&format!("{}\nline twosafe\n[hive-msg:", "p".repeat(1287))));
+        assert_eq!(response["payload_bytes_written"], actual.len());
+    }
+
+    #[tokio::test]
+    async fn operator_inject_unassociated_empty_message_is_bare_enter_and_unknown() {
+        let (_temp, app, state) = setup_test_app();
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":""})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_attempts"], 1);
+        assert_eq!(response["payload_bytes_written"], 0);
+        assert_eq!(response["submit_bytes_written"], 1);
+        assert_eq!(response["submit_confirmed"], Value::Null);
+        assert_eq!(response["submit_confirmation_basis"], "transcript-unavailable");
+        assert_eq!(writes(&state), vec![b"\r".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn pending_message_empty_flush_reuses_prior_nonce_without_writing_new_marker() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let (_, pending) = post_inject(app.clone(), "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"pending fixture"})).await;
+        assert_eq!(pending["submit_confirmation_basis"], "transcript-pending");
+        let nonce = written_nonce(&state).await;
+        // This user timestamp predates the flush. Confirmation must reuse the
+        // original message's evidence window, rather than the flush timestamp.
+        write_transcript(&state, &nonce, false);
+        let before = writes(&state);
+        let fixture_state = state.clone();
+        let before_len = before.len();
+        let turn = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while writes(&fixture_state).len() == before_len {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("bare flush write");
+            let line = format!("{}\n", json!({"timestamp":Utc::now().to_rfc3339(),"type":"event_msg","payload":{
+                "type":"task_started","turn_attribution":{"turn_id":"http-fixture-turn"}}}));
+            let mut file = std::fs::OpenOptions::new().append(true).open(transcript_path(&fixture_state)).unwrap();
+            std::io::Write::write_all(&mut file, line.as_bytes()).unwrap();
+        });
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":""})).await;
+        turn.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["payload_bytes_written"], 0);
+        assert_eq!(response["submit_bytes_written"], 1);
+        assert_eq!(response["submit_confirmed"], true);
+        assert_eq!(response["turn_id"], "http-fixture-turn");
+        let after = writes(&state);
+        assert_eq!(&after[..before.len()], before.as_slice());
+        assert_eq!(&after[before.len()..], &[b"\r".to_vec()]);
     }
 
     #[tokio::test]
     async fn operator_inject_blocking_path_preserves_pty_error_status() {
-        let (_temp_dir, app, _state) = setup_test_app();
-
-        let (status, _response) = post_inject(
-            app,
-            "/api/sessions/inject-test/inject",
-            json!({ "target_agent_id": "missing-agent", "message": "hello" }),
-        )
-        .await;
-
+        let (_temp, app, _state) = setup_test_app();
+        let (status, _) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":"missing-agent","message":"hello"})).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
-    async fn all_inject_routes_return_the_measured_sender_contract() {
-        let (_temp_dir, app, _state) = setup_test_app();
-        let cases = [
-            (
-                "/api/sessions/inject-test/inject",
-                json!({ "target_agent_id": AGENT_ID, "message": "operator" }),
-            ),
-            (
-                "/api/sessions/inject-test/inject/queen",
-                json!({
-                    "queen_id": QUEEN_ID,
-                    "target_worker_id": AGENT_ID,
-                    "message": "queen"
-                }),
-            ),
-            (
-                "/api/sessions/inject-test/inject/evaluator",
-                json!({
-                    "evaluator_id": "inject-test-evaluator",
-                    "target_agent_id": QUEEN_ID,
-                    "message": "evaluator"
-                }),
-            ),
-        ];
-
-        for (path, body) in cases {
+    async fn all_inject_routes_return_transcript_receipt_contract() {
+        let (_temp, app, _state) = setup_test_app();
+        for (path, body) in [
+            ("/api/sessions/inject-test/inject", json!({"target_agent_id":AGENT_ID,"message":"operator"})),
+            ("/api/sessions/inject-test/inject/queen", json!({"queen_id":QUEEN_ID,"target_worker_id":AGENT_ID,"message":"queen"})),
+            ("/api/sessions/inject-test/inject/evaluator", json!({"evaluator_id":"inject-test-evaluator","target_agent_id":QUEEN_ID,"message":"evaluator"})),
+        ] {
             let (status, response) = post_inject(app.clone(), path, body).await;
             assert_eq!(status, StatusCode::OK, "{path}: {response}");
-            assert_eq!(response["submit_keystroke_issued"], true, "{path}");
-            assert_eq!(response["submit_bytes_written"], 2, "{path}");
-            assert_eq!(response["submit_attempts"], 2, "{path}");
-            assert_eq!(response["submit_retry_failed"], false, "{path}");
-            assert_eq!(response["submit_retry_failure"], Value::Null, "{path}");
-            assert_eq!(
-                response["pre_write_pty_observation_available"], true,
-                "{path}"
-            );
-            assert!(
-                response["pre_write_activity_change_count"].is_number(),
-                "{path}"
-            );
-            assert!(
-                response["receiver_busy_before_write"].is_boolean(),
-                "{path}"
-            );
-            assert_eq!(response["pre_write_observation_window_ms"], 250, "{path}");
-            assert_eq!(response["pty_observation_available"], true, "{path}");
-            assert!(response["pty_output_bytes_before"].is_number(), "{path}");
-            assert!(
-                response["pty_output_bytes_after_write"].is_number(),
-                "{path}"
-            );
-            assert_eq!(response["observation_window_ms"], 250, "{path}");
-            assert_eq!(response["submit_confirmed"], false, "{path}");
-            assert_eq!(response["submit_confirmation_window_ms"], 1500, "{path}");
-            assert!(response["submit_confirmation_basis"].is_string(), "{path}");
-            assert!(response["evidence_scope"]
-                .as_str()
-                .unwrap()
-                .contains("do not prove that the agent took a turn"));
+            assert_eq!(response["submit_attempts"], 1);
+            assert_eq!(response["submit_bytes_written"], 1);
+            assert_eq!(response["submit_confirmed"], Value::Null);
+            assert_eq!(response["submit_confirmation_source"], "none");
+            assert_eq!(response["submit_confirmation_basis"], "transcript-unavailable");
+            assert!(response["submit_screen_activity_basis"].is_string());
         }
     }
 
-    /// #256 acceptance: a payload well over 1 KB travels through the full HTTP stack in
-    /// one bracketed envelope, and a confident negative adds only one bare-Enter retry.
     #[tokio::test]
-    async fn operator_inject_large_payload_brackets_once_and_retries_once() {
-        let (_temp_dir, app, state) = setup_test_app();
-        let payload = "p".repeat(1287);
-
-        let (status, response) = post_inject(
-            app,
-            "/api/sessions/inject-test/inject",
-            json!({ "target_agent_id": AGENT_ID, "message": payload }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(response["payload_bytes_written"], 1287);
-        assert_eq!(response["submit_bytes_written"], 2);
-        assert_eq!(response["submit_attempts"], 2);
-        let writes = state
-            .pty_manager
-            .read()
-            .write_records_for_test(AGENT_ID)
-            .unwrap();
-        assert_eq!(
-            writes,
-            vec![
-                b"\x1b[200~".to_vec(),
-                payload.as_bytes().to_vec(),
-                b"\x1b[201~".to_vec(),
-                b"\r".to_vec(),
-                b"\r".to_vec()
-            ]
-        );
-    }
-
-    /// #256: payload_bytes_written reports the sanitized bytes actually written, not the
-    /// request length — an embedded end marker is stripped before framing.
-    #[tokio::test]
-    async fn operator_inject_reports_sanitized_payload_bytes() {
-        let (_temp_dir, app, state) = setup_test_app();
-
-        let (status, response) = post_inject(
-            app,
-            "/api/sessions/inject-test/inject",
-            json!({ "target_agent_id": AGENT_ID, "message": "safe\u{1b}[201~payload" }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(response["payload_bytes_written"], "safepayload".len());
-        let writes = state
-            .pty_manager
-            .read()
-            .write_records_for_test(AGENT_ID)
-            .unwrap();
-        assert_eq!(writes[1], b"safepayload".to_vec());
-    }
-
-    /// #256: the documented two-call workaround — an empty message with submit:true —
-    /// stays a bare-Enter flush with no paste envelope; the stub's confident negative
-    /// produces the one bounded bare-Enter retry.
-    #[tokio::test]
-    async fn operator_inject_empty_message_flushes_with_a_bare_enter() {
-        let (_temp_dir, app, state) = setup_test_app();
-
-        let (status, response) = post_inject(
-            app,
-            "/api/sessions/inject-test/inject",
-            json!({ "target_agent_id": AGENT_ID, "message": "" }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(response["payload_bytes_written"], 0);
-        assert_eq!(response["submit_keystroke_issued"], true);
-        assert_eq!(response["submit_bytes_written"], 2);
-        assert_eq!(response["submit_attempts"], 2);
-        assert_eq!(
-            state
-                .pty_manager
-                .read()
-                .write_records_for_test(AGENT_ID)
-                .unwrap(),
-            vec![b"\r".to_vec(), b"\r".to_vec()]
-        );
-    }
-
-    /// #259: one isolated repaint is ambiguous, so the tri-state contract must suppress
-    /// the retry and leave exactly one Enter in the stub writer.
-    #[tokio::test]
-    async fn operator_inject_does_not_retry_ambiguous_submit_observation() {
-        let (_temp_dir, app, state) = setup_test_app();
-
-        let pty_manager = Arc::clone(&state.pty_manager);
-        let repainter = tokio::spawn(async move {
-            // Wait past the 250 ms pre-write baseline and the 50 ms adapter gap so this
-            // remains one isolated post-submit receiver repaint.
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-            pty_manager
-                .read()
-                .record_output_for_test(AGENT_ID, b"one-frame;");
+    async fn codex_nonce_user_then_turn_confirms_real_fixture() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let fixture_state = state.clone();
+        let fixture = tokio::spawn(async move {
+            let nonce = written_nonce(&fixture_state).await;
+            write_transcript(&fixture_state, &nonce, true);
         });
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"fixture request"})).await;
+        fixture.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_confirmed"], true);
+        assert_eq!(response["submit_confirmation_basis"], "transcript-confirmed");
+        assert_eq!(response["submit_confirmation_source"], "transcript");
+        assert_eq!(response["turn_id"], "http-fixture-turn");
+        assert_eq!(response["submit_attempts"], 1);
+    }
 
-        let (status, response) = post_inject(
-            app,
-            "/api/sessions/inject-test/inject",
-            json!({ "target_agent_id": AGENT_ID, "message": "go" }),
-        )
-        .await;
-        repainter.await.unwrap();
+    #[tokio::test]
+    async fn g_false_positive_one_hz_ticker_with_swallowed_enter_never_confirms() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let ticker_state = state.clone();
+        let ticker = tokio::spawn(async move {
+            written_nonce(&ticker_state).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            for tick in 0..3 {
+                ticker_state.pty_manager.read().record_output_for_test(AGENT_ID, format!("\nticker-{tick}").as_bytes());
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"swallowed Enter"})).await;
+        ticker.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["receiver_busy_before_write"], false);
+        assert_eq!(response["submit_screen_activity"], true, "ticker must exercise old false-positive path: {response}");
+        assert_ne!(response["submit_confirmed"], true);
+        assert_eq!(response["submit_confirmation_basis"], "transcript-pending");
+        assert_eq!(response["submit_attempts"], 1);
+    }
 
+    #[tokio::test]
+    async fn supported_missing_transcript_and_visible_staging_retries_once() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let staged = stage_after_write(state.clone());
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"retry fixture"})).await;
+        staged.await.unwrap();
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["submit_confirmed"], Value::Null);
-        assert_eq!(
-            response["submit_confirmation_basis"],
-            "ambiguous-post-submit-activity"
-        );
-        assert_eq!(response["submit_attempts"], 1);
-        assert_eq!(response["submit_bytes_written"], 1);
-        let writes = state
-            .pty_manager
-            .read()
-            .write_records_for_test(AGENT_ID)
-            .unwrap();
-        assert_eq!(
-            writes
-                .iter()
-                .filter(|write| write.as_slice() == b"\r")
-                .count(),
-            1
-        );
+        assert_eq!(response["submit_confirmation_basis"], "transcript-pending");
+        assert_eq!(response["submit_attempts"], 2);
+        assert_eq!(writes(&state).iter().filter(|w| w.as_slice() == b"\r").count(), 2);
     }
 
-    /// Review finding 3: the staging request begins only after the submitting request has
-    /// completed its first quiet observation. Without the per-agent transaction lock, the
-    /// test hook gives the staged payload time to land before the delayed bare-Enter retry.
+    #[tokio::test]
+    async fn recorded_user_without_turn_suppresses_retry_despite_staged_text() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let fixture_state = state.clone();
+        let fixture = tokio::spawn(async move {
+            let nonce = stage_after_write(fixture_state.clone()).await.unwrap();
+            write_transcript(&fixture_state, &nonce, false);
+        });
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"queued fixture"})).await;
+        fixture.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_confirmation_basis"], "transcript-pending");
+        assert_eq!(response["submit_attempts"], 1);
+    }
+
     #[tokio::test]
     async fn concurrent_injects_to_same_agent_do_not_cross_submit_staged_text() {
-        let (_temp_dir, app, state) = setup_test_app();
-        let (retry_ready_tx, retry_ready_rx) = tokio::sync::oneshot::channel();
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let staged_screen = stage_after_write(state.clone());
+        let (tx, rx) = tokio::sync::oneshot::channel();
         install_before_submit_retry_hook(&state, async move {
-            let _ = retry_ready_tx.send(());
+            let _ = tx.send(());
             tokio::time::sleep(Duration::from_millis(100)).await;
         });
-
-        let submitting_app = app.clone();
+        let submit_app = app.clone();
         let submitting = tokio::spawn(async move {
-            post_inject(
-                submitting_app,
-                "/api/sessions/inject-test/inject",
-                json!({ "target_agent_id": AGENT_ID, "message": "first" }),
-            )
-            .await
+            post_inject(submit_app, "/api/sessions/inject-test/inject", json!({"target_agent_id":AGENT_ID,"message":"first"})).await
         });
-        tokio::time::timeout(
-            SUBMIT_CONFIRMATION_WINDOW
-                + INJECTION_ACTIVITY_OBSERVATION_WINDOW
-                + Duration::from_secs(1),
-            retry_ready_rx,
-        )
-        .await
-        .expect("initial quiet confirmation window")
-        .expect("retry hook signal");
-
-        let staged = tokio::spawn(async move {
-            post_inject(
-                app,
-                "/api/sessions/inject-test/inject",
-                json!({
-                    "target_agent_id": AGENT_ID,
-                    "message": "draft",
-                    "submit": false
-                }),
-            )
-            .await
+        tokio::time::timeout(TRANSCRIPT_SYNC_WAIT + Duration::from_secs(3), rx).await.unwrap().unwrap();
+        let staging = tokio::spawn(async move {
+            post_inject(app, "/api/sessions/inject-test/inject", json!({"target_agent_id":AGENT_ID,"message":"draft","submit":false})).await
         });
-        let (submitting, staged) = tokio::join!(submitting, staged);
-        let (submit_status, submit_response) = submitting.unwrap();
-        let (stage_status, stage_response) = staged.unwrap();
-
-        assert_eq!(submit_status, StatusCode::OK, "{submit_response}");
-        assert_eq!(stage_status, StatusCode::OK, "{stage_response}");
-        assert_eq!(submit_response["submit_attempts"], 2);
+        let ((status, response), (stage_status, stage_response)) = (submitting.await.unwrap(), staging.await.unwrap());
+        staged_screen.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stage_status, StatusCode::OK);
+        assert_eq!(response["submit_attempts"], 2);
         assert_eq!(stage_response["submit_attempts"], 0);
-        assert_eq!(
-            state
-                .pty_manager
-                .read()
-                .write_records_for_test(AGENT_ID)
-                .unwrap(),
-            vec![
-                b"\x1b[200~".to_vec(),
-                b"first".to_vec(),
-                b"\x1b[201~".to_vec(),
-                b"\r".to_vec(),
-                b"\r".to_vec(),
-                b"draft".to_vec(),
-            ],
-            "staged text must be written only after the submitting transaction finishes"
-        );
+        let records = writes(&state);
+        assert_eq!(&records[records.len()-2..], &[b"\r".to_vec(), b"draft".to_vec()]);
     }
 
-    /// Review finding 4: once the initial payload and Enter succeeded, losing the PTY before
-    /// the bounded retry is a receipt caveat, not an HTTP failure or reason to skip recording.
     #[tokio::test]
     async fn failed_submit_retry_returns_success_and_records_initial_submission() {
-        let (_temp_dir, app, state) = setup_test_app();
-        let pty_manager = Arc::clone(&state.pty_manager);
-        install_before_submit_retry_hook(&state, async move {
-            pty_manager.read().kill(AGENT_ID).unwrap();
-        });
-
-        let (status, response) = post_inject(
-            app,
-            "/api/sessions/inject-test/inject",
-            json!({ "target_agent_id": AGENT_ID, "message": "go" }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK, "{response}");
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let staged = stage_after_write(state.clone());
+        let pty = state.pty_manager.clone();
+        install_before_submit_retry_hook(&state, async move { pty.read().kill(AGENT_ID).unwrap(); });
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"go"})).await;
+        staged.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(response["status"], "success");
         assert_eq!(response["submit_attempts"], 1);
-        assert_eq!(response["submit_bytes_written"], 1);
         assert_eq!(response["submit_retry_failed"], true);
-        assert!(response["submit_retry_failure"]
-            .as_str()
-            .unwrap()
-            .contains("Submit retry failed"));
-        assert_eq!(response["submit_confirmed"], false);
-        assert!(matches!(
-            state
-                .session_controller
-                .read()
-                .get_session(SESSION_ID)
-                .unwrap()
-                .agents
-                .into_iter()
-                .find(|agent| agent.id == AGENT_ID)
-                .unwrap()
-                .status,
-            AgentStatus::WaitingForInput(reason)
-                if reason.starts_with("awaiting_injected_turn:")
-        ));
-    }
-
-    /// #256/#260: a receiver that stays quiet through the pre-write baseline can still
-    /// produce a confident positive from sustained post-submit activity.
-    #[tokio::test]
-    async fn operator_inject_confirms_submit_when_quiet_before_sustained_activity() {
-        let (_temp_dir, app, state) = setup_test_app();
-
-        let pty_manager = Arc::clone(&state.pty_manager);
-        let repainter = tokio::spawn(async move {
-            // Let the 250 ms pre-write baseline finish before simulating the child TUI's
-            // sustained reaction to Enter.
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            for tick in 0..8u32 {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                pty_manager
-                    .read()
-                    .record_output_for_test(AGENT_ID, format!("frame-{tick};").as_bytes());
-            }
-        });
-
-        let (status, response) = post_inject(
-            app,
-            "/api/sessions/inject-test/inject",
-            json!({ "target_agent_id": AGENT_ID, "message": "go" }),
-        )
-        .await;
-        repainter.abort();
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(response["pre_write_activity_change_count"], 0);
-        assert_eq!(response["receiver_busy_before_write"], false);
-        assert_eq!(response["submit_confirmed"], true);
-        assert_eq!(
-            response["submit_confirmation_basis"],
-            "sustained-post-submit-activity"
-        );
-        assert_eq!(response["submit_attempts"], 1);
-        assert_eq!(response["submit_bytes_written"], 1);
-        assert!(response["submit_confirmation_elapsed_ms"].as_u64().unwrap() <= 1500);
-        let writes = state
-            .pty_manager
-            .read()
-            .write_records_for_test(AGENT_ID)
-            .unwrap();
-        assert_eq!(
-            writes
-                .iter()
-                .filter(|write| write.as_slice() == b"\r")
-                .count(),
-            1
-        );
-    }
-
-    /// #260: output already streaming before the payload write makes an otherwise
-    /// confident positive indeterminate. The retry remains keyed strictly to false,
-    /// so this busy receiver must receive exactly one Enter.
-    #[tokio::test]
-    async fn operator_inject_downgrades_sustained_activity_from_busy_receiver() {
-        let (_temp_dir, app, state) = setup_test_app();
-
-        let pty_manager = Arc::clone(&state.pty_manager);
-        let repainter = tokio::spawn(async move {
-            for tick in 0..16u32 {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                pty_manager
-                    .read()
-                    .record_output_for_test(AGENT_ID, format!("busy-frame-{tick};").as_bytes());
-            }
-        });
-
-        let (status, response) = post_inject(
-            app,
-            "/api/sessions/inject-test/inject",
-            json!({ "target_agent_id": AGENT_ID, "message": "go" }),
-        )
-        .await;
-        repainter.abort();
-
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            response["pre_write_activity_change_count"]
-                .as_u64()
-                .unwrap()
-                >= 2
-        );
-        assert_eq!(response["receiver_busy_before_write"], true);
+        assert!(response["submit_retry_failure"].as_str().unwrap().contains("Submit retry failed"));
         assert_eq!(response["submit_confirmed"], Value::Null);
-        assert_eq!(
-            response["submit_confirmation_basis"],
-            "busy-receiver-indeterminate"
-        );
-        assert_eq!(
-            response["submit_attempts"], 1,
-            "an indeterminate busy receiver must not trigger the Some(false)-only retry"
-        );
-        assert_eq!(response["submit_bytes_written"], 1);
-        let writes = state
-            .pty_manager
-            .read()
-            .write_records_for_test(AGENT_ID)
-            .unwrap();
-        assert_eq!(
-            writes
-                .iter()
-                .filter(|write| write.as_slice() == b"\r")
-                .count(),
-            1
-        );
+        assert!(matches!(state.session_controller.read().get_session(SESSION_ID).unwrap().agents
+            .iter().find(|agent| agent.id == AGENT_ID).unwrap().status,
+            AgentStatus::WaitingForInput(_)));
+    }
+
+    #[tokio::test]
+    async fn pending_background_watch_updates_status_after_late_turn() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"late fixture"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_confirmation_basis"], "transcript-pending");
+        assert_eq!(response["submit_attempts"], 1, "raw echo is not staging evidence");
+        let nonce = written_nonce(&state).await;
+        write_transcript(&state, &nonce, true);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let status = state.session_controller.read().get_session(SESSION_ID).unwrap().agents
+                    .iter().find(|agent| agent.id == AGENT_ID).unwrap().status.clone();
+                if matches!(status, AgentStatus::Running) { break; }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }).await.expect("background transcript confirmation updates agent status");
+    }
+
+    fn short_watch_fixture(state: &Arc<AppState>, user_recorded: bool) -> (InjectionReceipt, SharedConfirmation) {
+        support_codex(state);
+        let receipt = state.injection_manager.read().write_to_agent(AGENT_ID, "watch fixture", true).unwrap();
+        record_injection_submission(state, SESSION_ID, AGENT_ID, &receipt);
+        let nonce = receipt.nonce.as_deref().unwrap();
+        state.pty_manager.read().record_output_for_test(AGENT_ID, format!("\n> {nonce}").as_bytes());
+        if user_recorded { write_transcript(state, nonce, false); }
+        let since = SystemTime::from(receipt.confirmation_since.unwrap_or(receipt.write_started_at));
+        let reader = Arc::new(parking_lot::Mutex::new(confirmation_reader(state, SESSION_ID, AGENT_ID, since)));
+        (receipt, reader)
+    }
+
+    async fn wait_status_reason(state: &AppState, expected: &str) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let status = state.session_controller.read().get_session(SESSION_ID).unwrap().agents
+                    .iter().find(|agent| agent.id == AGENT_ID).unwrap().status.clone();
+                if matches!(status, AgentStatus::WaitingForInput(ref reason) if reason == expected) { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("bounded watch status transition");
+    }
+
+    #[tokio::test]
+    async fn short_watch_absent_message_and_visible_staging_reports_failure() {
+        let (_temp, _app, state) = setup_test_app();
+        let (receipt, reader) = short_watch_fixture(&state, false);
+        watch_pending_delivery(&state, SESSION_ID, AGENT_ID, &receipt, reader, Duration::from_millis(300));
+        wait_status_reason(&state, &format!("injected_delivery_failed:transcript-timeout:{}", receipt.submitted_at.to_rfc3339())).await;
+        state.session_controller.read().update_heartbeat(SESSION_ID, AGENT_ID, "working", None).unwrap();
+        state.session_controller.read().get_stalled_agent_reports(SESSION_ID, Duration::from_secs(30));
+        let status = state.session_controller.read().get_session(SESSION_ID).unwrap().agents
+            .into_iter().find(|agent| agent.id == AGENT_ID).unwrap().status;
+        assert!(matches!(status, AgentStatus::Running), "newer heartbeat clears transcript timeout failure");
+    }
+
+    #[tokio::test]
+    async fn short_watch_recorded_user_without_turn_reports_unknown_even_when_staged() {
+        let (_temp, _app, state) = setup_test_app();
+        let (receipt, reader) = short_watch_fixture(&state, true);
+        watch_pending_delivery(&state, SESSION_ID, AGENT_ID, &receipt, reader.clone(), Duration::from_millis(300));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&reader) != 1 { tokio::time::sleep(Duration::from_millis(20)).await; }
+        }).await.expect("unknown watch completed without replacing recovery marker");
+        wait_status_reason(&state, &format!("awaiting_injected_turn:{}", receipt.submitted_at.to_rfc3339())).await;
+    }
+
+    #[tokio::test]
+    async fn deleting_pty_cancels_pending_watch_and_releases_reader() {
+        let (_temp, _app, state) = setup_test_app();
+        let (receipt, reader) = short_watch_fixture(&state, false);
+        watch_pending_delivery(&state, SESSION_ID, AGENT_ID, &receipt, reader.clone(), Duration::from_millis(300));
+        state.pty_manager.read().kill(AGENT_ID).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&reader) != 1 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("deleted agent must release its watch reader");
+        let status = state.session_controller.read().get_session(SESSION_ID).unwrap().agents
+            .iter().find(|agent| agent.id == AGENT_ID).unwrap().status.clone();
+        assert!(matches!(status, AgentStatus::WaitingForInput(reason) if reason.starts_with("awaiting_injected_turn:")));
     }
 
     #[test]
@@ -1369,16 +1395,16 @@ mod tests {
         use std::time::Duration;
 
         assert_eq!(
-            classify_submit_confirmation(&[], &[]),
+            classify_screen_activity(&[], &[]),
             (Some(false), "no-post-submit-activity")
         );
         assert_eq!(
-            classify_submit_confirmation(&[Duration::from_millis(40)], &[]),
+            classify_screen_activity(&[Duration::from_millis(40)], &[]),
             (None, "ambiguous-post-submit-activity"),
             "a single repaint also matches a swallowed Enter"
         );
         assert_eq!(
-            classify_submit_confirmation(
+            classify_screen_activity(
                 &[Duration::from_millis(40), Duration::from_millis(120)],
                 &[]
             ),
@@ -1386,7 +1412,7 @@ mod tests {
             "a short burst is not sustained activity"
         );
         assert_eq!(
-            classify_submit_confirmation(
+            classify_screen_activity(
                 &[
                     Duration::from_millis(40),
                     Duration::from_millis(120),
@@ -1399,17 +1425,17 @@ mod tests {
 
         let busy_baseline = [Duration::from_millis(40), Duration::from_millis(180)];
         assert_eq!(
-            classify_submit_confirmation(&[], &busy_baseline),
+            classify_screen_activity(&[], &busy_baseline),
             (Some(false), "no-post-submit-activity"),
             "a busy baseline does not change a confident negative"
         );
         assert_eq!(
-            classify_submit_confirmation(&[Duration::from_millis(40)], &busy_baseline),
+            classify_screen_activity(&[Duration::from_millis(40)], &busy_baseline),
             (None, "ambiguous-post-submit-activity"),
             "a busy baseline does not change an ambiguous verdict"
         );
         assert_eq!(
-            classify_submit_confirmation(
+            classify_screen_activity(
                 &[
                     Duration::from_millis(40),
                     Duration::from_millis(120),
@@ -1432,7 +1458,7 @@ mod tests {
         let short_pre_write_burst = [Duration::from_millis(40), Duration::from_millis(120)];
 
         assert_eq!(
-            classify_submit_confirmation(&sustained_submit, &short_pre_write_burst),
+            classify_screen_activity(&sustained_submit, &short_pre_write_burst),
             (Some(true), "sustained-post-submit-activity"),
             "an 80 ms pre-write burst is shorter than half the 250 ms baseline window"
         );
@@ -1486,4 +1512,55 @@ mod tests {
         );
         assert_eq!(status_for(QA_WORKER_ID), &AgentStatus::Idle);
     }
+    #[tokio::test]
+    async fn cursor_inject_unknown_status_recovers_after_newer_heartbeat() {
+        let (_temp, app, state) = setup_test_app();
+        let mut session = state.session_controller.read().get_session(SESSION_ID).unwrap();
+        session.agents.iter_mut().find(|agent| agent.id == AGENT_ID).unwrap().config.cli = "cursor".into();
+        state.session_controller.read().insert_test_session(session);
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"unsupported runtime fixture"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_confirmation_basis"], "transcript-unavailable");
+        let before = state.session_controller.read().get_session(SESSION_ID).unwrap().agents
+            .into_iter().find(|agent| agent.id == AGENT_ID).unwrap().status;
+        assert!(matches!(before, AgentStatus::WaitingForInput(reason) if reason.starts_with("awaiting_injected_turn:")));
+        state.session_controller.read().update_heartbeat(SESSION_ID, AGENT_ID, "working", None).unwrap();
+        state.session_controller.read().get_stalled_agent_reports(SESSION_ID, Duration::from_secs(30));
+        let after = state.session_controller.read().get_session(SESSION_ID).unwrap().agents
+            .into_iter().find(|agent| agent.id == AGENT_ID).unwrap().status;
+        assert!(matches!(after, AgentStatus::Running));
+    }
+
+    #[tokio::test]
+    async fn long_lived_dynamic_worker_uses_its_spawn_bucket_not_injection_or_session_date() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let spawned_at = Utc::now() - ChronoDuration::days(3);
+        let mut session = state.session_controller.read().get_session(SESSION_ID).unwrap();
+        session.created_at = Utc::now() - ChronoDuration::days(5);
+        session.agents.iter_mut().find(|agent| agent.id == AGENT_ID).unwrap()
+            .transcript_spawned_at = Some(spawned_at);
+        state.session_controller.read().insert_test_session(session);
+        let fixture_state = state.clone();
+        let fixture = tokio::spawn(async move {
+            let nonce = written_nonce(&fixture_state).await;
+            let dir = fixture_state.storage.base_dir().join("transcript-test-home/.codex/sessions")
+                .join(spawned_at.with_timezone(&chrono::Local).format("%Y/%m/%d").to_string());
+            std::fs::create_dir_all(&dir).unwrap();
+            let timestamp = Utc::now().to_rfc3339();
+            let user = json!({"timestamp":timestamp,"type":"response_item","payload":{
+                "role":"user","content":[{"type":"input_text","text":format!("Fixture request\n{nonce}")}]}});
+            let turn = json!({"timestamp":timestamp,"type":"event_msg","payload":{
+                "type":"task_started","turn_attribution":{"turn_id":"long-lived-http-turn"}}});
+            std::fs::write(dir.join("rollout-long-lived-fixture.jsonl"), format!("{user}\n{turn}\n")).unwrap();
+        });
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"old dynamic worker fixture"})).await;
+        fixture.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_confirmed"], true);
+        assert_eq!(response["turn_id"], "long-lived-http-turn");
+    }
+
 }

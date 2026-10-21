@@ -20,6 +20,10 @@ use super::{CoordinationMessage, StateManager, WorkerStateInfo};
 /// after-write snapshot; neither kind of ring change proves that the agent took a turn.
 #[derive(Debug, Clone)]
 pub struct InjectionReceipt {
+    /// Exact marker in the submitted payload; absent for staging writes.
+    pub nonce: Option<String>,
+    pub confirmation_since: Option<DateTime<Utc>>,
+    pub confirmation_expires: Option<std::time::Instant>,
     pub write_started_at: DateTime<Utc>,
     pub submitted_at: DateTime<Utc>,
     pub observation_started_at: DateTime<Utc>,
@@ -219,9 +223,13 @@ impl InjectionManager {
 
         let mut results = Vec::new();
         for worker_id in worker_ids {
+            // Shell control commands must not receive conversational nonce decoration.
             let result = self
-                .write_to_agent(worker_id, &git_command, true)
-                .map(|_| ());
+                .pty_manager
+                .read()
+                .submit(worker_id, git_command.as_bytes())
+                .map(|_| ())
+                .map_err(|e| InjectionError::PtyError(format!("Failed to write: {}", e)));
 
             let status = if result.is_ok() { "initiated" } else { "failed" };
             let log_msg = format!(
@@ -251,6 +259,9 @@ impl InjectionManager {
 
         // Strip any existing line endings first
         let clean_message = message.trim_end_matches(&['\r', '\n'][..]);
+        let nonce = (submit && !clean_message.is_empty()).then(|| format!("[hive-msg:{}]", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+        let submitted_message = nonce.as_ref().map(|nonce| format!("{clean_message}\n{nonce}"));
+        let clean_message = submitted_message.as_deref().unwrap_or(clean_message);
 
         tracing::info!("=== INJECTION START ===");
         tracing::info!("Target agent: {}", agent_id);
@@ -291,6 +302,9 @@ impl InjectionManager {
         tracing::info!("=== INJECTION COMPLETE ===");
 
         Ok(InjectionReceipt {
+            confirmation_expires: None,
+            confirmation_since: nonce.as_ref().map(|_| write_started_at),
+            nonce,
             write_started_at,
             submitted_at,
             observation_started_at: submitted_at,
@@ -531,6 +545,39 @@ fn format_agent_display(agent_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn branch_switch_submits_without_nonce_but_messages_keep_nonce() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = SessionStorage::new_with_base(root.path().to_path_buf()).unwrap();
+        storage.create_session_dir("test").unwrap();
+        let pty = Arc::new(RwLock::new(PtyManager::new()));
+        pty.read().create_session(
+            "test-worker-1".into(),
+            crate::pty::AgentRole::Worker { index: 1, parent: None },
+            "claude", &[], None, 80, 24,
+        ).unwrap();
+        let manager = InjectionManager::new(Arc::clone(&pty), storage);
+        assert!(matches!(manager.queen_switch_branch("test", "test-worker-1", &[], "topic"),
+            Err(InjectionError::NotAuthorized(_))));
+        let results = manager.queen_switch_branch("test", "test-queen",
+            &["test-worker-1".into(), "missing-worker-2".into()], "topic").unwrap();
+        assert!(results[0].1.is_ok());
+        assert!(matches!(results[1].1, Err(InjectionError::PtyError(_))));
+        let writes = pty.read().write_records_for_test("test-worker-1").unwrap();
+        let payload = writes.concat();
+        let payload = String::from_utf8(payload).unwrap();
+        assert!(payload.contains("git switch topic"));
+        assert!(!payload.contains("[hive-msg:"));
+        assert_eq!(writes.last().unwrap(), b"\r");
+
+        let receipt = manager.write_to_agent("test-worker-1", "ordinary message", true).unwrap();
+        let nonce = receipt.nonce.unwrap();
+        let writes = pty.read().write_records_for_test("test-worker-1").unwrap();
+        assert!(String::from_utf8(writes.concat()).unwrap().contains(&nonce));
+        assert_eq!(writes.last().unwrap(), b"\r");
+    }
 
     #[test]
     fn test_format_agent_display() {

@@ -8,7 +8,20 @@ operator interference invalidates a positive "submitted" observation, but text v
 remaining in the composer is admissible negative evidence because a keypress cannot
 manufacture the staged payload.
 
-The read-only instrument is:
+Transcript confirmation (#356) now supplies an additional instrument: submitted messages
+carry a trailing `[hive-msg:<8 hex>]` marker. `submit_confirmed: true` requires that marker
+in the agent's user record followed by a turn start; `submit_confirmation_source` is
+`transcript` and `turn_id` identifies the turn. The screen classifier is exposed only as
+`submit_screen_activity`. Unsupported CLIs return `null` / `transcript-unavailable`.
+The request waits up to 8 seconds, then returns `null` / `transcript-pending` and watches
+for at most 60 more seconds. Timeout is `false` only while the message is visibly staged;
+otherwise it remains unknown. Deleting the agent cancels its watch.
+
+Issue #241 owns the receiver-side sweep matrix below. A transcript proves that a turn
+started, not whether a human pressed Enter. It therefore does not establish an uncontaminated
+positive sweep result. The matrix cells remain operator-owned and unchanged.
+
+The read-only screen instrument is:
 
 ```http
 GET /api/sessions/{session_id}/agents/{agent_id}/pty-buffer
@@ -38,68 +51,75 @@ keep `byte_count` directly comparable to the fixture byte length.
   for a window after a fast raw byte burst) from swallowing the follow-up `\r` as a
   literal newline inside the paste.
 - Enter is still a bare `\r` written as its own discrete PTY write; no `\n` is appended
-  and Enter is outside the bracketed-paste envelope. If the first observation returns the
-  confident negative `submit_confirmed: false`, the HTTP inject path writes exactly one more
-  bare `\r` and observes once more. Confirmed and ambiguous first observations do not retry.
-- An empty payload with `"submit": true` writes only the bare `\r` — this is the
-  supported flush for content already staged in a composer.
+  and Enter is outside the bracketed-paste envelope. After the synchronous wait, exactly
+  one retry is allowed only when the transcript has not recorded the message and the
+  composer visibly holds its exact marker. Screen activity alone never triggers a retry.
+- Every nonempty `"submit": true` message receives a fresh nonce. An empty flush request
+  writes only bare Enter and carries no nonce. If the agent has an earlier pending nonce
+  within its watch window, the flush confirms against that nonce; otherwise it returns
+  `null` / `transcript-unavailable`. A `"submit": false` staging write carries no nonce
+  and issues no Enter.
+- Codex's submit-time gap is 150 ms plus 1 ms per 200 sanitized payload bytes, capped at
+  600 ms. `HIVE_PTY_SUBMIT_GAP_MS` overrides it; other adapters retain their 50 ms default.
 - A multi-line payload retains its internal newlines and receives one Enter after the whole
   payload, not one Enter per line.
 - Trailing `\r`/`\n` on an injected message are always stripped before writing
   (`clean_message`), so a payload cannot self-submit by embedding its own newline; the
   discrete Enter write is the only submit mechanism.
 - `pty.paste` remains bracketed input with no automatic submit.
-- The compiled fallback gap is 50 ms for every adapter until measurements justify a change.
+- The compiled fallback gap is 50 ms for non-codex adapters. Codex uses a payload-scaled
+  150–600 ms gap at submit time; the shared adapter policy default remains 50 ms.
 - `HIVE_PTY_SUBMIT_GAP_MS` values from 0 through 300,000 ms override the adapter policy for the
   sweep. Invalid, overflowed, and larger values are rejected with one warning and fall back to the
   adapter default; they are never silently clamped. The 300,000 ms safety ceiling is not a default.
   The parsed override is cached in a `OnceLock` on first use, so it is restart-scoped: changing
   the variable requires restarting the backend, not just re-running a request.
 
-The 50 ms value is intentionally unchanged. Existing uncontrolled observations report two
-failures around 1.2-2.7 seconds, two successes around 4-5 seconds, and one success around
-65 seconds. Agent busy state was uncontrolled, so those observations suggest 50 ms is likely
-too short but do not support replacing it with another guessed constant. Note that those
-observations predate the #256 bracketed envelope, which removes the dependency on the gap
-for paste-coalescing composers rather than tuning it.
+The historical 50 ms discussion predates the current Codex policy. Uncontrolled observations
+reported two failures around 1.2–2.7 seconds, two successes around 4–5 seconds, and one
+success around 65 seconds. Busy state was uncontrolled, so these are not matrix evidence.
+The #256 bracketed envelope improves framing, but does not establish that Codex no longer
+needs a submit gap. Non-codex adapters retain the 50 ms default pending controlled evidence.
 
-## Sender receipt and delivery signal (#256, #259)
+## Sender receipt and delivery signal (#256, #259, #356)
 
 The inject response reports measured facts, not request echoes:
 
-- `payload_bytes_written` counts the sanitized payload bytes actually written inside the
-  envelope (embedded `ESC[201~` sequences are stripped before framing).
-- `submit_bytes_written` counts all discrete Enter bytes actually written;
-  `submit_keystroke_issued` is derived from the initial write. `submit_attempts` counts the Enter
-  writes that actually landed: `0` when submit was not requested, `1` when exactly one Enter was
-  written, and `2` when the one bounded retry also wrote. Note that `1` therefore covers two
-  distinct cases — the initial Enter was not confidently rejected so no retry was needed, **and**
-  the retry was attempted but its write failed. Read `submit_retry_failed` to tell them apart.
-- `submit_confirmation_window_ms` is **per attempt** (1,500 ms) while
-  `submit_confirmation_elapsed_ms` is **cumulative across attempts**. After a retry the elapsed
-  value can therefore approach 3,000 ms and legitimately exceed the reported window — do not
-  compute `elapsed / window` or assert `elapsed <= window`.
-- `submit_confirmed` is a tri-state delivery heuristic observed from the PTY output ring
-  after an Enter write, over a bounded 1,500 ms window per attempt: `true` means sustained ring
-  activity consistent with the composer accepting Enter and starting a turn, `false` means
-  the Enter produced no observable ring reaction at all, and `null` means unknown,
-  unobservable, or `"submit": false`. The handler also samples a bounded pre-write activity
-  baseline. When that baseline shows the receiver was already streaming, a would-be positive is
-  downgraded to `null` with basis `busy-receiver-indeterminate`; the field never upgrades an
-  ambiguous buffer observation to a sweep PASS.
-- The retry is keyed strictly on the first `false` verdict and is capped at one extra CR.
-  Its observation baseline is captured after that CR so local echo cannot become false
-  receiver evidence. The response reports the retry observation as the final verdict; two
-  quiet windows therefore remain `false`. A false negative can double-execute a turn on a
-  non-idempotent composer, so the matrix measurement must settle that risk before any widening.
-- Issue #260 is addressed by the bounded pre-write baseline and the
-  `busy-receiver-indeterminate` downgrade. Pre-write changes must span at least 125 ms — half
-  the 250 ms baseline window — before the receiver is considered already streaming. The
-  motivating observation remains four injects to three busy codex principals that returned
-  `submit_confirmed: true` with `sustained-post-submit-activity` even though each payload stayed
-  visibly staged and needed a later bare-Enter flush. The baseline prevents that busy receiver
-  output from remaining a confident positive. A `true` is still sender-side evidence, never a
-  sweep PASS without controlled receiver-buffer confirmation.
+- `write_started_at` and `submitted_at` bracket the successful write. `payload_bytes_written`
+  counts sanitized payload bytes inside the envelope; embedded `ESC[201~` is stripped.
+- `submit_attempted` and `submit_keystroke_issued` reflect the initial Enter write.
+  `submit_bytes_written` counts all Enter bytes actually written. `submit_attempts` is 0
+  for no Enter, 1 for the initial Enter, or 2 if the single retry also lands.
+  `submit_retry_failed` and `submit_retry_failure` distinguish a failed retry from no retry.
+- `submit_confirmed` is transcript evidence: `true` requires the exact nonce in the agent's
+  user record followed by a turn start. `submit_confirmation_source` is `transcript`,
+  `submit_confirmation_basis` is `transcript-confirmed`, and `turn_id` identifies that turn.
+  Screen activity never makes this field true. Unsupported or unreadable transcript sources
+  return `null` / `transcript-unavailable`; pending evidence returns `null` / `transcript-pending`.
+- `submit_confirmation_window_ms` is the 8,000 ms synchronous transcript window;
+  `submit_confirmation_elapsed_ms` measures elapsed delivery observation, including retry work.
+  A pending result starts up to 60 seconds of background watching, cancelled on agent deletion.
+  At expiry, `transcript-timeout` is false only if the nonce is still visibly staged;
+  otherwise confirmation remains unknown. No-submit requests have no transcript confirmation.
+- `submit_screen_activity`, `submit_screen_activity_basis`, `submit_screen_activity_window_ms`
+  and `submit_screen_activity_elapsed_ms` expose the advisory screen classifier separately.
+  Its window is 1,500 ms: true means sustained activity, false means no observed reaction,
+  and null means indeterminate or unavailable. These observations cannot confirm delivery.
+- The single extra-CR retry requires transcript-pending, no recorded nonce-bearing user
+  message, and a visibly staged nonce. The handler rechecks transcript and screen state
+  immediately before retrying. A recorded user message without a turn suppresses retry.
+  A screen-false result alone does not authorize a retry.
+- `pre_write_pty_observation_available`, `pre_write_activity_change_count`,
+  `receiver_busy_before_write`, `pre_write_observation_window_ms` and
+  `pre_write_observation_elapsed_ms` describe the 250 ms pre-write screen baseline.
+  The historical #260 busy-receiver downgrade now applies only to advisory screen activity:
+  changes spanning at least 125 ms downgrade its would-be positive to null with basis
+  `busy-receiver-indeterminate`. It does not change transcript confirmation.
+- `pty_observation_available`, `pty_output_bytes_before`, `pty_output_bytes_after_write`,
+  `pty_output_bytes_after`, `pty_activity_observed`, `observation_window_ms` and
+  `observation_elapsed_ms` describe bounded PTY snapshots and activity. `evidence_scope`
+  identifies the transcript delivery scope. None of these screen counters establishes a
+  sweep PASS without the controlled receiver-buffer evidence required by #241.
 
 ## Two-call workaround
 
@@ -190,9 +210,9 @@ gap:
 4. Without touching the target terminal, repeat the PTY-buffer `GET` at 250 ms, 1 second,
    5 seconds, and 10 seconds after the configured gap. Save every raw status and response;
    do not rely on a transient UI repaint. Note that the inject POST itself can stay pending
-   up to ~1,500 ms after one Enter write, or ~3,000 ms when a confident negative triggers
-   the single retry and second observation. Issue the POST from a separate shell (or
-   background it) rather than waiting for its response — otherwise the 250 ms and 1 second
+   up to 8,000 ms for synchronous transcript confirmation, plus any single retry write.
+   Pending confirmation continues in the bounded background watch. Issue the POST from a
+   separate shell (or background it) rather than waiting for its response — otherwise the 250 ms and 1 second
    samples are missed before the POST returns.
 5. Score the current terminal state reconstructed from the PTY output:
 
