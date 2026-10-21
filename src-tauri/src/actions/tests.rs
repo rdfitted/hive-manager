@@ -85,6 +85,8 @@ fn test_registry_lists_all_actions() {
         "session.get",
         "session.stop",
         "session.close",
+        "session.continue_after_planning",
+        "session.mark_plan_ready",
         "session.launch_hive_v2",
         "session.launch_debate",
         "session.update_metadata",

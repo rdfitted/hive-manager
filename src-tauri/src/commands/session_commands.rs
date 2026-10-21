@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::State;
 
+use crate::actions::session::{dispatch_continue_after_planning, dispatch_mark_plan_ready};
 use crate::actions::{ActionContext, ActionRegistry, Caller};
 use crate::http::state::AppState;
 use crate::pty::AgentConfig;
@@ -387,20 +388,28 @@ pub async fn launch_debate(
 
 #[tauri::command]
 pub async fn continue_after_planning(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     session_id: String,
-) -> Result<Session, String> {
-    let controller = state.0.read();
-    controller.continue_after_planning(&session_id)
+) -> Result<serde_json::Value, String> {
+    // Same action as POST /api/sessions/{id}/continue (#371).
+    let ctx = ActionContext::new(Caller::Frontend, Arc::clone(&app_state));
+    dispatch_continue_after_planning(&registry, &ctx, &session_id)
+        .await
+        .map_err(|e| e.to_message())
 }
 
 #[tauri::command]
 pub async fn mark_plan_ready(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     session_id: String,
 ) -> Result<(), String> {
-    let controller = state.0.read();
-    controller.mark_plan_ready(&session_id)
+    let ctx = ActionContext::new(Caller::Frontend, Arc::clone(&app_state));
+    dispatch_mark_plan_ready(&registry, &ctx, &session_id)
+        .await
+        .map_err(|e| e.to_message())?;
+    Ok(())
 }
 
 #[tauri::command]
