@@ -14,6 +14,7 @@ interface TestLayoutState {
   recentCollapsed: boolean;
   agentsCollapsed: boolean;
   maximizedTerminalId: string | null;
+  sessionViewMode: 'focus' | 'grid';
 }
 
 const testMocks = vi.hoisted(() => ({
@@ -22,6 +23,8 @@ const testMocks = vi.hoisted(() => ({
   toggleRight: vi.fn(),
   setMaximizedTerminalId: vi.fn(),
   toggleMaximizedTerminal: vi.fn(),
+  setSessionViewMode: vi.fn(),
+  toggleSessionViewMode: vi.fn(),
   setSessionId: vi.fn(),
   loadSessions: vi.fn().mockResolvedValue(undefined),
   fetchCliHealth: vi.fn().mockResolvedValue({}),
@@ -29,6 +32,10 @@ const testMocks = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn().mockResolvedValue(() => {}),
 }));
 
 vi.mock('phosphor-svelte', () => ({
@@ -90,6 +97,7 @@ vi.mock('$lib/stores/layout', async () => {
     recentCollapsed: true,
     agentsCollapsed: false,
     maximizedTerminalId: null,
+    sessionViewMode: 'grid',
   });
   testMocks.setLayoutState = state.set;
   testMocks.toggleLeft.mockImplementation(() => {
@@ -107,6 +115,15 @@ vi.mock('$lib/stores/layout', async () => {
       maximizedTerminalId: current.maximizedTerminalId === id ? null : id,
     }));
   });
+  testMocks.setSessionViewMode.mockImplementation((mode: 'focus' | 'grid') => {
+    state.update((current) => ({ ...current, sessionViewMode: mode }));
+  });
+  testMocks.toggleSessionViewMode.mockImplementation(() => {
+    state.update((current) => ({
+      ...current,
+      sessionViewMode: current.sessionViewMode === 'focus' ? 'grid' : 'focus',
+    }));
+  });
 
   return {
     layout: {
@@ -115,6 +132,8 @@ vi.mock('$lib/stores/layout', async () => {
       toggleRight: testMocks.toggleRight,
       setMaximizedTerminalId: testMocks.setMaximizedTerminalId,
       toggleMaximizedTerminal: testMocks.toggleMaximizedTerminal,
+      setSessionViewMode: testMocks.setSessionViewMode,
+      toggleSessionViewMode: testMocks.toggleSessionViewMode,
     },
   };
 });
@@ -198,6 +217,7 @@ const expandedLayout: TestLayoutState = {
   recentCollapsed: true,
   agentsCollapsed: false,
   maximizedTerminalId: null,
+  sessionViewMode: 'grid',
 };
 
 function setLayoutState(state: TestLayoutState): void {
