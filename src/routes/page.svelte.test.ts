@@ -183,6 +183,8 @@ vi.mock('$lib/components/Terminal.svelte', () => ({
   readTerminalSelection: vi.fn(() => null),
 }));
 
+import { activeAgents } from '$lib/stores/sessions';
+import { ui } from '$lib/stores/ui';
 import Page from './+page.svelte';
 import TerminalGrid from '$lib/components/TerminalGrid.svelte';
 
@@ -218,6 +220,8 @@ async function pressEscape(): Promise<KeyboardEvent> {
 beforeEach(() => {
   vi.clearAllMocks();
   setLayoutState(expandedLayout);
+  (activeAgents as Writable<AgentInfo[]>).set([]);
+  ui.setFocusedAgent(null);
 });
 
 afterEach(() => {
@@ -307,5 +311,43 @@ describe('start screen', () => {
       store.set(previous);
       vi.restoreAllMocks();
     }
+  });
+});
+
+
+describe('agent focus and navigation', () => {
+  const agent = (id: string, status: AgentInfo['status'] = 'Running'): AgentInfo => ({
+    id, role: 'Queen', status, config: { cli: 'codex', flags: [] }, parent_id: null,
+  });
+  it('G-no-focus-steal: keeps X focused when Y awaits an injected turn', async () => {
+    const agents = activeAgents as Writable<AgentInfo[]>;
+    agents.set([agent('X'), agent('Y')]);
+    ui.setFocusedAgent('X');
+    render(Page);
+    await tick();
+    agents.set([agent('X'), agent('Y', { WaitingForInput: 'awaiting_injected_turn:2026-10-21' })]);
+    await tick();
+    expect(get(ui).focusedAgentId).toBe('X');
+    agents.set([agent('X'), agent('Y', { WaitingForInput: 'injected_delivery_failed:transcript:1' })]);
+    await tick();
+    expect(get(ui).focusedAgentId).toBe('X');
+  });
+  it('preserves first-agent selection and fallback when the focused agent vanishes', async () => {
+    const agents = activeAgents as Writable<AgentInfo[]>;
+    agents.set([agent('X'), agent('Y')]);
+    render(Page); await tick();
+    expect(get(ui).focusedAgentId).toBe('X');
+    agents.set([agent('Y')]); await tick();
+    expect(get(ui).focusedAgentId).toBe('Y');
+    agents.set([]); await tick();
+    expect(get(ui).focusedAgentId).toBeNull();
+  });
+  it('still navigates agents with arrow keys', async () => {
+    (activeAgents as Writable<AgentInfo[]>).set([agent('X'), agent('Y')]);
+    ui.setFocusedAgent('X'); render(Page); await tick();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await tick(); expect(get(ui).focusedAgentId).toBe('Y');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    await tick(); expect(get(ui).focusedAgentId).toBe('X');
   });
 });

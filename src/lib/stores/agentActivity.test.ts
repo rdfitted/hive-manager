@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import type { AgentInfo } from './sessions';
 
-vi.mock('./sessions', async () => ({ activeAgents: (await import('svelte/store')).writable([]) }));
-vi.mock('./conversations', async () => ({ heartbeatStore: (await import('svelte/store')).writable({ agents: {}, staleAgents: new Set() }) }));
+const mocks = vi.hoisted(() => ({ loadHeartbeats: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('./sessions', async () => ({ activeAgents: (await import('svelte/store')).writable([]), activeSession: (await import('svelte/store')).writable(null) }));
+vi.mock('./conversations', async () => ({ heartbeatStore: { ...(await import('svelte/store')).writable({ agents: {}, staleAgents: new Set() }), loadHeartbeats: mocks.loadHeartbeats } }));
 vi.mock('./events', async () => ({ events: (await import('svelte/store')).writable({ events: [] }) }));
-import { activeAgents } from './sessions';
+import { activeAgents, activeSession } from './sessions';
 import { heartbeatStore } from './conversations';
 import { events } from './events';
 import { agentActivity, attentionReason, needsAttention, now } from './agentActivity';
@@ -13,6 +14,8 @@ import { agentActivity, attentionReason, needsAttention, now } from './agentActi
 const agent = (status: AgentInfo['status']): AgentInfo => ({ id: 'a', role: 'Queen', status, config: { cli: 'codex', flags: [] }, parent_id: null });
 const set = (store: unknown, value: unknown) => (store as { set(value: unknown): void }).set(value);
 beforeEach(() => {
+  mocks.loadHeartbeats.mockReset().mockResolvedValue(undefined);
+  set(activeSession, null);
   set(activeAgents, [agent('Running')]);
   set(heartbeatStore, { agents: {}, staleAgents: new Set() });
   set(events, { events: [] });
@@ -63,5 +66,47 @@ describe('activity derivation', () => {
     expect(one).toHaveBeenCalledTimes(2); expect(two).toHaveBeenCalledTimes(2);
     stopOne(); expect(vi.getTimerCount()).toBe(1);
     stopTwo(); expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+
+describe('shared heartbeat refresh without Chat mounted', () => {
+  it('starts once, uses the existing loader every 10s, re-keys, and stops at the last subscriber', async () => {
+    vi.useFakeTimers();
+    set(activeSession, { id: 'one' });
+    const stopOne = agentActivity.subscribe(() => {});
+    const stopTwo = agentActivity.subscribe(() => {});
+    try {
+      expect(mocks.loadHeartbeats).toHaveBeenCalledTimes(1);
+      expect(mocks.loadHeartbeats).toHaveBeenLastCalledWith('one');
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(mocks.loadHeartbeats).toHaveBeenCalledTimes(2);
+      set(activeSession, { id: 'one', state: 'Running' });
+      expect(mocks.loadHeartbeats).toHaveBeenCalledTimes(2);
+      set(activeSession, { id: 'two' });
+      expect(mocks.loadHeartbeats).toHaveBeenLastCalledWith('two');
+      stopOne(); expect(vi.getTimerCount()).toBe(1);
+      stopTwo(); expect(vi.getTimerCount()).toBe(0);
+      const calls = mocks.loadHeartbeats.mock.calls.length;
+      set(activeSession, { id: 'three' });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(mocks.loadHeartbeats).toHaveBeenCalledTimes(calls);
+    } finally { stopOne(); stopTwo(); }
+  });
+  it('loads summary data without a Chat component and stops polling when no session is selected', async () => {
+    vi.useFakeTimers();
+    mocks.loadHeartbeats.mockImplementation(async () => {
+      set(heartbeatStore, { agents: { a: { summary: 'Loaded outside Chat', timestamp: '2026-10-21T12:00:00Z' } }, staleAgents: new Set() });
+    });
+    set(activeSession, { id: 'one' });
+    const values: string[] = [];
+    const stop = agentActivity.subscribe(value => values.push(value.a.summary));
+    try {
+      await Promise.resolve();
+      expect(values.at(-1)).toBe('Loaded outside Chat');
+      set(activeSession, null);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { stop(); }
   });
 });

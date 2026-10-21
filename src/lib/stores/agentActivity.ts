@@ -1,5 +1,5 @@
 import { derived, readable, type Readable } from 'svelte/store';
-import { activeAgents, type AgentInfo } from './sessions';
+import { activeAgents, activeSession, type AgentInfo } from './sessions';
 import { heartbeatStore } from './conversations';
 import { events } from './events';
 
@@ -48,8 +48,48 @@ function timestamp(value: string | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+// The sidebar must receive heartbeats even when Chat/AgentStatusBar is closed.
+// This shared subscription owns one refresh loop, regardless of the row count.
+const heartbeatRefresh = readable(null, () => {
+  let sessionId: string | null = null;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let stopped = false;
+  let loading = false;
+  let pending = false;
+
+  async function refresh() {
+    if (!sessionId || stopped) return;
+    if (loading) { pending = true; return; }
+    loading = true;
+    try {
+      await heartbeatStore.loadHeartbeats(sessionId);
+    } catch {
+      // Heartbeat refresh is best-effort, as in the existing status bar.
+    } finally {
+      loading = false;
+      if (pending && !stopped) { pending = false; void refresh(); }
+    }
+  }
+
+  const unsubscribe = activeSession.subscribe((session) => {
+    const nextId = session?.id ?? null;
+    if (nextId === sessionId) return;
+    sessionId = nextId;
+    clearInterval(timer);
+    if (sessionId) {
+      void refresh();
+      timer = setInterval(() => void refresh(), 10_000);
+    }
+  });
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+    unsubscribe();
+  };
+});
+
 export const agentActivity: Readable<Record<string, AgentActivity>> = derived(
-  [activeAgents, heartbeatStore, events],
+  [activeAgents, heartbeatStore, events, heartbeatRefresh],
   ([$agents, $heartbeats, $events]) => {
     const latest = new Map<string, { at: number; label: string }>();
     for (const event of $events.events) {

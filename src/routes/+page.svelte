@@ -84,12 +84,6 @@
       return;
     }
 
-    // Auto-focus agent requesting input
-    const waitingAgent = agents.find(a => typeof a.status === 'object' && 'WaitingForInput' in a.status);
-    if (waitingAgent && currentFocusId !== waitingAgent.id) {
-      ui.setFocusedAgent(waitingAgent.id);
-      ui.setSelectedAgent(waitingAgent.id);
-    }
   });
 
   // Read an xterm terminal selection if the focused/under-cursor element is inside one.

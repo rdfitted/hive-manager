@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { CaretDown, CaretRight, Check, ClipboardText, Crown, MagnifyingGlass, Microscope, Scales, X } from 'phosphor-svelte';
+  import { CaretDown, CaretRight } from 'phosphor-svelte';
   import { createEventDispatcher } from 'svelte';
   import { serdeEnumVariantName, type AgentInfo } from '$lib/stores/sessions';
   import { heartbeatStore } from '$lib/stores/conversations';
+  import { attentionReason, needsAttention } from '$lib/stores/agentActivity';
+  import AgentActivityLine from './agent/AgentActivityLine.svelte';
 
   export let agent: AgentInfo;
   export let childrenMap: Map<string | null, AgentInfo[]>;
@@ -27,42 +29,6 @@
     return 'Agent';
   }
 
-  function getRoleIcon(role: AgentInfo['role']) {
-    if (typeof role === 'object' && role !== null) {
-      if ('Judge' in role) return Scales;
-      if ('Planner' in role) return '◆';
-      if ('Worker' in role) return '●';
-      if ('QaWorker' in role) return Microscope;
-      if ('Fusion' in role) return '◎';
-    }
-    const k = serdeEnumVariantName(role);
-    if (k === 'Queen') return Crown;
-    if (k === 'Evaluator') return MagnifyingGlass;
-    if (k === 'MasterPlanner') return ClipboardText;
-    return '○';
-  }
-
-  function getRoleColor(role: AgentInfo['role']): string {
-    if (typeof role === 'object' && role !== null) {
-      if ('Worker' in role) return 'var(--accent-cyan)';
-      if ('QaWorker' in role) return 'var(--accent-chrome)';
-    }
-    const k = serdeEnumVariantName(role);
-    if (k === 'Queen') return 'var(--accent-amber)';
-    if (k === 'Evaluator') return 'var(--accent-chrome)';
-    return 'var(--text-secondary)';
-  }
-
-  function getStatusIcon(status: AgentInfo['status']) {
-    if (typeof status === 'object' && status !== null && 'WaitingForInput' in status) return '⏳';
-    if (typeof status === 'object' && status !== null && 'Error' in status) return X;
-    const k = serdeEnumVariantName(status);
-    if (k === 'Running') return '█';
-    if (k === 'Completed') return Check;
-    if (k === 'Starting') return '○';
-    return '?';
-  }
-
   function getStatusColor(status: AgentInfo['status'], role: AgentInfo['role']): string {
     const rk = serdeEnumVariantName(role);
     const sk = serdeEnumVariantName(status);
@@ -85,7 +51,7 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' || e.key === ' ') {
+    if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
       e.preventDefault();
       handleClick();
     }
@@ -96,14 +62,6 @@
     expanded = !expanded;
   }
 
-  function isQaWorker(role: AgentInfo['role']): boolean {
-    return typeof role === 'object' && role !== null && 'QaWorker' in role;
-  }
-
-  function isAgentStale(): boolean {
-    return $heartbeatStore.staleAgents.has(agent.id);
-  }
-
   $: children = childrenMap.get(agent.id) || [];
   $: hasChildren = children.length > 0;
   $: isSelected = selectedId === agent.id;
@@ -111,8 +69,9 @@
     || (agent.config?.name && agent.config?.description ? `${agent.config.name} — ${agent.config.description}` : null)
     || agent.config?.name
     || getRoleName(agent.role);
-  $: RoleIcon = getRoleIcon(agent.role);
-  $: StatusIcon = getStatusIcon(agent.status);
+  $: attention = needsAttention(agent, $heartbeatStore.staleAgents);
+  $: reason = attentionReason(agent, $heartbeatStore.staleAgents);
+  $: reasonLabel = reason === 'delivery_failed' ? 'Delivery failed' : reason === 'error' ? 'Agent error' : 'Stale heartbeat';
 </script>
 
 <div class="tree-item">
@@ -144,32 +103,21 @@
       <span class="chevron-spacer"></span>
     {/if}
 
-    <span class="role-icon" style="color: {getRoleColor(agent.role)}; opacity: 1;">
-      {#if typeof RoleIcon === 'string'}
-        {RoleIcon}
-      {:else}
-        <RoleIcon size={12} weight="light" />
-      {/if}
-    </span>
-    <span class="label">{displayLabel}</span>
-
-    <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
-
-    {#if isQaWorker(agent.role) && isAgentStale()}
-      <span class="stale-badge">stale</span>
-    {/if}
-
-    <span
-      class="status-indicator"
-      class:pulse-error={serdeEnumVariantName(agent.status) === 'Error'}
+    <span class="status-dot" role="img"
+      aria-label={serdeEnumVariantName(agent.status) || 'Unknown status'}
+      title={serdeEnumVariantName(agent.status) || 'Unknown status'}
       style="color: {getStatusColor(agent.status, agent.role)}"
-    >
-      {#if typeof StatusIcon === 'string'}
-        {StatusIcon}
-      {:else}
-        <StatusIcon size={12} weight="fill" />
-      {/if}
+    ></span>
+    <span class="agent-copy">
+      <span class="label">{displayLabel}</span>
+      <AgentActivityLine agentId={agent.id} compact />
     </span>
+    {#if attention}
+      <button type="button" class="attention-badge lattice-btn lattice-btn--secondary"
+        aria-label={`Needs you: ${reasonLabel} — ${displayLabel}`} title={reasonLabel}
+        on:click={(event) => { event.stopPropagation(); handleClick(); }}
+      >Needs you</button>
+    {/if}
   </div>
 
   {#if hasChildren && expanded}
@@ -225,16 +173,9 @@
     flex-shrink: 0;
   }
 
-  .role-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 12px;
-    flex-shrink: 0;
-  }
+  .agent-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 
   .label {
-    flex: 1;
     font-size: 13px;
     color: var(--text-primary);
     white-space: nowrap;
@@ -242,35 +183,13 @@
     text-overflow: ellipsis;
   }
 
-  .cli-badge {
-    font-size: 10px;
-    padding: 2px 6px;
-    background: var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-secondary);
-    text-transform: lowercase;
-    flex-shrink: 0;
-  }
+  .attention-badge { font-size: 10px; padding: 2px 5px; min-height: 22px; flex-shrink: 0; }
 
-  .stale-badge {
-    font-size: 9px;
-    padding: 2px 5px;
-    background: var(--status-warning);
-    border-radius: var(--radius-sm);
-    color: var(--bg-void);
-    text-transform: uppercase;
-    font-weight: 600;
-    flex-shrink: 0;
-  }
+  .status-dot { width: 7px; height: 7px; border: 1px solid currentColor; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 
-  .status-indicator {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 12px;
-    font-size: 10px;
-    flex-shrink: 0;
-    text-shadow: 0 0 4px currentColor;
+  @media (forced-colors: active) {
+    .status-dot { background: CanvasText; border-color: CanvasText; }
+    .attention-badge { border: 1px solid ButtonText; }
   }
 
   .children {
