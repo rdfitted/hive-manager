@@ -10948,3 +10948,32 @@ async fn test_queue_endpoint_rejects_bad_session_id() {
         .unwrap();
     assert_ne!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn review_diff_route_reaches_its_handler() {
+    let app = setup_test_app().await;
+
+    // A router miss is 404; only the review handler's validation answers 400 here.
+    let invalid_cell = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/review-route-session/cells/a..b/review-diff?agent_id=worker-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_cell.status(), StatusCode::BAD_REQUEST);
+
+    let missing_session = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/review-route-session/cells/primary/review-diff?agent_id=worker-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_session.status(), StatusCode::NOT_FOUND);
+}
