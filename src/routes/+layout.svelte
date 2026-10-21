@@ -4,6 +4,7 @@
   import '../lib/styles/lattice.css';
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
+  import CommandPalette from '$lib/components/palette/CommandPalette.svelte';
   import {
     sessions,
     type DebateLaunchConfig,
@@ -54,3 +55,4 @@
 </div>
 
 <AddWorkerDialog bind:open={showAddWorkerDialog} on:close={() => shell.closeAddWorker()} />
+<CommandPalette />

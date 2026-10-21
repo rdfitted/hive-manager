@@ -5,19 +5,13 @@
     import { agents } from '../../stores/agents';
     import { events } from '../../stores/events';
     import { conversationStore } from '../../stores/conversations';
+    import { layout } from '../../stores/layout';
     import { activeSession, serdeEnumVariantName, sessions } from '../../stores/sessions';
     import { TERMINAL_SESSION_STATES, terminalPool } from '../../stores/terminalPool';
     import SessionHeader from './SessionHeader.svelte';
     import TerminalGrid from '../TerminalGrid.svelte';
-    import TimelineView from '../timeline/TimelineView.svelte';
-    import ReplayView from '../replay/ReplayView.svelte';
-    import ReplayControls from '../replay/ReplayControls.svelte';
-    import ArtifactBrowser from '../artifacts/ArtifactBrowser.svelte';
-
-    type SessionView = 'terminal' | 'observability' | 'artifacts';
-    let activeView: SessionView = $state('terminal');
     const sessionId = $derived($activeSession?.id);
-    const terminalAgentId = $derived($ui.selectedAgentId || $ui.focusedAgentId);
+    const terminalAgentId = $derived($ui.focusedAgentId || $ui.selectedAgentId);
 
     function selectTerminalAgent(id: string) {
         ui.setFocusedAgent(id);
@@ -149,10 +143,15 @@
         {:else}
             <div class="terminal-section lattice-panel">
                 <div class="terminal-controls lattice-forced-colors-boundary">
-                    <div class="tab-bar" role="tablist" aria-label="Session view">
-                        <button type="button" role="tab" class="lattice-tab" class:lattice-tab--active={activeView === 'terminal'} aria-selected={activeView === 'terminal'} onclick={() => activeView = 'terminal'}>Terminal</button>
-                        <button type="button" role="tab" class="lattice-tab" class:lattice-tab--active={activeView === 'observability'} aria-selected={activeView === 'observability'} onclick={() => activeView = 'observability'}>Observability</button>
-                        <button type="button" role="tab" class="lattice-tab" class:lattice-tab--active={activeView === 'artifacts'} aria-selected={activeView === 'artifacts'} onclick={() => activeView = 'artifacts'}>Artifacts</button>
+                    <div class="view-controls" role="group" aria-label="Terminal view">
+                        {#each ['focus', 'grid'] as mode}
+                            <button
+                                type="button"
+                                class={`lattice-btn lattice-btn--compact ${$layout.sessionViewMode === mode ? 'lattice-btn--secondary' : 'lattice-btn--ghost'}`}
+                                aria-pressed={$layout.sessionViewMode === mode}
+                                onclick={() => layout.setSessionViewMode(mode === 'grid' ? 'grid' : 'focus')}
+                            >{mode === 'focus' ? 'Focus' : 'Grid'}</button>
+                        {/each}
                     </div>
                 </div>
                 <div class="terminal-wrapper">
@@ -160,30 +159,15 @@
                         {@const isActiveGrid = pooled.id === sessionId}
                         <!-- Pooled grids stay mounted but hidden so a session switch shows
                              the terminals exactly as the operator left them (#286). -->
-                        <div class="terminal-panel" class:hidden={activeView !== 'terminal' || !isActiveGrid}>
+                        <div class="terminal-panel" class:hidden={!isActiveGrid}>
                             <TerminalGrid
                                 session={pooled}
-                                visible={activeView === 'terminal' && isActiveGrid}
+                                visible={isActiveGrid}
                                 focusedAgentId={isActiveGrid ? terminalAgentId : null}
                                 onSelect={selectTerminalAgent}
                             />
                         </div>
                     {/each}
-                    {#if activeView === 'observability'}
-                        <div class="observability-container">
-                            <div class="obs-main">
-                                <div class="obs-timeline lattice-forced-colors-boundary">
-                                    <TimelineView />
-                                </div>
-                                <div class="obs-replay lattice-forced-colors-boundary">
-                                    <ReplayView />
-                                </div>
-                            </div>
-                            <ReplayControls />
-                        </div>
-                    {:else if activeView === 'artifacts'}
-                        <ArtifactBrowser />
-                    {/if}
                 </div>
             </div>
         {/if}
@@ -240,14 +224,14 @@
     }
 
     .terminal-controls {
-        padding: 0 12px;
+        padding: 6px 12px;
         display: flex;
         justify-content: space-between;
         align-items: center;
         box-shadow: var(--edge-seam);
     }
 
-    .tab-bar {
+    .view-controls {
         display: flex;
         gap: 2px;
     }
@@ -266,22 +250,4 @@
         display: none;
     }
 
-    .observability-container {
-        display: flex;
-        flex-direction: column;
-        height: 100%;
-        background: var(--bg-void);
-    }
-
-    .obs-main {
-        flex: 1;
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        overflow: hidden;
-    }
-
-    .obs-timeline, .obs-replay {
-        overflow: hidden;
-        box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.45);
-    }
 </style>

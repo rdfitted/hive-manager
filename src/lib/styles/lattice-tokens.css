@@ -1,29 +1,29 @@
 :root {
   /* ── Core Surfaces ─────────────────────────────────────────────── */
-  --bg-void: #060709;
+  --bg-void: #060606;
 
   /* ── Surface ladder (#198) — tonal steps, not hairlines ───────── */
-  --bg-chrome: #0D0F14;   /* app chrome: rails, toolbars, headers, tab strips */
-  --bg-panel:  #131720;   /* panels, cards, modals — the .lattice-panel tone   */
-  --bg-raised: #181D27;   /* hover / raised card state                          */
+  --bg-chrome: #0E0E0E;   /* app chrome: rails, toolbars, headers, tab strips */
+  --bg-panel:  #161616;   /* panels, cards, modals — the .lattice-panel tone   */
+  --bg-raised: #1B1B1B;   /* hover / raised card state                          */
 
   /* D3: --bg-surface stays a value-preserving chrome alias. The large lit
      .main-content card deliberately consumes --bg-panel in shell.css. */
   --bg-surface: var(--bg-chrome);
-  --bg-elevated: #151820;
+  --bg-elevated: #171717;
   --bg-sunken: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
 
-  --border-structural: #222631;
+  --border-structural: #282828;
 
   /* ── Text ──────────────────────────────────────────────────────── */
-  --text-primary: #E4E7EB;
-  --text-secondary: #8B949E;
-  --text-disabled: #484F58;
+  --text-primary: #E8E8E8;
+  --text-secondary: #969696;
+  --text-disabled: #555555;
 
   /* ── Accents ───────────────────────────────────────────────────── */
-  --accent-cyan: #00E5FF;
-  --accent-amber: #FF9D00;
-  --accent-chrome: #A3B8CC;
+  --accent-cyan: #B5DAEC;
+  --accent-amber: var(--accent-cyan);
+  --accent-chrome: #BCBCBC;
 
   /* ── ANSI extension (terminal only, #190) ──────────────────────── */
   --ansi-blue:           #658FEC;
@@ -32,20 +32,20 @@
   --ansi-magenta-bright: #F18BEE;
 
   /* ── Status (Hex) ──────────────────────────────────────────────── */
-  --status-success: #00FF66;
-  --status-running: #00E5FF;
-  --status-warning: #FFD600;
-  --status-error: #FF3366;
-  --status-blocked: #FF3300;
-  --status-queued: #8B949E;
-  --status-canceled: #484F58;
+  --status-success: #A0F3BC;
+  --status-running: #B5DAEC;
+  --status-warning: #ECDDA5;
+  --status-error: #F39CA9;
+  --status-blocked: #EDA68C;
+  --status-queued: #969696;
+  --status-canceled: #888888;
 
   /* ── Status (RGB — for opacity & glow calculations) ────────────── */
-  --rgb-success: 0, 255, 102;
-  --rgb-running: 0, 229, 255;
-  --rgb-warning: 255, 214, 0;
-  --rgb-error: 255, 51, 102;
-  --rgb-blocked: 255, 51, 0;
+  --rgb-success: 160, 243, 188;
+  --rgb-running: 181, 218, 236;
+  --rgb-warning: 236, 221, 165;
+  --rgb-error: 243, 156, 169;
+  --rgb-blocked: 237, 166, 140;
 
   /* ── Typography ────────────────────────────────────────────────── */
   --font-display: 'Rajdhani', sans-serif;

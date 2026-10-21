@@ -15,6 +15,13 @@ function layoutKeys(container: HTMLElement): Array<string | null> {
 }
 
 describe('ShortcutsOverlay', () => {
+  it('documents palette chords with terminal ownership and the Focus/Grid key', () => {
+    const view = render(ShortcutsOverlay, { open: true, onClose: () => {} });
+    expect(view.getByText('Command palette (outside a terminal)')).toBeTruthy();
+    expect(view.getByText('Command palette (including terminals)')).toBeTruthy();
+    const row = view.getByText('Toggle Focus / Grid (outside a terminal)').closest('li');
+    expect(Array.from(row!.querySelectorAll('kbd')).map((key) => key.textContent)).toEqual(['Alt', 'Shift', 'F6']);
+  });
   it('shows ⌘ for the layout toggles on macOS', () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
     const view = render(ShortcutsOverlay, { open: true, onClose: () => {} });

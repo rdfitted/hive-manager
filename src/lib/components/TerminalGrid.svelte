@@ -20,6 +20,8 @@
   } from '$lib/stores/scratchTerminals';
   import { serdeEnumVariantName, type AgentInfo, type Session } from '$lib/stores/sessions';
   import { TERMINAL_SESSION_STATES } from '$lib/stores/terminalPool';
+  import AgentActivityLine from './agent/AgentActivityLine.svelte';
+  import AttentionCard from './attention/AttentionCard.svelte';
   import Terminal from './Terminal.svelte';
 
   interface Props {
@@ -75,13 +77,22 @@
     ...scratchPanes,
   ]);
   let maximizedTerminalId = $derived($layout.maximizedTerminalId);
+  let focusMode = $derived($layout.sessionViewMode === 'focus');
+  let focusedPaneId = $derived(
+    scratchPanes.some((pane) => pane.id === focusedScratchId) ? focusedScratchId
+      : agents.some((agent) => agent.id === focusedAgentId) ? focusedAgentId
+      : panes[0]?.id ?? null
+  );
   // The maximize id is global; only honour it when it names one of this grid's panes,
   // so a pooled grid never collapses because another session maximized something.
-  let localMaximizedId = $derived(
+  let gridMaximizedId = $derived(
     maximizedTerminalId !== null && panes.some((pane) => pane.id === maximizedTerminalId)
       ? maximizedTerminalId
       : null
   );
+  // Focus reuses the maximize geometry, never the global maximize state or a filtered
+  // pane list. Hidden panes retain their Terminal instances and live scrollback.
+  let localMaximizedId = $derived(focusMode ? focusedPaneId : gridMaximizedId);
 
   let cols = $derived(
     panes.length <= 1 ? 1 :
@@ -162,6 +173,7 @@
   }
 
   function isPaneFocused(pane: TerminalPane) {
+    if (focusMode) return pane.id === localMaximizedId;
     return pane.kind === 'scratch'
       ? pane.id === focusedScratchId
       : focusedScratchId === null && pane.id === focusedAgentId;
@@ -175,6 +187,7 @@
 
   function handleWindowKeydown(event: KeyboardEvent) {
     if (
+      focusMode ||
       !visible ||
       event.key !== 'Escape' ||
       !localMaximizedId ||
@@ -304,7 +317,25 @@
 
 <div class="terminal-workspace">
   <div class="terminal-toolbar">
-    <span class="toolbar-label">Terminals</span>
+    {#if focusMode && panes.length > 0}
+      <label class="pane-picker">
+        <span class="sr-only">Focused terminal</span>
+        <select
+          class="lattice-input"
+          value={localMaximizedId ?? ''}
+          onchange={(event) => {
+            const pane = panes.find((candidate) => candidate.id === event.currentTarget.value);
+            if (pane) focusPane(pane);
+          }}
+        >
+          {#each panes as pane (pane.id)}
+            <option value={pane.id}>{pane.title}{pane.kind === 'scratch' ? ' (scratch)' : ''}</option>
+          {/each}
+        </select>
+      </label>
+    {:else}
+      <span class="toolbar-label">Terminals</span>
+    {/if}
     <div class="scratch-controls">
       <label class="shell-picker">
         <span class="sr-only">Scratch terminal shell</span>
@@ -401,21 +432,29 @@
                 <X size={13} weight="light" />
               </button>
             {/if}
-            <button
-              type="button"
-              class="pane-control lattice-btn lattice-btn--ghost lattice-btn--icon"
-              aria-label={pane.id === localMaximizedId ? `Restore ${pane.title}` : `Maximize ${pane.title}`}
-              title={pane.id === localMaximizedId ? 'Restore terminal (Esc)' : 'Maximize terminal'}
-              onclick={(event) => toggleMaximized(event, pane)}
-            >
-              {#if pane.id === localMaximizedId}
-                <ArrowsIn size={13} weight="light" />
-              {:else}
-                <ArrowsOut size={13} weight="light" />
-              {/if}
-            </button>
+            {#if !focusMode}
+              <button
+                type="button"
+                class="pane-control lattice-btn lattice-btn--ghost lattice-btn--icon"
+                aria-label={pane.id === localMaximizedId ? `Restore ${pane.title}` : `Maximize ${pane.title}`}
+                title={pane.id === localMaximizedId ? 'Restore terminal (Esc)' : 'Maximize terminal'}
+                onclick={(event) => toggleMaximized(event, pane)}
+              >
+                {#if pane.id === localMaximizedId}
+                  <ArrowsIn size={13} weight="light" />
+                {:else}
+                  <ArrowsOut size={13} weight="light" />
+                {/if}
+              </button>
+            {/if}
           </div>
         </div>
+        {#if focusMode && visible && pane.kind === 'agent' && pane.id === localMaximizedId}
+          <div class="focused-agent-info">
+            <AgentActivityLine agentId={pane.id} />
+            <AttentionCard sessionId={session.id} agent={pane.agent} />
+          </div>
+        {/if}
         <div class="terminal-container">
           <Terminal
             agentId={pane.id}
@@ -470,10 +509,25 @@
     gap: 6px;
   }
 
-  .shell-picker :global(.lattice-input) {
+  .shell-picker :global(.lattice-input), .pane-picker :global(.lattice-input) {
     height: 28px;
     padding: 0 24px 0 8px;
     font-size: 10px;
+  }
+
+  .pane-picker {
+    min-width: 0;
+  }
+
+  .pane-picker select {
+    max-width: 100%;
+    text-overflow: ellipsis;
+  }
+
+  .focused-agent-info {
+    flex: 0 0 auto;
+    min-width: 0;
+    padding: var(--space-2) var(--space-3);
   }
 
   .shell-picker select:disabled {

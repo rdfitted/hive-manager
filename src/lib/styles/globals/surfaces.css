@@ -19,6 +19,18 @@
     var(--edge-lip);
 }
 
+/* Nested content shares the outer panel's surface. Floating overlays still
+   need an opaque surface above live content. Keep border ordinary so the
+   forced-colours boundaries below remain on their original owners. */
+.lattice-panel .lattice-panel:not(:where(
+  .context-menu, .search-bar, .drop-card,
+  .mention-menu, .slash-menu, .color-picker, .update-banner
+)) {
+  border: 0;
+  box-shadow: none !important;
+  background-color: transparent !important;
+}
+
 .lattice-modal {
   background-color: var(--bg-elevated);
   border: 1px solid var(--accent-chrome);

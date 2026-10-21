@@ -4,6 +4,8 @@
   import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { layout, RAIL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
+  import { heartbeatStore } from '$lib/stores/conversations';
+  import { agentActivity, needsAttention } from '$lib/stores/agentActivity';
   import { shortcutLabel } from '$lib/platform';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, tick } from 'svelte';
@@ -125,6 +127,9 @@
     }
     await loadPersistedSessions();
   });
+
+  // Keep the shared heartbeat refresh alive even while the agent tree is collapsed.
+  onMount(() => agentActivity.subscribe(() => {}));
 
   async function loadPersistedSessions() {
     loadingPersisted = true;
@@ -470,11 +475,12 @@
         <h3 class="section-title">Active</h3>
       </button>
       {#if !$layout.sessionsCollapsed}
-        {#if $sessions.sessions.filter(s => isActiveState(s.state)).length === 0}
+        {#if $sessions.sessions.filter(s => isActiveState(s.state) || s.id === $activeSession?.id).length === 0}
           <p class="empty-state">No active sessions</p>
         {:else}
           <ul class="session-list">
-            {#each $sessions.sessions.filter(s => isActiveState(s.state)) as session}
+            {#each $sessions.sessions.filter(s => isActiveState(s.state) || s.id === $activeSession?.id) as session}
+              {@const attentionAgents = session.agents.filter(agent => needsAttention(agent, $heartbeatStore.staleAgents))}
               <li class="session-item" style:--session-color={session.color || 'transparent'}>
                 <div class="session-row">
                   <div
@@ -563,6 +569,12 @@
                     {/if}
                     </div>
                   </div>
+                  {#if attentionAgents.length > 0}
+                    <button type="button" class="lattice-btn lattice-btn--secondary"
+                      aria-label={`${attentionAgents.length} need attention in ${session.name || session.id}`}
+                      onclick={() => { selectSession(session.id); handleAgentSelect(new CustomEvent('select', { detail: attentionAgents[0].id })); }}
+                    >{attentionAgents.length} need you</button>
+                  {/if}
                   <button
                     class="close-session-button lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon"
                     class:lattice-btn--waiting={closingSessionId === session.id}
@@ -575,6 +587,30 @@
                     {closingSessionId === session.id ? '…' : '×'}
                   </button>
                 </div>
+                {#if $activeSession?.id === session.id}
+                  <section class="section session-agents" aria-label="Session agents">
+                    <button type="button" class="lattice-btn lattice-btn--link lattice-btn--row" aria-expanded={!$layout.agentsCollapsed} onclick={() => layout.toggleSection('agentsCollapsed')}>
+                      <span class="chevron" class:collapsed={$layout.agentsCollapsed}>
+                        {#if $layout.agentsCollapsed}
+                          <CaretRight size={12} weight="light" />
+                        {:else}
+                          <CaretDown size={12} weight="light" />
+                        {/if}
+                      </span>
+                      <h3 class="section-title">Agents ({$activeAgents.length})</h3>
+                    </button>
+                    {#if !$layout.agentsCollapsed}
+                      <AgentTree
+                        agents={$activeAgents}
+                        selectedId={$ui.focusedAgentId}
+                        on:select={handleAgentSelect}
+                      />
+                      <div class="queen-controls-section lattice-forced-colors-boundary">
+                        <QueenControls on:openAddWorker={() => onOpenAddWorker?.()} />
+                      </div>
+                    {/if}
+                  </section>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -636,30 +672,6 @@
       {/if}
     </section>
 
-    {#if $activeSession}
-      <section class="section">
-        <button type="button" class="lattice-btn lattice-btn--link lattice-btn--row" aria-expanded={!$layout.agentsCollapsed} onclick={() => layout.toggleSection('agentsCollapsed')}>
-          <span class="chevron" class:collapsed={$layout.agentsCollapsed}>
-            {#if $layout.agentsCollapsed}
-              <CaretRight size={12} weight="light" />
-            {:else}
-              <CaretDown size={12} weight="light" />
-            {/if}
-          </span>
-          <h3 class="section-title">Agents ({$activeAgents.length})</h3>
-        </button>
-        {#if !$layout.agentsCollapsed}
-          <AgentTree
-            agents={$activeAgents}
-            selectedId={$ui.focusedAgentId}
-            on:select={handleAgentSelect}
-          />
-          <div class="queen-controls-section lattice-forced-colors-boundary">
-            <QueenControls on:openAddWorker={() => onOpenAddWorker?.()} />
-          </div>
-        {/if}
-      </section>
-    {/if}
     </div>
 
     <div class="sidebar-footer lattice-forced-colors-boundary">

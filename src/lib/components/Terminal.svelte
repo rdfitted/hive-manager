@@ -757,6 +757,10 @@
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true;
 
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === 'p') {
+        return false;
+      }
+
       // Ctrl+F opens the find bar
       if (event.ctrlKey && !event.shiftKey && (event.key === 'f' || event.key === 'F')) {
         openSearch();
