@@ -46,6 +46,8 @@ async function renderTierRoutingDialog() {
     events: { launchHive },
   });
 
+  await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
+
   await fireEvent.click(view.getByRole('button', { name: 'Browse' }));
   await waitFor(() => {
     expect((view.getByLabelText('Project Path') as HTMLInputElement).value).toBe('C:/code/project');
@@ -143,6 +145,7 @@ describe('LaunchDialog QA defaults', () => {
       props: { show: true },
       events: { launchHive },
     });
+    await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
     await fireEvent.click(view.getByRole('button', { name: 'Browse' }));
     const qaCheckbox = view.getByRole('checkbox', { name: /QA: Evaluator \+ QA workers/ }) as HTMLInputElement;
     expect(qaCheckbox.checked).toBe(true);
@@ -163,6 +166,7 @@ describe('LaunchDialog QA defaults', () => {
       props: { show: true },
       events: { launchSolo },
     });
+    await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
     await fireEvent.click(view.getByRole('button', { name: 'Solo' }));
     await fireEvent.click(view.getByRole('button', { name: 'Browse' }));
     expect((view.getByRole('checkbox', { name: /QA: Evaluator \+ QA workers/ }) as HTMLInputElement).checked).toBe(true);

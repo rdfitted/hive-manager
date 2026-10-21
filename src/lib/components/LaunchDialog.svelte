@@ -17,6 +17,7 @@
   import TemplatePicker from './templates/TemplatePicker.svelte';
   import { routeFusionTemplateCells } from './templates/templateLaunch';
   import Composer from './composer/Composer.svelte';
+  import LaunchComposer from './launch/LaunchComposer.svelte';
   import { Crown, CaretDown, CaretRight } from 'phosphor-svelte';
   import type { AgentConfig, DebateDebaterConfig, DebateLaunchConfig, DelegationMode, FusionLaunchConfig, FusionVariantConfig, HiveLaunchConfig, QaWorkerConfig, ResearchLaunchConfig, SoloLaunchConfig, WorkerRole } from '$lib/stores/sessions';
   import type { SessionTemplate } from '$lib/types/domain';
@@ -271,6 +272,62 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   let prompt = '';
   let error = '';
   let showPreview = false;
+  let showAdvanced = false;
+  let composerPreset = 'custom';
+  $: composerWorkerCount = mode === 'hive' ? codingPrincipals.length
+    : mode === 'research' ? researchWorkers.length
+    : mode === 'fusion' ? variantCount
+    : mode === 'debate' ? debaterCount : 1;
+  $: composerMaxWorkers = mode === 'hive' ? Math.max(3, codingPrincipals.length)
+    : mode === 'research' ? Math.max(6, researchWorkers.length)
+    : mode === 'solo' || mode === 'templates' ? 1
+    : Math.max(4, composerWorkerCount);
+
+  function setComposerMode(next: string) {
+    if (!['templates', 'hive', 'fusion', 'solo', 'research', 'debate'].includes(next)) return;
+    // Solo's event contract uses a separate task field. Carry the edited task
+    // across mode switches without changing that payload boundary.
+    if (next === 'solo' && mode !== 'solo') soloTask = prompt;
+    if (mode === 'solo' && next !== 'solo') prompt = soloTask;
+    mode = next as SessionMode;
+    composerPreset = 'custom';
+    fusionTemplateError = '';
+    error = '';
+  }
+
+  function setComposerWorkers(count: number) {
+    if (!Number.isInteger(count) || count < 1 || count > composerMaxWorkers) return;
+    if (mode === 'hive') {
+      while (codingPrincipals.length < count) {
+        codingPrincipals = [...codingPrincipals, createDefaultCodingPrincipal(nextCodingPrincipalIndex(codingPrincipals))];
+      }
+      codingPrincipals = codingPrincipals.slice(0, count);
+    } else if (mode === 'research') {
+      while (researchWorkers.length < count) researchWorkers = [...researchWorkers, createDefaultConfig('general')];
+      researchWorkers = researchWorkers.slice(0, count);
+    } else if (mode === 'fusion') {
+      while (fusionVariants.length < count) {
+        const name = `Variant ${String.fromCharCode(65 + fusionVariants.length)}`;
+        fusionVariants = [...fusionVariants, { name, cli: 'claude', flags: [] }];
+        variantAgentConfigs = [...variantAgentConfigs, { cli: 'claude', flags: [], label: name }];
+      }
+      variantCount = count;
+    } else if (mode === 'debate') {
+      while (debateDebaters.length < count) {
+        const suffix = String.fromCharCode(65 + debateDebaters.length);
+        debateDebaters = [...debateDebaters, { name: `Debater ${suffix}`, stance: `Stance ${suffix}`, cli: 'claude', flags: [] }];
+        debaterAgentConfigs = [...debaterAgentConfigs, { cli: 'claude', flags: [], label: `Debater ${suffix}` }];
+      }
+      debaterCount = count;
+    }
+    composerPreset = 'custom';
+  }
+
+  function setComposerPreset(id: string) {
+    if (id === 'custom') { composerPreset = id; return; }
+    const template = $templates.templates.find((entry) => entry.id === id);
+    if (template) applyTemplate(template);
+  }
 
   const COLORS = [
     { name: 'Blue', value: '#7aa2f7' },
@@ -400,6 +457,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   function applyTemplate(template: SessionTemplate | null) {
     if (!template) return;
+
+    if (mode === 'solo') prompt = soloTask;
+    composerPreset = template.id;
+    if (!prompt.trim()) prompt = template.description;
 
     if (template.mode !== 'fusion') fusionTemplateError = '';
 
@@ -628,6 +689,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   async function handleSubmit(smokeTest: boolean = false) {
+    if (launching) return;
     if (!projectPath.trim()) return;
     if (mode === 'templates') {
       error = 'Choose a template before launching.';
@@ -798,8 +860,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     healthLoadedForOpen = true;
     if (initialMode !== undefined) mode = initialMode;
     void loadCliHealth();
+    void templates.fetchTemplates();
   }
   $: if (!show) {
+    showAdvanced = false;
     error = '';
     tierLadderRequestId += 1;
     tierLadderLoadedProject = '';
@@ -824,12 +888,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     >
       <h2 id="launch-dialog-title">Launch New Session</h2>
 
+      {#if showAdvanced}
+      <button type="button" class="lattice-btn lattice-btn--ghost" on:click={() => showAdvanced = false} disabled={launching}>Back to composer</button>
       <div class="mode-tabs">
         <button
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'templates'}
           aria-pressed={mode === 'templates'}
-          on:click={() => (mode = 'templates')}
+          on:click={() => setComposerMode('templates')}
           type="button"
         >
           Templates
@@ -838,7 +904,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'hive'}
           aria-pressed={mode === 'hive'}
-          on:click={() => (mode = 'hive')}
+          on:click={() => setComposerMode('hive')}
           type="button"
         >
           Hive
@@ -847,11 +913,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'fusion'}
           aria-pressed={mode === 'fusion'}
-          on:click={() => {
-            mode = 'fusion';
-            fusionTemplateError = '';
-            error = '';
-          }}
+          on:click={() => setComposerMode('fusion')}
           type="button"
         >
           Fusion
@@ -860,7 +922,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'debate'}
           aria-pressed={mode === 'debate'}
-          on:click={() => (mode = 'debate')}
+          on:click={() => setComposerMode('debate')}
           type="button"
         >
           Debate
@@ -869,7 +931,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'research'}
           aria-pressed={mode === 'research'}
-          on:click={() => (mode = 'research')}
+          on:click={() => setComposerMode('research')}
           type="button"
         >
           Research
@@ -878,7 +940,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'solo'}
           aria-pressed={mode === 'solo'}
-          on:click={() => (mode = 'solo')}
+          on:click={() => setComposerMode('solo')}
           type="button"
         >
           Solo
@@ -1659,6 +1721,29 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           </button>
         </div>
       </form>
+      {:else}
+        <LaunchComposer
+          {mode}
+          value={mode === 'solo' ? soloTask : prompt}
+          onvalue={(value) => { if (mode === 'solo') soloTask = value; else prompt = value; }}
+          {projectPath}
+          workerCount={composerWorkerCount}
+          maxWorkers={composerMaxWorkers}
+          preset={composerPreset}
+          templates={$templates.templates}
+          templatesLoading={$templates.loading}
+          templatesError={$templates.error}
+          {launching}
+          error={error || launchError}
+          onmode={setComposerMode}
+          onworkers={setComposerWorkers}
+          onpreset={setComposerPreset}
+          onbrowse={browseForFolder}
+          onadvanced={() => showAdvanced = true}
+          onlaunch={() => handleSubmit(false)}
+          oncancel={handleClose}
+        />
+      {/if}
     </div>
   </div>
 {/if}
@@ -2255,16 +2340,16 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
   }
   .node.fusion {
-    --node-role: var(--status-success);
-    background: color-mix(in srgb, var(--status-success) 10%, transparent);
+    --node-role: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
   }
   .node.debate {
-    --node-role: var(--accent-purple, #bb9af7);
-    background: color-mix(in srgb, var(--accent-purple, #bb9af7) 10%, transparent);
+    --node-role: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
   }
   .node.solo {
-    --node-role: var(--status-warning);
-    background: color-mix(in srgb, var(--status-warning) 10%, transparent);
+    --node-role: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
   }
 
   .topology-contract {

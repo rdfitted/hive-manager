@@ -188,7 +188,10 @@
       <div class="welcome lattice-scroll-content">
         <section class="welcome-content" aria-labelledby="welcome-title">
           <h1 id="welcome-title">Hive Manager</h1>
-          <p class="welcome-intro">Choose how you want to start.</p>
+          <p class="welcome-intro">Start with a task. Shape the session as you go.</p>
+          <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled" onclick={() => shell.requestStartAction('hive')}>
+            Start a session
+          </button>
           <div class="features" role="group" aria-label="Start a session">
             <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => shell.requestStartAction('hive')}>
               <span class="feature-icon" aria-hidden="true">
