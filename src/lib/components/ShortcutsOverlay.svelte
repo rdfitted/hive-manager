@@ -20,6 +20,7 @@
       shortcuts: [
         { keys: [mod, 'B'], action: `Toggle left sidebar${panelNote}` },
         { keys: [mod, 'J'], action: `Toggle right panel${panelNote}` },
+        { keys: ['Alt', 'Shift', 'F6'], action: 'Toggle Focus / Grid (outside a terminal)' },
         { keys: ['↑', '↓'], action: 'Navigate agents' },
       ],
     },
@@ -44,6 +45,8 @@
     {
       title: 'Help',
       shortcuts: [
+        { keys: [mod, 'K'], action: 'Command palette (outside a terminal)' },
+        { keys: [mod, 'Shift', 'P'], action: 'Command palette (including terminals)' },
         { keys: [mod, '/'], action: 'Show this overlay' },
       ],
     },
