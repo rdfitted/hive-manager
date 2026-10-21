@@ -10,6 +10,7 @@ vi.mock('./CoordinationPanel.svelte', () => ({ default: () => {} }));
 vi.mock('./ConversationViewer.svelte', () => ({ default: () => {} }));
 vi.mock('./timeline/TimelineView.svelte', () => ({ default: () => {} }));
 vi.mock('./SessionFilesView.svelte', () => ({ default: () => {} }));
+vi.mock('./review/ReviewView.svelte', () => ({ default: () => {} }));
 
 import RightPanel from './RightPanel.svelte';
 import { layout } from '$lib/stores/layout';

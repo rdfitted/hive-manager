@@ -9,12 +9,14 @@
   import ConversationViewer from './ConversationViewer.svelte';
   import TimelineView from './timeline/TimelineView.svelte';
   import SessionFilesView from './SessionFilesView.svelte';
+  import ReviewView from './review/ReviewView.svelte';
   import ResizeHandle from './ResizeHandle.svelte';
 
   const TABS: Array<{ id: RightPanelTab; label: string; icon: typeof ChartBar }> = [
     { id: 'status', label: 'Status', icon: ChartBar },
     { id: 'plan', label: 'Plan', icon: NotePencil },
     { id: 'graph', label: 'Graph', icon: Graph },
+    { id: 'review', label: 'Review', icon: FileText },
     { id: 'files', label: 'Files', icon: FileText },
     { id: 'logs', label: 'Logs', icon: ListBullets },
     { id: 'chat', label: 'Chat', icon: ChatCenteredText },
@@ -95,6 +97,8 @@
         <CoordinationPanel />
       {:else if activeTab === 'timeline'}
         <TimelineView />
+      {:else if activeTab === 'review'}
+        <ReviewView />
       {:else if activeTab === 'files'}
         <SessionFilesView />
       {:else}

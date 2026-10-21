@@ -1,7 +1,7 @@
 use crate::cli::health as cli_health;
 use crate::http::handlers::{
     actions, agents, application_state, artifacts, cells, conversations, evaluator, events, health,
-    heartbeats, inject, knowledge, learnings, maintenance, planners, pty_buffer, queue, resolver,
+    heartbeats, inject, knowledge, learnings, maintenance, planners, pty_buffer, queue, resolver, review,
     session_files,
     sessions, templates, work_graph, workers,
 };
@@ -222,6 +222,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/sessions/{id}/cells/{cid}/artifacts",
             get(artifacts::list_artifacts).post(artifacts::post_artifact),
+        )
+        .route(
+            "/api/sessions/{id}/cells/{cid}/review-diff",
+            get(review::get_review_diff),
         )
         .route(
             "/api/templates",
