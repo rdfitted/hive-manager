@@ -621,6 +621,10 @@ impl SessionState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
+    #[serde(default)]
+    pub transcript_spawned_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub transcript_session_id: Option<String>,
     pub id: String,
     pub role: AgentRole,
     pub status: AgentStatus,
@@ -1387,8 +1391,9 @@ impl SessionController {
         // Parse command without splitting quoted executable paths or arguments.
         let (launch_command, parsed_args) = Self::parse_legacy_launch_command(command)?;
         let cmd = launch_command.as_str();
-        let base_args: Vec<&str> = parsed_args.iter().map(String::as_str).collect();
-        let launch_model = extract_model_arg(&base_args)
+        let base_args = parsed_args;
+        let base_arg_refs: Vec<&str> = base_args.iter().map(String::as_str).collect();
+        let launch_model = extract_model_arg(&base_arg_refs)
             .or_else(|| CliRegistry::default_model(cmd).map(ToString::to_string));
 
         {
@@ -1397,10 +1402,14 @@ impl SessionController {
             // Create Queen agent
             let queen_id = format!("{}-queen", session_id);
             let mut queen_args = base_args.clone();
+            if cmd == "claude" {
+                Self::remove_claude_session_flags(&mut queen_args);
+                queen_args.splice(0..0, ["--session-id".to_string(), Uuid::new_v4().to_string()]);
+            }
 
             // Add prompt as positional argument if provided and command is claude
             if cmd == "claude" && !prompt_str.is_empty() {
-                queen_args.push(&prompt_str);
+                queen_args.push(prompt_str.clone());
             }
 
             tracing::info!(
@@ -1410,12 +1419,13 @@ impl SessionController {
                 project_path
             );
 
+            let transcript_spawned_at = Some(Utc::now());
             pty_manager
                 .create_session(
                     queen_id.clone(),
                     AgentRole::Queen,
                     cmd,
-                    &queen_args.iter().map(|s| *s).collect::<Vec<_>>(),
+                    &queen_args.iter().map(String::as_str).collect::<Vec<_>>(),
                     Some(cwd),
                     120,
                     30,
@@ -1438,6 +1448,8 @@ impl SessionController {
             };
 
             agents.push(AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(cmd, &queen_args),
                 id: queen_id,
                 role: AgentRole::Queen,
                 status: AgentStatus::Running,
@@ -1452,7 +1464,11 @@ impl SessionController {
             // Create Worker agents
             for i in 1..=worker_count {
                 let worker_id = format!("{}-worker-{}", session_id, i);
-                let worker_args = base_args.clone();
+                let mut worker_args = base_args.clone();
+                if cmd == "claude" {
+                    Self::remove_claude_session_flags(&mut worker_args);
+                    worker_args.splice(0..0, ["--session-id".to_string(), Uuid::new_v4().to_string()]);
+                }
 
                 tracing::info!(
                     "Launching Worker {} agent: {} {:?} in {:?}",
@@ -1462,6 +1478,7 @@ impl SessionController {
                     project_path
                 );
 
+                let transcript_spawned_at = Some(Utc::now());
                 pty_manager
                     .create_session(
                         worker_id.clone(),
@@ -1470,7 +1487,7 @@ impl SessionController {
                             parent: None,
                         },
                         cmd,
-                        &worker_args.iter().map(|s| *s).collect::<Vec<_>>(),
+                        &worker_args.iter().map(String::as_str).collect::<Vec<_>>(),
                         Some(cwd),
                         120,
                         30,
@@ -1484,7 +1501,7 @@ impl SessionController {
                 let worker_config = AgentConfig {
                     cli: cmd.to_string(),
                     model: launch_model.clone(),
-                    flags: worker_args.iter().map(|s| s.to_string()).collect(),
+                    flags: base_args.iter().map(|s| s.to_string()).collect(),
                     label: None,
                     name: None,
                     description: None,
@@ -1493,6 +1510,8 @@ impl SessionController {
                 };
 
                 agents.push(AgentInfo {
+                    transcript_spawned_at,
+                    transcript_session_id: Self::claude_transcript_session_id(cmd, &worker_args),
                     id: worker_id.clone(),
                     role: AgentRole::Worker {
                         index: i,
@@ -2023,7 +2042,11 @@ impl SessionController {
         let AgentStatus::WaitingForInput(reason) = status else {
             return None;
         };
-        let timestamp = reason.strip_prefix(Self::AWAITING_INJECTED_TURN_PREFIX)?;
+        let timestamp = if let Some(timestamp) = reason.strip_prefix(Self::AWAITING_INJECTED_TURN_PREFIX) {
+            timestamp
+        } else {
+            reason.strip_prefix("injected_delivery_failed:")?.split_once(':')?.1
+        };
         DateTime::parse_from_rfc3339(timestamp)
             .ok()
             .map(|parsed| parsed.with_timezone(&Utc))
@@ -2067,14 +2090,49 @@ impl SessionController {
                 .find(|agent| agent.id == agent_id)
                 .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
 
-            // PTY-ring activity may be input echo or unrelated output. Only a later heartbeat
-            // proves the agent took another managed turn, so every successful submit starts in
-            // the awaiting state regardless of the observation result.
+            // Begin pending; only a nonce-matched transcript turn or newer heartbeat
+            // clears this marker. Terminal activity cannot resolve delivery.
             agent.status = AgentStatus::WaitingForInput(format!(
                 "{}{}",
                 Self::AWAITING_INJECTED_TURN_PREFIX,
                 submitted_at.to_rfc3339()
             ));
+        }
+        self.emit_session_update(session_id);
+        Ok(())
+    }
+
+    /// Resolve only the exact injection still awaiting evidence. Late watches cannot
+    /// overwrite a heartbeat or a newer injection with the same agent id.
+    pub fn record_injection_delivery(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        submitted_at: DateTime<Utc>,
+        delivery: &crate::delivery::Delivery,
+    ) -> Result<(), String> {
+        if delivery.confirmed.is_none() { return Ok(()); }
+        if self.agent_heartbeats.read().get(session_id)
+            .and_then(|agents| agents.get(agent_id))
+            .is_some_and(|heartbeat| heartbeat.last_activity > submitted_at) {
+            return Ok(());
+        }
+        {
+            let mut sessions = self.sessions.write();
+            let session = sessions.get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {session_id}"))?;
+            let agent = session.agents.iter_mut().find(|agent| agent.id == agent_id)
+                .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+            let expected = format!("{}{}", Self::AWAITING_INJECTED_TURN_PREFIX, submitted_at.to_rfc3339());
+            if !matches!(&agent.status, AgentStatus::WaitingForInput(reason) if reason == &expected) {
+                return Ok(());
+            }
+            agent.status = match delivery.confirmed {
+                Some(true) => AgentStatus::Running,
+                Some(false) => AgentStatus::WaitingForInput(format!(
+                    "injected_delivery_failed:{}:{}", delivery.basis, submitted_at.to_rfc3339())),
+                None => return Ok(()),
+            };
         }
         self.emit_session_update(session_id);
         Ok(())
@@ -3444,18 +3502,48 @@ impl SessionController {
 
     /// Build command and args from AgentConfig
     /// Returns (command, args) with CLI-specific flags already added
+    /// Session identity belongs to this spawn, never to reusable configured flags.
+    fn remove_claude_session_flags(flags: &mut Vec<String>) {
+        let mut skip_value = false;
+        flags.retain(|flag| {
+            if skip_value {
+                skip_value = false;
+                return false;
+            }
+            if flag == "--session-id" {
+                skip_value = true;
+                return false;
+            }
+            !flag.starts_with("--session-id=")
+        });
+    }
+
+    fn claude_transcript_session_id(command: &str, args: &[String]) -> Option<String> {
+        if command != "claude" {
+            return None;
+        }
+        args.windows(2).find(|pair| pair[0] == "--session-id")
+            .map(|pair| pair[1].clone())
+    }
+
     fn build_command(config: &AgentConfig) -> (String, Vec<String>) {
         let mut args = Vec::new();
-        let (effective_model, extra_flags) = CliRegistry::resolve_model_and_flags(
+        let (effective_model, mut extra_flags) = CliRegistry::resolve_model_and_flags(
             &config.cli,
             config.model.as_deref(),
             CliRegistry::default_model(&config.cli),
             &config.flags,
         );
 
+        if config.cli == "claude" {
+            Self::remove_claude_session_flags(&mut extra_flags);
+        }
+
         // Add CLI-specific flags
         match config.cli.as_str() {
             "claude" => {
+                args.push("--session-id".to_string());
+                args.push(Uuid::new_v4().to_string());
                 // Claude CLI requires --dangerously-skip-permissions for automated use
                 args.push("--dangerously-skip-permissions".to_string());
                 if let Some(ref model) = effective_model {
@@ -3582,16 +3670,22 @@ impl SessionController {
     /// When task is None, opens the CLI in interactive mode.
     fn build_solo_command(config: &AgentConfig, task: Option<&str>) -> (String, Vec<String>) {
         let mut args = Vec::new();
-        let (effective_model, extra_flags) = CliRegistry::resolve_model_and_flags(
+        let (effective_model, mut extra_flags) = CliRegistry::resolve_model_and_flags(
             &config.cli,
             config.model.as_deref(),
             CliRegistry::default_model(&config.cli),
             &config.flags,
         );
 
+        if config.cli == "claude" {
+            Self::remove_claude_session_flags(&mut extra_flags);
+        }
+
         // Add CLI-specific auto-approve flags (matching build_command for hive/swarm modes)
         match config.cli.as_str() {
             "claude" => {
+                args.push("--session-id".to_string());
+                args.push(Uuid::new_v4().to_string());
                 args.push("--dangerously-skip-permissions".to_string());
                 if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
@@ -7164,9 +7258,9 @@ With the default `"submit":true`, the sender delivers the payload inside one bra
   -d '{{"target_agent_id":"{session_id}-worker-N","message":"your message here"}}'
 ```
 
-The response reports measured sender-side facts: `payload_bytes_written` counts the sanitized payload bytes, `submit_bytes_written` is the aggregate number of Enter bytes written across all attempts, and `submit_attempts` reports `0` when no Enter was requested, `1` when one Enter was written, or `2` when the bounded automatic retry was written. `submit_keystroke_issued` reflects whether the initial Enter was written. The receipt also includes PTY-output byte counts, `pty_activity_observed`, the bounded per-attempt `observation_window_ms`, and the tri-state `submit_confirmed` (`true` = sustained post-submit PTY activity consistent with the composer accepting Enter, `false` = no observable reaction in the last completed confirmation window, `null` = unknown or not requested). Normally, `false` means the initial Enter and its one automatic retry both produced no observable reaction. If the retry write itself fails, the response remains successful because the initial injection already happened: `submit_retry_failed` is `true`, `submit_retry_failure` gives the caveat, `submit_attempts`/`submit_bytes_written` count only successful Enter writes, and `submit_confirmed` retains the honest pre-retry verdict. When `submit_confirmed` is `false` and `submit_retry_failed` is `false`, the sender has already retried once automatically; flush the target with `{{"message":"","submit":true}}`, then re-check its state. Remediate one target at a time. A `"submit":true` response may stay pending up to ~3000 ms across two confirmation windows (it returns earlier once activity is confirmed); `submit_confirmation_elapsed_ms` reports cumulative time spent in every completed confirmation window. Do not treat the held response as a stalled agent.
+The response reports measured sender-side facts: `payload_bytes_written` counts the sanitized payload bytes, `submit_bytes_written` is the aggregate number of Enter bytes written across all attempts, and `submit_attempts` reports `0` when no Enter was requested, `1` when one Enter was written, or `2` when the bounded automatic retry was written. `submit_keystroke_issued` reflects whether the initial Enter was written. The receipt also includes PTY-output byte counts, `pty_activity_observed`, the bounded per-attempt `observation_window_ms`, and the tri-state `submit_confirmed` (`true` = the nonce-matched message and following turn start appear in the agent's transcript, `false` = the transcript timed out while the message was still visibly staged, `null` = unknown, pending, unavailable or not requested). `submit_confirmation_source` names `transcript`, `protocol` or `none`; `turn_id` identifies a confirmed turn. `submit_screen_activity` is advisory only. The sender retries Enter once only when the transcript has not recorded the message and the composer visibly holds the staged text. If the retry write itself fails, the response remains successful because the initial injection already happened: `submit_retry_failed` is `true`, `submit_retry_failure` gives the caveat, and `submit_attempts`/`submit_bytes_written` count only successful Enter writes. When `submit_confirmed` is `false`, flush the target with `{{"message":"","submit":true}}` (a bare Enter, no nonce), then re-check its state. Remediate one target at a time. A submitted response may stay pending up to 8 seconds; `null` with `transcript-pending` starts a bounded 60-second background watch that updates agent status and stops when the agent is deleted. `submit_confirmation_elapsed_ms` reports the synchronous wait. Do not treat the held response as a stalled agent.
 
-**Evidence limit:** these facts prove only that bytes were written and the existing PTY-output ring was observed for a bounded window. They do **not** prove that the agent took a turn; output may be terminal echo or unrelated activity, and `submit_confirmed` is heuristic. `submit_confirmed: true` is not proof that a busy receiver accepted Enter: unrelated output from a target that was already streaming can create a false positive and bypass the false-only retry. When the target was busy, inspect its actual state rather than treating `true` as confirmation. Never infer success from receiver behaviour alone.
+**Evidence limit:** `submit_confirmed: true` is transcript-backed confirmation that this nonce-matched message reached the agent and a turn started. `null` means unknown; inspect the agent's status while confirmation is pending. Act on `false`: the transcript timed out and the message remained visibly staged. PTY output and `submit_screen_activity` are advisory and cannot confirm a turn. A transcript proves that a turn started, not whether a human pressed Enter.
 
 **Task files remain the primary channel for assignments.** Inject is a nudge; task files are the contract. Workers re-read their task file, so durable direction belongs there. `HIVE_PTY_SUBMIT_GAP_MS` (ceiling 300000 ms) overrides the submit gap, but the value is cached on first use and requires an app restart to change.
 
@@ -9204,6 +9298,7 @@ Last updated: {timestamp}
         }
         let solo_id = format!("{}-worker-1", session_id);
 
+        let transcript_spawned_at = Some(Utc::now());
         {
             let pty_manager = self.pty_manager.read();
             if let Err(e) = pty_manager.create_session(
@@ -9243,6 +9338,8 @@ Last updated: {timestamp}
             created_at: Utc::now(),
             last_activity_at: Utc::now(),
             agents: vec![AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: solo_id,
                 role: AgentRole::Worker {
                     index: 1,
@@ -9554,6 +9651,7 @@ Last updated: {timestamp}
             queen_cwd
         );
 
+        let transcript_spawned_at = Some(Utc::now());
         {
             let pty_manager = self.pty_manager.read();
             if let Err(e) = pty_manager.create_session(
@@ -9577,6 +9675,8 @@ Last updated: {timestamp}
         spawned_agent_ids.push(queen_id.clone());
 
         agents.push(AgentInfo {
+            transcript_spawned_at,
+            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
             id: queen_id.clone(),
             role: AgentRole::Queen,
             status: AgentStatus::Running,
@@ -9744,6 +9844,7 @@ Last updated: {timestamp}
                 worker_cwd
             );
 
+            let transcript_spawned_at = Some(Utc::now());
             {
                 let pty_manager = self.pty_manager.read();
                 if let Err(e) = pty_manager.create_session(
@@ -9770,6 +9871,8 @@ Last updated: {timestamp}
             spawned_agent_ids.push(worker_id.clone());
 
             agents.push(AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: worker_id,
                 role: AgentRole::Worker {
                     index,
@@ -10232,6 +10335,7 @@ phases and do EXACTLY this, then stop:
                 variant.worktree_path
             );
 
+            let transcript_spawned_at = Some(Utc::now());
             {
                 let pty_manager = self.pty_manager.read();
                 pty_manager
@@ -10252,6 +10356,8 @@ phases and do EXACTLY this, then stop:
             }
 
             let agent_info = AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: variant.agent_id.clone(),
                 role: AgentRole::Fusion {
                     variant: variant.name.clone(),
@@ -10677,6 +10783,7 @@ phases and do EXACTLY this, then stop:
             let (cmd, mut args) = Self::build_command(&agent_config);
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
+            let transcript_spawned_at = Some(Utc::now());
             {
                 let pty_manager = self.pty_manager.read();
                 pty_manager
@@ -10700,6 +10807,8 @@ phases and do EXACTLY this, then stop:
             }
 
             new_agents.push(AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: agent_id,
                 role: AgentRole::Fusion {
                     variant: debater.name.clone(),
@@ -11265,6 +11374,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             tracing::info!("Launching Master Planner: {} {:?} in {:?}", cmd, args, cwd);
 
+            let transcript_spawned_at = Some(Utc::now());
             pty_manager
                 .create_session(
                     planner_id.clone(),
@@ -11288,6 +11398,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 })?;
 
             agents.push(AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
@@ -11399,6 +11511,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 cwd
             );
 
+            let transcript_spawned_at = Some(Utc::now());
             pty_manager
                 .create_session(
                     planner_id.clone(),
@@ -11412,6 +11525,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
 
             agents.push(AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
@@ -11534,6 +11649,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 cwd
             );
 
+            let transcript_spawned_at = Some(Utc::now());
             pty_manager
                 .create_session(
                     planner_id.clone(),
@@ -11547,6 +11663,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
 
             agents.push(AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
@@ -11739,6 +11857,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             tracing::info!("Launching Fusion Queen: {} {:?} in {:?}", cmd, args, cwd);
 
+            let transcript_spawned_at = Some(Utc::now());
             pty_manager
                 .create_session(
                     queen_id.clone(),
@@ -11752,6 +11871,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Fusion Queen: {}", e))?;
 
             new_agents.push(AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: queen_id,
                 role: AgentRole::Queen,
                 status: AgentStatus::Running,
@@ -11859,6 +11980,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 variant.worktree_path
             );
 
+            let transcript_spawned_at = Some(Utc::now());
             {
                 let pty_manager = self.pty_manager.read();
                 pty_manager
@@ -11879,6 +12001,8 @@ The backend composed and persisted the following authoritative skeleton before l
             }
 
             new_agents.push(AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: variant.agent_id.clone(),
                 role: AgentRole::Fusion {
                     variant: variant.name.clone(),
@@ -12124,6 +12248,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 cwd
             );
 
+            let transcript_spawned_at = Some(Utc::now());
             pty_manager
                 .create_session(
                     planner_id.clone(),
@@ -12137,6 +12262,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
 
             agents.push(AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
@@ -12431,6 +12558,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
         // 5. Spawn the worker (use worker_cwd as PTY cwd)
         let pty_manager = self.pty_manager.read();
+        let transcript_spawned_at = Some(Utc::now());
         pty_manager
             .create_session(
                 worker_id.clone(),
@@ -12462,6 +12590,8 @@ The backend composed and persisted the following authoritative skeleton before l
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
+                    transcript_spawned_at,
+                    transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                     id: worker_id,
                     role: AgentRole::Worker {
                         index,
@@ -13994,6 +14124,7 @@ The backend composed and persisted the following authoritative skeleton before l
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
         let cwd = session.project_path.to_string_lossy().to_string();
+        let transcript_spawned_at = Some(Utc::now());
         {
             let pty_manager = self.pty_manager.read();
             pty_manager
@@ -14015,6 +14146,8 @@ The backend composed and persisted the following authoritative skeleton before l
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
+                    transcript_spawned_at,
+                    transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                     id: judge_id,
                     role: AgentRole::Judge {
                         session_id: session_id.to_string(),
@@ -14335,6 +14468,7 @@ The backend composed and persisted the following authoritative skeleton before l
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
         let cwd = session.project_path.to_string_lossy().to_string();
+        let transcript_spawned_at = Some(Utc::now());
         {
             let pty_manager = self.pty_manager.read();
             pty_manager
@@ -14356,6 +14490,8 @@ The backend composed and persisted the following authoritative skeleton before l
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
+                    transcript_spawned_at,
+                    transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                     id: judge_id,
                     role: AgentRole::Judge {
                         session_id: session_id.to_string(),
@@ -14809,6 +14945,7 @@ The backend composed and persisted the following authoritative skeleton before l
             cwd
         );
 
+        let transcript_spawned_at = Some(Utc::now());
         if let Err(error) = self.pty_manager.read().create_session(
             queen_id.clone(),
             AgentRole::Queen,
@@ -14828,6 +14965,8 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         new_agents.push(AgentInfo {
+            transcript_spawned_at,
+            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
             id: queen_id.clone(),
             role: AgentRole::Queen,
             status: AgentStatus::Running,
@@ -15436,6 +15575,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 };
 
                 Some(AgentInfo {
+                    transcript_spawned_at: pa.transcript_spawned_at,
+                    transcript_session_id: pa.transcript_session_id.clone(),
                     id: pa.id.clone(),
                     role,
                     status: AgentStatus::Completed,
@@ -15570,6 +15711,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             tracing::info!("Launching Queen agent (swarm - sequential planner spawning, after planning): {} {:?} in {:?}", cmd, args, cwd);
 
+            let transcript_spawned_at = Some(Utc::now());
             pty_manager
                 .create_session(
                     queen_id.clone(),
@@ -15583,6 +15725,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
 
             new_agents.push(AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: queen_id.clone(),
                 role: AgentRole::Queen,
                 status: AgentStatus::Running,
@@ -15718,6 +15862,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 cwd
             );
 
+            let transcript_spawned_at = Some(Utc::now());
             pty_manager
                 .create_session(
                     queen_id.clone(),
@@ -15731,6 +15876,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
 
             agents.push(AgentInfo {
+                transcript_spawned_at,
+                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
                 id: queen_id.clone(),
                 role: AgentRole::Queen,
                 status: AgentStatus::Running,
@@ -16438,6 +16585,7 @@ The backend composed and persisted the following authoritative skeleton before l
         };
 
         // Spawn PTY
+        let transcript_spawned_at = Some(Utc::now());
         {
             let pty_manager = self.pty_manager.read();
             if let Err(e) = pty_manager.create_session(
@@ -16465,6 +16613,8 @@ The backend composed and persisted the following authoritative skeleton before l
         let agent_config = config_with_role;
 
         let agent_info = AgentInfo {
+            transcript_spawned_at,
+            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
             id: worker_id.clone(),
             role: worker_role,
             status: AgentStatus::Running,
@@ -16629,6 +16779,7 @@ The backend composed and persisted the following authoritative skeleton before l
         );
 
         let cwd = session.project_path.to_str().unwrap_or(".");
+        let transcript_spawned_at = Some(Utc::now());
         {
             let pty_manager = self.pty_manager.read();
             pty_manager
@@ -16654,6 +16805,8 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let agent_info = AgentInfo {
+            transcript_spawned_at,
+            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
             id: evaluator_id,
             role: AgentRole::Evaluator,
             status: AgentStatus::Running,
@@ -16791,6 +16944,7 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let cwd = session.project_path.to_str().unwrap_or(".");
+        let transcript_spawned_at = Some(Utc::now());
         {
             let pty_manager = self.pty_manager.read();
             pty_manager
@@ -16807,6 +16961,8 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let agent_info = AgentInfo {
+            transcript_spawned_at,
+            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
             id: prince_id,
             role: AgentRole::Prince,
             status: AgentStatus::Running,
@@ -16915,6 +17071,7 @@ The backend composed and persisted the following authoritative skeleton before l
             index: next_index,
             parent: Some(evaluator_id.clone()),
         };
+        let transcript_spawned_at = Some(Utc::now());
         {
             let pty_manager = self.pty_manager.read();
             pty_manager
@@ -16931,6 +17088,8 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let agent_info = AgentInfo {
+            transcript_spawned_at,
+            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
             id: qa_worker_id,
             role,
             status: AgentStatus::Running,
@@ -17053,6 +17212,7 @@ The backend composed and persisted the following authoritative skeleton before l
         );
 
         // Spawn PTY
+        let transcript_spawned_at = Some(Utc::now());
         {
             let pty_manager = self.pty_manager.read();
             pty_manager
@@ -17075,6 +17235,8 @@ The backend composed and persisted the following authoritative skeleton before l
         agent_config.label = Some(format!("{} Planner", domain));
 
         let agent_info = AgentInfo {
+            transcript_spawned_at,
+            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
             id: planner_id.clone(),
             role: AgentRole::Planner {
                 index: planner_index,
@@ -17176,6 +17338,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 let role_str = serialize_persisted_agent_role(&a.role);
 
                 PersistedAgentInfo {
+                    transcript_spawned_at: a.transcript_spawned_at,
+                    transcript_session_id: a.transcript_session_id.clone(),
                     id: a.id.clone(),
                     role: role_str,
                     config: PersistedAgentConfig {
@@ -17989,6 +18153,8 @@ mod tests {
         session.worktree_path = Some(project_path.to_string_lossy().to_string());
         session.agents = vec![
             AgentInfo {
+                transcript_spawned_at: None,
+                transcript_session_id: None,
                 id: format!("{SESSION_ID}-queen"),
                 role: AgentRole::Queen,
                 status: AgentStatus::Running,
@@ -18000,6 +18166,8 @@ mod tests {
                 base_commit_sha: None,
             },
             AgentInfo {
+                transcript_spawned_at: None,
+                transcript_session_id: None,
                 id: format!("{SESSION_ID}-worker-1"),
                 role: AgentRole::Worker {
                     index: 1,
@@ -18014,6 +18182,8 @@ mod tests {
                 base_commit_sha: None,
             },
             AgentInfo {
+                transcript_spawned_at: None,
+                transcript_session_id: None,
                 id: format!("{SESSION_ID}-worker-2"),
                 role: AgentRole::Worker {
                     index: 2,
@@ -18919,6 +19089,8 @@ mod tests {
         let mut session = waiting_worker_session(session_id, temp.path(), 1);
         session.state = SessionState::PlanReady;
         session.agents = vec![AgentInfo {
+            transcript_spawned_at: None,
+            transcript_session_id: None,
             id: planner_id,
             role: AgentRole::MasterPlanner,
             status: AgentStatus::Running,
@@ -20277,21 +20449,16 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             .split("\n\n")
             .find(|passage| passage.contains("the tri-state `submit_confirmed`"))
             .expect("inject receipt and remediation passage");
-        assert!(
-            remediation_passage.contains(
-                "Normally, `false` means the initial Enter and its one automatic retry both produced no observable reaction"
-            ) && remediation_passage.contains(
-                r#"When `submit_confirmed` is `false` and `submit_retry_failed` is `false`, the sender has already retried once automatically; flush the target with `{"message":"","submit":true}`, then re-check its state. Remediate one target at a time."#
-            ),
-            "the false verdict and its measured remediation must stay in one emitted passage"
-        );
+        assert!(remediation_passage.contains("the transcript timed out while the message was still visibly staged"));
+        assert!(remediation_passage.contains(r#"When `submit_confirmed` is `false`, flush the target with `{"message":"","submit":true}` (a bare Enter, no nonce), then re-check its state."#));
         assert!(prompt.contains("`submit_retry_failed` is `true`"));
-        assert!(prompt.contains("`submit_confirmation_elapsed_ms` reports cumulative time"));
-        assert!(prompt.contains("may stay pending up to ~3000 ms across two confirmation windows"));
+        assert!(prompt.contains("`submit_confirmation_elapsed_ms` reports the synchronous wait"));
+        assert!(prompt.contains("may stay pending up to 8 seconds"));
+        assert!(prompt.contains("bounded 60-second background watch"));
         assert!(prompt.contains("pty_activity_observed"));
-        assert!(prompt.contains("do **not** prove that the agent took a turn"));
-        assert!(prompt
-            .contains("`submit_confirmed: true` is not proof that a busy receiver accepted Enter"));
+        assert!(prompt.contains("`submit_confirmed: true` is transcript-backed confirmation"));
+        assert!(prompt.contains("`null` means unknown"));
+        assert!(prompt.contains("Act on `false`"));
         assert!(!prompt.contains("payload and its newline share one PTY write"));
         assert!(!prompt.contains("send a second, empty message"));
         assert!(!prompt.contains("Measured against a live codex agent"));
@@ -21233,6 +21400,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             created_at: Utc::now(),
             last_activity_at: Utc::now(),
             agents: vec![AgentInfo {
+                transcript_spawned_at: None,
+                transcript_session_id: None,
                 id: format!("{session_id}-worker-{worker_id}"),
                 role: AgentRole::Worker {
                     index: worker_id,
@@ -21273,6 +21442,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let mut agents = Vec::new();
         if with_evaluator {
             agents.push(AgentInfo {
+                transcript_spawned_at: None,
+                transcript_session_id: None,
                 id: format!("{id}-evaluator"),
                 role: AgentRole::Evaluator,
                 status: AgentStatus::Completed,
@@ -21498,6 +21669,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         with_prince: bool,
     ) -> Session {
         let mut agents = vec![AgentInfo {
+            transcript_spawned_at: None,
+            transcript_session_id: None,
             id: format!("{id}-evaluator"),
             role: AgentRole::Evaluator,
             status: AgentStatus::Running,
@@ -21510,6 +21683,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         }];
         if with_prince {
             agents.push(AgentInfo {
+                transcript_spawned_at: None,
+                transcript_session_id: None,
                 id: format!("{id}-prince"),
                 role: AgentRole::Prince,
                 status: AgentStatus::Running,
@@ -23524,6 +23699,187 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert_eq!(controller.get_session(id).unwrap().qa_timeout_secs, 720,
             "a running launch keeps the requested setting even when persistence fails");
         assert!(matches!(controller.get_session(id).unwrap().state, SessionState::Running));
+    }
+
+    #[test]
+    fn claude_spawn_identity_is_fresh_and_matches_the_argv() {
+        let config = AgentConfig {
+            cli: "claude".to_string(),
+            flags: vec!["--session-id".to_string(), "stale-id".to_string(),
+                "--session-id=another-stale-id".to_string(), "--verbose".to_string()],
+            ..AgentConfig::default()
+        };
+        let builds = [SessionController::build_command(&config),
+            SessionController::build_command(&config),
+            SessionController::build_solo_command(&config, Some("Fixture task")),
+            SessionController::build_solo_command(&config, None)];
+        let mut ids = std::collections::HashSet::new();
+        for (cmd, args) in builds {
+            let id = SessionController::claude_transcript_session_id(&cmd, &args).unwrap();
+            assert_eq!(uuid::Uuid::parse_str(&id).unwrap().get_version_num(), 4);
+            assert!(ids.insert(id.clone()), "every spawn must receive a fresh UUID");
+            assert_eq!(args.iter().filter(|arg| *arg == "--session-id").count(), 1);
+            assert!(args.windows(2).any(|pair| pair[0] == "--session-id" && pair[1] == id));
+            assert!(!args.iter().any(|arg| arg.contains("stale-id")));
+            assert!(args.iter().any(|arg| arg == "--verbose"));
+        }
+        let (cmd, args) = SessionController::build_command(&AgentConfig {
+            cli: "codex".to_string(), ..AgentConfig::default()
+        });
+        assert_eq!(SessionController::claude_transcript_session_id(&cmd, &args), None);
+    }
+
+    #[test]
+    fn claude_transcript_identity_survives_storage_and_old_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let controller = test_controller();
+        let mut source = waiting_worker_session("claude-identity", temp.path(), 1);
+        let (cmd, args) = SessionController::build_command(&AgentConfig {
+            cli: "claude".to_string(), ..AgentConfig::default()
+        });
+        let id = SessionController::claude_transcript_session_id(&cmd, &args);
+        let spawned_at = Some(Utc::now() - Duration::seconds(2));
+        source.agents[0].transcript_spawned_at = spawned_at;
+        source.agents[0].transcript_session_id = id.clone();
+        let persisted = SessionController::session_to_persisted_snapshot(&source);
+        assert_eq!(persisted.agents[0].transcript_session_id, id);
+        assert_eq!(persisted.agents[0].transcript_spawned_at, spawned_at);
+        let json = serde_json::to_value(&persisted).unwrap();
+        let decoded = serde_json::from_value(json.clone()).unwrap();
+        let restored = controller.session_from_persisted(&decoded).unwrap();
+        assert_eq!(restored.agents[0].transcript_session_id, id);
+        assert_eq!(restored.agents[0].transcript_spawned_at, spawned_at);
+        let mut legacy = json;
+        for agent in legacy["agents"].as_array_mut().unwrap() {
+            agent.as_object_mut().unwrap().remove("transcript_session_id");
+            agent.as_object_mut().unwrap().remove("transcript_spawned_at");
+        }
+        let decoded = serde_json::from_value(legacy).unwrap();
+        let restored = controller.session_from_persisted(&decoded).unwrap();
+        assert!(restored.agents.iter().all(|agent| agent.transcript_session_id.is_none()));
+        assert!(restored.agents.iter().all(|agent| agent.transcript_spawned_at.is_none()));
+    }
+
+    #[test]
+    fn delivery_pending_retains_exact_marker_and_confirmed_turn_runs() {
+        let controller = test_controller();
+        let id = "delivery-pending-status";
+        let session = qa_session_with(id, SessionState::Running, PathBuf::from("."), false);
+        let agent_id = session.agents[0].id.clone();
+        controller.insert_test_session(session);
+        let submitted_at = Utc::now();
+        controller.record_injection_submission(id, &agent_id, submitted_at, true).unwrap();
+        let marker = AgentStatus::WaitingForInput(format!("awaiting_injected_turn:{}", submitted_at.to_rfc3339()));
+        assert_eq!(controller.get_session(id).unwrap().agents[0].status, marker);
+        controller.record_injection_delivery(id, &agent_id, submitted_at, &crate::delivery::Delivery::pending()).unwrap();
+        assert_eq!(controller.get_session(id).unwrap().agents[0].status, marker,
+            "pending transcript evidence must preserve the exact watch identity");
+        controller.record_injection_delivery(id, &agent_id, submitted_at,
+            &crate::delivery::Delivery::confirmed("fixture-turn".to_string())).unwrap();
+        assert_eq!(controller.get_session(id).unwrap().agents[0].status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn delivery_timeout_distinguishes_visible_failure_from_unknown() {
+        let controller = test_controller();
+        let id = "delivery-timeout-status";
+        let session = qa_session_with(id, SessionState::Running, PathBuf::from("."), false);
+        let agent_id = session.agents[0].id.clone();
+        controller.insert_test_session(session);
+        let submitted_at = Utc::now();
+        for (visible, expected) in [
+            (true, format!("injected_delivery_failed:transcript-timeout:{}", submitted_at.to_rfc3339())),
+            (false, format!("awaiting_injected_turn:{}", submitted_at.to_rfc3339()))] {
+            controller.record_injection_submission(id, &agent_id, submitted_at, true).unwrap();
+            controller.record_injection_delivery(id, &agent_id, submitted_at,
+                &crate::delivery::Delivery::timeout(visible)).unwrap();
+            assert_eq!(controller.get_session(id).unwrap().agents[0].status,
+                AgentStatus::WaitingForInput(expected.to_string()));
+        }
+    }
+
+    #[test]
+    fn older_delivery_watch_cannot_resolve_a_newer_injection() {
+        let controller = test_controller();
+        let id = "delivery-newer-injection";
+        let session = qa_session_with(id, SessionState::Running, PathBuf::from("."), false);
+        let agent_id = session.agents[0].id.clone();
+        controller.insert_test_session(session);
+        let older = Utc::now();
+        let newer = older + Duration::seconds(1);
+        controller.record_injection_submission(id, &agent_id, older, true).unwrap();
+        controller.record_injection_submission(id, &agent_id, newer, true).unwrap();
+        let marker = AgentStatus::WaitingForInput(format!("awaiting_injected_turn:{}", newer.to_rfc3339()));
+        for result in [crate::delivery::Delivery::confirmed("older-turn".to_string()),
+            crate::delivery::Delivery::timeout(true), crate::delivery::Delivery::timeout(false)] {
+            controller.record_injection_delivery(id, &agent_id, older, &result).unwrap();
+            assert_eq!(controller.get_session(id).unwrap().agents[0].status, marker);
+        }
+    }
+
+    #[test]
+    fn older_delivery_watch_cannot_overwrite_newer_heartbeat_evidence() {
+        let controller = test_controller();
+        let id = "delivery-newer-heartbeat";
+        let session = qa_session_with(id, SessionState::Running, PathBuf::from("."), false);
+        let agent_id = session.agents[0].id.clone();
+        controller.insert_test_session(session);
+        let submitted_at = Utc::now();
+        controller.record_injection_submission(id, &agent_id, submitted_at, true).unwrap();
+        let marker = controller.get_session(id).unwrap().agents[0].status.clone();
+        // Keep the exact pending marker so this exercises the heartbeat guard independently.
+        controller.agent_heartbeats.write().entry(id.to_string()).or_default().insert(
+            agent_id.clone(), super::AgentHeartbeatInfo {
+                last_activity: submitted_at + Duration::seconds(1),
+                status: "working".to_string(), summary: None,
+            });
+        for result in [crate::delivery::Delivery::confirmed("older-turn".to_string()),
+            crate::delivery::Delivery::timeout(true), crate::delivery::Delivery::timeout(false)] {
+            controller.record_injection_delivery(id, &agent_id, submitted_at, &result).unwrap();
+            assert_eq!(controller.get_session(id).unwrap().agents[0].status, marker,
+                "newer heartbeat evidence owns the agent's next status transition");
+        }
+    }
+
+    #[test]
+    fn unavailable_delivery_keeps_timestamp_for_newer_heartbeat_recovery() {
+        let controller = test_controller();
+        let id = "delivery-unavailable-recovery";
+        let mut session = qa_session_with(id, SessionState::Running, PathBuf::from("."), false);
+        session.agents[0].config.cli = "droid".to_string();
+        let agent_id = session.agents[0].id.clone();
+        controller.insert_test_session(session);
+        let submitted_at = Utc::now() - Duration::seconds(1);
+        controller.record_injection_submission(id, &agent_id, submitted_at, true).unwrap();
+        controller.record_injection_delivery(id, &agent_id, submitted_at,
+            &crate::delivery::Delivery::unavailable()).unwrap();
+        let status = controller.get_session(id).unwrap().agents[0].status.clone();
+        assert_eq!(status, AgentStatus::WaitingForInput(format!(
+            "awaiting_injected_turn:{}", submitted_at.to_rfc3339())));
+        assert_eq!(SessionController::awaiting_injected_turn_since(&status), Some(submitted_at));
+        controller.update_heartbeat(id, &agent_id, "working", None).unwrap();
+        controller.get_stalled_agent_reports(id, std::time::Duration::from_secs(30));
+        assert_eq!(controller.get_session(id).unwrap().agents[0].status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn failed_delivery_timestamp_allows_newer_heartbeat_recovery() {
+        let controller = test_controller();
+        let id = "delivery-failed-recovery";
+        let session = qa_session_with(id, SessionState::Running, PathBuf::from("."), false);
+        let agent_id = session.agents[0].id.clone();
+        controller.insert_test_session(session);
+        let submitted_at = Utc::now() - Duration::seconds(1);
+        controller.record_injection_submission(id, &agent_id, submitted_at, true).unwrap();
+        controller.record_injection_delivery(id, &agent_id, submitted_at,
+            &crate::delivery::Delivery::timeout(true)).unwrap();
+        let status = controller.get_session(id).unwrap().agents[0].status.clone();
+        assert_eq!(status, AgentStatus::WaitingForInput(format!(
+            "injected_delivery_failed:transcript-timeout:{}", submitted_at.to_rfc3339())));
+        assert_eq!(SessionController::awaiting_injected_turn_since(&status), Some(submitted_at));
+        controller.update_heartbeat(id, &agent_id, "idle", None).unwrap();
+        controller.get_stalled_agent_reports(id, std::time::Duration::from_secs(30));
+        assert_eq!(controller.get_session(id).unwrap().agents[0].status, AgentStatus::Idle);
     }
 
 }

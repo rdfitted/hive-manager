@@ -20,6 +20,10 @@ use super::{CoordinationMessage, StateManager, WorkerStateInfo};
 /// after-write snapshot; neither kind of ring change proves that the agent took a turn.
 #[derive(Debug, Clone)]
 pub struct InjectionReceipt {
+    /// Exact marker in the submitted payload; absent for staging writes.
+    pub nonce: Option<String>,
+    pub confirmation_since: Option<DateTime<Utc>>,
+    pub confirmation_expires: Option<std::time::Instant>,
     pub write_started_at: DateTime<Utc>,
     pub submitted_at: DateTime<Utc>,
     pub observation_started_at: DateTime<Utc>,
@@ -251,6 +255,9 @@ impl InjectionManager {
 
         // Strip any existing line endings first
         let clean_message = message.trim_end_matches(&['\r', '\n'][..]);
+        let nonce = (submit && !clean_message.is_empty()).then(|| format!("[hive-msg:{}]", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+        let submitted_message = nonce.as_ref().map(|nonce| format!("{clean_message}\n{nonce}"));
+        let clean_message = submitted_message.as_deref().unwrap_or(clean_message);
 
         tracing::info!("=== INJECTION START ===");
         tracing::info!("Target agent: {}", agent_id);
@@ -291,6 +298,9 @@ impl InjectionManager {
         tracing::info!("=== INJECTION COMPLETE ===");
 
         Ok(InjectionReceipt {
+            confirmation_expires: None,
+            confirmation_since: nonce.as_ref().map(|_| write_started_at),
+            nonce,
             write_started_at,
             submitted_at,
             observation_started_at: submitted_at,

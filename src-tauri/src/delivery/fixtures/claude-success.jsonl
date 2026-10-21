@@ -1,0 +1,2 @@
+{"type":"user","uuid":"user_fixture","parentUuid":null,"timestamp":"2026-10-21T12:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"Scrubbed fixture request.\n[hive-msg:1234abcd]"}]}}
+{"type":"assistant","uuid":"assistant_fixture","parentUuid":"user_fixture","timestamp":"2026-10-21T12:00:01.000Z","message":{"id":"msg_fixture_turn","role":"assistant","content":[{"type":"text","text":"Scrubbed fixture response."}]}}

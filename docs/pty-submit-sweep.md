@@ -8,7 +8,20 @@ operator interference invalidates a positive "submitted" observation, but text v
 remaining in the composer is admissible negative evidence because a keypress cannot
 manufacture the staged payload.
 
-The read-only instrument is:
+Transcript confirmation (#356) now supplies an additional instrument: submitted messages
+carry a trailing `[hive-msg:<8 hex>]` marker. `submit_confirmed: true` requires that marker
+in the agent's user record followed by a turn start; `submit_confirmation_source` is
+`transcript` and `turn_id` identifies the turn. The screen classifier is exposed only as
+`submit_screen_activity`. Unsupported CLIs return `null` / `transcript-unavailable`.
+The request waits up to 8 seconds, then returns `null` / `transcript-pending` and watches
+for at most 60 more seconds. Timeout is `false` only while the message is visibly staged;
+otherwise it remains unknown. Deleting the agent cancels its watch.
+
+Issue #241 owns the receiver-side sweep matrix below. A transcript proves that a turn
+started, not whether a human pressed Enter. It therefore does not establish an uncontaminated
+positive sweep result. The matrix cells remain operator-owned and unchanged.
+
+The read-only screen instrument is:
 
 ```http
 GET /api/sessions/{session_id}/agents/{agent_id}/pty-buffer
@@ -38,11 +51,16 @@ keep `byte_count` directly comparable to the fixture byte length.
   for a window after a fast raw byte burst) from swallowing the follow-up `\r` as a
   literal newline inside the paste.
 - Enter is still a bare `\r` written as its own discrete PTY write; no `\n` is appended
-  and Enter is outside the bracketed-paste envelope. If the first observation returns the
-  confident negative `submit_confirmed: false`, the HTTP inject path writes exactly one more
-  bare `\r` and observes once more. Confirmed and ambiguous first observations do not retry.
-- An empty payload with `"submit": true` writes only the bare `\r` — this is the
-  supported flush for content already staged in a composer.
+  and Enter is outside the bracketed-paste envelope. After the synchronous wait, exactly
+  one retry is allowed only when the transcript has not recorded the message and the
+  composer visibly holds its exact marker. Screen activity alone never triggers a retry.
+- Every nonempty `"submit": true` message receives a fresh nonce. An empty flush request
+  writes only bare Enter and carries no nonce. If the agent has an earlier pending nonce
+  within its watch window, the flush confirms against that nonce; otherwise it returns
+  `null` / `transcript-unavailable`. A `"submit": false` staging write carries no nonce
+  and issues no Enter.
+- Codex's submit-time gap is 150 ms plus 1 ms per 200 sanitized payload bytes, capped at
+  600 ms. `HIVE_PTY_SUBMIT_GAP_MS` overrides it; other adapters retain their 50 ms default.
 - A multi-line payload retains its internal newlines and receives one Enter after the whole
   payload, not one Enter per line.
 - Trailing `\r`/`\n` on an injected message are always stripped before writing

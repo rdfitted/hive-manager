@@ -216,14 +216,31 @@ fn resolve_submit_gap(
     override_gap.unwrap_or(policy.default_gap)
 }
 
-fn submit_gap(policy: PtySubmitPolicy) -> Duration {
+const CODEX_SUBMIT_GAP_BASE: Duration = Duration::from_millis(150);
+
+fn resolve_payload_submit_gap(
+    policy: PtySubmitPolicy,
+    override_gap: Option<Duration>,
+    payload_len: usize,
+) -> Duration {
+    if let Some(gap) = override_gap {
+        return gap;
+    }
+    if policy.adapter == Some("codex") {
+        crate::adapters::CodexAdapter::codex_scaled_submit_gap(CODEX_SUBMIT_GAP_BASE, payload_len)
+    } else {
+        resolve_submit_gap(policy, None)
+    }
+}
+
+fn submit_gap(policy: PtySubmitPolicy, payload_len: usize) -> Duration {
     let override_value = std::env::var_os(SUBMIT_GAP_ENV);
     let override_gap = cached_submit_gap_override(
         &RUNTIME_SUBMIT_GAP,
         override_value.as_deref(),
         warn_rejected_submit_gap_override,
     );
-    resolve_submit_gap(policy, override_gap)
+    resolve_payload_submit_gap(policy, override_gap, payload_len)
 }
 // END SHARED SUBMIT GAP OVERRIDE POLICY
 
@@ -486,7 +503,7 @@ impl PtySession {
             Self::write_bracketed_locked(&mut writer, data)?
         };
         self.pause_submit_after_payload_if_requested();
-        std::thread::sleep(submit_gap(self.submit_policy));
+        std::thread::sleep(submit_gap(self.submit_policy, payload_bytes_written));
         let submit_bytes_written = Self::write_submit_keystroke_locked(&mut writer)?;
         Ok(PtySubmitResult {
             payload_bytes_written,
@@ -721,6 +738,23 @@ mod tests {
         let production = policy_block(include_str!("session.rs"));
         let test_stub = policy_block(include_str!("session_stub.rs"));
         assert_eq!(production, test_stub, "the Windows shim must not drift");
+    }
+
+    #[test]
+    fn codex_submit_time_gap_scales_and_explicit_overrides_win() {
+        let codex = crate::adapters::pty_submit_policy("codex");
+        assert_eq!(codex.default_gap, Duration::from_millis(50));
+        for (bytes, millis) in [(0, 150), (20_000, 250), (1_000_000, 600)] {
+            assert_eq!(super::resolve_payload_submit_gap(codex, None, bytes), Duration::from_millis(millis));
+            for override_ms in [0, 7] {
+                let gap = Duration::from_millis(override_ms);
+                assert_eq!(super::resolve_payload_submit_gap(codex, Some(gap), bytes), gap);
+            }
+        }
+        for cli in ["claude", "cursor", "qwen", "unknown-shell"] {
+            let policy = crate::adapters::pty_submit_policy(cli);
+            assert_eq!(super::resolve_payload_submit_gap(policy, None, 1_000_000), Duration::from_millis(50));
+        }
     }
 
     #[test]

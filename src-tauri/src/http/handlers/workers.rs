@@ -1797,6 +1797,8 @@ mod tests {
             created_at: now,
             last_activity_at: now,
             agents: vec![AgentInfo {
+                transcript_spawned_at: None,
+                transcript_session_id: None,
                 id: "parent".to_string(),
                 role: worker_parent(),
                 status: AgentStatus::Running,

@@ -2,6 +2,13 @@
 
 use super::{AgentLaunchSpec, AgentSignal, BootstrapContext, CliAdapter, LaunchCommand};
 use crate::cli::CliRegistry;
+use std::time::Duration;
+
+/// Add Codex's payload-size allowance without overflowing on large inputs.
+pub fn codex_scaled_submit_gap(base: Duration, payload_len: usize) -> Duration {
+    base.saturating_add(Duration::from_millis((payload_len / 200) as u64))
+        .min(Duration::from_millis(600))
+}
 
 /// Codex CLI adapter.
 ///
@@ -10,6 +17,14 @@ use crate::cli::CliRegistry;
 /// - Model flag: `-m`
 /// - Prompts: positional argument
 pub struct CodexAdapter;
+
+impl CodexAdapter {
+    /// Bridge through the existing public adapter export; adapters/mod.rs stays unchanged.
+    /// policy.default_gap stays the shared default; Codex scaling applies at submit time.
+    pub fn codex_scaled_submit_gap(base: Duration, payload_len: usize) -> Duration {
+        codex_scaled_submit_gap(base, payload_len)
+    }
+}
 
 impl CliAdapter for CodexAdapter {
     fn cli_name(&self) -> &'static str {
@@ -130,6 +145,13 @@ fn is_explicit_prompt_marker(line_lower: &str, trimmed: &str) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn codex_payload_gap_table_is_bounded() {
+        for (bytes, millis) in [(0, 150), (20_000, 250), (1_000_000, 600), (usize::MAX, 600)] {
+            assert_eq!(codex_scaled_submit_gap(Duration::from_millis(150), bytes), Duration::from_millis(millis));
+        }
+    }
 
     fn make_spec() -> AgentLaunchSpec {
         AgentLaunchSpec {

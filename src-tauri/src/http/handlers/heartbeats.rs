@@ -927,6 +927,8 @@ mod tests {
 
     fn agent(id: &str, role: AgentRole, parent_id: Option<&str>) -> AgentInfo {
         AgentInfo {
+            transcript_spawned_at: None,
+            transcript_session_id: None,
             id: id.to_string(),
             role,
             status: AgentStatus::Running,
