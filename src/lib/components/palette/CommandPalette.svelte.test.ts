@@ -180,9 +180,58 @@ describe('command action wiring and navigation', () => {
     await fireEvent.click(view.getByRole('button', { name: 'Flush Enter: Frontend' }));
     await fireEvent.keyDown(view.getByRole('textbox', { name: 'Find command' }), { key: 'Escape' });
     await openPalette();
+    expect(view.getByRole('button', { name: 'Flush Enter: Frontend' }).getAttribute('aria-disabled')).toBe('true');
     resolve({ ok: true, text: async () => 'receipt from previous opening' });
-    await waitFor(() => expect((view.getByRole('button', { name: 'Flush Enter: Frontend' }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect(view.getByRole('button', { name: 'Flush Enter: Frontend' }).hasAttribute('aria-disabled')).toBe(false));
     expect(view.queryByText('receipt from previous opening')).toBeNull();
+  });
+  it('keeps pending Flush focused, blocks duplicate clicks and search Enter, and contains Tab/Escape', async () => {
+    let resolve!: (value: unknown) => void;
+    const fetcher = vi.fn(() => new Promise((done) => { resolve = done; }));
+    vi.stubGlobal('fetch', fetcher);
+    const previous = document.createElement('button'); document.body.append(previous); previous.focus();
+    const view = render(CommandPalette); await openPalette();
+    const flush = view.getByRole('button', { name: 'Flush Enter: Frontend' });
+    flush.focus(); await fireEvent.click(flush);
+    expect(document.activeElement).toBe(flush);
+    expect(Array.from(view.getByRole('dialog').querySelectorAll('[aria-disabled="true"]'))).toEqual([flush]);
+    expect(view.getByRole('dialog').querySelectorAll('button:disabled')).toHaveLength(0);
+    await fireEvent.click(flush);
+    const search = view.getByRole('textbox', { name: 'Find command' });
+    search.focus(); await fireEvent.input(search, { target: { value: 'Flush Enter' } });
+    await fireEvent.keyDown(search, { key: 'Enter' });
+    expect(fetcher).toHaveBeenCalledOnce();
+    flush.focus(); await fireEvent.keyDown(flush, { key: 'Tab' });
+    const close = view.getByRole('button', { name: 'Close command palette' });
+    expect(document.activeElement).toBe(close);
+    await fireEvent.keyDown(close, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(flush);
+    await fireEvent.keyDown(flush, { key: 'Escape' });
+    expect(view.queryByRole('dialog')).toBeNull(); expect(document.activeElement).toBe(previous);
+    resolve({ ok: true, text: async () => 'settled after closing' });
+    await openPalette();
+    await waitFor(() => expect(view.getByRole('button', { name: 'Flush Enter: Frontend' }).hasAttribute('aria-disabled')).toBe(false));
+    expect(view.queryByText('settled after closing')).toBeNull();
+  });
+  it.each(['immediately', 'after reopening'])('unrelated command runs while a flush is pending (%s)', async (when) => {
+    let resolve!: (value: unknown) => void;
+    const fetcher = vi.fn(() => new Promise((done) => { resolve = done; }));
+    vi.stubGlobal('fetch', fetcher);
+    const view = render(CommandPalette); await openPalette();
+    const flush = view.getByRole('button', { name: 'Flush Enter: Frontend' });
+    flush.focus(); await fireEvent.click(flush);
+    if (when === 'after reopening') {
+      await fireEvent.keyDown(flush, { key: 'Escape' });
+      await openPalette();
+    }
+    expect(view.getByRole('button', { name: 'Flush Enter: Frontend' }).getAttribute('aria-disabled')).toBe('true');
+    await fireEvent.click(view.getByRole('button', { name: 'Open Activity' }));
+    expect(layout.setRightTab).toHaveBeenCalledWith('activity');
+    expect(view.queryByRole('dialog')).toBeNull(); expect(fetcher).toHaveBeenCalledOnce();
+    resolve({ ok: true, text: async () => 'settled after navigation' });
+    await openPalette();
+    await waitFor(() => expect(view.getByRole('button', { name: 'Flush Enter: Frontend' }).hasAttribute('aria-disabled')).toBe(false));
+    expect(view.queryByText('settled after navigation')).toBeNull();
   });
   it('registers Alt+Shift+F6 without Ctrl, Meta, or repeat', () => {
     render(CommandPalette);

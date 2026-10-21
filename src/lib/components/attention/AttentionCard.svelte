@@ -33,8 +33,7 @@
   }
 
   function openTerminal() {
-    // F publishes this additive method after R's layout migration lands.
-    (layout as typeof layout & { setSessionViewMode?: (mode: 'focus') => void }).setSessionViewMode?.('focus');
+    layout.setSessionViewMode('focus');
     ui.setFocusedAgent(agent.id);
   }
 </script>

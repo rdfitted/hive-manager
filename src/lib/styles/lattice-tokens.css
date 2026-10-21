@@ -38,7 +38,7 @@
   --status-error: #F39CA9;
   --status-blocked: #EDA68C;
   --status-queued: #969696;
-  --status-canceled: #555555;
+  --status-canceled: #888888;
 
   /* ── Status (RGB — for opacity & glow calculations) ────────────── */
   --rgb-success: 160, 243, 188;

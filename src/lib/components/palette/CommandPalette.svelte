@@ -85,7 +85,7 @@
   }
 
   function execute(command: Command | undefined) {
-    if (!command || pending) return;
+    if (!command) return;
     if (!command.keepOpen) close();
     void command.run();
   }
@@ -123,7 +123,7 @@
       <span id="command-selection" class="selection-announcement" aria-live="polite">{matches[activeIndex]?.label ?? 'No matching commands'}</span>
       <ul class="commands lattice-scroll-content" aria-label="Commands">
         {#each matches as command, index (command.id)}
-          <li><button type="button" data-command-index={index} class="command lattice-forced-colors-boundary" class:active={index === activeIndex} aria-current={index === activeIndex ? 'true' : undefined} disabled={pending} onclick={() => execute(command)}>{command.label}</button></li>
+          <li><button type="button" data-command-index={index} class="command lattice-forced-colors-boundary" class:active={index === activeIndex} aria-current={index === activeIndex ? 'true' : undefined} aria-disabled={pending && command.id === 'flush' ? 'true' : undefined} onclick={() => execute(command)}>{command.label}</button></li>
         {:else}<li class="empty">No commands match “{query}”.</li>{/each}
       </ul>
       {#if pending}<p role="status">Flushing Enter to {receiptTarget}…</p>{/if}
