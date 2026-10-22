@@ -267,6 +267,79 @@ async fn http_continue_moves_planning_hive_to_running_and_spawns_queen() {
     assert!(error_message(&body).contains("not in planning phase"), "{body}");
 }
 
+/// Two continues on one Planning hive: the second fires while the first is
+/// between PlanReady and Queen startup, the window where PlanReady passes the
+/// state guard. Exactly one may launch; the other must be a 409, not a second
+/// launch attempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_continues_launch_exactly_one_queen() {
+    let app = test_app();
+    let mut fired_during_plan_ready = 0;
+
+    for round in 0..5 {
+        let session_id = format!("continue-race-{round}");
+        seed_session(
+            &app,
+            &session_id,
+            SessionType::Hive { worker_count: 0 },
+            SessionState::Planning,
+            VALID_PLAN,
+        );
+        let uri = format!("/api/sessions/{session_id}/continue");
+
+        let first = tokio::spawn({
+            let router = app.router.clone();
+            let uri = uri.clone();
+            async move { post_empty(&router, &uri).await }
+        });
+        // Fire the retry the moment the first call has marked the plan ready.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let state = app.session(&session_id).state;
+            if state == SessionState::PlanReady {
+                fired_during_plan_ready += 1;
+                break;
+            }
+            if state != SessionState::Planning || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        let (second_status, second_body) = post_empty(&app.router, &uri).await;
+        let (first_status, first_body) = first.await.expect("first continue task");
+
+        let mut statuses = [first_status, second_status];
+        statuses.sort();
+        assert_eq!(
+            statuses,
+            [StatusCode::OK, StatusCode::CONFLICT],
+            "round {round}: first {first_status} {first_body}, second {second_status} {second_body}"
+        );
+        let queen_id = format!("{session_id}-queen");
+        assert_eq!(
+            app.pty_ids().iter().filter(|id| **id == queen_id).count(),
+            1,
+            "round {round}: exactly one Queen PTY"
+        );
+        let session = app.session(&session_id);
+        assert_eq!(session.state, SessionState::Running);
+        assert_eq!(
+            session
+                .agents
+                .iter()
+                .filter(|agent| matches!(agent.role, AgentRole::Queen))
+                .count(),
+            1,
+            "round {round}: exactly one Queen agent"
+        );
+    }
+
+    assert!(
+        fired_during_plan_ready > 0,
+        "the retry never landed between PlanReady and Queen startup"
+    );
+}
+
 #[tokio::test]
 async fn http_continue_rejects_wrong_state_with_conflict() {
     let app = test_app();

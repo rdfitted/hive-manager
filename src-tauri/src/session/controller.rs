@@ -14834,6 +14834,14 @@ The backend composed and persisted the following authoritative skeleton before l
         &self,
         session_id: &str,
     ) -> Result<Session, PlanningPhaseError> {
+        // mark_plan_ready moves the session to PlanReady before the Queen is up,
+        // and PlanReady passes the guard below. Hold the lifecycle lock (shared
+        // with stop/close/resume) across the whole continuation so a concurrent
+        // retry waits, then sees Running and gets WrongState instead of racing a
+        // second launch. Nothing inside takes this lock (parking_lot, not reentrant).
+        let lifecycle_lock = self.session_lifecycle_lock(session_id);
+        let _lifecycle_guard = lifecycle_lock.lock();
+
         // Get the session
         let session = {
             let sessions = self.sessions.read();
