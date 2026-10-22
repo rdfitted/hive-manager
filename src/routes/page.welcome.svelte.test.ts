@@ -122,6 +122,19 @@ function textarea(view: { getByLabelText: (label: string) => HTMLElement }) {
 const componentSources = import.meta.glob<string>('../**/*.svelte', { query: '?raw', import: 'default', eager: true });
 
 describe('inline composer landing', () => {
+  it.each([false, true])('Advanced hides Cancel and Back preserves task text (active session: %s)', async (hasActiveSession) => {
+    if (hasActiveSession) {
+      activateSession();
+      launch.open();
+    }
+    const view = render(Page);
+    await fireEvent.input(textarea(view), { target: { value: 'Keep Advanced draft' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
+    expect(view.queryByRole('button', { name: 'Cancel' })).toBeNull();
+    await fireEvent.click(view.getByRole('button', { name: 'Back to composer' }));
+    expect(textarea(view).value).toBe('Keep Advanced draft');
+  });
+
   it('G-landing-inline: renders the task textarea focused without modal ancestors', async () => {
     const view = render(Page);
     expect(textarea(view).closest('[role="dialog"], [aria-modal]')).toBeNull();

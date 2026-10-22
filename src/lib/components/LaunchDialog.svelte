@@ -1731,9 +1731,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         {/if}
 
         <div class="dialog-actions">
+          {#if presentation === 'modal'}
           <button type="button" class="lattice-btn lattice-btn--secondary" on:click={handleClose} disabled={launching}>
             Cancel
           </button>
+          {/if}
           {#if mode === 'hive' || mode === 'research'}
           <button
             type="button"
