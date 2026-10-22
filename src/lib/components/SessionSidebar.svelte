@@ -1,6 +1,8 @@
 <script lang="ts">
   import { Brain, CaretDown, CaretRight, Check, House, Kanban, PencilSimple, SidebarSimple } from 'phosphor-svelte';
   import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
+  import { launch, type LaunchMode } from '$lib/stores/launch';
   import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { layout, RAIL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
@@ -9,7 +11,6 @@
   import { shortcutLabel } from '$lib/platform';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, tick } from 'svelte';
-  import LaunchDialog from './LaunchDialog.svelte';
   import AgentTree from './AgentTree.svelte';
   import QueenControls from './QueenControls.svelte';
   import ResizeHandle from './ResizeHandle.svelte';
@@ -71,14 +72,10 @@
     state: string;
   }
 
-  let { onLaunchHiveV2, onLaunchResearch, onLaunchFusion, onLaunchSolo, onLaunchDebate, onOpenAddWorker, startAction = null }: Props = $props();
-
-  let showLaunchDialog = $state(false);
-  let launching = $state(false);
-  let launchError = $state('');
-  let launchInitialMode = $state<'hive' | 'fusion' | 'debate' | undefined>(undefined);
+  let { onOpenAddWorker, startAction = null }: Props = $props();
   let persistedSessions = $state<SessionSummary[]>([]);
   let loadingPersisted = $state(false);
+  let persistedLoaded = $state(false);
   let currentDirectory = $state<string | null>(null);
   let resumeModalOpen = $state(false);
   let resumeTargetSessionId = $state<string | null>(null);
@@ -113,9 +110,21 @@
       return;
     }
 
-    launchInitialMode = request.action;
-    launchError = '';
-    showLaunchDialog = true;
+    void openLaunch(request.action);
+  });
+
+  async function openLaunch(mode?: LaunchMode) {
+    if ($page.url.pathname !== '/') await goto('/');
+    // Show the landing without clearing the active session or its live terminals.
+    launch.open(mode);
+  }
+
+  $effect(() => {
+    if (!persistedLoaded) return;
+    const latest = [...persistedSessions].sort((a, b) =>
+      Date.parse(b.last_activity_at || b.created_at) - Date.parse(a.last_activity_at || a.created_at),
+    )[0];
+    launch.setDefaultProjectPath(latest?.project_path || currentDirectory || '');
   });
 
   onMount(async () => {
@@ -142,6 +151,7 @@
       console.error('Failed to load persisted sessions:', err);
     } finally {
       loadingPersisted = false;
+      persistedLoaded = true;
     }
   }
 
@@ -168,6 +178,7 @@
   }
 
   function selectSession(sessionId: string) {
+    launch.close();
     sessions.setActiveSession(sessionId);
   }
 
@@ -243,6 +254,7 @@
     resumeError = null;
     try {
       await sessions.resumeSession(targetSessionId, e.detail);
+      launch.close();
       // Remove from persisted list after successful resume
       persistedSessions = persistedSessions.filter(s => s.id !== targetSessionId);
       resetResumeModal();
@@ -251,92 +263,6 @@
       console.error('Failed to resume session:', err);
     } finally {
       resuming = false;
-    }
-  }
-
-  async function handleLaunchHive(e: CustomEvent<HiveLaunchConfig>) {
-    launching = true;
-    launchError = '';
-    try {
-      await onLaunchHiveV2(e.detail);
-      showLaunchDialog = false;
-    } catch (err) {
-      launchError = String(err);
-      console.error('Launch failed:', err);
-    } finally {
-      launching = false;
-    }
-  }
-
-  async function handleLaunchResearch(e: CustomEvent<ResearchLaunchConfig>) {
-    launching = true;
-    launchError = '';
-    try {
-      if (onLaunchResearch) {
-        await onLaunchResearch(e.detail);
-      } else {
-        await sessions.launchResearch(e.detail);
-      }
-      showLaunchDialog = false;
-    } catch (err) {
-      launchError = String(err);
-      console.error('Launch failed:', err);
-    } finally {
-      launching = false;
-    }
-  }
-
-  async function handleLaunchFusion(e: CustomEvent<FusionLaunchConfig>) {
-    launching = true;
-    launchError = '';
-    try {
-      if (onLaunchFusion) {
-        await onLaunchFusion(e.detail);
-        showLaunchDialog = false;
-      } else {
-        throw new Error('Fusion launch not supported');
-      }
-    } catch (err) {
-      launchError = String(err);
-      console.error('Launch failed:', err);
-    } finally {
-      launching = false;
-    }
-  }
-
-  async function handleLaunchSolo(e: CustomEvent<SoloLaunchConfig>) {
-    launching = true;
-    launchError = '';
-    try {
-      if (onLaunchSolo) {
-        await onLaunchSolo(e.detail);
-      } else {
-        await sessions.launchSolo(e.detail);
-      }
-      showLaunchDialog = false;
-    } catch (err) {
-      launchError = String(err);
-      console.error('Launch failed:', err);
-    } finally {
-      launching = false;
-    }
-  }
-
-  async function handleLaunchDebate(e: CustomEvent<DebateLaunchConfig>) {
-    launching = true;
-    launchError = '';
-    try {
-      if (onLaunchDebate) {
-        await onLaunchDebate(e.detail);
-      } else {
-        await sessions.launchDebate(e.detail);
-      }
-      showLaunchDialog = false;
-    } catch (err) {
-      launchError = String(err);
-      console.error('Launch failed:', err);
-    } finally {
-      launching = false;
     }
   }
 
@@ -675,8 +601,8 @@
     </div>
 
     <div class="sidebar-footer lattice-forced-colors-boundary">
-      <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled lattice-btn--row" onclick={() => { launchInitialMode = undefined; launchError = ''; showLaunchDialog = true; }} title="New Session">
-        <span class="icon">+</span>
+      <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled lattice-btn--row" onclick={() => openLaunch()} title="New Session">
+        <span class="icon" aria-hidden="true">+</span>
         New Session
       </button>
     </div>
@@ -688,19 +614,6 @@
     />
   </div>
 </aside>
-
-<LaunchDialog
-  show={showLaunchDialog}
-  {launching}
-  {launchError}
-  initialMode={launchInitialMode}
-  on:close={() => { showLaunchDialog = false; launchError = ''; }}
-  on:launchHive={handleLaunchHive}
-  on:launchResearch={handleLaunchResearch}
-  on:launchFusion={handleLaunchFusion}
-  on:launchSolo={handleLaunchSolo}
-  on:launchDebate={handleLaunchDebate}
-/>
 
 <ResumeConfirmModal
   open={resumeModalOpen}

@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { get, type Writable } from 'svelte/store';
 import type { AgentInfo, Session } from '$lib/stores/sessions';
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn().mockResolvedValue([]) }));
+const launchMocks = vi.hoisted(() => ({ goto: vi.fn().mockResolvedValue(undefined), invoke: vi.fn().mockResolvedValue([]) }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: launchMocks.invoke }));
+vi.mock('$app/navigation', () => ({ goto: launchMocks.goto }));
 vi.mock('$app/stores', async () => {
-  const { readable } = await import('svelte/store');
-  return { page: readable({ url: new URL('http://localhost/') }) };
+  const { writable } = await import('svelte/store');
+  return { page: writable({ url: new URL('http://localhost/') }) };
 });
 vi.mock('$lib/stores/sessions', async () => {
   const { writable } = await import('svelte/store');
@@ -27,13 +29,79 @@ import SessionSidebar from './SessionSidebar.svelte';
 import { layout } from '$lib/stores/layout';
 import { sessions, activeSession, activeAgents } from '$lib/stores/sessions';
 import { ui } from '$lib/stores/ui';
+import { launch } from '$lib/stores/launch';
+import { page } from '$app/stores';
 
 beforeEach(() => {
+  vi.clearAllMocks();
+  launch.close();
+  (page as unknown as Writable<unknown>).set({ url: new URL('http://localhost/') });
+  launchMocks.invoke.mockResolvedValue([]);
   (sessions as unknown as Writable<unknown>).set({ sessions: [] });
   (activeSession as Writable<Session | null>).set(null);
   (activeAgents as Writable<AgentInfo[]>).set([]);
   ui.setFocusedAgent(null);
   if (get(layout).leftCollapsed) layout.toggleLeft();
+});
+
+describe('SessionSidebar launch entries', () => {
+  it('New Session opens a fresh request without a mode or a second dialog', async () => {
+    const view = render(SessionSidebar);
+    const previousId = get(launch).requestId;
+    await fireEvent.click(view.getByRole('button', { name: 'New Session' }));
+    expect(get(launch)).toMatchObject({ landingOpen: true, requestedMode: undefined });
+    expect(get(launch).requestId).toBeGreaterThan(previousId);
+    expect(sessions.setActiveSession).not.toHaveBeenCalled();
+    expect(view.queryByRole('dialog')).toBeNull();
+  });
+
+  it('preserves the running session when opening the inline landing', async () => {
+    const active = { id: 'active', project_path: 'D:/project', state: 'Running', session_type: { Hive: {} }, agents: [] } as unknown as Session;
+    (activeSession as Writable<Session | null>).set(active);
+    const view = render(SessionSidebar);
+    await fireEvent.click(view.getByRole('button', { name: 'New Session' }));
+    expect(get(activeSession)).toBe(active);
+    expect(sessions.setActiveSession).not.toHaveBeenCalled();
+    expect(get(launch).landingOpen).toBe(true);
+  });
+
+  it('awaits navigation to / before opening New Session off-route', async () => {
+    (page as unknown as Writable<unknown>).set({ url: new URL('http://localhost/knowledge') });
+    let finish!: () => void;
+    launchMocks.goto.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const view = render(SessionSidebar);
+    const previousId = get(launch).requestId;
+    await fireEvent.click(view.getByRole('button', { name: 'New Session' }));
+    expect(launchMocks.goto).toHaveBeenCalledWith('/');
+    expect(get(launch).requestId).toBe(previousId);
+    finish();
+    await waitFor(() => expect(get(launch).requestId).toBeGreaterThan(previousId));
+  });
+
+  it.each(['hive', 'fusion', 'debate'] as const)('routes the %s start action off-route and reapplies repeated requests', async (action) => {
+    (page as unknown as Writable<unknown>).set({ url: new URL('http://localhost/dashboard') });
+    const view = render(SessionSidebar, { props: { onLaunchHiveV2: vi.fn(), startAction: { id: 1, action } } });
+    await waitFor(() => expect(get(launch).requestedMode).toBe(action));
+    expect(launchMocks.goto).toHaveBeenCalledWith('/');
+    const previousId = get(launch).requestId;
+    await view.rerender({ onLaunchHiveV2: vi.fn(), startAction: { id: 2, action } });
+    await waitFor(() => expect(get(launch).requestId).toBeGreaterThan(previousId));
+  });
+
+  it('selects the most recently active persisted project as the default', async () => {
+    launchMocks.invoke.mockImplementation(async (command: string) => command === 'get_current_directory' ? 'D:/cwd' : [
+      { id: 'older', project_path: 'D:/older', created_at: '2026-01-01', last_activity_at: '2026-01-03' },
+      { id: 'latest', project_path: 'D:/latest', created_at: '2026-01-02', last_activity_at: '2026-10-22' },
+    ]);
+    render(SessionSidebar);
+    await waitFor(() => expect(get(launch).defaultProjectPath).toBe('D:/latest'));
+  });
+
+  it('falls back to the current directory when no persisted session exists', async () => {
+    launchMocks.invoke.mockImplementation(async (command: string) => command === 'get_current_directory' ? 'D:/cwd' : []);
+    render(SessionSidebar);
+    await waitFor(() => expect(get(launch).defaultProjectPath).toBe('D:/cwd'));
+  });
 });
 
 afterEach(() => {
