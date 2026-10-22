@@ -26,6 +26,7 @@ export default defineConfig({
     alias: {
       $lib: path.resolve(__dirname, './src/lib'),
       '$app/stores': path.resolve(__dirname, './src/test/app-stores.ts'),
+      '$app/navigation': path.resolve(__dirname, './src/test/app-navigation.ts'),
     },
   },
   test: {

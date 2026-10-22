@@ -19,7 +19,14 @@
   export let onbrowse: () => void;
   export let onadvanced: () => void;
   export let onlaunch: () => void;
-  export let oncancel: () => void;
+  export let oncancel: (() => void) | undefined = undefined;
+  export let showQa = false;
+  export let qaEnabled = true;
+  export let qaSummary = '';
+  export let qaCaveat = '';
+  export let onqa: (on: boolean) => void = () => {};
+  export let showSmoke = false;
+  export let onsmoke: () => void = () => {};
 
   $: minWorkers = mode === 'fusion' || mode === 'debate' ? Math.min(2, workerCount) : 1;
 
@@ -33,17 +40,20 @@
 
 <form class="launch-composer" on:submit|preventDefault={onlaunch}>
   <label class="task-label" for="launch-task">What would you like to work on?</label>
-  <textarea
-    id="launch-task"
-    class="lattice-input lattice-scroll-chrome"
-    {value}
-    on:input={(event) => onvalue(event.currentTarget.value)}
-    rows="6"
-    placeholder="Describe a task for your session…"
-    disabled={launching}
-    aria-describedby="launch-submit-hint"
-    on:keydown={handleKeydown}
-  ></textarea>
+  <div class="composer-input">
+    <textarea
+      id="launch-task"
+      class="lattice-input lattice-scroll-chrome lattice-forced-colors-boundary"
+      {value}
+      on:input={(event) => onvalue(event.currentTarget.value)}
+      rows="6"
+      placeholder="Describe a task for your session…"
+      disabled={launching}
+      aria-describedby="launch-submit-hint"
+      on:keydown={handleKeydown}
+    ></textarea>
+    <button type="submit" class="lattice-btn lattice-btn--primary lattice-btn--filled composer-send" disabled={launching || !projectPath.trim() || mode === 'templates'} aria-busy={launching}>{launching ? 'Launching...' : 'Launch'}</button>
+  </div>
 
   <div class="launch-chips">
     <label class="launch-chip">
@@ -80,7 +90,12 @@
         <span id="launch-project-value">{projectPath || 'Choose folder…'}</span>
       </button>
     </div>
+    {#if showQa}
+      <button type="button" class="lattice-btn lattice-btn--secondary qa-chip" aria-pressed={qaEnabled} aria-describedby={qaCaveat ? 'launch-qa-caveat' : undefined} on:click={() => onqa(!qaEnabled)} disabled={launching}>{qaSummary}</button>
+    {/if}
   </div>
+
+  {#if showQa && qaCaveat}<p class="hint" id="launch-qa-caveat">{qaCaveat}</p>{/if}
 
   {#if templatesLoading}<p class="hint" role="status">Loading presets…</p>{/if}
   {#if templatesError}<p class="hint" role="status">Presets unavailable: {templatesError}. You can still configure a session.</p>{/if}
@@ -90,21 +105,24 @@
   <div class="composer-actions">
     <button type="button" class="lattice-btn lattice-btn--ghost" on:click={onadvanced} disabled={launching}>Advanced</button>
     <span class="hint" id="launch-submit-hint">Ctrl/Cmd+Enter to launch · Enter for a new line</span>
-    <button type="button" class="lattice-btn lattice-btn--secondary" on:click={oncancel} disabled={launching}>Cancel</button>
-    <button type="submit" class="lattice-btn lattice-btn--primary lattice-btn--filled" disabled={launching || !projectPath.trim() || mode === 'templates'} aria-busy={launching}>{launching ? 'Launching...' : 'Launch'}</button>
+    {#if showSmoke}<button type="button" class="lattice-btn lattice-btn--secondary" on:click={onsmoke} disabled={launching || !projectPath.trim() || mode === 'templates'}>Smoke Test</button>{/if}
+    {#if oncancel}<button type="button" class="lattice-btn lattice-btn--secondary" on:click={oncancel} disabled={launching}>Cancel</button>{/if}
   </div>
 </form>
 
 <style>
   .launch-composer { display: flex; flex-direction: column; gap: var(--space-4); }
   .task-label { color: var(--text-primary); font-size: var(--text-base); }
-  textarea { width: 100%; min-height: 10rem; resize: vertical; line-height: 1.6; }
+  .composer-input { position: relative; min-width: 0; }
+  textarea { display: block; box-sizing: border-box; width: 100%; min-height: 12rem; resize: vertical; line-height: 1.6; padding-bottom: calc(var(--space-6) * 2); }
+  .composer-send { position: absolute; right: var(--space-3); bottom: var(--space-3); max-width: calc(100% - var(--space-6)); }
   .launch-chips { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; }
   .launch-chip { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
   .launch-chip > span { font-size: var(--text-small); color: var(--text-secondary); }
   .launch-chip select { width: 100%; }
   .preset-chip, .project-chip { flex: 1 1 12rem; }
   .project-chip button { max-width: 100%; text-transform: none; }
+  .qa-chip { max-width: 100%; white-space: normal; text-align: left; text-transform: none; }
   #launch-project-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
   .composer-actions .hint { flex: 1 1 10rem; }
