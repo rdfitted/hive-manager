@@ -114,6 +114,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/sessions/{id}/stop", post(sessions::stop_session))
         .route("/api/sessions/{id}/close", post(sessions::close_session))
+        .route("/api/sessions/{id}/continue", post(sessions::continue_after_planning))
+        .route("/api/sessions/{id}/plan-ready", post(sessions::mark_plan_ready))
         .route(
             "/api/sessions/{id}/complete",
             post(sessions::complete_session),

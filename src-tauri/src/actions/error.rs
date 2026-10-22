@@ -25,6 +25,8 @@ pub enum ActionStatus {
     NotFound,
     /// The request conflicts with current state, optionally with structured details (HTTP 409).
     Conflict,
+    /// Well-formed input whose content failed domain validation (HTTP 422).
+    Unprocessable,
     /// An unexpected internal failure (HTTP 500).
     Internal,
 }
@@ -59,6 +61,10 @@ impl ActionError {
     #[allow(dead_code)]
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::new(ActionStatus::Conflict, message)
+    }
+
+    pub fn unprocessable(message: impl Into<String>) -> Self {
+        Self::new(ActionStatus::Unprocessable, message)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -119,6 +125,7 @@ impl From<ApiError> for ActionError {
             StatusCode::BAD_REQUEST => ActionStatus::BadRequest,
             StatusCode::NOT_FOUND => ActionStatus::NotFound,
             StatusCode::CONFLICT => ActionStatus::Conflict,
+            StatusCode::UNPROCESSABLE_ENTITY => ActionStatus::Unprocessable,
             _ => ActionStatus::Internal,
         };
         ActionError {
@@ -142,6 +149,9 @@ impl From<ActionError> for ApiError {
             }
             (ActionStatus::Conflict, None) => {
                 ApiError::new(axum::http::StatusCode::CONFLICT, error.message)
+            }
+            (ActionStatus::Unprocessable, _) => {
+                ApiError::new(axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.message)
             }
             (ActionStatus::Internal, _) => ApiError::internal(error.message),
         }

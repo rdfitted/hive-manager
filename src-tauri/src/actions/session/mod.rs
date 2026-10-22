@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use crate::domain::{HiveLaunchKind, WorkspaceStrategy};
 use crate::http::handlers::{validate_cli, validate_project_path};
 use crate::session::{
-    DebateLaunchConfig, FusionLaunchConfig, HiveLaunchConfig, ResearchLaunchConfig, Session,
-    SessionState, SessionType, SwarmLaunchConfig,
+    DebateLaunchConfig, FusionLaunchConfig, HiveLaunchConfig, PlanningPhaseError,
+    ResearchLaunchConfig, Session, SessionState, SessionType, SwarmLaunchConfig,
 };
 use crate::storage::{PersistedSession, SessionTypeInfo};
 
@@ -245,7 +245,7 @@ fn validate_fusion_launch_config(config: &FusionLaunchConfig) -> Result<(), Acti
 }
 
 /// Input carrying just a session id (`session.get`, `session.stop`,
-/// `session.close`).
+/// `session.close`, `session.continue_after_planning`, `session.mark_plan_ready`).
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SessionIdInput {
     id: String,
@@ -547,6 +547,111 @@ impl Action for CloseSession {
             })?;
         }
         Ok(json!({ "message": format!("Session {} closed", parsed.id) }))
+    }
+}
+
+/// Map a planning-exit failure onto the action status categories: wrong state is
+/// a conflict, a session type with no planning continuation (Solo) is a bad
+/// request, and a plan graph that fails PlanReady validation is unprocessable.
+fn planning_phase_error(error: PlanningPhaseError) -> ActionError {
+    match error {
+        PlanningPhaseError::NotFound(message) => ActionError::not_found(message),
+        PlanningPhaseError::WrongState(message) => ActionError::conflict(message),
+        PlanningPhaseError::Unsupported(message) => ActionError::bad_request(message),
+        PlanningPhaseError::InvalidPlan(message) => ActionError::unprocessable(message),
+        PlanningPhaseError::Failed(message) => ActionError::internal(message),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// session.continue_after_planning
+// ---------------------------------------------------------------------------
+
+/// The single exit from the planning phase, shared by the app's Continue button
+/// (Tauri `continue_after_planning`) and `POST /api/sessions/{id}/continue`.
+struct ContinueAfterPlanning;
+
+#[async_trait]
+impl Action for ContinueAfterPlanning {
+    fn name(&self) -> &'static str {
+        "session.continue_after_planning"
+    }
+
+    fn input_schema(&self) -> RootSchema {
+        schemars::schema_for!(SessionIdInput)
+    }
+
+    fn validate_input(&self, input: &Value) -> Result<(), ActionError> {
+        let parsed: SessionIdInput = deserialize_input(input.clone())?;
+        validate_session_id_input(&parsed.id)
+    }
+
+    async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
+        let parsed: SessionIdInput = deserialize_input(input)?;
+        let session = {
+            let controller = ctx.state.session_controller.read();
+            controller
+                .continue_after_planning_checked(&parsed.id)
+                .map_err(planning_phase_error)?
+        };
+        serde_json::to_value(session)
+            .map_err(|e| ActionError::internal(format!("Failed to serialize session: {}", e)))
+    }
+}
+
+/// The one way out of the planning phase. The Tauri `continue_after_planning`
+/// command (the app's Continue button) and `POST /api/sessions/{id}/continue`
+/// both call this, so the two surfaces cannot drift apart (#371).
+pub(crate) async fn dispatch_continue_after_planning(
+    registry: &ActionRegistry,
+    ctx: &ActionContext,
+    session_id: &str,
+) -> Result<Value, ActionError> {
+    registry
+        .dispatch(
+            "session.continue_after_planning",
+            ctx,
+            json!({ "id": session_id }),
+        )
+        .await
+}
+
+// ---------------------------------------------------------------------------
+// session.mark_plan_ready
+// ---------------------------------------------------------------------------
+
+/// Validate and persist the plan-derived graph (Planning -> PlanReady) without
+/// spawning the Queen. Shared by the Tauri `mark_plan_ready` command and
+/// `POST /api/sessions/{id}/plan-ready`.
+struct MarkPlanReady;
+
+#[async_trait]
+impl Action for MarkPlanReady {
+    fn name(&self) -> &'static str {
+        "session.mark_plan_ready"
+    }
+
+    fn input_schema(&self) -> RootSchema {
+        schemars::schema_for!(SessionIdInput)
+    }
+
+    fn validate_input(&self, input: &Value) -> Result<(), ActionError> {
+        let parsed: SessionIdInput = deserialize_input(input.clone())?;
+        validate_session_id_input(&parsed.id)
+    }
+
+    async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
+        let parsed: SessionIdInput = deserialize_input(input)?;
+        let session = {
+            let controller = ctx.state.session_controller.read();
+            controller
+                .mark_plan_ready_checked(&parsed.id)
+                .map_err(planning_phase_error)?;
+            controller.get_session(&parsed.id)
+        }
+        .ok_or_else(|| ActionError::not_found(format!("Session not found: {}", parsed.id)))?;
+        serde_json::to_value(session)
+            .map_err(|e| ActionError::internal(format!("Failed to serialize session: {}", e)))
     }
 }
 
@@ -883,6 +988,18 @@ impl Action for UpdateSessionMetadataInfo {
     }
 }
 
+/// Shared by the Tauri `mark_plan_ready` command and
+/// `POST /api/sessions/{id}/plan-ready`.
+pub(crate) async fn dispatch_mark_plan_ready(
+    registry: &ActionRegistry,
+    ctx: &ActionContext,
+    session_id: &str,
+) -> Result<Value, ActionError> {
+    registry
+        .dispatch("session.mark_plan_ready", ctx, json!({ "id": session_id }))
+        .await
+}
+
 /// Register every session action into the registry.
 pub fn register(registry: &mut ActionRegistry) {
     registry.register(Box::new(ListSessions));
@@ -890,6 +1007,8 @@ pub fn register(registry: &mut ActionRegistry) {
     registry.register(Box::new(GetSessionInfo));
     registry.register(Box::new(StopSession));
     registry.register(Box::new(CloseSession));
+    registry.register(Box::new(ContinueAfterPlanning));
+    registry.register(Box::new(MarkPlanReady));
     registry.register(Box::new(LaunchHive));
     registry.register(Box::new(LaunchHiveV2));
     registry.register(Box::new(LaunchResearch));

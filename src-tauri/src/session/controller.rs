@@ -423,6 +423,59 @@ impl CompletionError {
     }
 }
 
+/// Typed failure for leaving the planning phase (`mark_plan_ready` and
+/// `continue_after_planning`, #371). Each variant carries the exact message the
+/// `Result<_, String>` wrappers have always returned, so `Display` is lossless
+/// and only the HTTP status mapping gains information.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanningPhaseError {
+    NotFound(String),
+    /// The session is not in a state that can leave planning.
+    WrongState(String),
+    /// The session type has no planning continuation (Solo).
+    Unsupported(String),
+    /// The plan-derived graph failed PlanReady validation; the session stays in Planning.
+    InvalidPlan(String),
+    /// Any other failure (pending config, workspace, spawn, persistence).
+    Failed(String),
+}
+
+impl PlanningPhaseError {
+    fn not_found(session_id: &str) -> Self {
+        Self::NotFound(format!("Session not found: {}", session_id))
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::NotFound(message)
+            | Self::WrongState(message)
+            | Self::Unsupported(message)
+            | Self::InvalidPlan(message)
+            | Self::Failed(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for PlanningPhaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for PlanningPhaseError {}
+
+impl From<String> for PlanningPhaseError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<&str> for PlanningPhaseError {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.to_string())
+    }
+}
+
 fn default_max_qa_iterations() -> u8 {
     DEFAULT_MAX_QA_ITERATIONS
 }
@@ -14771,23 +14824,43 @@ The backend composed and persisted the following authoritative skeleton before l
 
     /// Continue a session after planning phase - spawns Queen + Workers/Planners
     pub fn continue_after_planning(&self, session_id: &str) -> Result<Session, String> {
+        self.continue_after_planning_checked(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// [`Self::continue_after_planning`] with the failure category preserved, so
+    /// the `session.continue_after_planning` action can map it to an HTTP status.
+    pub fn continue_after_planning_checked(
+        &self,
+        session_id: &str,
+    ) -> Result<Session, PlanningPhaseError> {
+        // mark_plan_ready moves the session to PlanReady before the Queen is up,
+        // and PlanReady passes the guard below. Hold the lifecycle lock (shared
+        // with stop/close/resume) across the whole continuation so a concurrent
+        // retry waits, then sees Running and gets WrongState instead of racing a
+        // second launch. Nothing inside takes this lock (parking_lot, not reentrant).
+        let lifecycle_lock = self.session_lifecycle_lock(session_id);
+        let _lifecycle_guard = lifecycle_lock.lock();
+
         // Get the session
         let session = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
         }
-        .ok_or_else(|| format!("Session not found: {}", session_id))?;
+        .ok_or_else(|| PlanningPhaseError::not_found(session_id))?;
 
         // Verify session is in Planning or PlanReady state
         if session.state != SessionState::Planning && session.state != SessionState::PlanReady {
-            return Err(format!(
+            return Err(PlanningPhaseError::WrongState(format!(
                 "Session is not in planning phase: {:?}",
                 session.state
-            ));
+            )));
         }
 
         if matches!(&session.session_type, SessionType::Solo { .. }) {
-            return Err("Solo sessions do not support planning continuation".to_string());
+            return Err(PlanningPhaseError::Unsupported(
+                "Solo sessions do not support planning continuation".to_string(),
+            ));
         }
 
         // The production continue action is the authoritative exit from Planning.
@@ -14795,28 +14868,30 @@ The backend composed and persisted the following authoritative skeleton before l
         // can transition to Running. A retry from PlanReady is intentionally a
         // no-op here because the graph was already persisted by mark_plan_ready.
         if session.state == SessionState::Planning {
-            self.mark_plan_ready(session_id)?;
+            self.mark_plan_ready_checked(session_id)?;
         }
 
         let session = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
         }
-        .ok_or_else(|| format!("Session not found: {}", session_id))?;
+        .ok_or_else(|| PlanningPhaseError::not_found(session_id))?;
 
         // Dispatch based on session type
         match &session.session_type {
             SessionType::Swarm { .. } => {
-                return self.continue_swarm_after_planning(session_id, &session);
+                return Ok(self.continue_swarm_after_planning(session_id, &session)?);
             }
             SessionType::Fusion { .. } => {
-                return self.continue_fusion_after_planning(session_id, &session);
+                return Ok(self.continue_fusion_after_planning(session_id, &session)?);
             }
             SessionType::Debate { .. } => {
-                return self.continue_debate_after_planning(session_id, &session);
+                return Ok(self.continue_debate_after_planning(session_id, &session)?);
             }
             SessionType::Solo { .. } => {
-                return Err("Solo sessions do not support planning continuation".to_string());
+                return Err(PlanningPhaseError::Unsupported(
+                    "Solo sessions do not support planning continuation".to_string(),
+                ));
             }
             _ => {} // Continue with Hive logic below
         }
@@ -14869,7 +14944,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 }
             }
             WorkspaceStrategy::None => {
-                return Err("Planning Hive sessions require a managed git workspace".to_string())
+                return Err("Planning Hive sessions require a managed git workspace".into())
             }
         };
 
@@ -14915,7 +14990,7 @@ The backend composed and persisted the following authoritative skeleton before l
                     &continuation_created_cells,
                     &[],
                 );
-                return Err(error);
+                return Err(error.into());
             }
         };
         let prompt_path = prompt_file.to_string_lossy().to_string();
@@ -14935,7 +15010,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 &continuation_created_cells,
                 &[],
             );
-            return Err(error);
+            return Err(error.into());
         }
 
         tracing::info!(
@@ -14961,7 +15036,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 &continuation_created_cells,
                 &[],
             );
-            return Err(format!("Failed to spawn Queen: {}", error));
+            return Err(format!("Failed to spawn Queen: {}", error).into());
         }
 
         new_agents.push(AgentInfo {
@@ -14999,7 +15074,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 let changes = self.set_session_state_with_events(s, SessionState::Running);
                 (s.clone(), changes)
             } else {
-                return Err("Session disappeared".to_string());
+                return Err("Session disappeared".into());
             }
         };
 
@@ -15032,6 +15107,14 @@ The backend composed and persisted the following authoritative skeleton before l
 
     /// Mark a planning session as ready (plan generated)
     pub fn mark_plan_ready(&self, session_id: &str) -> Result<(), String> {
+        self.mark_plan_ready_checked(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// [`Self::mark_plan_ready`] with the failure category preserved: a plan
+    /// graph that fails PlanReady validation is [`PlanningPhaseError::InvalidPlan`]
+    /// and leaves the session in Planning.
+    pub fn mark_plan_ready_checked(&self, session_id: &str) -> Result<(), PlanningPhaseError> {
         use crate::orchestrator::work_graph::{
             TaskGraph, WorkGraphOmission, WorkGraphOmissionReason,
         };
@@ -15040,12 +15123,12 @@ The backend composed and persisted the following authoritative skeleton before l
             let sessions = self.sessions.read();
             let session = sessions
                 .get(session_id)
-                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+                .ok_or_else(|| PlanningPhaseError::not_found(session_id))?;
             if session.state != SessionState::Planning {
-                return Err(format!(
+                return Err(PlanningPhaseError::WrongState(format!(
                     "Session is not in planning state: {:?}",
                     session.state
-                ));
+                )));
             }
             let inventory_root = if session.no_git {
                 session.project_path.clone()
@@ -15214,7 +15297,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 | PlanReadyError::MissingAdjudicator { .. }
                 | PlanReadyError::AdjudicatorLacksAuthority { .. }),
             ) => {
-                return Err(error.to_string());
+                return Err(PlanningPhaseError::InvalidPlan(error.to_string()));
             }
         }
 
@@ -15284,12 +15367,12 @@ The backend composed and persisted the following authoritative skeleton before l
             let mut sessions = self.sessions.write();
             let session = sessions
                 .get_mut(session_id)
-                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+                .ok_or_else(|| PlanningPhaseError::not_found(session_id))?;
             if session.state != SessionState::Planning {
-                return Err(format!(
+                return Err(PlanningPhaseError::WrongState(format!(
                     "Session is not in planning state: {:?}",
                     session.state
-                ));
+                )));
             }
             if let Some(storage) = self.storage.as_ref() {
                 let state_manager = StateManager::new(storage.session_dir(session_id));
@@ -15334,7 +15417,7 @@ The backend composed and persisted the following authoritative skeleton before l
                         Some(storage.as_ref()),
                         session,
                     );
-                    return Err(error);
+                    return Err(error.into());
                 }
             }
             changes

@@ -1,3 +1,4 @@
+use crate::actions::session::{dispatch_continue_after_planning, dispatch_mark_plan_ready};
 use crate::actions::{ActionContext, Caller};
 use crate::cli::CliRegistry;
 use axum::{
@@ -1297,6 +1298,33 @@ pub async fn close_session(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let output =
         dispatch_session_action(&state, "session.close", serde_json::json!({ "id": id })).await?;
+    Ok(Json(output))
+}
+
+/// POST /api/sessions/{id}/continue - Leave the planning phase and spawn the Queen
+///
+/// The HTTP twin of the app's Continue button: both dispatch
+/// `session.continue_after_planning` (#371). An operator/orchestrator action, so
+/// it is deliberately absent from the Queen and worker tool docs.
+pub async fn continue_after_planning(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_session_id(&id)?;
+    let ctx = ActionContext::new(Caller::Http, Arc::clone(&state));
+    let output = dispatch_continue_after_planning(state.registry(), &ctx, &id).await?;
+    Ok(Json(output))
+}
+
+/// POST /api/sessions/{id}/plan-ready - Validate the plan graph (Planning -> PlanReady)
+/// without spawning the Queen
+pub async fn mark_plan_ready(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_session_id(&id)?;
+    let ctx = ActionContext::new(Caller::Http, Arc::clone(&state));
+    let output = dispatch_mark_plan_ready(state.registry(), &ctx, &id).await?;
     Ok(Json(output))
 }
 
