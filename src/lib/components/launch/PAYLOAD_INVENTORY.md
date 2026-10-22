@@ -42,3 +42,7 @@ Template cells' `prompt_template` values are **agent-role keys**, not task text.
 ## Validation traps
 
 Compare actual event details using independent expected fields, including absent versus `undefined` fields, not two aliases for one builder. Exercise nondefault prompt/count/path mappings, every mode, the Templates rejection, all three built-ins, custom Hive graph/roles, Fusion judge aliases, QA-off and advanced edits round-tripped through the composer. Mutation must remove a live composer-to-dialog mapping and fail parity; restore and rerun. Existing LaunchDialog has 7 cases and hiveLaunch has 9 at base; neither count may shrink.
+
+## Composer QA and smoke reachability (#376)
+
+Hive and Solo expose QA directly in the composer, bound to the same Advanced variables. QA remains on by default; off emits `with_evaluator:false` with no evaluator config or QA roster. The summary uses the live roster's count and uppercase specialisations, and its accessible description retains the browser caveat. Hive and Research expose the same secondary Smoke Test action as Advanced (`smoke_test:true`). Fusion, Debate and ordinary Research launch payloads are unchanged.

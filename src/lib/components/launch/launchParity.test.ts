@@ -246,3 +246,91 @@ describe('composer input contract', () => {
     expect(view.launch).not.toHaveBeenCalled();
   });
 });
+
+describe('G-qa-parity: composer controls reach emitted payloads', () => {
+  async function captureQa(mode: 'hive' | 'solo', advanced: boolean, enabled: boolean) {
+    const view = openDialog(mode);
+    if (advanced) {
+      await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
+      await fireEvent.click(view.getByRole('button', { name: 'Browse' }));
+      await editAdvancedTask(view, mode, task);
+      if (!enabled) await fireEvent.click(view.getByRole('checkbox', { name: /QA: Evaluator \+ QA workers/ }));
+    } else {
+      await fireEvent.click(view.getByRole('button', { name: /Project/ }));
+      await fireEvent.input(view.getByLabelText('What would you like to work on?'), { target: { value: task } });
+      if (!enabled) await fireEvent.click(view.getByRole('button', { name: /^QA: on/ }));
+    }
+    await fireEvent.click(view.getByRole('button', { name: 'Launch' }));
+    expect(view.launch).toHaveBeenCalledOnce();
+    const payload = structuredClone(view.launch.mock.calls[0][0].detail);
+    view.unmount();
+    return payload;
+  }
+
+  it.each(['hive', 'solo'] as const)('%s QA-off matches Advanced with no evaluator config or QA roster', async (mode) => {
+    const composer = await captureQa(mode, false, false);
+    expect(composer).toStrictEqual(await captureQa(mode, true, false));
+    expect(composer.with_evaluator).toBe(false);
+    expect(composer.evaluator_config).toBeUndefined();
+    expect(composer.qa_workers).toBeUndefined();
+  });
+  it.each(['hive', 'solo'] as const)('%s QA-on retains the independent default payload', async (mode) => {
+    const composer = await captureQa(mode, false, true);
+    expect(composer).toStrictEqual(await captureQa(mode, true, true));
+    expect(composer).toStrictEqual(legacyPayload(mode, project, task));
+  });
+  it.each(['hive', 'solo'] as const)('%s QA toggles round-trip through Advanced and the live roster summary', async (mode) => {
+    const view = openDialog(mode);
+    expect(view.getByRole('button', { name: 'QA: on · Evaluator + 3 (UI, API, A11Y)' }).getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(view.getByRole('button', { name: /^QA: on/ }));
+    await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
+    const qa = view.getByRole('checkbox', { name: /QA: Evaluator \+ QA workers/ });
+    expect((qa as HTMLInputElement).checked).toBe(false);
+    await fireEvent.click(qa);
+    await fireEvent.click(view.getByRole('button', { name: '+ Add' }));
+    await fireEvent.click(view.getByRole('button', { name: 'Back to composer' }));
+    expect(view.getByRole('button', { name: 'QA: on · Evaluator + 4 (UI, API, A11Y, UI)' }).getAttribute('aria-pressed')).toBe('true');
+  });
+  it.each(['hive', 'research'] as const)('%s Smoke Test matches Advanced and changes only smoke_test', async (mode) => {
+    const payloads = [];
+    for (const advanced of [false, true]) {
+      const view = openDialog(mode);
+      if (advanced) {
+        await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
+        await fireEvent.click(view.getByRole('button', { name: 'Browse' }));
+        await editAdvancedTask(view, mode, task);
+      } else {
+        await fireEvent.click(view.getByRole('button', { name: /Project/ }));
+        await fireEvent.input(view.getByLabelText('What would you like to work on?'), { target: { value: task } });
+      }
+      await fireEvent.click(view.getByRole('button', { name: 'Smoke Test' }));
+      expect(view.launch).toHaveBeenCalledOnce();
+      payloads.push(structuredClone(view.launch.mock.calls[0][0].detail));
+      view.unmount();
+    }
+    expect(payloads[0]).toStrictEqual(payloads[1]);
+    expect(payloads[0]).toStrictEqual({ ...legacyPayload(mode, project, task), smoke_test: true });
+  });
+  it.each(['fusion', 'debate', 'research'] as const)('%s remains byte-identical to its independent baseline payload', async (mode) => {
+    expect(JSON.stringify((await capture(mode, false)).payload)).toBe(JSON.stringify(legacyPayload(mode, project, task)));
+  });
+});
+
+describe('dialog composer reachability by mode', () => {
+  it.each(modes)('%s exposes only the supported quick controls', (mode) => {
+    const view = openDialog(mode);
+    expect(!!view.queryByRole('button', { name: /^QA:/ })).toBe(mode === 'hive' || mode === 'solo');
+    expect(!!view.queryByRole('button', { name: 'Smoke Test' })).toBe(mode === 'hive' || mode === 'research');
+  });
+});
+
+describe('T6 Cancel presentation contract', () => {
+  it('Cancel is absent inline and present in the modal on the same instance', async () => {
+    const view = render(LaunchDialog, { props: { show: true, presentation: 'inline' } });
+    expect(view.queryByRole('button', { name: 'Cancel' })).toBeNull();
+    await view.rerender({ presentation: 'modal' });
+    expect(view.getByRole('button', { name: 'Cancel' })).toBeTruthy();
+    await view.rerender({ presentation: 'inline' });
+    expect(view.queryByRole('button', { name: 'Cancel' })).toBeNull();
+  });
+});

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onMount, tick } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor, {
     fetchCliHealth,
@@ -57,6 +57,26 @@
   export let launching: boolean = false;
   export let launchError: string = '';
   export let initialMode: SessionMode | undefined = undefined;
+  export let presentation: 'modal' | 'inline' = 'modal';
+  export let modeRequestId: number | undefined = undefined;
+  export let defaultProjectPath: string = '';
+
+  let handledModeRequestId: number | undefined;
+  $: if (show && modeRequestId !== undefined && modeRequestId !== handledModeRequestId) {
+    handledModeRequestId = modeRequestId;
+    if (initialMode !== undefined) mode = initialMode;
+    showAdvanced = false;
+  }
+  $: if (!projectPath && defaultProjectPath) projectPath = defaultProjectPath;
+  $: if (show && presentation === 'inline' && !showAdvanced) {
+    // Repeated requests focus the existing textarea, even when show stays true.
+    modeRequestId;
+    void tick().then(() => {
+      if (show && presentation === 'inline' && !showAdvanced) {
+        document.getElementById('launch-task')?.focus();
+      }
+    });
+  }
 
   const dispatch = createEventDispatcher<{
     close: void;
@@ -876,17 +896,28 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
 {#if show}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="dialog-overlay lattice-modal-backdrop" on:click={handleOverlayClick} role="presentation">
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <svelte:element
+    this={presentation === 'inline' ? 'section' : 'div'}
+    class={presentation === 'inline' ? 'launch-inline' : 'dialog-overlay lattice-modal-backdrop'}
+    on:click={presentation === 'modal' ? handleOverlayClick : undefined}
+    role={presentation === 'modal' ? 'presentation' : undefined}
+    aria-labelledby={presentation === 'inline' ? 'launch-dialog-title' : undefined}
+  >
+    <!-- The modal alone has role=dialog and tabindex=-1; inline has neither. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_tabindex -->
     <div
-      class="dialog lattice-modal lattice-scroll-chrome"
+      class={presentation === 'inline' ? 'launch-inline-content' : 'dialog lattice-modal lattice-scroll-chrome'}
       on:click|stopPropagation
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="launch-dialog-title"
-      tabindex="-1"
+      role={presentation === 'modal' ? 'dialog' : undefined}
+      aria-modal={presentation === 'modal' ? 'true' : undefined}
+      aria-labelledby={presentation === 'modal' ? 'launch-dialog-title' : undefined}
+      tabindex={presentation === 'modal' ? -1 : undefined}
     >
-      <h2 id="launch-dialog-title">Launch New Session</h2>
+      {#if presentation === 'inline'}
+        <p id="launch-dialog-title" class="launch-title">Hive Manager</p>
+      {:else}
+        <h2 id="launch-dialog-title">Launch New Session</h2>
+      {/if}
 
       {#if showAdvanced}
       <button type="button" class="lattice-btn lattice-btn--ghost" on:click={() => showAdvanced = false} disabled={launching}>Back to composer</button>
@@ -1700,9 +1731,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         {/if}
 
         <div class="dialog-actions">
+          {#if presentation === 'modal'}
           <button type="button" class="lattice-btn lattice-btn--secondary" on:click={handleClose} disabled={launching}>
             Cancel
           </button>
+          {/if}
           {#if mode === 'hive' || mode === 'research'}
           <button
             type="button"
@@ -1741,14 +1774,37 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           onbrowse={browseForFolder}
           onadvanced={() => showAdvanced = true}
           onlaunch={() => handleSubmit(false)}
-          oncancel={handleClose}
+          showQa={mode === 'hive' || mode === 'solo'}
+          qaEnabled={mode === 'solo' ? withSoloEvaluator : withEvaluator}
+          qaSummary={(mode === 'solo' ? withSoloEvaluator : withEvaluator) ? `QA: on · Evaluator + ${qaWorkers.length} (${qaWorkers.map((worker) => worker.specialization.toUpperCase()).join(', ')})` : 'QA: off'}
+          qaCaveat="Gates milestones before push. UI and A11Y workers need a rendered browser; for desktop-only projects, select API or other terminal-checkable QA workers."
+          onqa={(on) => { if (mode === 'solo') withSoloEvaluator = on; else withEvaluator = on; }}
+          showSmoke={mode === 'hive' || mode === 'research'}
+          onsmoke={handleSmokeTest}
+          oncancel={presentation === 'inline' ? undefined : handleClose}
         />
       {/if}
     </div>
-  </div>
+  </svelte:element>
 {/if}
 
 <style>
+  .launch-inline {
+    width: min(100%, calc(var(--space-7) * 10));
+    min-width: 0;
+  }
+
+  .launch-inline-content {
+    min-width: 0;
+  }
+
+  .launch-title {
+    margin: 0 0 var(--space-5);
+    font-family: var(--font-display);
+    font-size: var(--text-h3);
+    color: var(--text-secondary);
+  }
+
   .dialog-overlay {
     position: fixed;
     inset: 0;

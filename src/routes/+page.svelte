@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack, tick } from 'svelte';
-  import { ArrowsSplit, ClockCounterClockwise, Crown, Scales } from 'phosphor-svelte';
+  import LaunchDialog from '$lib/components/LaunchDialog.svelte';
   import RightPanel from '$lib/components/RightPanel.svelte';
   import ShortcutsOverlay from '$lib/components/ShortcutsOverlay.svelte';
   import UpdateChecker from '$lib/components/UpdateChecker.svelte';
@@ -14,9 +14,11 @@
   import { layout } from '$lib/stores/layout';
   import { pendingContext } from '$lib/stores/pendingContext';
   import { shell } from '$lib/stores/shell';
+  import { launch } from '$lib/stores/launch';
   import { shortcutLabel } from '$lib/platform';
 
   let showShortcuts = $state(false);
+  let landingVisible = $derived(!$activeSession || $launch.landingOpen);
 
   // Use UI store as single source of truth for focused agent
   let focusedAgentId = $derived($ui.focusedAgentId);
@@ -110,6 +112,16 @@
   }
 
   // Keyboard shortcuts (Ctrl on Windows/Linux, Cmd on macOS)
+  function handleLandingEscape(event: KeyboardEvent) {
+    if (event.key !== 'Escape' || !landingVisible || showShortcuts || document.querySelector('[aria-modal="true"]')) return;
+    // The mounted grid also listens in capture phase; the landing owns this Escape.
+    event.stopImmediatePropagation();
+    if ($activeSession) {
+      event.preventDefault();
+      launch.close();
+    }
+  }
+
   function handleKeydown(event: KeyboardEvent) {
     const mod = event.ctrlKey || event.metaKey;
     // Ctrl+J to toggle the right panel
@@ -128,6 +140,8 @@
         showShortcuts = false;
         return;
       }
+
+      if (landingVisible) return;
 
       const modalWasOpen = document.querySelector('[aria-modal="true"]') !== null;
       queueMicrotask(() => {
@@ -181,60 +195,34 @@
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydowncapture={handleLandingEscape} onkeydown={handleKeydown} />
 
 <main class="main-content">
-    {#if !$activeSession}
-      <div class="welcome lattice-scroll-content">
-        <section class="welcome-content" aria-labelledby="welcome-title">
-          <h1 id="welcome-title">Hive Manager</h1>
-          <p class="welcome-intro">Start with a task. Shape the session as you go.</p>
-          <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled" onclick={() => shell.requestStartAction('hive')}>
-            Start a session
-          </button>
-          <div class="features" role="group" aria-label="Start a session">
-            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => shell.requestStartAction('hive')}>
-              <span class="feature-icon" aria-hidden="true">
-                <Crown size={24} weight="light" />
-              </span>
-              <span class="feature-copy">
-                <span class="feature-title">Hive</span>
-                <span class="feature-text">Coordinate implementation with a principal-led team.</span>
-              </span>
-            </button>
-            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => shell.requestStartAction('fusion')}>
-              <span class="feature-icon" aria-hidden="true">
-                <ArrowsSplit size={24} weight="light" />
-              </span>
-              <span class="feature-copy">
-                <span class="feature-title">Fusion</span>
-                <span class="feature-text">Compare independent approaches and synthesize the best.</span>
-              </span>
-            </button>
-            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => shell.requestStartAction('debate')}>
-              <span class="feature-icon" aria-hidden="true">
-                <Scales size={24} weight="light" />
-              </span>
-              <span class="feature-copy">
-                <span class="feature-title">Debate</span>
-                <span class="feature-text">Test a decision through structured opposing arguments.</span>
-              </span>
-            </button>
-            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => shell.requestStartAction('recent')}>
-              <span class="feature-icon" aria-hidden="true">
-                <ClockCounterClockwise size={24} weight="light" />
-              </span>
-              <span class="feature-copy">
-                <span class="feature-title">Open recent</span>
-                <span class="feature-text">Resume a stored session from this project.</span>
-              </span>
-            </button>
-          </div>
+    <div class:welcome={landingVisible} class:lattice-scroll-content={landingVisible}>
+      <LaunchDialog
+        show={landingVisible}
+        presentation="inline"
+        launching={$launch.launching}
+        launchError={$launch.launchError}
+        initialMode={$launch.requestedMode}
+        modeRequestId={$launch.requestId}
+        defaultProjectPath={$launch.defaultProjectPath}
+        on:close={() => launch.close()}
+        on:launchHive={(event) => launch.launchHive(event.detail)}
+        on:launchResearch={(event) => launch.launchResearch(event.detail)}
+        on:launchFusion={(event) => launch.launchFusion(event.detail)}
+        on:launchSolo={(event) => launch.launchSolo(event.detail)}
+        on:launchDebate={(event) => launch.launchDebate(event.detail)}
+      />
+      {#if landingVisible}
+        <div class="landing-links">
+          <button type="button" class="open-recent lattice-btn lattice-btn--ghost" onclick={() => shell.requestStartAction('recent')}>Open recent</button>
           <p class="cta hint">Press <strong>{shortcutLabel('/')}</strong> for keyboard shortcuts</p>
-        </section>
-      </div>
-    {:else}
-      <div class="terminal-area">
+        </div>
+      {/if}
+    </div>
+    {#if $activeSession}
+      <div class="terminal-area" hidden={landingVisible} inert={landingVisible} aria-hidden={landingVisible ? 'true' : undefined}>
         {#if $activeAgents.length === 0}
           <div class="no-agents">
             <section class="no-agents-content lattice-panel" aria-labelledby="no-agents-title">
@@ -265,81 +253,22 @@
   .welcome {
     flex: 1;
     display: flex;
-    align-items: safe center;
-    justify-content: center;
+    flex-direction: column;
+    align-items: center;
+    justify-content: safe center;
+    gap: var(--space-4);
     min-height: 0;
     padding: calc(var(--space-6) + var(--space-2));
     overflow-y: auto;
   }
 
-  .welcome-content {
+  .landing-links {
     width: min(100%, calc(var(--space-7) * 10));
     text-align: center;
   }
 
-  .welcome h1 {
-    margin: 0 0 var(--space-3);
-    font-family: var(--font-display);
-    font-size: var(--text-h1);
-    font-weight: 700;
-    color: var(--text-primary);
-  }
-
-  .welcome-intro {
-    margin: 0 0 var(--space-6);
-    font-size: var(--text-h3);
-    color: var(--text-secondary);
-  }
-
-  .features {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-    margin-bottom: var(--space-6);
-  }
-
-  .feature {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-4) calc(var(--space-4) + var(--space-1));
-    background: var(--bg-panel);
-    box-shadow: var(--elev-1), var(--edge-lip);
-    text-align: left;
-    transition:
-      background-color var(--motion-duration-fast) var(--motion-ease-standard),
-      box-shadow var(--motion-duration-fast) var(--motion-ease-standard);
-  }
-
-  .feature:hover:where(:not(:disabled):not([aria-disabled="true"])) {
-    background: var(--bg-raised);
-    box-shadow: var(--elev-2), var(--edge-lip);
-  }
-
-  .feature-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    color: var(--accent-cyan);
-  }
-
-  .feature-copy {
-    display: flex;
-    min-width: 0;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .feature-title {
-    font-family: var(--font-display);
-    font-size: var(--text-h3);
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .feature-text {
-    font-size: var(--text-base);
+  .open-recent {
+    font-size: var(--text-small);
     color: var(--text-secondary);
   }
 

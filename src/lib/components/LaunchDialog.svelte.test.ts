@@ -74,6 +74,26 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
+describe('LaunchDialog modal presentation', () => {
+  it('keeps Advanced Cancel available and dispatches exactly one close event', async () => {
+    const close = vi.fn();
+    const view = render(LaunchDialog, {
+      props: { show: true, presentation: 'modal' },
+      events: { close },
+    });
+
+    await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
+
+    const cancel = view.getByRole('button', { name: 'Cancel' });
+    expect(cancel).toBeTruthy();
+    expect(close).not.toHaveBeenCalled();
+
+    await fireEvent.click(cancel);
+
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('LaunchDialog tier routing', () => {
   it('renders distinct Claude and Codex ladder previews and emits the selected policy', async () => {
     const view = await renderTierRoutingDialog();
