@@ -117,17 +117,23 @@ The inject response reports measured facts, not request echoes:
 - `write_started_at` and `submitted_at` bracket the successful write. `payload_bytes_written`
   counts sanitized payload bytes inside the envelope; embedded `ESC[201~` is stripped.
 - `submit_attempted` and `submit_keystroke_issued` reflect the initial Enter write.
-  `submit_bytes_written` counts all Enter bytes actually written. `submit_attempts` is 0
+  `submit_bytes_written` counts all submit-keystroke bytes actually written (Enter, or Codex's
+  Tab on the retry). `submit_attempts` is 0
   for no Enter, 1 for the initial Enter, or 2 if the single retry also lands.
   `submit_retry_failed` and `submit_retry_failure` distinguish a failed retry from no retry.
 - `submit_confirmed` is transcript evidence: `true` requires the exact nonce in the agent's
-  user record followed by a turn start. `submit_confirmation_source` is `transcript`,
+  user record with its turn start, or (Codex) inside a turn that is still open, as a steer is.
+  `submit_confirmation_source` is `transcript`,
   `submit_confirmation_basis` is `transcript-confirmed`, and `turn_id` identifies that turn.
   Screen activity never makes this field true. Unsupported or unreadable transcript sources
   return `null` / `transcript-unavailable`; pending evidence returns `null` / `transcript-pending`.
+  A Codex retry sent while its turn spinner shows returns `null` / `transcript-pending-busy`:
+  the message is queued behind that turn.
 - `submit_confirmation_window_ms` is the 8,000 ms synchronous transcript window;
   `submit_confirmation_elapsed_ms` measures elapsed delivery observation, including retry work.
   A pending result starts up to 60 seconds of background watching, cancelled on agent deletion.
+  For Codex the watch is renewed while the spinner persists, up to 30 minutes, polling every
+  second after the first renewal.
   At expiry, `transcript-timeout` is false only if the nonce is still visibly staged;
   otherwise confirmation remains unknown. No-submit requests have no transcript confirmation.
 - `submit_screen_activity`, `submit_screen_activity_basis`, `submit_screen_activity_window_ms`

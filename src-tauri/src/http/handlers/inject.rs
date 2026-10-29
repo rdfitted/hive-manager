@@ -27,6 +27,8 @@ const TRANSCRIPT_WATCH_LIMIT: Duration = Duration::from_secs(60);
 const CODEX_RETRY_CONFIRM_WAIT: Duration = Duration::from_secs(3);
 /// Upper bound on watching a message queued behind a running Codex turn.
 const CODEX_BUSY_WATCH_LIMIT: Duration = Duration::from_secs(30 * 60);
+/// Poll interval once a watch has been renewed behind a long Codex turn.
+const CODEX_BUSY_WATCH_POLL: Duration = Duration::from_secs(1);
 const TRANSCRIPT_POLL: Duration = Duration::from_millis(250);
 const INJECTION_ACTIVITY_OBSERVATION_WINDOW: Duration = Duration::from_millis(250);
 const INJECTION_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -458,8 +460,9 @@ fn record_delivery(state: &AppState, session_id: &str, agent_id: &str,
 }
 
 /// With `extend_while_busy`, an expiring watch is renewed while Codex's title still shows its
-/// running-turn spinner (up to [`CODEX_BUSY_WATCH_LIMIT`]): a message queued behind that turn
-/// can only reach the transcript once the turn ends.
+/// running-turn spinner (up to [`CODEX_BUSY_WATCH_LIMIT`], then polling every
+/// [`CODEX_BUSY_WATCH_POLL`]): a message queued behind that turn can only reach the transcript
+/// once the turn ends.
 fn watch_pending_delivery(state: &Arc<AppState>, session_id: &str, agent_id: &str,
     receipt: &InjectionReceipt, reader: SharedConfirmation, watch_limit: Duration,
     extend_while_busy: bool) {
@@ -473,6 +476,7 @@ fn watch_pending_delivery(state: &Arc<AppState>, session_id: &str, agent_id: &st
         let started = Instant::now();
         let busy_deadline = started + CODEX_BUSY_WATCH_LIMIT.max(watch_limit);
         let mut deadline = started + watch_limit;
+        let mut poll_interval = TRANSCRIPT_POLL;
         let mut message_recorded = false;
         loop {
             let Some(state) = weak.upgrade() else { return };
@@ -488,6 +492,7 @@ fn watch_pending_delivery(state: &Arc<AppState>, session_id: &str, agent_id: &st
                 if extend_while_busy && Instant::now() < busy_deadline
                     && output.as_deref().and_then(CodexAdapter::turn_running) == Some(true) {
                     deadline = (Instant::now() + TRANSCRIPT_WATCH_LIMIT).min(busy_deadline);
+                    poll_interval = CODEX_BUSY_WATCH_POLL;
                 } else {
                     let result = Delivery::timeout(!message_recorded && staged_text_visible(output.as_deref(), &nonce));
                     record_delivery(&state, &session_id, &agent_id, &receipt, &result);
@@ -495,7 +500,7 @@ fn watch_pending_delivery(state: &Arc<AppState>, session_id: &str, agent_id: &st
                 }
             }
             // At least one poll interval, so a watch renewed at its deadline still reads once.
-            let remaining = deadline.saturating_duration_since(Instant::now()).max(TRANSCRIPT_POLL);
+            let remaining = deadline.saturating_duration_since(Instant::now()).max(poll_interval);
             let polled = tokio::time::timeout(remaining, poll_transcript(&reader, &nonce, since)).await;
             let (result, recorded) = match polled {
                 Ok(result) => result,
@@ -516,7 +521,7 @@ fn watch_pending_delivery(state: &Arc<AppState>, session_id: &str, agent_id: &st
                 return;
             }
             drop(state);
-            tokio::time::sleep(TRANSCRIPT_POLL).await;
+            tokio::time::sleep(poll_interval).await;
         }
     });
 }
@@ -582,6 +587,11 @@ async fn observe_injection_with_retry(
                         let deadline = Instant::now() + CODEX_RETRY_CONFIRM_WAIT;
                         let deadline = receipt.confirmation_expires.map_or(deadline, |expires| expires.min(deadline));
                         verdict = wait_for_transcript(&reader, nonce, since, deadline).await.0;
+                        // A turn that started between the spinner read and the Tab queued it.
+                        if verdict.basis == delivery::TRANSCRIPT_PENDING && state.pty_manager.read()
+                            .recent_output(agent_id).as_deref().and_then(CodexAdapter::turn_running) == Some(true) {
+                            verdict = Delivery::pending_busy();
+                        }
                     }
                 }
                 other => submit_retry_failure = Some(format!("Submit retry failed: {other:?}")),
@@ -613,7 +623,9 @@ async fn observe_injection_with_retry(
         if verdict.is_pending() {
             let limit = receipt.confirmation_expires.map(|expires| expires.saturating_duration_since(Instant::now()))
                 .unwrap_or(TRANSCRIPT_WATCH_LIMIT);
-            watch_pending_delivery(state, session_id, agent_id, receipt, reader, limit, busy);
+            // Any Codex watch may renew while the spinner shows: a single spinner read before
+            // the Tab can miss a turn that queued the message.
+            watch_pending_delivery(state, session_id, agent_id, receipt, reader, limit, codex);
         }
     }
     InjectionMeasurement {
