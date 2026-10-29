@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::delivery::{self, Confirmation, Delivery};
 
 use super::{validate_agent_id, validate_session_id};
+use crate::adapters::CodexAdapter;
 use crate::coordination::{InjectionError, InjectionReceipt};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
@@ -18,9 +19,14 @@ fn default_submit() -> bool {
     true
 }
 
-const INJECTION_EVIDENCE_SCOPE: &str = "submit_confirmed true means a nonce-matched user message and following turn start were recorded in the agent transcript. null means unknown, pending, unavailable or not requested. false requires transcript timeout and visibly staged text. PTY screen activity is advisory and never confirms delivery. Transcript evidence does not identify who pressed Enter.";
+const INJECTION_EVIDENCE_SCOPE: &str = "submit_confirmed true means a nonce-matched user message was recorded in the agent transcript together with its turn start, or inside a turn already running (a Codex steer). null means unknown, pending, unavailable or not requested; transcript-pending-busy means the message was handed to Codex's queue key while a turn was running and is expected when that turn ends. false requires transcript timeout and visibly staged text. PTY screen activity is advisory and never confirms delivery. Transcript evidence does not identify who pressed Enter.";
 const TRANSCRIPT_SYNC_WAIT: Duration = Duration::from_secs(8);
 const TRANSCRIPT_WATCH_LIMIT: Duration = Duration::from_secs(60);
+/// A queue-key retry into an idle Codex submits at once; wait this long for its transcript
+/// turn so the receipt can say so instead of pending.
+const CODEX_RETRY_CONFIRM_WAIT: Duration = Duration::from_secs(3);
+/// Upper bound on watching a message queued behind a running Codex turn.
+const CODEX_BUSY_WATCH_LIMIT: Duration = Duration::from_secs(30 * 60);
 const TRANSCRIPT_POLL: Duration = Duration::from_millis(250);
 const INJECTION_ACTIVITY_OBSERVATION_WINDOW: Duration = Duration::from_millis(250);
 const INJECTION_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -64,6 +70,8 @@ struct InjectionMeasurement {
     submit_attempts: usize,
     submit_bytes_written: usize,
     submit_retry_failure: Option<String>,
+    submit_retry_keystroke: Option<&'static str>,
+    receiver_turn_running: Option<bool>,
 }
 
 type InjectionTransactionMutex = tokio::sync::Mutex<()>;
@@ -359,6 +367,12 @@ fn confirmation_reader(state: &AppState, session_id: &str, agent_id: &str, _sinc
         root.join(".codex/sessions"), root.join(".claude/projects"))
 }
 
+fn agent_cli(state: &AppState, session_id: &str, agent_id: &str) -> Option<String> {
+    state.session_controller.read().get_session(session_id)?
+        .agents.into_iter().find(|agent| agent.id == agent_id)
+        .map(|agent| agent.config.cli)
+}
+
 #[derive(Clone)]
 struct PendingNonce {
     nonce: String,
@@ -430,7 +444,7 @@ async fn wait_for_transcript(reader: &SharedConfirmation, nonce: &str, since: Sy
 
 fn record_delivery(state: &AppState, session_id: &str, agent_id: &str,
     receipt: &InjectionReceipt, delivery: &Delivery) {
-    if delivery.basis != delivery::TRANSCRIPT_PENDING {
+    if !delivery.is_pending() {
         let key = pending_nonce_key(state, session_id, agent_id);
         let mut pending = pending_nonces().lock();
         if pending.get(&key).is_some_and(|value| value.submitted_at == receipt.submitted_at) {
@@ -443,8 +457,12 @@ fn record_delivery(state: &AppState, session_id: &str, agent_id: &str,
     }
 }
 
+/// With `extend_while_busy`, an expiring watch is renewed while Codex's title still shows its
+/// running-turn spinner (up to [`CODEX_BUSY_WATCH_LIMIT`]): a message queued behind that turn
+/// can only reach the transcript once the turn ends.
 fn watch_pending_delivery(state: &Arc<AppState>, session_id: &str, agent_id: &str,
-    receipt: &InjectionReceipt, reader: SharedConfirmation, watch_limit: Duration) {
+    receipt: &InjectionReceipt, reader: SharedConfirmation, watch_limit: Duration,
+    extend_while_busy: bool) {
     let weak = Arc::downgrade(state);
     let session_id = session_id.to_owned();
     let agent_id = agent_id.to_owned();
@@ -452,7 +470,9 @@ fn watch_pending_delivery(state: &Arc<AppState>, session_id: &str, agent_id: &st
     let nonce = receipt.nonce.clone().expect("submitted nonce");
     let since = SystemTime::from(receipt.confirmation_since.unwrap_or(receipt.write_started_at));
     tokio::spawn(async move {
-        let deadline = Instant::now() + watch_limit;
+        let started = Instant::now();
+        let busy_deadline = started + CODEX_BUSY_WATCH_LIMIT.max(watch_limit);
+        let mut deadline = started + watch_limit;
         let mut message_recorded = false;
         loop {
             let Some(state) = weak.upgrade() else { return };
@@ -465,13 +485,19 @@ fn watch_pending_delivery(state: &Arc<AppState>, session_id: &str, agent_id: &st
             }
             if Instant::now() >= deadline {
                 let output = state.pty_manager.read().recent_output(&agent_id);
-                let result = Delivery::timeout(!message_recorded && staged_text_visible(output.as_deref(), &nonce));
-                record_delivery(&state, &session_id, &agent_id, &receipt, &result);
-                return;
+                if extend_while_busy && Instant::now() < busy_deadline
+                    && output.as_deref().and_then(CodexAdapter::turn_running) == Some(true) {
+                    deadline = (Instant::now() + TRANSCRIPT_WATCH_LIMIT).min(busy_deadline);
+                } else {
+                    let result = Delivery::timeout(!message_recorded && staged_text_visible(output.as_deref(), &nonce));
+                    record_delivery(&state, &session_id, &agent_id, &receipt, &result);
+                    return;
+                }
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            // At least one poll interval, so a watch renewed at its deadline still reads once.
+            let remaining = deadline.saturating_duration_since(Instant::now()).max(TRANSCRIPT_POLL);
             let polled = tokio::time::timeout(remaining, poll_transcript(&reader, &nonce, since)).await;
-            let (mut result, recorded) = match polled {
+            let (result, recorded) = match polled {
                 Ok(result) => result,
                 Err(_) => {
                     // A blocking filesystem read cannot be cancelled. End this watch
@@ -486,12 +512,6 @@ fn watch_pending_delivery(state: &Arc<AppState>, session_id: &str, agent_id: &st
                 return;
             }
             if result.confirmed == Some(true) {
-                record_delivery(&state, &session_id, &agent_id, &receipt, &result);
-                return;
-            }
-            if Instant::now() >= deadline {
-                let output = state.pty_manager.read().recent_output(&agent_id);
-                result = Delivery::timeout(!recorded && staged_text_visible(output.as_deref(), &nonce));
                 record_delivery(&state, &session_id, &agent_id, &receipt, &result);
                 return;
             }
@@ -511,6 +531,14 @@ async fn observe_injection_with_retry(
         confirmation_reader(state, session_id, agent_id, since)
     } else { Confirmation::Unavailable }));
     let nonce = receipt.nonce.as_deref().unwrap_or("");
+    // A busy Codex drains input late, so its paste-burst check can turn the sender's Enter into
+    // a newline and strand the message in the composer. That composer is drawn as cell diffs
+    // under a spinner-driven title stream, so the raw PTY tail cannot show staged text. Codex
+    // therefore retries on transcript evidence alone, with its queue key, which does nothing
+    // on an empty composer (see `CodexAdapter::QUEUE_KEY`).
+    let codex = agent_cli(state, session_id, agent_id).as_deref() == Some("codex");
+    let retry_gate = |output: Option<&str>| codex || staged_text_visible(output, nonce);
+    let retry_keystroke = if codex { CodexAdapter::QUEUE_KEY } else { SUBMIT_KEYSTROKE };
     let screen = observe_submit(state, agent_id, receipt.submit_keystroke_issued,
         receipt.pty_output_after_write.as_deref(), &pre_write_baseline.change_offsets);
     let transcript = async {
@@ -524,21 +552,38 @@ async fn observe_injection_with_retry(
     let mut submit_attempts = usize::from(receipt.submit_keystroke_issued);
     let mut submit_bytes_written = receipt.submit_bytes_written;
     let mut submit_retry_failure = None;
+    let mut submit_retry_keystroke = None;
+    let mut receiver_turn_running = None;
     let output = state.pty_manager.read().recent_output(agent_id);
-    if receipt.submit_keystroke_issued && verdict.basis == delivery::TRANSCRIPT_PENDING
-        && !recorded && staged_text_visible(output.as_deref(), nonce) {
+    if receipt.submit_keystroke_issued && verdict.is_pending()
+        && !recorded && retry_gate(output.as_deref()) {
         let latest = poll_transcript(&reader, nonce, since).await;
         verdict = latest.0;
         let current_output = state.pty_manager.read().recent_output(agent_id);
-        if verdict.basis == delivery::TRANSCRIPT_PENDING && !latest.1
-            && staged_text_visible(current_output.as_deref(), nonce) {
+        if verdict.is_pending() && !latest.1 && retry_gate(current_output.as_deref()) {
             #[cfg(all(test, windows))]
             run_before_submit_retry_hook(state).await;
+            if codex {
+                receiver_turn_running = state.pty_manager.read().recent_output(agent_id)
+                    .as_deref().and_then(CodexAdapter::turn_running);
+            }
             let manager = Arc::clone(&state.pty_manager);
             let target = agent_id.to_owned();
-            let result = tokio::task::spawn_blocking(move || manager.read().write(&target, SUBMIT_KEYSTROKE)).await;
+            let result = tokio::task::spawn_blocking(move || manager.read().write(&target, retry_keystroke)).await;
             match result {
-                Ok(Ok(())) => { submit_attempts += 1; submit_bytes_written += SUBMIT_KEYSTROKE.len(); }
+                Ok(Ok(())) => {
+                    submit_attempts += 1;
+                    submit_bytes_written += retry_keystroke.len();
+                    submit_retry_keystroke = Some(if codex { "tab" } else { "enter" });
+                    if codex && receiver_turn_running == Some(true) {
+                        // Queued behind the running turn: nothing can confirm before it ends.
+                        verdict = Delivery::pending_busy();
+                    } else if codex {
+                        let deadline = Instant::now() + CODEX_RETRY_CONFIRM_WAIT;
+                        let deadline = receipt.confirmation_expires.map_or(deadline, |expires| expires.min(deadline));
+                        verdict = wait_for_transcript(&reader, nonce, since, deadline).await.0;
+                    }
+                }
                 other => submit_retry_failure = Some(format!("Submit retry failed: {other:?}")),
             }
         }
@@ -547,31 +592,34 @@ async fn observe_injection_with_retry(
         && receipt.confirmation_expires.is_some_and(|expires| expires <= Instant::now()) {
         verdict = Delivery::timeout(false);
     }
+    let busy = verdict.basis == delivery::TRANSCRIPT_PENDING_BUSY;
     if receipt.submit_keystroke_issued {
         let key = pending_nonce_key(state, session_id, agent_id);
         let mut pending = pending_nonces().lock();
         pending.retain(|_, value| value.expires > Instant::now() && value.state.strong_count() > 0);
         pending.remove(&key);
-        if verdict.basis == delivery::TRANSCRIPT_PENDING {
+        if verdict.is_pending() {
+            let watch_limit = if busy { CODEX_BUSY_WATCH_LIMIT } else { TRANSCRIPT_WATCH_LIMIT };
             pending.insert(key, PendingNonce {
                 nonce: nonce.to_owned(), since: receipt.confirmation_since.unwrap_or(receipt.write_started_at),
                 submitted_at: receipt.submitted_at,
-                expires: receipt.confirmation_expires.unwrap_or_else(|| Instant::now() + TRANSCRIPT_WATCH_LIMIT),
+                expires: receipt.confirmation_expires.unwrap_or_else(|| Instant::now() + watch_limit),
                 state: Arc::downgrade(state),
             });
         }
     }
     if receipt.submit_keystroke_issued {
         record_delivery(state, session_id, agent_id, receipt, &verdict);
-        if verdict.basis == delivery::TRANSCRIPT_PENDING {
+        if verdict.is_pending() {
             let limit = receipt.confirmation_expires.map(|expires| expires.saturating_duration_since(Instant::now()))
                 .unwrap_or(TRANSCRIPT_WATCH_LIMIT);
-            watch_pending_delivery(state, session_id, agent_id, receipt, reader, limit);
+            watch_pending_delivery(state, session_id, agent_id, receipt, reader, limit, busy);
         }
     }
     InjectionMeasurement {
         delivery: verdict, delivery_elapsed_ms: started.elapsed().as_millis() as u64,
         pre_write_baseline, observation, submit_attempts, submit_bytes_written, submit_retry_failure,
+        submit_retry_keystroke, receiver_turn_running,
     }
 }
 
@@ -612,6 +660,8 @@ fn measured_response(
         "submit_attempts": measurement.submit_attempts,
         "submit_retry_failed": measurement.submit_retry_failure.is_some(),
         "submit_retry_failure": measurement.submit_retry_failure,
+        "submit_retry_keystroke": measurement.submit_retry_keystroke,
+        "receiver_turn_running": measurement.receiver_turn_running,
         "pre_write_pty_observation_available": pre_write_baseline.pty_observation_available,
         "pre_write_activity_change_count": pre_write_baseline.change_offsets.len(),
         "receiver_busy_before_write": pre_write_baseline.receiver_busy(),
@@ -1059,6 +1109,8 @@ mod tests {
         assert_eq!(response["submit_confirmation_basis"], "transcript-unavailable");
         assert_eq!(response["submit_confirmation_source"], "none");
         assert_eq!(response["submit_retry_failed"], false);
+        assert_eq!(response["submit_retry_keystroke"], Value::Null, "Claude path unchanged");
+        assert_eq!(response["receiver_turn_running"], Value::Null);
         let records = writes(&state);
         assert_eq!(records[0], b"\x1b[200~");
         assert_eq!(records[2], b"\x1b[201~");
@@ -1222,7 +1274,9 @@ mod tests {
         assert_eq!(response["submit_screen_activity"], true, "ticker must exercise old false-positive path: {response}");
         assert_ne!(response["submit_confirmed"], true);
         assert_eq!(response["submit_confirmation_basis"], "transcript-pending");
-        assert_eq!(response["submit_attempts"], 1);
+        assert_eq!(response["submit_attempts"], 2, "a silent Codex transcript earns one queue-key retry");
+        assert_eq!(response["submit_retry_keystroke"], "tab");
+        assert_eq!(response["receiver_turn_running"], Value::Null, "no title in the tail");
     }
 
     #[tokio::test]
@@ -1237,7 +1291,9 @@ mod tests {
         assert_eq!(response["submit_confirmed"], Value::Null);
         assert_eq!(response["submit_confirmation_basis"], "transcript-pending");
         assert_eq!(response["submit_attempts"], 2);
-        assert_eq!(writes(&state).iter().filter(|w| w.as_slice() == b"\r").count(), 2);
+        assert_eq!(response["submit_bytes_written"], 2);
+        assert_eq!(writes(&state).iter().filter(|w| w.as_slice() == b"\r").count(), 1);
+        assert_eq!(writes(&state).iter().filter(|w| w.as_slice() == b"\t").count(), 1);
     }
 
     #[tokio::test]
@@ -1282,7 +1338,7 @@ mod tests {
         assert_eq!(response["submit_attempts"], 2);
         assert_eq!(stage_response["submit_attempts"], 0);
         let records = writes(&state);
-        assert_eq!(&records[records.len()-2..], &[b"\r".to_vec(), b"draft".to_vec()]);
+        assert_eq!(&records[records.len()-2..], &[b"\t".to_vec(), b"draft".to_vec()]);
     }
 
     #[tokio::test]
@@ -1314,7 +1370,7 @@ mod tests {
             json!({"target_agent_id":AGENT_ID,"message":"late fixture"})).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["submit_confirmation_basis"], "transcript-pending");
-        assert_eq!(response["submit_attempts"], 1, "raw echo is not staging evidence");
+        assert_eq!(response["submit_attempts"], 2, "a silent Codex transcript earns one queue-key retry");
         let nonce = written_nonce(&state).await;
         write_transcript(&state, &nonce, true);
         tokio::time::timeout(Duration::from_secs(3), async {
@@ -1354,7 +1410,7 @@ mod tests {
     async fn short_watch_absent_message_and_visible_staging_reports_failure() {
         let (_temp, _app, state) = setup_test_app();
         let (receipt, reader) = short_watch_fixture(&state, false);
-        watch_pending_delivery(&state, SESSION_ID, AGENT_ID, &receipt, reader, Duration::from_millis(300));
+        watch_pending_delivery(&state, SESSION_ID, AGENT_ID, &receipt, reader, Duration::from_millis(300), false);
         wait_status_reason(&state, &format!("injected_delivery_failed:transcript-timeout:{}", receipt.submitted_at.to_rfc3339())).await;
         state.session_controller.read().update_heartbeat(SESSION_ID, AGENT_ID, "working", None).unwrap();
         state.session_controller.read().get_stalled_agent_reports(SESSION_ID, Duration::from_secs(30));
@@ -1367,7 +1423,7 @@ mod tests {
     async fn short_watch_recorded_user_without_turn_reports_unknown_even_when_staged() {
         let (_temp, _app, state) = setup_test_app();
         let (receipt, reader) = short_watch_fixture(&state, true);
-        watch_pending_delivery(&state, SESSION_ID, AGENT_ID, &receipt, reader.clone(), Duration::from_millis(300));
+        watch_pending_delivery(&state, SESSION_ID, AGENT_ID, &receipt, reader.clone(), Duration::from_millis(300), false);
         tokio::time::timeout(Duration::from_secs(2), async {
             while Arc::strong_count(&reader) != 1 { tokio::time::sleep(Duration::from_millis(20)).await; }
         }).await.expect("unknown watch completed without replacing recovery marker");
@@ -1378,7 +1434,7 @@ mod tests {
     async fn deleting_pty_cancels_pending_watch_and_releases_reader() {
         let (_temp, _app, state) = setup_test_app();
         let (receipt, reader) = short_watch_fixture(&state, false);
-        watch_pending_delivery(&state, SESSION_ID, AGENT_ID, &receipt, reader.clone(), Duration::from_millis(300));
+        watch_pending_delivery(&state, SESSION_ID, AGENT_ID, &receipt, reader.clone(), Duration::from_millis(300), false);
         state.pty_manager.read().kill(AGENT_ID).unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while Arc::strong_count(&reader) != 1 {
@@ -1561,6 +1617,216 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["submit_confirmed"], true);
         assert_eq!(response["turn_id"], "long-lived-http-turn");
+    }
+
+    /// Codex 0.165 receiver driven by the sender's recorded PTY writes. Rules follow codex-rs
+    /// `bottom_pane/chat_composer.rs` and `chatwidget/input_flow.rs` at rust-v0.165.0:
+    /// - Enter submits, as a steer when a turn runs, unless the paste-burst check (evaluated
+    ///   when Codex dequeues the key) still counts it as part of the paste; then it inserts a
+    ///   newline. `swallow_enter` models a busy TUI that drained the paste and Enter together.
+    /// - Tab queues the draft while a turn runs, submits when idle, ignores an empty composer.
+    /// - Rollouts record `task_started` before the turn's user item; a queued draft starts the
+    ///   next turn when the running one ends.
+    #[derive(Default)]
+    struct FakeCodex {
+        seen: usize,
+        composer: String,
+        queued: Vec<String>,
+        turn: Option<String>,
+        turns: usize,
+        swallow_enter: bool,
+    }
+
+    impl FakeCodex {
+        fn pump(&mut self, state: &AppState) {
+            let records = writes(state);
+            for record in records.iter().skip(self.seen) {
+                match record.as_slice() {
+                    b"\x1b[200~" | b"\x1b[201~" => {}
+                    b"\r" if self.swallow_enter => self.composer.push('\n'),
+                    b"\r" => self.submit(state, false),
+                    b"\t" => self.submit(state, true),
+                    payload => self.composer.push_str(&String::from_utf8_lossy(payload)),
+                }
+            }
+            self.seen = records.len();
+        }
+
+        fn submit(&mut self, state: &AppState, queue_key: bool) {
+            let text = std::mem::take(&mut self.composer).trim().to_owned();
+            if text.is_empty() {
+                return;
+            }
+            match (self.turn.is_some(), queue_key) {
+                (true, true) => self.queued.push(text),
+                (true, false) => append_rollout(state, &user_record(&text)),
+                (false, _) => self.start_turn(state, Some(text)),
+            }
+        }
+
+        fn start_turn(&mut self, state: &AppState, text: Option<String>) {
+            self.turns += 1;
+            let turn = format!("fake-turn-{}", self.turns);
+            append_rollout(state, &json!({"timestamp":Utc::now().to_rfc3339(),"type":"event_msg",
+                "payload":{"type":"task_started","turn_attribution":{"turn_id":turn.as_str()}}}));
+            if let Some(text) = text {
+                append_rollout(state, &user_record(&text));
+            }
+            self.turn = Some(turn);
+            state.pty_manager.read().record_output_for_test(AGENT_ID, "\x1b]0;\u{280b} Working | fake\x07".as_bytes());
+        }
+
+        fn end_turn(&mut self, state: &AppState) {
+            if let Some(turn) = self.turn.take() {
+                append_rollout(state, &json!({"timestamp":Utc::now().to_rfc3339(),"type":"event_msg",
+                    "payload":{"type":"task_complete","turn_id":turn}}));
+            }
+            state.pty_manager.read().record_output_for_test(AGENT_ID, b"\x1b]0;Working | fake\x07");
+            if !self.queued.is_empty() {
+                let next = self.queued.remove(0);
+                self.start_turn(state, Some(next));
+            }
+        }
+    }
+
+    fn user_record(text: &str) -> Value {
+        json!({"timestamp":Utc::now().to_rfc3339(),"type":"response_item","payload":{
+            "type":"message","role":"user","content":[{"type":"input_text","text":text}]}})
+    }
+
+    fn append_rollout(state: &AppState, record: &Value) {
+        let mut file = std::fs::OpenOptions::new().create(true).append(true)
+            .open(transcript_path(state)).unwrap();
+        std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes()).unwrap();
+    }
+
+    fn user_records_with(state: &AppState, nonce: &str) -> usize {
+        std::fs::read_to_string(transcript_path(state)).unwrap_or_default().lines()
+            .filter(|line| line.contains("\"role\":\"user\"") && line.contains(nonce))
+            .count()
+    }
+
+    fn spawn_fake_codex(state: &Arc<AppState>, fake: FakeCodex) -> Arc<parking_lot::Mutex<FakeCodex>> {
+        let fake = Arc::new(parking_lot::Mutex::new(fake));
+        let (weak, shared) = (Arc::downgrade(state), fake.clone());
+        tokio::spawn(async move {
+            while let Some(state) = weak.upgrade() {
+                shared.lock().pump(&state);
+                drop(state);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        fake
+    }
+
+    fn keystrokes(state: &AppState, key: &[u8]) -> usize {
+        writes(state).iter().filter(|write| write.as_slice() == key).count()
+    }
+
+    #[tokio::test]
+    async fn busy_codex_swallowed_enter_is_queued_and_delivered_once_after_the_turn() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let fake = spawn_fake_codex(&state, FakeCodex { swallow_enter: true, ..Default::default() });
+        fake.lock().start_turn(&state, None);
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"relay while busy"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_attempts"], 2);
+        assert_eq!(response["submit_retry_keystroke"], "tab");
+        assert_eq!(response["receiver_turn_running"], true);
+        assert_eq!(response["submit_confirmed"], Value::Null);
+        assert_eq!(response["submit_confirmation_basis"], "transcript-pending-busy");
+        let nonce = written_nonce(&state).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fake.lock().queued.is_empty() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.expect("queue key moves the stranded draft into Codex's queue");
+        assert!(fake.lock().composer.is_empty());
+        assert_eq!(user_records_with(&state, &nonce), 0, "nothing is delivered mid-turn");
+
+        fake.lock().end_turn(&state);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let status = state.session_controller.read().get_session(SESSION_ID).unwrap().agents
+                    .iter().find(|agent| agent.id == AGENT_ID).unwrap().status.clone();
+                if matches!(status, AgentStatus::Running) { break; }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }).await.expect("background watch confirms the queued turn");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(user_records_with(&state, &nonce), 1, "delivered exactly once");
+        assert_eq!((keystrokes(&state, b"\r"), keystrokes(&state, b"\t")), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn idle_codex_enter_submits_once_without_retry() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let _fake = spawn_fake_codex(&state, FakeCodex::default());
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"idle relay"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_confirmed"], true, "task_started before the user item: {response}");
+        assert_eq!(response["turn_id"], "fake-turn-1");
+        assert_eq!(response["submit_attempts"], 1);
+        assert_eq!(response["submit_retry_keystroke"], Value::Null);
+        let records = writes(&state);
+        assert_eq!(records.len(), 4);
+        assert_eq!((records[0].as_slice(), records[2].as_slice(), records[3].as_slice()),
+            (&b"\x1b[200~"[..], &b"\x1b[201~"[..], &b"\r"[..]));
+        assert_eq!(user_records_with(&state, &written_nonce(&state).await), 1);
+    }
+
+    #[tokio::test]
+    async fn busy_codex_accepted_enter_is_a_steer_confirmed_in_the_running_turn() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let fake = spawn_fake_codex(&state, FakeCodex::default());
+        fake.lock().start_turn(&state, None);
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"steer relay"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_confirmed"], true, "{response}");
+        assert_eq!(response["turn_id"], "fake-turn-1");
+        assert_eq!(response["submit_attempts"], 1);
+        assert_eq!(keystrokes(&state, b"\t"), 0);
+    }
+
+    #[tokio::test]
+    async fn codex_turn_ending_before_the_retry_submits_exactly_once() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let fake = spawn_fake_codex(&state, FakeCodex { swallow_enter: true, ..Default::default() });
+        fake.lock().start_turn(&state, None);
+        let (hook_state, hook_fake) = (state.clone(), fake.clone());
+        install_before_submit_retry_hook(&state, async move {
+            hook_fake.lock().end_turn(&hook_state);
+        });
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"relay racing turn end"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["receiver_turn_running"], false);
+        assert_eq!(response["submit_retry_keystroke"], "tab");
+        assert_eq!(response["submit_confirmed"], true, "idle Tab submits at once: {response}");
+        assert_eq!(response["turn_id"], "fake-turn-2");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let nonce = written_nonce(&state).await;
+        assert_eq!(user_records_with(&state, &nonce), 1, "no duplicate submission");
+        assert!(fake.lock().queued.is_empty() && fake.lock().composer.is_empty());
+        assert_eq!((keystrokes(&state, b"\r"), keystrokes(&state, b"\t")), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn codex_empty_flush_writes_exactly_one_bare_enter() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id":AGENT_ID,"message":"","submit":true})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_attempts"], 1);
+        assert_eq!(response["submit_retry_keystroke"], Value::Null);
+        assert_eq!(response["submit_confirmation_basis"], "transcript-unavailable");
+        assert_eq!(writes(&state), vec![b"\r".to_vec()]);
     }
 
 }
