@@ -351,8 +351,19 @@ mod tests {
         fs::remove_file(path).unwrap();
         write(temp.path(), day, "rollout-substring.jsonl", &FIXTURE.replace(NONCE, &format!("{NONCE}extra")));
         assert_eq!(reader.poll(NONCE, SystemTime::UNIX_EPOCH), None);
+        // A turn that already ended cannot claim a later user item.
         let lines: Vec<_> = FIXTURE.lines().collect();
-        write(temp.path(), day, "rollout-reverse.jsonl", &format!("{}\n{}\n", lines[2], lines[1]));
+        let closed = event("task_complete", "scrubbed-turn");
+        write(temp.path(), day, "rollout-reverse.jsonl", &format!("{}\n{closed}{}\n", lines[2], lines[1]));
         assert_eq!(reader.poll(NONCE, SystemTime::UNIX_EPOCH), None);
+    }
+
+    #[test]
+    fn open_turn_before_user_confirms_that_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let lines: Vec<_> = FIXTURE.lines().collect();
+        write(temp.path(), Local::now().date_naive(), "rollout-open.jsonl", &format!("{}\n{}\n", lines[2], lines[1]));
+        let mut reader = CodexRolloutReader::new(temp.path().into(), SystemTime::UNIX_EPOCH);
+        assert_eq!(reader.poll(NONCE, SystemTime::UNIX_EPOCH), Some("scrubbed-turn".into()));
     }
 }
