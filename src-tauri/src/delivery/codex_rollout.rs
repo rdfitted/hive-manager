@@ -17,6 +17,8 @@ struct Tail {
     discard_line: bool,
     matched_user: bool,
     pending: bool,
+    /// Turn opened by `task_started` and not yet closed by `task_complete`/`turn_aborted`.
+    active_turn: Option<String>,
     confirmed: Option<String>,
 }
 
@@ -99,7 +101,8 @@ impl CodexRolloutReader {
                 for (index, byte) in tail.partial.iter().enumerate() {
                     if *byte != b'\n' { continue; }
                     if let Ok(record) = serde_json::from_slice::<Value>(&tail.partial[consumed..index]) {
-                        observe(&record, nonce, since, &mut tail.pending, &mut tail.matched_user, &mut tail.confirmed);
+                        observe(&record, nonce, since, &mut tail.pending, &mut tail.matched_user,
+                            &mut tail.active_turn, &mut tail.confirmed);
                     }
                     consumed = index + 1;
                 }
@@ -115,8 +118,17 @@ impl CodexRolloutReader {
     }
 }
 
-fn observe(record: &Value, nonce: &str, since: SystemTime, pending: &mut bool, matched_user: &mut bool, confirmed: &mut Option<String>) {
+/// Codex 0.165 writes `task_started` before the turn's user item, and a mid-turn
+/// steer appends a user item to the turn already running. A nonce-matched user
+/// item inside an open turn therefore confirms that turn. The older order (user
+/// item, then `task_started`) still confirms on the following turn start.
+fn observe(record: &Value, nonce: &str, since: SystemTime, pending: &mut bool, matched_user: &mut bool,
+    active_turn: &mut Option<String>, confirmed: &mut Option<String>) {
     let payload = &record["payload"];
+    if record["type"] == "event_msg" && matches!(payload["type"].as_str(), Some("task_complete" | "turn_aborted")) {
+        *active_turn = None;
+        return;
+    }
     if record["type"] == "response_item" && payload["role"] == "user" {
         let recent = record["timestamp"].as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
@@ -129,8 +141,16 @@ fn observe(record: &Value, nonce: &str, since: SystemTime, pending: &mut bool, m
         // never borrow an earlier user's nonce.
         *pending = recent && matches;
         *matched_user |= *pending;
-    } else if *pending && record["type"] == "event_msg" && payload["type"] == "task_started" {
-        if let Some(turn) = payload["turn_attribution"]["turn_id"].as_str().filter(|id| !id.is_empty()) {
+        if *pending && active_turn.is_some() {
+            *confirmed = active_turn.clone();
+            *pending = false;
+        }
+    } else if record["type"] == "event_msg" && payload["type"] == "task_started" {
+        let Some(turn) = payload["turn_attribution"]["turn_id"].as_str().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        *active_turn = Some(turn.to_owned());
+        if *pending {
             *confirmed = Some(turn.to_owned());
             *pending = false;
         }
@@ -251,6 +271,63 @@ mod tests {
         assert!(!reader.message_recorded());
     }
 
+    fn event(kind: &str, turn: &str) -> String {
+        let payload = if kind == "task_started" {
+            serde_json::json!({"type": kind, "turn_attribution": {"turn_id": turn}})
+        } else {
+            serde_json::json!({"type": kind, "turn_id": turn})
+        };
+        format!("{}
+", serde_json::json!({"timestamp":"2026-10-29T20:50:05.200Z","type":"event_msg","payload":payload}))
+    }
+
+    fn user(nonce: &str) -> String {
+        format!("{}
+", serde_json::json!({"timestamp":"2026-10-29T20:50:05.298Z","type":"response_item",
+            "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":format!("relay
+{nonce}")}]}}))
+    }
+
+    #[test]
+    fn codex_0_165_order_task_started_then_user_confirms_that_turn() {
+        // Observed in codex 0.165 rollouts: task_started precedes the turn's user item.
+        let temp = tempfile::tempdir().unwrap();
+        let text = format!("{}{}{}", event("task_started", "turn-a"), user(NONCE), event("task_complete", "turn-a"));
+        write(temp.path(), Local::now().date_naive(), "rollout-current.jsonl", &text);
+        let mut reader = CodexRolloutReader::new(temp.path().into(), SystemTime::UNIX_EPOCH);
+        assert_eq!(reader.poll(NONCE, SystemTime::UNIX_EPOCH), Some("turn-a".into()));
+    }
+
+    #[test]
+    fn mid_turn_steer_confirms_the_running_turn_and_next_turn_cannot_borrow_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let day = Local::now().date_naive();
+        // A steered relay lands inside the running turn; no task_started follows it.
+        let steer = format!("{}{}{}", event("task_started", "turn-a"), user("[hive-msg:00000001]"), user(NONCE));
+        let path = write(temp.path(), day, "rollout-steer.jsonl", &steer);
+        let mut reader = CodexRolloutReader::new(temp.path().into(), SystemTime::UNIX_EPOCH);
+        assert_eq!(reader.poll(NONCE, SystemTime::UNIX_EPOCH), Some("turn-a".into()));
+        // A closed turn is no longer open: a later user item waits for its own turn start.
+        let closed = format!("{}{}", event("task_complete", "turn-a"), user("[hive-msg:00000002]"));
+        File::options().append(true).open(&path).unwrap().write_all(closed.as_bytes()).unwrap();
+        let mut late = CodexRolloutReader::new(temp.path().into(), SystemTime::UNIX_EPOCH);
+        assert_eq!(late.poll("[hive-msg:00000002]", SystemTime::UNIX_EPOCH), None);
+        assert!(late.message_recorded());
+        File::options().append(true).open(&path).unwrap()
+            .write_all(event("task_started", "turn-b").as_bytes()).unwrap();
+        assert_eq!(late.poll("[hive-msg:00000002]", SystemTime::UNIX_EPOCH), Some("turn-b".into()));
+    }
+
+    #[test]
+    fn aborted_turn_is_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let text = format!("{}{}{}", event("task_started", "turn-a"), event("turn_aborted", "turn-a"), user(NONCE));
+        write(temp.path(), Local::now().date_naive(), "rollout-aborted.jsonl", &text);
+        let mut reader = CodexRolloutReader::new(temp.path().into(), SystemTime::UNIX_EPOCH);
+        assert_eq!(reader.poll(NONCE, SystemTime::UNIX_EPOCH), None);
+        assert!(reader.message_recorded());
+    }
+
     #[test]
     fn oversized_lines_and_reads_are_bounded() {
         let temp = tempfile::tempdir().unwrap();
@@ -274,8 +351,19 @@ mod tests {
         fs::remove_file(path).unwrap();
         write(temp.path(), day, "rollout-substring.jsonl", &FIXTURE.replace(NONCE, &format!("{NONCE}extra")));
         assert_eq!(reader.poll(NONCE, SystemTime::UNIX_EPOCH), None);
+        // A turn that already ended cannot claim a later user item.
         let lines: Vec<_> = FIXTURE.lines().collect();
-        write(temp.path(), day, "rollout-reverse.jsonl", &format!("{}\n{}\n", lines[2], lines[1]));
+        let closed = event("task_complete", "scrubbed-turn");
+        write(temp.path(), day, "rollout-reverse.jsonl", &format!("{}\n{closed}{}\n", lines[2], lines[1]));
         assert_eq!(reader.poll(NONCE, SystemTime::UNIX_EPOCH), None);
+    }
+
+    #[test]
+    fn open_turn_before_user_confirms_that_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let lines: Vec<_> = FIXTURE.lines().collect();
+        write(temp.path(), Local::now().date_naive(), "rollout-open.jsonl", &format!("{}\n{}\n", lines[2], lines[1]));
+        let mut reader = CodexRolloutReader::new(temp.path().into(), SystemTime::UNIX_EPOCH);
+        assert_eq!(reader.poll(NONCE, SystemTime::UNIX_EPOCH), Some("scrubbed-turn".into()));
     }
 }

@@ -9,6 +9,9 @@ pub mod claude_transcript;
 
 pub const TRANSCRIPT_CONFIRMED: &str = "transcript-confirmed";
 pub const TRANSCRIPT_PENDING: &str = "transcript-pending";
+/// Pending while the receiver is mid-turn and the message was handed to its queue key;
+/// delivery is expected when that turn ends, not within the synchronous window.
+pub const TRANSCRIPT_PENDING_BUSY: &str = "transcript-pending-busy";
 pub const TRANSCRIPT_UNAVAILABLE: &str = "transcript-unavailable";
 pub const TRANSCRIPT_TIMEOUT: &str = "transcript-timeout";
 #[allow(dead_code)] // Reserved I1 basis for the protocol follow-up.
@@ -25,6 +28,15 @@ pub struct Delivery {
 impl Delivery {
     pub fn pending() -> Self {
         Self { confirmed: None, basis: TRANSCRIPT_PENDING.into(), source: "transcript".into(), turn_id: None }
+    }
+
+    pub fn pending_busy() -> Self {
+        Self { confirmed: None, basis: TRANSCRIPT_PENDING_BUSY.into(), source: "transcript".into(), turn_id: None }
+    }
+
+    /// Both pending bases keep the background watch and the flush-inheritable nonce alive.
+    pub fn is_pending(&self) -> bool {
+        self.basis == TRANSCRIPT_PENDING || self.basis == TRANSCRIPT_PENDING_BUSY
     }
 
     pub fn unavailable() -> Self {
@@ -89,5 +101,8 @@ mod tests {
         assert_eq!(Delivery::timeout(false).confirmed, None);
         assert_eq!(Delivery::timeout(true).confirmed, Some(false));
         assert_eq!(Delivery::confirmed("turn".into()).source, "transcript");
+        assert!(Delivery::pending().is_pending() && Delivery::pending_busy().is_pending());
+        assert_eq!(Delivery::pending_busy().confirmed, None);
+        assert!(!Delivery::timeout(true).is_pending() && !Delivery::unavailable().is_pending());
     }
 }

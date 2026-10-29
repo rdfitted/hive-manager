@@ -52,8 +52,10 @@ keep `byte_count` directly comparable to the fixture byte length.
   literal newline inside the paste.
 - Enter is still a bare `\r` written as its own discrete PTY write; no `\n` is appended
   and Enter is outside the bracketed-paste envelope. After the synchronous wait, exactly
-  one retry is allowed only when the transcript has not recorded the message and the
-  composer visibly holds its exact marker. Screen activity alone never triggers a retry.
+  one retry is allowed only when the transcript has not recorded the message. For Claude the
+  composer must also visibly hold its exact marker, and the retry is a bare Enter. Screen
+  activity alone never triggers a retry.
+- Codex retries with its queue key, Tab, on transcript absence alone (see "Busy Codex" below).
 - Every nonempty `"submit": true` message receives a fresh nonce. An empty flush request
   writes only bare Enter and carries no nonce. If the agent has an earlier pending nonce
   within its watch window, the flush confirms against that nonce; otherwise it returns
@@ -81,6 +83,33 @@ success around 65 seconds. Busy state was uncontrolled, so these are not matrix 
 The #256 bracketed envelope improves framing, but does not establish that Codex no longer
 needs a submit gap. Non-codex adapters retain the 50 ms default pending controlled evidence.
 
+## Busy Codex
+
+Codex 0.165 (`codex-rs/tui/src/bottom_pane`, tag `rust-v0.165.0`) decides whether an Enter
+submits or inserts a newline with a paste-burst check: an Enter within 120 ms of a fast
+character burst, measured when Codex *dequeues* the key, is a newline (`paste_burst.rs`
+`PASTE_ENTER_SUPPRESS_WINDOW`, `chat_composer/reconnect.rs` `handle_paste_enter`). The sender's
+150-600 ms gap is measured when the bytes are *written*. A Codex busy rendering a turn drains
+input late, which collapses that gap and turns the Enter into a newline. The message stays in
+the composer, and the next relay is appended after it. Live rollouts from 2026-10-29 show one
+user item that carries three relay nonces joined by those newlines.
+
+Codex draws its composer as cell diffs under a spinner-driven title stream, so the raw 8 KB
+PTY tail cannot show staged text, and the visible-marker retry gate never opened for Codex.
+Codex therefore retries on transcript absence alone, with Tab (`queue_keys`). Tab queues the
+draft while a turn runs and skips the paste-burst check, submits when idle, and does nothing
+on an empty composer, so a retry after a submit that already landed cannot submit twice.
+`CodexAdapter::turn_running` reads the braille spinner that Codex puts at the front of its
+OSC title while a turn runs. If the turn is running when Tab is sent, the receipt is `null` /
+`transcript-pending-busy`, and the background watch is renewed while the spinner persists, up
+to 30 minutes. If the receiver is idle, the receipt waits up to 3 more seconds for the
+transcript turn.
+
+Codex 0.165 writes `task_started` *before* the turn's user item, and a mid-turn Enter is a
+steer whose user item lands inside the running turn with no new `task_started`. The rollout
+reader therefore confirms a nonce-matched user item inside an open turn against that turn.
+The older order, user item then `task_started`, still confirms.
+
 ## Sender receipt and delivery signal (#256, #259, #356)
 
 The inject response reports measured facts, not request echoes:
@@ -88,25 +117,33 @@ The inject response reports measured facts, not request echoes:
 - `write_started_at` and `submitted_at` bracket the successful write. `payload_bytes_written`
   counts sanitized payload bytes inside the envelope; embedded `ESC[201~` is stripped.
 - `submit_attempted` and `submit_keystroke_issued` reflect the initial Enter write.
-  `submit_bytes_written` counts all Enter bytes actually written. `submit_attempts` is 0
+  `submit_bytes_written` counts all submit-keystroke bytes actually written (Enter, or Codex's
+  Tab on the retry). `submit_attempts` is 0
   for no Enter, 1 for the initial Enter, or 2 if the single retry also lands.
   `submit_retry_failed` and `submit_retry_failure` distinguish a failed retry from no retry.
 - `submit_confirmed` is transcript evidence: `true` requires the exact nonce in the agent's
-  user record followed by a turn start. `submit_confirmation_source` is `transcript`,
+  user record with its turn start, or (Codex) inside a turn that is still open, as a steer is.
+  `submit_confirmation_source` is `transcript`,
   `submit_confirmation_basis` is `transcript-confirmed`, and `turn_id` identifies that turn.
   Screen activity never makes this field true. Unsupported or unreadable transcript sources
   return `null` / `transcript-unavailable`; pending evidence returns `null` / `transcript-pending`.
+  A Codex retry sent while its turn spinner shows returns `null` / `transcript-pending-busy`:
+  the message is queued behind that turn.
 - `submit_confirmation_window_ms` is the 8,000 ms synchronous transcript window;
   `submit_confirmation_elapsed_ms` measures elapsed delivery observation, including retry work.
   A pending result starts up to 60 seconds of background watching, cancelled on agent deletion.
+  For Codex the watch is renewed while the spinner persists, up to 30 minutes, polling every
+  second after the first renewal.
   At expiry, `transcript-timeout` is false only if the nonce is still visibly staged;
   otherwise confirmation remains unknown. No-submit requests have no transcript confirmation.
 - `submit_screen_activity`, `submit_screen_activity_basis`, `submit_screen_activity_window_ms`
   and `submit_screen_activity_elapsed_ms` expose the advisory screen classifier separately.
   Its window is 1,500 ms: true means sustained activity, false means no observed reaction,
   and null means indeterminate or unavailable. These observations cannot confirm delivery.
-- The single extra-CR retry requires transcript-pending, no recorded nonce-bearing user
-  message, and a visibly staged nonce. The handler rechecks transcript and screen state
+- The single retry requires transcript-pending and no recorded nonce-bearing user message.
+  Claude also requires a visibly staged nonce and retries with CR; Codex retries with Tab.
+  `submit_retry_keystroke` is `enter`, `tab` or null, and `receiver_turn_running` is Codex's
+  spinner state at the retry (null when unknown or not Codex). The handler rechecks transcript and screen state
   immediately before retrying. A recorded user message without a turn suppresses retry.
   A screen-false result alone does not authorize a retry.
 - `pre_write_pty_observation_available`, `pre_write_activity_change_count`,

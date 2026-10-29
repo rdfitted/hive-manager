@@ -24,6 +24,24 @@ impl CodexAdapter {
     pub fn codex_scaled_submit_gap(base: Duration, payload_len: usize) -> Duration {
         codex_scaled_submit_gap(base, payload_len)
     }
+
+    /// Codex's queue key: plain Tab (`queue_keys` in codex-rs `bottom_pane/chat_composer.rs`,
+    /// 0.165). While a turn runs, Tab queues the draft for the end of that turn and skips the
+    /// paste-burst check that turns an Enter processed shortly after a paste into a newline.
+    /// When idle it submits like Enter; on an empty composer it does nothing, so pressing it
+    /// after a submit that already landed cannot submit twice.
+    pub const QUEUE_KEY: &'static [u8] = b"\t";
+
+    /// Whether the last terminal title in `output` carries Codex's running-turn spinner.
+    ///
+    /// Codex prefixes its OSC title with a braille spinner frame while a turn runs and drops
+    /// it when the turn ends. `None` means no title survives in the retained PTY tail.
+    pub fn turn_running(output: &str) -> Option<bool> {
+        let start = [output.rfind("\x1b]0;"), output.rfind("\x1b]2;")].into_iter().flatten().max()?;
+        let title = &output[start + 4..];
+        let end = title.find(['\x07', '\x1b']).unwrap_or(title.len());
+        Some(title[..end].chars().next().is_some_and(|first| ('\u{2800}'..='\u{28ff}').contains(&first)))
+    }
 }
 
 impl CliAdapter for CodexAdapter {
@@ -145,6 +163,18 @@ fn is_explicit_prompt_marker(line_lower: &str, trimmed: &str) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn turn_running_reads_the_last_spinner_title() {
+        // Shape captured from a live codex 0.165 PTY tail: spinner frames, then turn end.
+        let busy = "\x1b]0;\u{2839} Execute worker prompt | primary\x07\x1b[?2026h\x1b[7;1H\u{2022}";
+        assert_eq!(CodexAdapter::turn_running(busy), Some(true));
+        let idle = format!("{busy}\x1b]0;Execute worker prompt | primary\x07\x1b[?2026l");
+        assert_eq!(CodexAdapter::turn_running(&idle), Some(false));
+        assert_eq!(CodexAdapter::turn_running("\x1b]2;\u{280b} Working\x1b\\"), Some(true));
+        assert_eq!(CodexAdapter::turn_running("plain output, no title"), None);
+        assert_eq!(CodexAdapter::QUEUE_KEY, b"\t");
+    }
 
     #[test]
     fn codex_payload_gap_table_is_bounded() {
