@@ -45,6 +45,8 @@ class MemoryTreeTests(unittest.TestCase):
         client = self.root / "clients" / "zebulon-holdings"
         client.mkdir(parents=True)
         (client / "CLIENT.md").write_text(CLIENT_PROFILE, encoding="utf-8")
+        (client / "PROFILE.md").write_text("  | Name | Email |\n  |---|---|\n  | **Perpetua Ostrander** | hidden |\n",
+                                           encoding="utf-8")
         (client / "context.md").write_text("| Name |\n|---|\n| **Decoy Context** |\n", encoding="utf-8")
         (self.root / "clients" / ".git").mkdir()
         (self.root / "clients" / "CLIENTS.md").write_text("- **[Zebulon Holdings](zebulon-holdings/)** note", encoding="utf-8")
@@ -60,7 +62,7 @@ class MemoryTreeTests(unittest.TestCase):
 
     def test_every_source_is_covered(self):
         for text in ("Zebulon Holdings", "zebulon-holdings", "zebulon", "zebulonbrain", "ZebulonHoldings",
-                     "Quillfeather", "Ottoline Vandersnoot", "Vandersnoot", "Quillon", "Davy",
+                     "Quillfeather", "Ottoline Vandersnoot", "Vandersnoot", "Ostrander", "Quillon", "Davy",
                      "Ignatius Pemberly", "Pemberly", "complete-widget-works", "Complete Widget Works Corp.",
                      "Wilhelmina Tarn", "Tarn"):
             with self.subTest(text=text):
@@ -128,7 +130,7 @@ class ContactDetailTests(unittest.TestCase):
         for text in ("https://portal.somecompany.co/login", "see http://10.1.2.3:8600/x"):
             with self.subTest(text=text):
                 self.assertTrue(blocked(text, self.DICTIONARY))
-        for text in ("curl http://localhost:8600/api", "http://127.0.0.1:18800/x", "https://api.example.com/v1",
+        for text in ("curl http://localhost:8600/api", "http://127.0.0.1:18800/x", "http://[::1]:8600/api", "https://api.example.com/v1",
                      "https://github.com/synthetic/repo/pull/1", "Origin http://other.test"):
             with self.subTest(text=text):
                 self.assertFalse(blocked(text, self.DICTIONARY))

@@ -12,7 +12,7 @@ from typing import Any
 EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 # Separators are required: a bare ten-digit run in evidence is usually a timestamp.
 PHONE = re.compile(r"(?<![\w.])(?:\+?\d{1,2}[\s.-])?(?:\(\d{3}\)\s?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?![\w])")
-URL = re.compile(r"\bhttps?://([^\s/:\"'<>)\]]+)", re.IGNORECASE)
+URL = re.compile(r"\bhttps?://(\[[^\]\s]+\]|[^\s/:\"'<>)\]]+)", re.IGNORECASE)
 # Other hosts can identify a client by themselves. A path on these still gets the name scan.
 SAFE_URL_HOSTS = re.compile(r"^(?:localhost|127\.0\.0\.1|\[::1\]|github\.com|(?:.+\.)?example\.(?:com|org|net)|.+\.test)$",
                             re.IGNORECASE)
@@ -33,7 +33,8 @@ def _contact_names(text: str) -> list[str]:
     names = []
     first_column = None
     previous_is_table = False
-    for line in text.splitlines():
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
         is_table = line.startswith("|")
         if is_table and not previous_is_table:
             first_column = line.split("|")[1].strip().strip("*").lower() if line.count("|") > 1 else None
