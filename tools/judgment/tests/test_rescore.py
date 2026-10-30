@@ -176,6 +176,28 @@ class LedgerTests(unittest.TestCase):
         enough = rescore._thin_reasons("ledger-outcomes", 200, 100, TABLES["targets"])
         self.assertEqual([], enough)
 
+    def test_labels_class_is_reported_and_never_counts_as_human(self):
+        write_rows(self.ledger, run_rows("a", 0, 0.9, 0.1))
+        report = rescore.rescore_qa(self.ledger, TABLES, {"a": "pass"}, labels_class="history-proven")
+        self.assertEqual("history-proven", report["truth_class"])
+        self.assertIn("history-proven, not human-confirmed", report["baselines"][0]["too_thin_to_conclude"][0])
+
+    def test_label_source_keeps_only_matching_bench_items(self):
+        write_rows(self.ledger, run_rows("a", 0, 0.9, 0.1))
+        write_rows(self.ledger, run_rows("b", 0, 0.9, 0.1))
+        bench = self.root / "bench.json"
+        bench.write_text(json.dumps({"items": [
+            {"id": "a", "label": "pass", "label_source": "history-proven"},
+            {"id": "b", "label": "pass", "label_source": "agent-team"},
+        ]}), encoding="utf-8")
+        out = self.root / "report.json"
+        with patch("sys.stdout"):
+            code = rescore.main(["--ledger", str(self.ledger), "--labels", str(bench),
+                                 "--label-source", "history-proven", "--json", str(out)])
+        self.assertEqual(0, code)
+        baseline = json.loads(out.read_text(encoding="utf-8"))["baselines"][0]
+        self.assertEqual((2, 1), (baseline["items"], baseline["labeled_items"]))
+
     def test_a_request_missing_a_half_or_with_an_error_is_counted_not_scored(self):
         rows = run_rows("a", 0, 0.9, 0.1)
         write_rows(self.ledger, rows[:1])

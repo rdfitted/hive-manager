@@ -18,7 +18,9 @@ The rule is `P(pass) = min(P(meets), 1 - P(misses))`. All three questions go in 
 
 ## Results
 
-**These numbers don't support a conclusion.** Real data: 0 `hive.qa.*` rows in any ledger, and 0 human labels. The bench is 80 synthetic items written by a fresh agent that wasn't told about the two-sided hypothesis. Labels are by construction, the set is not real QA work, and it's below the 200 labeled / 100 held-out targets.
+### Synthetic bench
+
+**These numbers don't support a conclusion.** There are 0 `hive.qa.*` rows in any ledger and 0 human labels. The bench is 80 synthetic items written by a fresh agent that wasn't told about the two-sided hypothesis. Labels are by construction, the set is not real QA work, and it's below the 200 labeled / 100 held-out targets.
 
 Bench: `bench-v1.json` (40 pass, 40 fail), `jev-1.14.0`, 10 passes per item, first pass reported.
 
@@ -40,7 +42,29 @@ Bench: `bench-v1.json` (40 pass, 40 fail), `jev-1.14.0`, 10 passes per item, fir
 
 `FrozenBenchTests` in `tests/test_rescore.py` recomputes these numbers from `trace-v1.jsonl` with no key.
 
-**Decision: keep two-sided in shadow.** Don't adopt it and don't decline it until there are human labels on real QA work.
+### Real history: two-sided didn't help
+
+The synthetic bench's direction didn't hold up on real work. This bench is 60 items built from this repo's own git history: 58 labels are proven by history (a later fix, revert or closed issue, or behavior that survived unchanged) and 2 came from a unanimous 3-agent team. Evidence was gathered blind from the code at each commit, and none of it shares an 8-word run with the Evaluator's files. The bench is private and isn't in this repo, so `FrozenBenchTests` doesn't cover these numbers. `jev-1.14.0`, 10 passes, first pass reported.
+
+| Rule | n | Abstain | False pass | False fail | Accuracy | ECE |
+|---|---|---|---|---|---|---|
+| `one_sided` | 60 | 0 | 4 | 6 | 83.3% (50/60) | 0.041 |
+| `two_sided` | 60 | 0 | 4 | 8 | 80.0% (48/60) | 0.115 |
+| `one_sided_band` (0.7 / 0.3) | 60 | 10 | 2 | 3 | 90.0% (45/50) | n/a |
+| `two_sided_band` (0.7 / 0.3) | 60 | 10 | 1 | 4 | 90.0% (45/50) | n/a |
+| `one_sided`, held out | 32 | 0 | 3 | 3 | 81.2% (26/32) | 0.071 |
+| `two_sided`, held out | 32 | 0 | 3 | 4 | 78.1% (25/32) | 0.088 |
+
+- **No false pass benefit, a false fail cost.** Two-sided broke 2 items and fixed none (sign test p = 0.50). Calibration was much worse overall.
+- **Neither rule is close to promotion.** Accuracy is well under the 95% target. Decisions flipped at 0.5 on 2 items one-sided and 4 two-sided in 10 passes, and jitter reached 0.18 and 0.22.
+- **The Evaluator did better where it could be compared.** On the 15 items with a matching Evaluator result, it was wrong 3 times (1 false pass, 2 false fails). One-sided was wrong 5 times (1, 4) and two-sided 6 (1, 5). That's too few to generalize.
+- **The band helps more than the second question.** It's the only rule family that raised accuracy, at the price of sending 1 in 6 items to a person.
+
+Limits: one repo, labels aren't human-confirmed, and n is below target. Most evidence is code reading, not behavior, which is harder than a QA worker's report and may explain the gap from the synthetic bench. Many requirements were reworded from fix commits.
+
+**Decision: two-sided is declined as the default on this evidence.** The code stays in shadow so it can be re-tested. `one_sided` is the baseline to beat, and the next thing worth testing is the band.
+
+Five more benches (299 items, 287 labels proven by history) were harvested inside client repos and stay there. They haven't been graded: `hive.qa.criterion` isn't an allowed surface for those repos, so sending them is the operator's ruling. The redaction dictionary also has to improve first, because it's built from client folder names and one harvest found words it would have missed.
 
 Replay on real recorded rows: `rescore.py --surface hive.review.finding` over the 27 recorded Jev answers recomputed every top label with 0 mismatches. 14 rows have outcomes, across two question versions, reported apart: 3/6 and 4/8 agreement. Requiring a top probability of at least 0.7 leaves 2/2 and 3/5. Those outcomes are `downstream`, not human labels, and n is too small to tune on.
 

@@ -230,7 +230,7 @@ def _thin_reasons(truth_class: str, labeled: int, heldout: int, targets: dict) -
 
 
 def rescore_qa(ledger_file: Path, tables: dict, labels: dict[str, str] | None = None,
-               truth_sources: set[str] | None = None) -> dict:
+               truth_sources: set[str] | None = None, labels_class: str = "bench-author") -> dict:
     config = tables["rescore"][QA_SURFACE]
     rules = config["rules"]
     sources = truth_sources if truth_sources is not None else set(config["truth_sources"])
@@ -244,7 +244,7 @@ def rescore_qa(ledger_file: Path, tables: dict, labels: dict[str, str] | None = 
     by_baseline: dict[str, list[dict]] = defaultdict(list)
     for run in runs:
         by_baseline[run["baseline"]].append(run)
-    truth_class = "bench-author" if labels is not None else "ledger-outcomes"
+    truth_class = labels_class if labels is not None else "ledger-outcomes"
     report = {
         "surface": QA_SURFACE, "truth_class": truth_class,
         "truth_sources": sorted(sources) if labels is None else None,
@@ -414,6 +414,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tables", type=Path, default=Path(__file__).resolve().parent / "decision-tables.json")
     parser.add_argument("--rules", type=Path, help="JSON rules that replace the tables' rules for this run")
     parser.add_argument("--labels", type=Path, help="bench file; its labels are reported as bench-author truth")
+    parser.add_argument("--labels-class", default="bench-author",
+                        help="how --labels were made; it's printed with the results and never counts as human")
+    parser.add_argument("--label-source", help="keep only bench items with this label_source")
     parser.add_argument("--json", type=Path, help="also write the full report here")
     args = parser.parse_args(argv)
     try:
@@ -427,8 +430,9 @@ def main(argv: list[str] | None = None) -> int:
             labels = None
             if args.labels:
                 bench = json.loads(args.labels.read_text(encoding="utf-8"))
-                labels = {item["id"]: item["label"] for item in bench["items"]}
-            report = rescore_qa(args.ledger, tables, labels)
+                labels = {item["id"]: item["label"] for item in bench["items"]
+                          if args.label_source in (None, item.get("label_source"))}
+            report = rescore_qa(args.ledger, tables, labels, labels_class=args.labels_class)
             text = render_qa(report)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"rescore: {exc}", file=sys.stderr)
