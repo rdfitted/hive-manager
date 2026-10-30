@@ -8,8 +8,9 @@ outcome: --decision-id --label JSON --source
 
 Path overrides: --ledger, --tables, --policy, --redact-dictionary (or the
 JUDGMENT_LEDGER, JUDGMENT_TABLES, JUDGMENT_EGRESS_POLICY, and
-JUDGMENT_REDACT_DICTIONARY environment variables). A dry run checks every
-gate, writes a local row, and never calls the provider.
+JUDGMENT_REDACT_DICTIONARY environment variables). JUDGMENT_REDACT_MEMORY_ROOT
+adds known names from a local memory root. A dry run checks every gate, writes
+a local row, and never calls the provider.
 
 The API key comes from TYPESAFE_API_KEY, else from the TYPESAFE_API_KEY= line
 of ~/.ai-gateway.env (override the file with JUDGMENT_KEY_FILE). It is never
@@ -295,7 +296,8 @@ def _decision(args: argparse.Namespace, ledger_path: Path, *, ask: bool) -> int:
                 redact_mode = surface_entry["redact"]
                 try:
                     dictionary = redaction.load_dictionary(
-                        args.redact_dictionary, os.environ.get("JUDGMENT_REDACT_PROFILE_ROOT")
+                        args.redact_dictionary, os.environ.get("JUDGMENT_REDACT_PROFILE_ROOT"),
+                        os.environ.get("JUDGMENT_REDACT_MEMORY_ROOT"),
                     )
                 except (ValueError, OSError, UnicodeError, json.JSONDecodeError):
                     dictionary = None
@@ -375,7 +377,8 @@ def _fanout(args: argparse.Namespace, ledger_path: Path) -> int:
         redact_mode = entry["redact"]
         try:
             dictionary = redaction.load_dictionary(
-                args.redact_dictionary, os.environ.get("JUDGMENT_REDACT_PROFILE_ROOT"))
+                args.redact_dictionary, os.environ.get("JUDGMENT_REDACT_PROFILE_ROOT"),
+                os.environ.get("JUDGMENT_REDACT_MEMORY_ROOT"))
         except (ValueError, OSError, UnicodeError, json.JSONDecodeError):
             dictionary = None
         clean, redaction_report = redaction.redact(

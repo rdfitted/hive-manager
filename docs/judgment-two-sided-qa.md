@@ -62,11 +62,45 @@ The synthetic bench's direction didn't hold up on real work. This bench is 60 it
 
 Limits: one repo, labels aren't human-confirmed, and n is below target. Most evidence is code reading, not behavior, which is harder than a QA worker's report and may explain the gap from the synthetic bench. Many requirements were reworded from fix commits.
 
-**Decision: two-sided is declined as the default on this evidence.** The code stays in shadow so it can be re-tested. `one_sided` is the baseline to beat, and the next thing worth testing is the band.
+This repo alone made two-sided look like it had no benefit. The pooled result below corrects that.
 
-Five more benches (299 items, 287 labels proven by history) were harvested inside client repos and stay there. They haven't been graded: `hive.qa.criterion` isn't an allowed surface for those repos, so sending them is the operator's ruling. The redaction dictionary also has to improve first, because it's built from client folder names and one harvest found words it would have missed.
+### Six repos pooled: a bias shift, at a price
+
+The same method ran on five client repos. Their benches stay private and the results are aggregated here. The pool is 340 items and 3,400 requests, with 327 labels proven by history and 13 from a unanimous 3-agent team. Another 19 client items were blocked by redaction and never sent. `jev-1.14.0`, 10 passes, first pass reported.
+
+| Rule | n | Abstain | False pass | False fail | Accuracy | ECE |
+|---|---|---|---|---|---|---|
+| `one_sided` | 340 | 0 | 11 | 18 | 91.5% (311/340) | 0.044 |
+| `two_sided` | 340 | 0 | 7 | 32 | 88.5% (301/340) | 0.040 |
+| `one_sided_band` (0.7 / 0.3) | 340 | 39 | 4 | 7 | 96.3% (290/301) | n/a |
+| `two_sided_band` (0.7 / 0.3) | 340 | 54 | 2 | 12 | 95.1% (272/286) | n/a |
+| `one_sided`, held out | 180 | 0 | 7 | 11 | 90.0% (162/180) | 0.053 |
+| `two_sided`, held out | 180 | 0 | 5 | 18 | 87.2% (157/180) | 0.046 |
+| `one_sided_band`, held out | 180 | 21 | 3 | 4 | 95.6% (152/159) | n/a |
+| `two_sided_band`, held out | 180 | 34 | 1 | 6 | 95.2% (139/146) | n/a |
+
+- **The shift is real in direction, and it costs more than it did in switch.** Two-sided avoided 4 false passes and added 14 false fails, about 3.5 false fails per false pass avoided. Switch's legal eval traded them 1 for 1. Two-sided was right on 4 items where one-sided was wrong, and wrong on 14 the other way (sign test p = 0.03, or 0.18 on held-out items). That p is optimistic, because items cluster by repo and many are before/after pairs of one requirement.
+- **The false pass intervals overlap:** 95% Wilson 3.7-11.4% one-sided, 2.0-8.4% two-sided. False fails separate more clearly, 6.7-15.8% against 13.4-24.9%.
+- **Direction varies by repo.** False passes fell in 3 of 6 repos and held in the others. False fails rose in 5 of 6 and held in 1. Accuracy was lower in 4 of 6, tied in 2.
+- **Calibration is about even.** Pooled ECE is 0.044 and 0.040. The hive-manager gap didn't generalize.
+- **The band beats the second question.** `one_sided_band` has fewer false passes and far fewer false fails than `two_sided`, at the cost of sending 11.5% of items to a person. `two_sided_band` has the fewest false passes, but abstains on 15.9%.
+- **Nothing is ready to promote.** Plain-rule held-out accuracy is under the 95% target. Decisions flipped at 0.5 on 10 of 340 items one-sided and 14 two-sided in 10 passes, against a 100% repeatability target. Jitter reached 0.32 and 0.37, against 0.05.
+- **Evaluator:** on the 19 items it covered, it was wrong 3 times, one-sided 6, two-sided 7. Too few to generalize, but Jev has not shown it beats the Evaluator.
+- **Injection:** no real item was flagged. There's no labeled injection in this data, so it says nothing about recall.
+
+Limits: the 200 labeled / 100 held-out sizes are met, but the labels aren't human-confirmed, so this can't support promotion by itself. Most evidence is code reading rather than QA-worker observations, many requirements were reworded from fix commits, and pairs reduce the real sample. These numbers come from private benches, so CI doesn't recompute them.
+
+**Decision: don't make two-sided the default, and test `one_sided_band` next.** Two-sided pays off only if a false pass costs more than about 3.5 false fails. That may be true for a QA gate, so the weighing is the operator's. Even then, a band gets more of the benefit. All of this stays in shadow.
 
 Replay on real recorded rows: `rescore.py --surface hive.review.finding` over the 27 recorded Jev answers recomputed every top label with 0 mismatches. 14 rows have outcomes, across two question versions, reported apart: 3/6 and 4/8 agreement. Requiring a top probability of at least 0.7 leaves 2/2 and 3/5. Those outcomes are `downstream`, not human labels, and n is too small to tune on.
+
+## Redaction for client benches
+
+`redaction.py` now loads known names from a local memory root through `JUDGMENT_REDACT_MEMORY_ROOT`: clients, partners, pipeline, display names, contact tables and person memories. No names are in this repo. It also blocks phone numbers and URLs on hosts that could identify someone, and a name inside an identifier like `name_orders` now matches. A hit still blocks the item; nothing is rewritten.
+
+Limits: a name that isn't in local memory, or that's joined into camelCase, isn't caught. The check only blocks known names, so review what a new surface sends.
+
+The operator ruled on 2026-10-30 that `hive.qa.criterion` may be sent for allowlisted client repos. That's recorded in the private root policy, not in this repo's policy, which still allows only this project. Every evidence file that was sent passes the fixed screen, including the hive-manager bench sent before the fix.
 
 ## Before real rows can be judged
 
