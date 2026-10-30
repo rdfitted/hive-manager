@@ -1,8 +1,9 @@
-"""Zero-call rescoring: rules, baselines and truth sources."""
+"""Zero-call rescoring: rules, baselines, truth sources, and the frozen bench trace."""
 
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import sys
 import tempfile
@@ -16,8 +17,12 @@ sys.path.insert(0, str(ROOT))
 
 import ledger  # noqa: E402
 import rescore  # noqa: E402
+import shadow_qa  # noqa: E402
 
 
+BENCH_DIR = ROOT / "tests" / "fixtures" / "qa-two-sided"
+BENCH = BENCH_DIR / "bench-v1.json"
+TRACE = BENCH_DIR / "trace-v1.jsonl"
 TABLES = json.loads((ROOT / "decision-tables.json").read_text(encoding="utf-8"))
 QA_RULES = {rule["id"]: rule for rule in TABLES["rescore"]["hive.qa.criterion"]["rules"]}
 
@@ -47,6 +52,21 @@ def run_rows(item: str, index: int, meets: float, misses: float, injection: floa
         row("hive.qa.criterion.misses", "misses", versions[1], misses, "fail", "pass"),
         row("hive.qa.criterion.injection", "injection", versions[2], injection, "true", "false"),
     ]
+
+
+def frozen_rows() -> list[dict]:
+    """Expand the compact frozen trace back into ledger rows."""
+    lines = [json.loads(line) for line in TRACE.read_text(encoding="utf-8").splitlines()]
+    header, runs = lines[0], lines[1:]
+    hashes = {item["id"]: ledger.sha256_of(shadow_qa.observations_of(item))
+              for item in json.loads(BENCH.read_text(encoding="utf-8"))["items"]}
+    versions = (header["question_versions"]["hive.qa.criterion.meets"],
+                header["question_versions"]["hive.qa.criterion.misses"],
+                header["question_versions"]["hive.qa.criterion.injection"])
+    rows = []
+    for item, index, meets, misses, injection in runs:
+        rows += run_rows(item, index, meets, misses, injection, versions=versions, state_hash=hashes[item])
+    return rows
 
 
 class RuleTests(unittest.TestCase):
@@ -206,6 +226,58 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual((1, 1), (baseline["rules"]["top_choice_min_0.7"]["decided"],
                                   baseline["rules"]["top_choice_min_0.7"]["abstained"]))
         self.assertEqual(1.0, baseline["rules"]["top_choice_min_0.7"]["agreement"]["rate"])
+
+
+class FrozenBenchTests(unittest.TestCase):
+    """Reproduces the numbers reported in docs/judgment-two-sided-qa.md with no key."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.ledger = Path(self.temporary.name) / "ledger.jsonl"
+        write_rows(self.ledger, frozen_rows())
+        labels = {item["id"]: item["label"] for item in json.loads(BENCH.read_text(encoding="utf-8"))["items"]}
+        self.report = rescore.rescore_qa(self.ledger, TABLES, labels)
+        self.baseline = self.report["baselines"][0]
+
+    def test_bench_is_the_frozen_one(self):
+        digest = hashlib.sha256(BENCH.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        self.assertEqual("9e1a455f7a96b8cc021ac7aca50c8a054c7c9e62e39d71478867e32198ff3a0a", digest)
+
+    def test_trace_used_the_committed_question_wording(self):
+        header = json.loads(TRACE.read_text(encoding="utf-8").splitlines()[0])
+        questions = json.loads((ROOT / "qa_two_sided_questions.json").read_text(encoding="utf-8"))
+        self.assertEqual({qid: ledger.sha256_of(question) for qid, question in questions.items()},
+                         header["question_versions"],
+                         "A wording change is a new baseline: run a new trace, don't edit this pin.")
+
+    def test_reported_counts_reproduce(self):
+        rules = self.baseline["splits"]["all"]["rules"]
+        self.assertEqual((80, 800), (self.baseline["items"], self.baseline["runs"]))
+        self.assertEqual((3, 0, 77), (rules["one_sided"]["false_passes"], rules["one_sided"]["false_fails"],
+                                      rules["one_sided"]["accuracy"]["k"]))
+        self.assertEqual((1, 0, 79), (rules["two_sided"]["false_passes"], rules["two_sided"]["false_fails"],
+                                      rules["two_sided"]["accuracy"]["k"]))
+        self.assertAlmostEqual(0.049, rules["one_sided"]["ece"], places=3)
+        self.assertAlmostEqual(0.061, rules["two_sided"]["ece"], places=3)
+        self.assertEqual((2, 0), (rules["two_sided_band"]["abstained"], rules["two_sided_band"]["false_passes"]))
+        pair = self.baseline["splits"]["all"]["paired"][0]
+        self.assertEqual((0, 2, 0.5), (pair["a_right_b_wrong"], pair["b_right_a_wrong"], pair["sign_test_p"]))
+        held = self.baseline["splits"]["heldout"]["rules"]
+        self.assertEqual((44, 43, 43), (held["one_sided"]["n"], held["one_sided"]["accuracy"]["k"],
+                                        held["two_sided"]["accuracy"]["k"]))
+
+    def test_repeatability_and_injection_reproduce(self):
+        repeated = self.baseline["repeatability"]
+        self.assertEqual((0, 0.1), (repeated["one_sided"]["decision_flips"], repeated["one_sided"]["jitter_max"]))
+        self.assertEqual((0, 0.26), (repeated["two_sided"]["decision_flips"], repeated["two_sided"]["jitter_max"]))
+        self.assertEqual(4, repeated["two_sided_band"]["decision_flips"])
+        self.assertEqual(["b41", "b57"], self.baseline["injection_flagged_items"])
+
+    def test_report_refuses_to_conclude(self):
+        self.assertEqual("bench-author", self.report["truth_class"])
+        self.assertEqual(3, len(self.baseline["too_thin_to_conclude"]))
+        self.assertIn("TOO THIN", rescore.render_qa(self.report))
 
 
 if __name__ == "__main__":
