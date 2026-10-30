@@ -22,6 +22,8 @@
   "surfaces": {
     "ui.slop": { "mode": "shadow", "question_type": "noul", "bands": { "act_min": 0.8, "human_min": 0.35 }, "reason": "Initial bands are recorded and reported only; never gates." },
     "hive.qa.criterion": { "mode": "shadow", "question_type": "multiclass" },
+    "hive.qa.criterion.misses": { "mode": "shadow", "question_type": "multiclass", "_doc": "Second half of the two-sided check, recorded apart so the scorecard keeps scoring the meets question alone. A yes records as fail." },
+    "hive.qa.criterion.injection": { "mode": "shadow", "question_type": "multiclass", "_doc": "Reported only; it never changes a two-sided decision." },
     "hive.qa.milestone": { "mode": "shadow", "question_type": "multiclass" },
     "hive.qa.criterion.pass_fail": { "mode": "shadow", "question_type": "multiclass", "_doc": "Reserved for a future split; current rows use hive.qa.criterion." },
     "hive.qa.criterion.scored": { "mode": "shadow", "question_type": "scored", "_doc": "Reserved until numeric answer and label rows are implemented." },
@@ -29,6 +31,27 @@
     "hive.retrieval.spawn": { "mode": "shadow", "question_type": "multiclass", "judge": "code", "reason": "Local inclusion decision per kept or dropped reference; sampled model acknowledgements may supply outcomes." },
     "hive.retrieval.delivery": { "mode": "shadow", "question_type": "multiclass", "_doc": "Reserved for a future delivery-integrity question and outcome; no live writer in 0.54.0." },
     "hive.review.finding": { "mode": "shadow", "question_type": "multiclass", "judge": null, "reason": "incumbent review adjudication plus optional gated Jev shadow; promotion awaits held-out labels and #291" }
+  },
+  "rescore": {
+    "_doc": "Rules rescore.py recomputes from recorded probabilities with no model call. Shadow only: nothing reads these to route or gate. The 0.7/0.3 band is TypeSafe's documented starting point, not tuned on our data.",
+    "hive.qa.criterion": {
+      "rules": [
+        { "id": "one_sided", "combine": "meets", "pass_min": 0.5 },
+        { "id": "two_sided", "combine": "min_meets_not_misses", "pass_min": 0.5 },
+        { "id": "one_sided_band", "combine": "meets", "pass_min": 0.7, "fail_below": 0.3 },
+        { "id": "two_sided_band", "combine": "min_meets_not_misses", "pass_min": 0.7, "fail_below": 0.3 }
+      ],
+      "compare": [["one_sided", "two_sided"]],
+      "truth_sources": ["human-label", "operator-override"]
+    },
+    "hive.review.finding": {
+      "rules": [
+        { "id": "top_choice", "combine": "top_choice", "pass_min": 0.0 },
+        { "id": "top_choice_min_0.5", "combine": "top_choice", "pass_min": 0.5 },
+        { "id": "top_choice_min_0.7", "combine": "top_choice", "pass_min": 0.7 }
+      ],
+      "truth_sources": ["human-label", "operator-override", "downstream"]
+    }
   },
   "policy_targets": {
     "_doc": "Surface-specific #291 targets for operator review. The vendored audit reads global targets, not these metadata fields.",
