@@ -250,6 +250,28 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(1.0, baseline["rules"]["top_choice_min_0.7"]["agreement"]["rate"])
 
 
+class MalformedRowTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.ledger = Path(self.temporary.name) / "ledger.jsonl"
+
+    def test_review_row_with_non_numeric_probability_is_skipped(self):
+        for index, bad in enumerate(({"ACCEPT": None, "DECLINE": 0.5}, {"ACCEPT": "high", "DECLINE": 0.5},
+                                     {"ACCEPT": True, "DECLINE": 0.5})):
+            write_rows(self.ledger, [{"v": 1, "kind": "decision", "ts": str(index), "decision_id": f"bad-{index}",
+                                      "surface": "hive.review.finding", "judge": "jev", "error": None,
+                                      "question_version": "qv", "answer": {"result": "ACCEPT"},
+                                      "probabilities": bad}])
+        self.assertEqual([], rescore.rescore_review(self.ledger, TABLES)["baselines"])
+
+    def test_non_object_answer_counts_as_a_mismatch_instead_of_crashing(self):
+        rows = run_rows("a", 0, 0.9, 0.1)
+        rows[0]["answer"] = "pass"
+        write_rows(self.ledger, rows)
+        self.assertEqual(1, rescore.rescore_qa(self.ledger, TABLES)["counters"]["fidelity_mismatches"])
+
+
 class FrozenBenchTests(unittest.TestCase):
     """Reproduces the numbers reported in docs/judgment-two-sided-qa.md with no key."""
 

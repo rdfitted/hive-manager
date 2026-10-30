@@ -40,6 +40,17 @@ def _probability(row: dict) -> float | None:
     return float(value)
 
 
+def _finite_number(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def _recorded_result(row: dict) -> str | None:
+    answer = row.get("answer")
+    result = answer.get("result") if isinstance(answer, dict) else None
+    return result if isinstance(result, str) else None
+
+
 def combined(rule: dict, meets: float, misses: float) -> float:
     if rule["combine"] == "meets":
         return meets
@@ -201,7 +212,7 @@ def _qa_runs(decisions: list[dict], ledger_file: Path, counters: dict) -> list[d
         recorded = [(meets_row, "pass" if meets >= 0.5 else "fail"),
                     (misses_row, "fail" if misses >= 0.5 else "pass")]
         counters["fidelity_mismatches"] += sum(
-            (row.get("answer") or {}).get("result") != expected for row, expected in recorded)
+            _recorded_result(row) != expected for row, expected in recorded)
         injection_row = parts.get(INJECTION_SURFACE)
         runs.append({
             "request_id": request_id, "ts": meets_row.get("ts", ""),
@@ -339,7 +350,8 @@ def rescore_review(ledger_file: Path, tables: dict) -> dict:
     decisions, outcomes = _load(ledger_file)
     rows = [row for row in decisions if row.get("surface") == REVIEW_SURFACE
             and row.get("judge") == "jev" and row.get("error") is None
-            and isinstance(row.get("probabilities"), dict) and row["probabilities"]]
+            and isinstance(row.get("probabilities"), dict) and row["probabilities"]
+            and all(_finite_number(value) for value in row["probabilities"].values())]
     by_baseline: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         by_baseline[str(row.get("question_version"))].append(row)
@@ -351,7 +363,7 @@ def rescore_review(ledger_file: Path, tables: dict) -> dict:
         for row in sorted(members, key=lambda item: item.get("ts", "")):
             probabilities = row["probabilities"]
             top = max(probabilities, key=probabilities.get)
-            mismatches += probabilities[top] > probabilities.get((row.get("answer") or {}).get("result"), -1)
+            mismatches += probabilities[top] > probabilities.get(_recorded_result(row), -1)
             ids = [i for i in (row.get("source_decision_id"), row["decision_id"]) if i]
             truth = _truth_of(ids, outcomes, None, sources, excluded)
             if truth is not None:

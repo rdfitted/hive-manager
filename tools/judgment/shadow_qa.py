@@ -79,16 +79,22 @@ def skip_reason(item: dict, observations: dict) -> str | None:
     return "verdict-text" if VERDICT_TEXT.search(text) else None
 
 
-def _completed_runs(ledger_path: Path) -> dict[str, int]:
+def _completed_runs(ledger_path: Path, questions: Path) -> dict[str, int]:
+    """Runs per item under the current wording. Another baseline's runs don't count."""
     done: dict[str, int] = {}
     if not ledger_path.exists():
         return done
+    current = {question_id: ledger.sha256_of(question)
+               for question_id, question in json.loads(questions.read_text(encoding="utf-8")).items()}
+    requests: dict[str, dict] = {}
     for row in ledger.read_records([ledger_path]):
-        if (row.get("kind") == "decision" and row.get("surface") == SURFACE
-                and row.get("judge") == "jev" and row.get("error") is None
+        if (row.get("kind") == "decision" and row.get("judge") == "jev" and row.get("error") is None
                 and row.get("request_id") and row.get("source_decision_id")):
-            source = str(row["source_decision_id"])
-            done[source] = done.get(source, 0) + 1
+            request = requests.setdefault(str(row["request_id"]), {"source": str(row["source_decision_id"]), "asked": {}})
+            request["asked"][row.get("question_id")] = row.get("question_version")
+    for request in requests.values():
+        if request["asked"] == current:
+            done[request["source"]] = done.get(request["source"], 0) + 1
     return done
 
 
@@ -143,7 +149,7 @@ def run(
     summary: dict[str, Any] = {
         "requests": 0, "recorded": 0, "statuses": {}, "skipped": skipped, "stopped": None,
     }
-    done = {} if dry_run else _completed_runs(ledger_path)
+    done = {} if dry_run else _completed_runs(ledger_path, questions)
     # One full pass at a time, so a capped or interrupted run stays comparable per pass.
     for pass_index in range(runs):
         for item_id, subject, observations in prepared:
@@ -168,12 +174,14 @@ def run(
                     if status in FINAL_STATUSES:
                         summary["skipped"][item_id] = status
                     break
-                if waited >= BACKOFF_TOTAL_S:
+                remaining = BACKOFF_TOTAL_S - waited
+                if remaining <= 0:
                     summary["stopped"] = "backoff-exhausted"
                     return summary
-                sleep(delay)
-                waited += delay
-                delay = min(delay * 2, BACKOFF_TOTAL_S)
+                pause = min(delay, remaining)
+                sleep(pause)
+                waited += pause
+                delay *= 2
     return summary
 
 

@@ -166,7 +166,19 @@ class ShadowQaTests(unittest.TestCase):
         failure = judge.jev_transport.TransportError("http-429")
         summary, _ = self.run_items([item()], side_effect=[failure] * 50)
         self.assertEqual("backoff-exhausted", summary["stopped"])
-        self.assertGreaterEqual(sum(self.slept), shadow_qa.BACKOFF_TOTAL_S)
+        self.assertEqual(shadow_qa.BACKOFF_TOTAL_S, sum(self.slept))
+
+    def test_a_wording_change_does_not_reuse_the_old_baselines_runs(self):
+        self.run_items([item()])
+        changed = json.loads(shadow_qa.DEFAULT_QUESTIONS.read_text(encoding="utf-8"))
+        changed[QIDS[0]]["instructions"] = "Does `evidence` demonstrate `criterion.description`?"
+        reworded = self.root / "reworded.json"
+        reworded.write_text(json.dumps(changed), encoding="utf-8")
+        summary, send = self.run_items([item()], questions=reworded)
+        send.assert_called_once()
+        self.assertEqual(1, summary["recorded"])
+        summary, send = self.run_items([item()], questions=reworded)
+        send.assert_not_called()
 
     def test_resume_and_request_cap(self):
         summary, send = self.run_items([item("a"), item("b")], runs=2, max_requests=3)
