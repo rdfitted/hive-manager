@@ -35,14 +35,16 @@ PASS_RESULTS = {"pass", "fail"}
 
 def _probability(row: dict) -> float | None:
     value = row.get("noul")
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        return None
-    return float(value)
+    return float(value) if _finite_number(value) else None
 
 
 def _finite_number(value: Any) -> bool:
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value))
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # A huge JSON integer doesn't fit a float.
+        return False
 
 
 def _recorded_result(row: dict) -> str | None:
@@ -242,6 +244,8 @@ def _thin_reasons(truth_class: str, labeled: int, heldout: int, targets: dict) -
 
 def rescore_qa(ledger_file: Path, tables: dict, labels: dict[str, str] | None = None,
                truth_sources: set[str] | None = None, labels_class: str = "bench-author") -> dict:
+    if labels is not None and labels_class == "ledger-outcomes":
+        raise ValueError("labels from a file can't be reported as ledger outcomes")
     config = tables["rescore"][QA_SURFACE]
     rules = config["rules"]
     sources = truth_sources if truth_sources is not None else set(config["truth_sources"])

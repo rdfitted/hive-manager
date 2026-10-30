@@ -265,6 +265,23 @@ class MalformedRowTests(unittest.TestCase):
                                       "probabilities": bad}])
         self.assertEqual([], rescore.rescore_review(self.ledger, TABLES)["baselines"])
 
+    def test_a_huge_integer_probability_is_skipped(self):
+        huge = 10 ** 400
+        write_rows(self.ledger, [{"v": 1, "kind": "decision", "ts": "1", "decision_id": "bad",
+                                  "surface": "hive.review.finding", "judge": "jev", "error": None,
+                                  "question_version": "qv", "answer": {"result": "ACCEPT"},
+                                  "probabilities": {"ACCEPT": huge, "DECLINE": 0.5}}])
+        self.assertEqual([], rescore.rescore_review(self.ledger, TABLES)["baselines"])
+        rows = run_rows("a", 0, 0.9, 0.1)
+        rows[0]["noul"] = huge
+        write_rows(self.ledger, rows)
+        self.assertEqual(1, rescore.rescore_qa(self.ledger, TABLES)["counters"]["incomplete_requests"])
+
+    def test_file_labels_cannot_claim_to_be_ledger_outcomes(self):
+        write_rows(self.ledger, run_rows("a", 0, 0.9, 0.1))
+        with self.assertRaisesRegex(ValueError, "ledger outcomes"):
+            rescore.rescore_qa(self.ledger, TABLES, {"a": "pass"}, labels_class="ledger-outcomes")
+
     def test_non_object_answer_counts_as_a_mismatch_instead_of_crashing(self):
         rows = run_rows("a", 0, 0.9, 0.1)
         rows[0]["answer"] = "pass"
