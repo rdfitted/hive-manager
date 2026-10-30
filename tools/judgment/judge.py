@@ -8,8 +8,9 @@ outcome: --decision-id --label JSON --source
 
 Path overrides: --ledger, --tables, --policy, --redact-dictionary (or the
 JUDGMENT_LEDGER, JUDGMENT_TABLES, JUDGMENT_EGRESS_POLICY, and
-JUDGMENT_REDACT_DICTIONARY environment variables). A dry run checks every
-gate, writes a local row, and never calls the provider.
+JUDGMENT_REDACT_DICTIONARY environment variables). JUDGMENT_REDACT_MEMORY_ROOT
+adds known names from a local memory root. A dry run checks every gate, writes
+a local row, and never calls the provider.
 
 The API key comes from TYPESAFE_API_KEY, else from the TYPESAFE_API_KEY= line
 of ~/.ai-gateway.env (override the file with JUDGMENT_KEY_FILE). It is never
@@ -45,6 +46,13 @@ FORBIDDEN = {"answer", "rationale", "severity", "verdict", "result", "measured"}
 MAX_REQUEST_BYTES = 32 * 1024
 QUESTION_TYPES = {"hive.qa.criterion": "noul", "hive.review.finding": "choice"}
 REVIEW_CHOICES = {"ACCEPT", "PARTIAL", "DECLINE"}
+# Companions asked with hive.qa.criterion's primary question: (ledger surface,
+# result if yes, result if no). Their own surfaces keep the scorecard's
+# one-row-per-item collapse scoring the primary question alone.
+QA_COMPANIONS = {
+    "hive.qa.criterion.misses": ("hive.qa.criterion.misses", "fail", "pass"),
+    "hive.qa.criterion.injection": ("hive.qa.criterion.injection", "true", "false"),
+}
 GITHUB_REMOTE = re.compile(
     r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
     r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$",
@@ -224,6 +232,8 @@ def _answer(surface: str, response: Any, question_id: str,
                 "confidence": None,
             }
         yes, no = ("pass", "fail") if surface == "hive.qa.criterion" else ("true", "false")
+        if surface == "hive.qa.criterion" and question_id in QA_COMPANIONS:
+            _, yes, no = QA_COMPANIONS[question_id]
         return {"result": yes if probability >= 0.5 else no}, {
             "probabilities": {yes: probability, no: 1 - probability},
             "threshold_id": "noul-0.5", "noul": probability, "confidence": None,
@@ -286,7 +296,8 @@ def _decision(args: argparse.Namespace, ledger_path: Path, *, ask: bool) -> int:
                 redact_mode = surface_entry["redact"]
                 try:
                     dictionary = redaction.load_dictionary(
-                        args.redact_dictionary, os.environ.get("JUDGMENT_REDACT_PROFILE_ROOT")
+                        args.redact_dictionary, os.environ.get("JUDGMENT_REDACT_PROFILE_ROOT"),
+                        os.environ.get("JUDGMENT_REDACT_MEMORY_ROOT"),
                     )
                 except (ValueError, OSError, UnicodeError, json.JSONDecodeError):
                     dictionary = None
@@ -366,7 +377,8 @@ def _fanout(args: argparse.Namespace, ledger_path: Path) -> int:
         redact_mode = entry["redact"]
         try:
             dictionary = redaction.load_dictionary(
-                args.redact_dictionary, os.environ.get("JUDGMENT_REDACT_PROFILE_ROOT"))
+                args.redact_dictionary, os.environ.get("JUDGMENT_REDACT_PROFILE_ROOT"),
+                os.environ.get("JUDGMENT_REDACT_MEMORY_ROOT"))
         except (ValueError, OSError, UnicodeError, json.JSONDecodeError):
             dictionary = None
         clean, redaction_report = redaction.redact(
@@ -398,22 +410,26 @@ def _fanout(args: argparse.Namespace, ledger_path: Path) -> int:
                     latency_ms = round((time.monotonic() - start) * 1000)
     results = {}
     state_hash = state_ref = None
+    request_id = str(uuid.uuid4())
     for qid, question in questions.items():
         decision_id = str(uuid.uuid4())
         answer, diagnostics = answers.get(qid, (None, {}))
         model = response["model"] if response else None
         usage = response.get("usage") if response else None
+        row_surface = args.surface
+        if args.surface == "hive.qa.criterion" and qid in QA_COMPANIONS:
+            row_surface = QA_COMPANIONS[qid][0]
         row = ledger.record_decision(
-            args.surface, subject, "jev", answer,
+            row_surface, subject, "jev", answer,
             state=safe_state if state_hash is None else None,
             state_hash=state_hash, state_ref=state_ref,
             question_id=qid, question_version=ledger.sha256_of(question),
-            model=model, mode="shadow", routed="none", latency_ms=latency_ms,
+            model=model, sampling={}, mode="shadow", routed="none", latency_ms=latency_ms,
             error=status if status != "recorded" else None,
             decision_id=decision_id, ledger=ledger_path,
             redact_mode=redact_mode, sent=sent, usage=usage, project=project,
             redaction=report, source_decision_id=args.source_decision_id,
-            **diagnostics)
+            request_id=request_id, **diagnostics)
         if row is None:
             results[qid] = _result("ledger-error", decision_id, sent=sent, error="ledger-error")
             code = 5
