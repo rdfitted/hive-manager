@@ -472,12 +472,10 @@
     }
 
     .mode-badge {
-        font-size: 9px;
-        font-weight: 800;
-        text-transform: uppercase;
+        font-size: 11px;
+        font-weight: 600;
         padding: 2px 6px;
         border-radius: var(--radius-sm);
-        letter-spacing: 0.1em;
         /* A compact mode badge uses a neutral semantic backing, not a panel surface. */
         background: var(--bg-surface);
         color: var(--text-primary);
@@ -567,10 +565,8 @@
 
     .preview-live-mode {
         flex-shrink: 0;
-        font-size: 9px;
-        font-weight: 800;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
+        font-size: 11px;
+        font-weight: 600;
         color: var(--accent-cyan);
     }
 
@@ -613,17 +609,15 @@
     }
 
     .stat .label {
-        font-size: 9px;
-        text-transform: uppercase;
+        font-size: 11px;
         color: var(--text-secondary);
-        font-weight: 700;
-        letter-spacing: 0.05em;
+        font-weight: 500;
     }
 
     .stat .value {
         font-size: 11px;
         color: var(--text-primary);
-        font-family: var(--font-mono);
+        font-family: var(--font-body);
     }
 
     .placeholder {

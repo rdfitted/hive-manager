@@ -15,7 +15,8 @@ const fixture = vi.hoisted(() => ({
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('phosphor-svelte', () => ({
   ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {},
-  Hourglass: () => {}, Plus: () => {}, X: () => {},
+  Hourglass: () => {}, Plus: () => {}, X: () => {}, Minus: () => {}, Square: () => {},
+  SidebarSimple: () => {}, MagnifyingGlass: () => {},
 }));
 vi.mock('./SessionHeader.svelte', () => ({ default: () => {} }));
 
@@ -64,6 +65,7 @@ vi.mock('../Terminal.svelte', async () => {
 
 import SessionOverview from './SessionOverview.svelte';
 import TerminalGrid from '../TerminalGrid.svelte';
+import TitleBar from '../shell/TitleBar.svelte';
 import { layout } from '$lib/stores/layout';
 import { ui } from '$lib/stores/ui';
 import { scratchTerminals } from '$lib/stores/scratchTerminals';
@@ -147,9 +149,10 @@ describe('Focus/Grid session terminals', () => {
     active.agents[0].status = { WaitingForInput: 'injected_delivery_failed:nonce:123' };
     publish(active);
     fixture.setHeartbeats!({ [active.agents[0].id]: { summary: 'Checking the terminal pool', timestamp: new Date().toISOString() } });
+    const toolbar = render(TitleBar);
     const view = render(SessionOverview);
     await tick();
-    expect(view.getByRole('button', { name: 'Focus' }).getAttribute('aria-pressed')).toBe('true');
+    expect(toolbar.getByRole('button', { name: 'Focus' }).getAttribute('aria-pressed')).toBe('true');
     expect(view.queryByRole('tablist', { name: 'Session view' })).toBeNull();
     expect(view.queryByText('Observability')).toBeNull();
     expect(view.queryByText('Artifacts')).toBeNull();
@@ -161,15 +164,20 @@ describe('Focus/Grid session terminals', () => {
   });
 
   it('changes Focus/Grid with one click and keeps every existing terminal instance', async () => {
+    const toolbar = render(TitleBar);
     const view = render(SessionOverview);
     await tick();
-    await fireEvent.click(view.getByRole('button', { name: 'Grid' }));
+    await fireEvent.click(toolbar.getByRole('button', { name: 'Grid' }));
     expect(get(layout).sessionViewMode).toBe('grid');
+    expect(JSON.parse(localStorage.getItem('hive-manager-layout')!).sessionViewMode).toBe('grid');
     expect(view.container.querySelectorAll('.terminal-item:not(.hidden-by-maximize)')).toHaveLength(3);
     expect(view.container.querySelector('.focused-agent-info')).toBeNull();
-    await fireEvent.click(view.getByRole('button', { name: 'Focus' }));
+    await fireEvent.click(toolbar.getByRole('button', { name: 'Focus' }));
     expect(get(layout).sessionViewMode).toBe('focus');
     expect(view.container.querySelectorAll('.terminal-item:not(.hidden-by-maximize)')).toHaveLength(1);
+    const panelToggle = within(toolbar.container).getByRole('button', { name: /panel \(/ });
+    await fireEvent.click(panelToggle);
+    await fireEvent.click(panelToggle);
     expect(terminalLifecycle.created).toHaveLength(3);
     expect(terminalLifecycle.destroyed).toHaveLength(0);
     // Positive teardown control proves the counting mock observes component destruction.

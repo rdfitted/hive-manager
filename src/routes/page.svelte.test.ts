@@ -203,6 +203,7 @@ vi.mock('$lib/components/Terminal.svelte', () => ({
 }));
 
 import { activeAgents } from '$lib/stores/sessions';
+import { layout } from '$lib/stores/layout';
 import { ui } from '$lib/stores/ui';
 import Page from './+page.svelte';
 import TerminalGrid from '$lib/components/TerminalGrid.svelte';
@@ -250,6 +251,19 @@ afterEach(() => {
 });
 
 describe('page Escape priority', () => {
+  it('toggles the right panel closed and open with Ctrl+J', async () => {
+    render(Page);
+    for (const collapsed of [true, false]) {
+      const event = new KeyboardEvent('keydown', { key: 'j', ctrlKey: true, bubbles: true, cancelable: true });
+      window.dispatchEvent(event);
+      await tick();
+      expect(event.defaultPrevented).toBe(true);
+      expect(get(layout).rightCollapsed).toBe(collapsed);
+    }
+    expect(testMocks.toggleRight).toHaveBeenCalledTimes(2);
+    expect(testMocks.toggleLeft).not.toHaveBeenCalled();
+  });
+
   it('leaves panels alone while a modal is open', async () => {
     render(Page);
     const modal = document.createElement('div');

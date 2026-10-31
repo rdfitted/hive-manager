@@ -12,11 +12,10 @@ const testMocks = vi.hoisted(() => ({
   sessionSidebar: vi.fn(),
 }));
 
-vi.mock('$lib/stores/layout', () => ({
-  layout: {
-    toggleLeft: testMocks.toggleLeft,
-  },
-}));
+vi.mock('$lib/stores/layout', async () => {
+  const actual = await vi.importActual<typeof import('$lib/stores/layout')>('$lib/stores/layout');
+  return { ...actual, layout: { ...actual.layout, toggleLeft: testMocks.toggleLeft } };
+});
 
 vi.mock('$lib/stores/sessions', async () => {
   const { writable } = await import('svelte/store');
@@ -28,6 +27,7 @@ vi.mock('$lib/stores/sessions', async () => {
     },
     activeSession: writable({
       id: 'session-a',
+      agents: [],
       state: 'Running',
       session_type: { Hive: {} },
       project_path: 'D:/project',

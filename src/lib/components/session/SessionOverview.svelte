@@ -5,7 +5,6 @@
     import { agents } from '../../stores/agents';
     import { events } from '../../stores/events';
     import { conversationStore } from '../../stores/conversations';
-    import { layout } from '../../stores/layout';
     import { activeSession, serdeEnumVariantName, sessions } from '../../stores/sessions';
     import { TERMINAL_SESSION_STATES, terminalPool } from '../../stores/terminalPool';
     import SessionHeader from './SessionHeader.svelte';
@@ -142,18 +141,6 @@
             </div>
         {:else}
             <div class="terminal-section lattice-panel">
-                <div class="terminal-controls lattice-forced-colors-boundary">
-                    <div class="view-controls" role="group" aria-label="Terminal view">
-                        {#each ['focus', 'grid'] as mode}
-                            <button
-                                type="button"
-                                class={`lattice-btn lattice-btn--compact ${$layout.sessionViewMode === mode ? 'lattice-btn--secondary' : 'lattice-btn--ghost'}`}
-                                aria-pressed={$layout.sessionViewMode === mode}
-                                onclick={() => layout.setSessionViewMode(mode === 'grid' ? 'grid' : 'focus')}
-                            >{mode === 'focus' ? 'Focus' : 'Grid'}</button>
-                        {/each}
-                    </div>
-                </div>
                 <div class="terminal-wrapper">
                     {#each pooledSessions as pooled (pooled.id)}
                         {@const isActiveGrid = pooled.id === sessionId}
@@ -221,19 +208,6 @@
         min-height: 0;
         display: flex;
         flex-direction: column;
-    }
-
-    .terminal-controls {
-        padding: 6px 12px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        box-shadow: var(--edge-seam);
-    }
-
-    .view-controls {
-        display: flex;
-        gap: 2px;
     }
 
     .terminal-wrapper {

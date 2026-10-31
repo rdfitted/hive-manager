@@ -313,7 +313,7 @@
 
   .no-agents-content h2 {
     margin: 0 0 var(--space-3);
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-size: var(--text-h2);
     color: var(--text-primary);
   }
