@@ -11,12 +11,14 @@
     variant?: 'dialog' | 'alert';
     placement?: 'center' | 'top';
     portal?: boolean;
+    dismissible?: boolean;
     children?: Snippet;
   };
 
   let {
     open = $bindable(false), onOpenChange, label, labelledby,
-    variant = 'dialog', placement = 'center', portal = true, class: className = '', children, ...rest
+    variant = 'dialog', placement = 'center', portal = true, dismissible = true,
+    class: className = '', children, ...rest
   }: Props = $props();
   const Primitive = $derived(variant === 'alert' ? AlertDialog : BitsDialog);
 
@@ -36,7 +38,11 @@
   {#if open}
     <Primitive.Portal disabled={!portal}>
       <Primitive.Overlay class="dialog-backdrop lattice-modal-backdrop" />
-      <Primitive.Content onInteractOutside={interactOutside}>
+      <Primitive.Content
+        onInteractOutside={interactOutside}
+        escapeKeydownBehavior={dismissible ? undefined : 'ignore'}
+        interactOutsideBehavior={dismissible ? undefined : 'ignore'}
+      >
         {#snippet child({ props })}
           <div {...props} {...rest} class="dialog-content lattice-modal lattice-scroll-chrome {className}" class:top={placement === 'top'} aria-modal="true" aria-label={label} aria-labelledby={labelledby}>
             {@render children?.()}

@@ -329,3 +329,46 @@ it.each([
   await waitFor(() => expect(view.queryByRole('dialog', { name: 'Portal dialog' })).toBeNull());
   expect(onOpenChange).toHaveBeenCalledWith(false);
 });
+
+async function clickOutside(target: HTMLElement) {
+  target.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: 100, clientY: 100 }));
+  target.click();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+}
+
+it.each([
+  { variant: 'dialog', role: 'dialog' },
+  { variant: 'alert', role: 'alertdialog' },
+] as const)('keeps a non-dismissible $variant open until its parent closes it', async ({ variant, role }) => {
+  const outside = document.createElement('button'); document.body.append(outside);
+  const onOpenChange = vi.fn();
+  const view = render(Dialog, { open: false, label: 'Busy dialog', variant, dismissible: false, onOpenChange });
+  await view.rerender({ open: true });
+  const dialog = await waitFor(() => view.getByRole(role, { name: 'Busy dialog' }));
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  await escape();
+  expect(view.getByRole(role, { name: 'Busy dialog' })).toBe(dialog);
+  expect(dialog.getAttribute('data-state')).toBe('open');
+  expect(onOpenChange).not.toHaveBeenCalled();
+  await clickOutside(outside);
+  expect(view.getByRole(role, { name: 'Busy dialog' })).toBe(dialog);
+  expect(dialog.getAttribute('data-state')).toBe('open');
+  expect(onOpenChange).not.toHaveBeenCalled();
+  await view.rerender({ open: false });
+  await waitFor(() => expect(view.queryByRole(role, { name: 'Busy dialog' })).toBeNull());
+});
+
+it('preserves default alert outside-ignore and Escape dismissal', async () => {
+  const outside = document.createElement('button'); document.body.append(outside);
+  const onOpenChange = vi.fn();
+  const view = render(Dialog, { open: false, variant: 'alert', label: 'Default alert', onOpenChange });
+  await view.rerender({ open: true });
+  const dialog = await waitFor(() => view.getByRole('alertdialog', { name: 'Default alert' }));
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  await clickOutside(outside);
+  expect(view.getByRole('alertdialog', { name: 'Default alert' })).toBe(dialog);
+  expect(onOpenChange).not.toHaveBeenCalled();
+  await escape();
+  await waitFor(() => expect(view.queryByRole('alertdialog', { name: 'Default alert' })).toBeNull());
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+});
