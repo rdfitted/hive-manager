@@ -16,7 +16,7 @@
 </span>
 
 <style>
-  .activity-line { display: flex; gap: 4px; min-width: 0; color: var(--text-secondary); font-size: 12px; }
+  .activity-line { display: flex; gap: 4px; min-width: 0; color: var(--text-muted); font-size: 12px; }
   .activity-line.compact { font-size: 11px; }
   .summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .relative { flex-shrink: 0; white-space: nowrap; }
