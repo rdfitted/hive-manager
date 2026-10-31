@@ -72,6 +72,8 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.use
 
 describe('dependency rows and G3 focus', () => {
   it('G3: refresh and status changes leave focusedAgentId alone; only a click moves it', async () => {
+    // Keep Queen selected across both update phases: focus-on-refresh and
+    // focus-on-Error mutants must each fail before the explicit worker click.
     vi.useFakeTimers();
     const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => graph() });
     vi.stubGlobal('fetch', fetcher);
