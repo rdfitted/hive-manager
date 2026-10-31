@@ -771,7 +771,7 @@
     </section>
   {:else}
     <!-- Keep the modal in place to preserve the frozen launch-parity container contract. -->
-    <Dialog open={show} onOpenChange={(open) => { if (!open) handleClose(); }} portal={false} labelledby="launch-dialog-title" class="launch-dialog">
+    <Dialog open={show} onOpenChange={(open) => { if (!open) handleClose(); }} portal={false} dismissible={!launching} labelledby="launch-dialog-title" class="launch-dialog">
       {@render content()}
     </Dialog>
   {/if}

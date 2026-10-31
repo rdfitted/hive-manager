@@ -75,6 +75,18 @@ afterEach(() => {
 });
 
 describe('LaunchDialog modal presentation', () => {
+  it('keeps a launch in progress open when Escape is pressed', async () => {
+    const close = vi.fn();
+    const view = render(LaunchDialog, { props: { show: true, launching: true }, events: { close } });
+    const dialog = view.getByRole('dialog');
+    await fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+    expect(view.getByRole('dialog')).toBe(dialog);
+    expect(close).not.toHaveBeenCalled();
+    await view.rerender({ show: true, launching: false });
+    await fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+    await waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+  });
+
   it('uses the shared modal primitive while inline presentation stays plain', async () => {
     const view = render(LaunchDialog, { props: { show: true } });
     expect(view.getByRole('dialog').getAttribute('aria-modal')).toBe('true');
