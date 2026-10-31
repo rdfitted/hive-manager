@@ -47,10 +47,11 @@
 </Primitive.Root>
 
 <style>
-  .dialog-backdrop { position: fixed; inset: 0; z-index: 110; }
+  /* Equal levels keep each later portal's backdrop above earlier dialog content. */
+  .dialog-backdrop { position: fixed; inset: 0; z-index: calc(110 + var(--bits-dialog-depth, 0)); }
   .dialog-content {
     position: fixed;
-    z-index: 111;
+    z-index: calc(110 + var(--bits-dialog-depth, 0));
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);

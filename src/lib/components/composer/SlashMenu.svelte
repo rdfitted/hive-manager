@@ -1,4 +1,5 @@
 <script lang="ts">
+  import CaretMenu from '../ui/CaretMenu.svelte';
   import type { SlashCommand } from '$lib/composer/commands';
 
   interface Props {
@@ -13,7 +14,7 @@
 </script>
 
 {#if items.length > 0}
-  <div class="slash-menu lattice-panel lattice-scroll-chrome" style="left: {x}px; top: {y}px;" role="listbox" aria-label="Commands">
+  <CaretMenu {x} {y} label="Commands" kind="slash" class="slash-menu">
     {#each items as cmd, i (cmd.name)}
       <button
         type="button"
@@ -26,23 +27,10 @@
         <span class="desc">{cmd.description}</span>
       </button>
     {/each}
-  </div>
+  </CaretMenu>
 {/if}
 
 <style>
-  .slash-menu {
-    position: fixed;
-    z-index: 200;
-    min-width: 220px;
-    max-width: 340px;
-    max-height: 240px;
-    overflow-y: auto;
-    box-shadow: var(--elev-3), var(--edge-lip);
-    padding: 4px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
 
   .cmd {
     color: var(--accent-cyan);

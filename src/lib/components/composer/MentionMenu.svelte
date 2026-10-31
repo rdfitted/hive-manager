@@ -1,4 +1,5 @@
 <script lang="ts">
+  import CaretMenu from '../ui/CaretMenu.svelte';
   import type { MentionItem } from '$lib/composer/sources';
 
   interface Props {
@@ -21,7 +22,7 @@
 </script>
 
 {#if items.length > 0}
-  <div class="mention-menu lattice-panel lattice-scroll-chrome" style="left: {x}px; top: {y}px;" role="listbox" aria-label="Mentions">
+  <CaretMenu {x} {y} label="Mentions" kind="mention" class="mention-menu">
     {#each items as item, i (item.kind + ':' + item.id)}
       <button
         type="button"
@@ -35,23 +36,10 @@
         {#if item.detail}<span class="detail">{item.detail}</span>{/if}
       </button>
     {/each}
-  </div>
+  </CaretMenu>
 {/if}
 
 <style>
-  .mention-menu {
-    position: fixed;
-    z-index: 200;
-    min-width: 200px;
-    max-width: 320px;
-    max-height: 240px;
-    overflow-y: auto;
-    box-shadow: var(--elev-3), var(--edge-lip);
-    padding: 4px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
 
   .glyph {
     color: var(--accent-cyan);
