@@ -45,3 +45,11 @@ describe('canceled status text contrast', () => {
     expect(luminance('--status-canceled')).toBeLessThan(luminance('--status-queued'));
   });
 });
+
+describe('UI role text contrast', () => {
+  it.each(['--canvas', '--chrome', '--toolbar', '--toolbar-control', '--surface', '--surface-raised', '--surface-overlay', '--input'])
+    ('keeps primary and muted text readable on %s', (surface) => {
+      expect(contrast('--text-primary', surface)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast('--text-muted', surface)).toBeGreaterThanOrEqual(4.5);
+    });
+});
