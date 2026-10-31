@@ -10,7 +10,7 @@
 
 <!-- Viewport coordinates must escape Dialog's layout containment. This surface never moves focus. -->
 <Portal>
-  <div class="caret-menu lattice-panel lattice-scroll-chrome {className}" class:slash={kind === 'slash'} style="left: {x}px; top: {y}px;" role="listbox" tabindex="-1" aria-label={label} onpointerdown={(event) => event.stopPropagation()}>
+  <div class="caret-menu lattice-panel lattice-scroll-chrome {className}" class:slash={kind === 'slash'} style="left: {x}px; top: {y}px;" role="listbox" tabindex="-1" aria-label={label} onpointerdown={(event) => event.stopPropagation()} onmousedown={(event) => event.preventDefault()}>
     {@render children()}
   </div>
 </Portal>

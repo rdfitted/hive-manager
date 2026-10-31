@@ -40,6 +40,12 @@ describe('composer caret menus', () => {
     expect(dialog.contains(menu)).toBe(false);
     expect(menu.style.left).toBe('173px'); expect(menu.style.top).toBe('285px');
     expect(document.activeElement).toBe(editor);
+    // jsdom does not perform native mouse focus; cancellation proves padding cannot focus the listbox.
+    menu.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: 100, clientY: 100 }));
+    const paddingDown = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    menu.dispatchEvent(paddingDown);
+    expect(paddingDown.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(editor);
     await fireEvent.keyDown(editor, { key: 'ArrowDown' });
     const options = Array.from(menu.querySelectorAll('[role="option"]'));
     expect(options.length).toBeGreaterThan(1);
