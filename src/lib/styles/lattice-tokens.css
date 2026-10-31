@@ -16,6 +16,8 @@
   --bg-sunken: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
 
   --border-structural: #191919;
+  /* Meaningful control boundaries need 3:1 against the neutral surface ladder. */
+  --border-control: #666666;
 
   /* ── Text ──────────────────────────────────────────────────────── */
   --text-primary: #E8E8E8;

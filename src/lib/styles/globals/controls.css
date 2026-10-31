@@ -47,7 +47,7 @@
 }
 
 .lattice-btn--secondary {
-  --lattice-btn-ring: var(--border-structural);
+  --lattice-btn-ring: var(--border-control);
   color: var(--text-primary);
 }
 
@@ -207,7 +207,7 @@
 
 .lattice-btn--card {
   align-items: flex-start;
-  --lattice-btn-ring: var(--border-structural);
+  --lattice-btn-ring: var(--border-control);
   padding: calc(var(--space-3) + 1px);
   background-color: var(--bg-surface);
 }
@@ -218,7 +218,7 @@
 }
 
 .lattice-btn--chip {
-  --lattice-btn-ring: var(--border-structural);
+  --lattice-btn-ring: var(--border-control);
   padding: calc(2px + 1px) calc(var(--space-2) + 1px);
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
@@ -275,7 +275,7 @@
 
 /* Labels and role-controls can share selection/focus without button layout. */
 .lattice-selectable {
-  border: 1px solid var(--border-structural);
+  border: 1px solid var(--border-control);
   border-radius: var(--control-radius);
   cursor: pointer;
   transition:
@@ -311,7 +311,7 @@
   box-sizing: border-box;
   background-color: var(--bg-void);
   color: var(--text-primary);
-  border: 1px solid var(--border-structural);
+  border: 1px solid var(--border-control);
   border-radius: var(--control-radius);
   padding: var(--space-2);
   transition:

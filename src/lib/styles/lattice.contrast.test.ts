@@ -53,3 +53,25 @@ describe('UI role text contrast', () => {
       expect(contrast('--text-muted', surface)).toBeGreaterThanOrEqual(4.5);
     });
 });
+
+describe('shared control boundary contrast', () => {
+  // Inputs use void inside; outlined buttons/choices can sit on any neutral
+  // shell or overlay surface, and card controls use the chrome surface inside.
+  it.each(['void', 'chrome', 'panel', 'raised', 'elevated'])
+    ('has at least 3:1 contrast against the adjacent %s surface', (surface) => {
+      expect(contrast('--border-control', `--bg-${surface}`)).toBeGreaterThanOrEqual(3);
+    });
+
+  it.each([
+    ['.lattice-input', 'border'],
+    ['.lattice-selectable', 'border'],
+    ['.lattice-btn--secondary', '--lattice-btn-ring'],
+    ['.lattice-btn--card', '--lattice-btn-ring'],
+    ['.lattice-btn--chip', '--lattice-btn-ring'],
+  ])('uses the control role for the unfocused %s boundary', (selector, property) => {
+    const controls = readFileSync('src/lib/styles/globals/controls.css', 'utf8');
+    const rule = controls.split('}').filter((block) => block.includes(`${selector} {`))
+      .map((block) => block.slice(block.indexOf(`${selector} {`))).join('\n');
+    expect(rule).toContain(`${property}: ${property === 'border' ? '1px solid ' : ''}var(--border-control);`);
+  });
+});
