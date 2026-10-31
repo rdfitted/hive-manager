@@ -134,6 +134,7 @@ describe('LaunchDialog shared state', () => {
       }
       await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
       await fireEvent.input(view.getByLabelText('Session Name (optional)'), { target: { value: 'Round trip' } });
+      await fireEvent.input(view.getByLabelText('Project Path'), { target: { value: 'C:/code/advanced-edit' } });
       if (mode === 'solo') {
         expect((view.getByLabelText('Task Description') as HTMLTextAreaElement).value)
           .toBe('Keep this task through every view');
@@ -145,6 +146,7 @@ describe('LaunchDialog shared state', () => {
         expect((view.getByLabelText(mode === 'fusion' ? 'Number of Variants' : 'Number of Debaters') as HTMLSelectElement).value).toBe('3');
       }
       await fireEvent.click(view.getByRole('button', { name: 'Back to composer' }));
+      expect(view.getByRole('button', { name: /Project C:\/code\/advanced-edit/ })).toBeTruthy();
       expect((view.getByLabelText('What would you like to work on?') as HTMLTextAreaElement).value)
         .toBe('Keep this task through every view');
       expect((view.getByLabelText('Workers') as HTMLSelectElement).value).toBe(mode === 'solo' ? '1' : '3');
@@ -155,6 +157,7 @@ describe('LaunchDialog shared state', () => {
       expect(launch).toHaveBeenCalledTimes(1);
       const payload = launch.mock.calls[0][0].detail;
       expect(payload.name).toBe('Round trip');
+      expect(mode === 'solo' ? payload.projectPath : payload.project_path).toBe('C:/code/advanced-edit');
       expect(mode === 'solo' ? payload.taskDescription : mode === 'fusion' ? payload.task_description : mode === 'debate' ? payload.topic : payload.prompt)
         .toBe('Keep this task through every view');
       if (mode !== 'solo') {

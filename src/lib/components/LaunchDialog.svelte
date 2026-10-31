@@ -705,7 +705,7 @@
     {/if}
     {#if showAdvanced}
 <LaunchAdvanced
-  {mode} {projectPath} bind:sessionName
+  {mode} bind:projectPath bind:sessionName
   bind:sessionColor bind:prompt bind:soloTask
   bind:error {launchError} bind:showPreview
   bind:showAdvanced bind:showHiveAdvanced {launching}
