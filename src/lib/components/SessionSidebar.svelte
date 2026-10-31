@@ -4,10 +4,12 @@
   import { goto } from '$app/navigation';
   import { launch, type LaunchMode } from '$lib/stores/launch';
   import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
-  import { layout, RAIL_WIDTH } from '$lib/stores/layout';
+  import { layout, COLLAPSED_PANEL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
   import { heartbeatStore } from '$lib/stores/conversations';
   import { agentActivity, needsAttention } from '$lib/stores/agentActivity';
+  import { agentDependencies } from '$lib/stores/agentDependencies';
+  import { Dialog } from '$lib/components/ui';
   import { shortcutLabel } from '$lib/platform';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, tick } from 'svelte';
@@ -91,7 +93,17 @@
   let collapsed = $derived($layout.leftCollapsed);
   const toggleShortcut = shortcutLabel('B');
   let toggleLabel = $derived(`${collapsed ? 'Expand' : 'Collapse'} sidebar (${toggleShortcut})`);
-  let drawerWidth = $derived($layout.leftWidth - RAIL_WIDTH);
+  let sidebarWidth = $derived(collapsed ? COLLAPSED_PANEL_WIDTH : $layout.leftWidth);
+  let visibleSessions = $derived($sessions.sessions.filter(s => isActiveState(s.state) || s.id === $activeSession?.id));
+  let projectGroups = $derived.by(() => {
+    const groups = new Map<string, Session[]>();
+    for (const session of visibleSessions) {
+      const group = groups.get(session.project_path) ?? [];
+      group.push(session);
+      groups.set(session.project_path, group);
+    }
+    return [...groups].map(([path, items]) => ({ path, items }));
+  });
   let knowledgeHref = $derived(
     $activeSession
       ? `/knowledge?session_id=${encodeURIComponent($activeSession.id)}`
@@ -139,6 +151,7 @@
 
   // Keep the shared heartbeat refresh alive even while the agent tree is collapsed.
   onMount(() => agentActivity.subscribe(() => {}));
+  onMount(() => agentDependencies.subscribe(() => {}));
 
   async function loadPersistedSessions() {
     loadingPersisted = true;
@@ -333,15 +346,20 @@
   }
 </script>
 
-<!-- The permanent rail is shell chrome; the adjacent drawer is a floating panel. -->
 <aside
   class="sidebar"
   class:resizing
-  style:width={`${RAIL_WIDTH}px`}
-  style:min-width={`${RAIL_WIDTH}px`}
-  style:flex-basis={`${RAIL_WIDTH}px`}
+  style:width={`${sidebarWidth}px`}
+  style:min-width={`${sidebarWidth}px`}
+  style:flex-basis={`${sidebarWidth}px`}
 >
-  <div class="sidebar-rail">
+  <div
+    class="sidebar-drawer lattice-forced-colors-boundary"
+    class:collapsed
+    inert={collapsed}
+    aria-hidden={collapsed}
+  >
+  <header class="sidebar-header">
     <nav class="view-toggle" aria-label="View switcher">
       {#each [
         { path: '/', href: '/', icon: House, label: 'Sessions' },
@@ -350,28 +368,20 @@
       ] as { path, href, icon: Icon, label } (path)}
         <a
           {href}
-          class="lattice-btn lattice-btn--ghost lattice-btn--icon"
+          class="destination lattice-btn lattice-btn--ghost"
           aria-label={label}
           aria-current={$page.url.pathname === path ? 'page' : undefined}
           title={label}
           onclick={(event) => handleViewClick(event, path)}
         >
           <Icon size={18} weight="light" />
+          <span>{label}</span>
         </a>
       {/each}
     </nav>
-    <!-- Pointer shortcut only; the labelled button below is the accessible control. -->
     <button
       type="button"
-      class="rail-filler"
-      tabindex="-1"
-      aria-hidden="true"
-      onclick={() => layout.toggleLeft()}
-      title={toggleLabel}
-    ></button>
-    <button
-      type="button"
-      class="rail-toggle lattice-btn lattice-btn--ghost lattice-btn--icon"
+      class="sidebar-toggle lattice-btn lattice-btn--ghost lattice-btn--icon"
       onclick={() => layout.toggleLeft()}
       title={toggleLabel}
       aria-label={toggleLabel}
@@ -379,15 +389,7 @@
     >
       <SidebarSimple size={18} weight="light" aria-hidden="true" />
     </button>
-  </div>
-
-  <div
-    class="sidebar-drawer lattice-forced-colors-boundary"
-    class:collapsed
-    style:width={`${drawerWidth}px`}
-    inert={collapsed}
-    aria-hidden={collapsed}
-  >
+  </header>
     <div class="sidebar-content lattice-scroll-chrome">
     <section class="section">
       <button type="button" class="lattice-btn lattice-btn--link lattice-btn--row" aria-expanded={!$layout.sessionsCollapsed} onclick={() => layout.toggleSection('sessionsCollapsed')}>
@@ -401,13 +403,18 @@
         <h3 class="section-title">Active</h3>
       </button>
       {#if !$layout.sessionsCollapsed}
-        {#if $sessions.sessions.filter(s => isActiveState(s.state) || s.id === $activeSession?.id).length === 0}
+        {#if visibleSessions.length === 0}
           <p class="empty-state">No active sessions</p>
         {:else}
-          <ul class="session-list">
-            {#each $sessions.sessions.filter(s => isActiveState(s.state) || s.id === $activeSession?.id) as session}
+          {#each projectGroups as group (group.path)}
+          <div class="project-group">
+          {#if projectGroups.length > 1}
+            <h4 class="project-heading" title={group.path}>{group.path}</h4>
+          {/if}
+          <ul class="session-list" aria-label={projectGroups.length > 1 ? `Sessions in ${group.path}` : 'Active sessions'}>
+            {#each group.items as session (session.id)}
               {@const attentionAgents = session.agents.filter(agent => needsAttention(agent, $heartbeatStore.staleAgents))}
-              <li class="session-item" style:--session-color={session.color || 'transparent'}>
+              <li class="session-item">
                 <div class="session-row">
                   <div
                     class="session-button lattice-btn lattice-btn--row"
@@ -475,6 +482,7 @@
                       </div>
                     {:else}
                       <span class="session-path">
+                        {#if session.color}<span class="session-color" style:background={session.color} aria-hidden="true"></span>{/if}
                         {session.name || session.project_path.split(/[/\\]/).pop()}
                         <button
                           class="lattice-btn lattice-btn--ghost lattice-btn--icon"
@@ -540,6 +548,8 @@
               </li>
             {/each}
           </ul>
+          </div>
+          {/each}
         {/if}
       {/if}
     </section>
@@ -626,21 +636,11 @@
   on:cancel={dismissResumeModal}
 />
 
-<!-- Close confirmation dialog -->
-{#if showCloseConfirm}
-  <div
-    class="confirm-overlay"
-    onclick={dismissCloseConfirm}
-    onkeydown={(event) => event.key === 'Escape' && dismissCloseConfirm()}
-    role="presentation"
-  >
+<Dialog open={showCloseConfirm !== null} onOpenChange={(open) => { if (!open) dismissCloseConfirm(); }}
+  label="Close Session?" variant="alert"
+  onkeydown={(event) => { if (closing && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); } }}>
     <div
-      class="confirm-dialog lattice-modal"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') dismissCloseConfirm(); }}
-      role="dialog"
-      aria-modal="true"
-      tabindex="-1"
+      class="confirm-dialog"
     >
       <h3>Close Session?</h3>
       <p>This will terminate all agents and mark the session as closed. This action cannot be undone.</p>
@@ -651,8 +651,7 @@
         </button>
       </div>
     </div>
-  </div>
-{/if}
+</Dialog>
 
 <style>
   .sidebar {
@@ -661,9 +660,8 @@
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
-    overflow: visible;
-    background: var(--bg-void);
-    box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.45);
+    min-width: 0;
+    background: var(--chrome);
     z-index: 20;
   }
 
@@ -675,66 +673,36 @@
     right: -3px;
   }
 
-  .sidebar-rail {
-    position: relative;
-    z-index: 2;
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 0;
-    width: 100%;
-    background: var(--bg-void);
-  }
-
   .sidebar-drawer {
-    position: absolute;
-    top: 11px;
-    bottom: 11px;
-    left: 100%;
-    z-index: 1;
+    position: relative;
     display: flex;
     min-width: 0;
     flex-direction: column;
     overflow: hidden;
-    border-radius: var(--radius-lg);
-    background: var(--bg-panel);
-    box-shadow: var(--elev-3), var(--edge-lip);
-    transform: translateX(0);
-    transition: transform var(--motion-duration-standard) var(--motion-ease-standard);
+    flex: 1;
+    background: var(--chrome);
+    border-right: 1px solid var(--border);
   }
 
   .sidebar-drawer.collapsed {
     pointer-events: none;
-    transform: translateX(-104%);
+    visibility: hidden;
   }
 
   .view-toggle {
     display: flex;
-    flex-direction: column;
+    flex-wrap: wrap;
     gap: 4px;
-    flex: none;
-  }
-
-  .rail-filler {
-    align-self: stretch;
     flex: 1;
-    min-height: 24px;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    cursor: pointer;
-    transition: background-color var(--motion-duration-standard) var(--motion-ease-standard);
+    min-width: 0;
   }
 
-  .rail-toggle {
-    flex: none;
-  }
-
-  .rail-filler:hover {
-    background: var(--color-surface-hover);
-  }
+  .sidebar-header { display: flex; align-items: flex-start; gap: 4px; padding: var(--sidebar-inset); border-bottom: 1px solid var(--border); }
+  .destination { display: flex; gap: 4px; padding-inline: 5px; font-size: 11px; }
+  .destination[aria-current="page"] { background: var(--toolbar-control); color: var(--text-primary); }
+  .sidebar-toggle { margin-left: auto; flex-shrink: 0; }
+  .project-heading { margin: 12px 8px 4px; font-size: 12px; font-weight: 600; color: var(--text-muted); overflow-wrap: anywhere; }
+  .session-color { display: inline-block; width: 7px; height: 7px; border: 1px solid var(--border); border-radius: 50%; flex-shrink: 0; }
 
   .sidebar-content {
     flex: 1;
@@ -752,8 +720,6 @@
     font-size: 11px;
     font-weight: 600;
     color: inherit;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
   }
 
   .chevron {
@@ -799,7 +765,6 @@
   .session-item {
     margin-bottom: 4px;
     border-radius: var(--radius-md);
-    box-shadow: inset 3px 0 0 var(--session-color);
   }
 
   .session-copy {
@@ -865,7 +830,6 @@
     border-radius: var(--radius-sm);
     font-size: 9px;
     font-weight: 600;
-    text-transform: uppercase;
     background: var(--bg-void);
     color: var(--text-secondary);
     box-shadow: inset 0 0 0 1px var(--border-structural);
@@ -915,17 +879,6 @@
     align-items: flex-start;
   }
 
-  .confirm-overlay {
-    position: fixed;
-    inset: 0;
-    /* Standalone modal scrim preserved per the Wave 3 scrim invariant. */
-    background: color-mix(in srgb, var(--bg-void) 60%, transparent);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10;
-  }
-
   .confirm-dialog {
     padding: 20px;
     width: 220px;
@@ -949,6 +902,12 @@
     display: flex;
     gap: 8px;
     justify-content: flex-end;
+  }
+
+  @media (forced-colors: active) {
+    .sidebar-drawer, .sidebar-header { border-color: CanvasText; }
+    .session-color { background: CanvasText !important; border-color: CanvasText; }
+    .destination[aria-current="page"] { outline: 1px solid Highlight; }
   }
 
 </style>

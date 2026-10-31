@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { get, type Writable } from 'svelte/store';
 import type { AgentInfo, Session } from '$lib/stores/sessions';
 
-const launchMocks = vi.hoisted(() => ({ goto: vi.fn().mockResolvedValue(undefined), invoke: vi.fn().mockResolvedValue([]) }));
+const launchMocks = vi.hoisted(() => ({ goto: vi.fn().mockResolvedValue(undefined), invoke: vi.fn().mockResolvedValue([]), closeSession: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: launchMocks.invoke }));
 vi.mock('$app/navigation', () => ({ goto: launchMocks.goto }));
 vi.mock('$app/stores', async () => {
@@ -14,7 +14,7 @@ vi.mock('$app/stores', async () => {
 vi.mock('$lib/stores/sessions', async () => {
   const { writable } = await import('svelte/store');
   return {
-    sessions: { ...writable({ sessions: [] }), setActiveSession: vi.fn() },
+    sessions: { ...writable({ sessions: [] }), setActiveSession: vi.fn(), closeSession: launchMocks.closeSession },
     activeSession: writable(null),
     activeAgents: writable([]),
     serdeEnumVariantName: (value: unknown) => typeof value === 'string' ? value : value && typeof value === 'object' ? Object.keys(value)[0] : undefined,
@@ -26,6 +26,7 @@ vi.mock('./QueenControls.svelte', () => ({ default: () => {} }));
 vi.mock('./ResumeConfirmModal.svelte', () => ({ default: () => {} }));
 
 import SessionSidebar from './SessionSidebar.svelte';
+import TitleBar from './shell/TitleBar.svelte';
 import { layout } from '$lib/stores/layout';
 import { sessions, activeSession, activeAgents } from '$lib/stores/sessions';
 import { ui } from '$lib/stores/ui';
@@ -34,9 +35,11 @@ import { page } from '$app/stores';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404 }));
   launch.close();
   (page as unknown as Writable<unknown>).set({ url: new URL('http://localhost/') });
   launchMocks.invoke.mockResolvedValue([]);
+  launchMocks.closeSession.mockResolvedValue(undefined);
   (sessions as unknown as Writable<unknown>).set({ sessions: [] });
   (activeSession as Writable<Session | null>).set(null);
   (activeAgents as Writable<AgentInfo[]>).set([]);
@@ -107,12 +110,13 @@ describe('SessionSidebar launch entries', () => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
-describe('SessionSidebar rail toggle', () => {
+describe('sidebar toggle moved from rail to TitleBar (D4)', () => {
   it('has a visible button that collapses and expands the sidebar', async () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32');
-    const view = render(SessionSidebar);
+    const view = render(TitleBar);
     const toggle = view.getByRole('button', { name: 'Collapse sidebar (Ctrl+B)' });
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(toggle.querySelector('svg')).toBeTruthy();
@@ -127,7 +131,7 @@ describe('SessionSidebar rail toggle', () => {
 
   it('labels the shortcut with ⌘ on macOS', () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
-    const view = render(SessionSidebar);
+    const view = render(TitleBar);
     expect(view.getByRole('button', { name: 'Collapse sidebar (⌘B)' })).toBeTruthy();
   });
 });
@@ -182,5 +186,91 @@ describe('sidebar session and agent attention', () => {
     expect(view.queryByRole('button', { name: /Needs you:/ })).toBeNull();
     expect(view.queryByRole('button', { name: /need attention in/ })).toBeNull();
     expect(view.getByRole('img', { name: 'WaitingForInput' })).toBeTruthy();
+  });
+});
+
+describe('sidebar project grouping and header navigation', () => {
+  function session(id: string, project_path: string): Session {
+    return { id, name: id, project_path, created_at: '2026-10-31', state: 'Running',
+      session_type: { Hive: { worker_count: 0 } }, agents: [] } as Session;
+  }
+  function load(items: Session[]) {
+    (sessions as unknown as Writable<unknown>).set({ sessions: items });
+    if (get(layout).sessionsCollapsed) layout.toggleSection('sessionsCollapsed');
+  }
+
+  it('groups by full project_path and keeps sessions in the correct project', () => {
+    load([session('A1', 'D:/one/project'), session('B1', 'D:/two/project'), session('A2', 'D:/one/project')]);
+    const view = render(SessionSidebar);
+    expect(view.getAllByRole('heading', { level: 4 }).map((heading) => heading.textContent)).toEqual(['D:/one/project', 'D:/two/project']);
+    const one = within(view.getByRole('list', { name: 'Sessions in D:/one/project' }));
+    expect(one.getByText('A1')).toBeTruthy(); expect(one.getByText('A2')).toBeTruthy();
+    expect(one.queryByText('B1')).toBeNull();
+    expect(within(view.getByRole('list', { name: 'Sessions in D:/two/project' })).getByText('B1')).toBeTruthy();
+  });
+
+  it('keeps one project flat and excludes inactive sessions in other projects', () => {
+    load([session('A1', 'D:/one'), session('A2', 'D:/one'), { ...session('Old', 'D:/two'), state: 'Completed' }]);
+    const view = render(SessionSidebar);
+    expect(view.queryAllByRole('heading', { level: 4 })).toHaveLength(0);
+    expect(within(view.getByRole('list', { name: 'Active sessions' })).getAllByRole('listitem')).toHaveLength(2);
+    expect(view.queryByText('Old')).toBeNull();
+  });
+
+  it('keeps all three destinations in the sidebar header and removes the rail', async () => {
+    const active = session('A', 'D:/one');
+    load([active]); (activeSession as Writable<Session | null>).set(active);
+    const view = render(SessionSidebar);
+    const header = view.container.querySelector('aside header')!;
+    const nav = within(header as HTMLElement);
+    expect(nav.getByRole('link', { name: 'Sessions' }).getAttribute('href')).toBe('/');
+    expect(nav.getByRole('link', { name: 'Dashboard' }).getAttribute('href')).toBe('/dashboard');
+    expect(nav.getByRole('link', { name: 'Knowledge' }).getAttribute('href')).toBe('/knowledge?session_id=A');
+    expect(view.container.querySelector('.sidebar-rail')).toBeNull();
+    await fireEvent.click(nav.getByRole('button', { name: /Collapse sidebar/ }));
+    expect(get(layout).leftCollapsed).toBe(true);
+    expect(view.container.querySelector('aside')?.style.width).toBe('0px');
+    expect(view.container.querySelector('.sidebar-drawer')?.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('uses the shared close dialog, dismisses without closing, and confirms the intended session', async () => {
+    load([session('A', 'D:/one')]);
+    const view = render(SessionSidebar);
+    await fireEvent.click(view.getByRole('button', { name: 'Close Session' }));
+    const body = within(document.body);
+    const dialog = await body.findByRole('alertdialog', { name: 'Close Session?' });
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(view.container.contains(dialog)).toBe(false);
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(body.queryByRole('alertdialog')).toBeNull());
+    expect(launchMocks.closeSession).not.toHaveBeenCalled();
+    await fireEvent.click(view.getByRole('button', { name: 'Close Session' }));
+    const escaped = await body.findByRole('alertdialog', { name: 'Close Session?' });
+    await fireEvent.keyDown(escaped, { key: 'Escape' });
+    await waitFor(() => expect(body.queryByRole('alertdialog')).toBeNull());
+    expect(launchMocks.closeSession).not.toHaveBeenCalled();
+    await fireEvent.click(view.getByRole('button', { name: 'Close Session' }));
+    const reopened = await body.findByRole('alertdialog', { name: 'Close Session?' });
+    await fireEvent.click(within(reopened).getByRole('button', { name: 'Close Session' }));
+    await waitFor(() => expect(launchMocks.closeSession).toHaveBeenCalledTimes(1));
+    expect(launchMocks.closeSession).toHaveBeenCalledWith('A');
+    await waitFor(() => expect(body.queryByRole('alertdialog')).toBeNull());
+  });
+
+  it('keeps the close confirmation open on Escape while closing is in progress', async () => {
+    let finish!: () => void;
+    launchMocks.closeSession.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    load([session('A', 'D:/one')]);
+    const view = render(SessionSidebar);
+    await fireEvent.click(view.getByRole('button', { name: 'Close Session' }));
+    const body = within(document.body);
+    const dialog = await body.findByRole('alertdialog', { name: 'Close Session?' });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Close Session' }));
+    expect((within(dialog).getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(body.getByRole('alertdialog', { name: 'Close Session?' })).toBe(dialog);
+    expect(launchMocks.closeSession).toHaveBeenCalledTimes(1);
+    finish();
+    await waitFor(() => expect(body.queryByRole('alertdialog')).toBeNull());
   });
 });
