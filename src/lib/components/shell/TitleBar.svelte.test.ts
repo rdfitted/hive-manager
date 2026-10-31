@@ -108,6 +108,7 @@ describe('TitleBar', () => {
   it.each([false, true])('preserves intended focus after a dialog closes (another control focused: %s)', async (anotherControlFocused) => {
     const view = render(TitleBarDialog);
     const trigger = view.getByRole('button', { name: /Open command palette/ });
+    const controls = trigger.closest<HTMLElement>('.shell-actions')!;
     const other = document.createElement('textarea');
     other.setAttribute('aria-label', 'Existing terminal focus');
     view.container.append(other);
@@ -115,17 +116,17 @@ describe('TitleBar', () => {
     const focus = trigger.focus.bind(trigger);
     // jsdom does not consistently implement the browser rule that inert rejects focus.
     vi.spyOn(trigger, 'focus').mockImplementation((options) => {
-      if (!trigger.closest('[inert]')) focus(options);
+      if (!controls.inert) focus(options);
       // Simulate a terminal or other control receiving explicit focus during teardown.
       else if (anotherControlFocused) other.focus();
     });
     await fireEvent.click(trigger);
-    await waitFor(() => expect(trigger.closest('[inert]')).toBeTruthy());
+    await waitFor(() => expect(controls.inert).toBe(true));
     const close = within(document.body).getByRole('button', { name: 'Close test dialog' });
     close.focus();
     await fireEvent.click(close);
     await waitFor(() => {
-      expect(trigger.closest('[inert]')).toBeNull();
+      expect(controls.inert).toBe(false);
       expect(document.activeElement).toBe(anotherControlFocused ? other : trigger);
     });
   });
@@ -133,13 +134,14 @@ describe('TitleBar', () => {
   it.each(['P', 'k', '/'])('returns keyboard focus to an application control after the %s dialog shortcut', async (key) => {
     const view = render(TitleBarDialog);
     const trigger = view.getByRole('button', { name: 'Collapse sidebar (Ctrl+B)' });
+    const controls = trigger.closest<HTMLElement>('.shell-actions')!;
     trigger.focus();
     const focus = trigger.focus.bind(trigger);
     vi.spyOn(trigger, 'focus').mockImplementation((options) => {
-      if (!trigger.closest('[inert]')) focus(options);
+      if (!controls.inert) focus(options);
     });
     await fireEvent.keyDown(window, { key, ctrlKey: true, shiftKey: key === 'P' });
-    await waitFor(() => expect(trigger.closest('[inert]')).toBeTruthy());
+    await waitFor(() => expect(controls.inert).toBe(true));
     const close = within(document.body).getByRole('button', { name: 'Close test dialog' });
     close.focus();
     await fireEvent.click(close);
