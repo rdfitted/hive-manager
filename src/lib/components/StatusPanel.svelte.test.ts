@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
-import type { Session } from '$lib/stores/sessions';
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
+import { sessions, type Session } from '$lib/stores/sessions';
 import StatusPanel from './StatusPanel.svelte';
 
 const tauriMocks = vi.hoisted(() => ({
@@ -105,6 +105,86 @@ describe('StatusPanel QA status', () => {
     expect(view.queryByText('QA Off')).toBeNull();
     storeMocks.setActiveSession?.(fakeSession('Fusion', false));
     await waitFor(() => expect(view.queryByText('QA Off')).toBeNull());
+  });
+});
+
+describe('StatusPanel shared confirmations', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const actions = [
+    { button: 'Close Session', title: 'Close Session?', endpoint: null, rationale: null },
+    { button: 'Force Fail', title: 'Force Fail Milestone?', endpoint: '/qa/force-fail', rationale: 'Force fail from the Status panel' },
+    { button: 'Force Pass', title: 'Force Pass Milestone?', endpoint: '/qa/force-pass', rationale: 'Force pass from the Status panel' },
+    { button: 'Skip QA', title: 'Skip QA?', endpoint: '/qa/force-pass', rationale: 'Skip QA from the Status panel' },
+  ];
+
+  function openPanel() {
+    tauriMocks.invoke.mockResolvedValue(null);
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const closeSession = vi.spyOn(sessions, 'closeSession').mockResolvedValue(undefined);
+    const view = render(StatusPanel);
+    const session = fakeSession('Hive', true);
+    session.state = 'QaInProgress';
+    storeMocks.setActiveSession?.(session);
+    return { ...view, fetchMock, closeSession };
+  }
+
+  it.each(actions)('keeps $button guarded through Cancel and Escape, then submits the same action', async (action) => {
+    const view = openPanel();
+    const body = within(document.body);
+    const trigger = await body.findByRole('button', { name: action.button });
+    await fireEvent.click(trigger);
+    const firstDialog = body.getByRole('dialog', { name: action.title });
+    expect(firstDialog.getAttribute('aria-modal')).toBe('true');
+    expect(view.container.contains(firstDialog)).toBe(false);
+    await fireEvent.click(within(firstDialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(body.queryByRole('dialog')).toBeNull());
+    expect(view.closeSession).not.toHaveBeenCalled();
+    expect(view.fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST')).toHaveLength(0);
+
+    await fireEvent.click(trigger);
+    const escaped = body.getByRole('dialog', { name: action.title });
+    await fireEvent.keyDown(escaped, { key: 'Escape', code: 'Escape' });
+    await waitFor(() => expect(body.queryByRole('dialog')).toBeNull());
+    expect(view.closeSession).not.toHaveBeenCalled();
+    expect(view.fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST')).toHaveLength(0);
+
+    await fireEvent.click(trigger);
+    const confirmed = body.getByRole('dialog', { name: action.title });
+    await fireEvent.click(within(confirmed).getByRole('button', { name: action.button }));
+    if (action.endpoint) {
+      await waitFor(() => expect(view.fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining(`/api/sessions/qa-hive${action.endpoint}`),
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ confirm: true, rationale: action.rationale }) }),
+      ));
+      expect(view.closeSession).not.toHaveBeenCalled();
+    } else {
+      await waitFor(() => expect(view.closeSession).toHaveBeenCalledTimes(1));
+      expect(view.closeSession).toHaveBeenCalledWith('qa-hive');
+    }
+    await waitFor(() => expect(body.queryByRole('dialog')).toBeNull());
+  });
+
+  it.each(['Close Session', 'Force Fail'])('keeps %s confirmation open while its request is pending', async (button) => {
+    const view = openPanel();
+    const closed = deferred<void>();
+    const failed = deferred<Response>();
+    view.closeSession.mockReturnValue(closed.promise);
+    view.fetchMock.mockImplementation(async (_input, init) => init?.method === 'POST' ? failed.promise : new Response('{}', { status: 200 }));
+    const body = within(document.body);
+    await fireEvent.click(await body.findByRole('button', { name: button }));
+    const dialog = body.getByRole('dialog');
+    await fireEvent.click(within(dialog).getByRole('button', { name: button }));
+    expect((within(dialog).getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
+    expect(body.getByRole('dialog')).toBe(dialog);
+    closed.resolve();
+    failed.resolve(new Response('{}', { status: 200 }));
+    await waitFor(() => expect(body.queryByRole('dialog')).toBeNull());
   });
 });
 
