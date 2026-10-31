@@ -339,7 +339,6 @@
 
     if ($page.url.pathname === path) {
       event.preventDefault();
-      layout.toggleLeft();
     } else if (path === '/') {
       layout.setLeftCollapsed(false);
     }
@@ -637,8 +636,7 @@
 />
 
 <Dialog open={showCloseConfirm !== null} onOpenChange={(open) => { if (!open) dismissCloseConfirm(); }}
-  label="Close Session?" variant="alert"
-  onkeydown={(event) => { if (closing && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); } }}>
+  label="Close Session?" dismissible={!closing}>
     <div
       class="confirm-dialog"
     >

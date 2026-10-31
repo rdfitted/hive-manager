@@ -65,6 +65,7 @@
   }
 
   $: childrenMap = getChildrenMap(agents);
+  $: sessionAgentIds = new Set(agents.map((agent) => agent.id));
   $: rootAgents = childrenMap.get(null) || [];
 </script>
 
@@ -77,6 +78,7 @@
       <TreeItem
         {agent}
         {childrenMap}
+        {sessionAgentIds}
         depth={0}
         {selectedId}
         byAgent={$agentDependencies.byAgent}

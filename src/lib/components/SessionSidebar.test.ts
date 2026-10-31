@@ -190,6 +190,16 @@ describe('sidebar session and agent attention', () => {
 });
 
 describe('sidebar project grouping and header navigation', () => {
+  async function clickCloseBackdrop() {
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const backdrop = document.body.querySelector<HTMLElement>('.dialog-backdrop');
+    expect(backdrop).not.toBeNull();
+    backdrop!.dispatchEvent(new MouseEvent('pointerdown', {
+      bubbles: true, cancelable: true, button: 0, clientX: 100, clientY: 100,
+    }));
+    backdrop!.click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
   function session(id: string, project_path: string): Session {
     return { id, name: id, project_path, created_at: '2026-10-31', state: 'Running',
       session_type: { Hive: { worker_count: 0 } }, agents: [] } as Session;
@@ -233,28 +243,44 @@ describe('sidebar project grouping and header navigation', () => {
     expect(view.container.querySelector('.sidebar-drawer')?.getAttribute('aria-hidden')).toBe('true');
   });
 
+  it.each([
+    { path: '/', label: 'Sessions' },
+    { path: '/dashboard', label: 'Dashboard' },
+    { path: '/knowledge', label: 'Knowledge' },
+  ])('keeps the drawer open when activating the current $label page', async ({ path, label }) => {
+    (page as unknown as Writable<unknown>).set({ url: new URL(`http://localhost${path}`) });
+    const view = render(SessionSidebar);
+    const link = view.getByRole('link', { name: label });
+    const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    await fireEvent(link, event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(get(layout).leftCollapsed).toBe(false);
+    expect(view.container.querySelector('.sidebar-drawer')?.getAttribute('aria-hidden')).toBe('false');
+    expect(view.getByRole('link', { name: label })).toBe(link);
+  });
+
   it('uses the shared close dialog, dismisses without closing, and confirms the intended session', async () => {
     load([session('A', 'D:/one')]);
     const view = render(SessionSidebar);
     await fireEvent.click(view.getByRole('button', { name: 'Close Session' }));
     const body = within(document.body);
-    const dialog = await body.findByRole('alertdialog', { name: 'Close Session?' });
+    const dialog = await body.findByRole('dialog', { name: 'Close Session?' });
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     expect(view.container.contains(dialog)).toBe(false);
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-    await waitFor(() => expect(body.queryByRole('alertdialog')).toBeNull());
+    await waitFor(() => expect(body.queryByRole('dialog')).toBeNull());
     expect(launchMocks.closeSession).not.toHaveBeenCalled();
     await fireEvent.click(view.getByRole('button', { name: 'Close Session' }));
-    const escaped = await body.findByRole('alertdialog', { name: 'Close Session?' });
+    const escaped = await body.findByRole('dialog', { name: 'Close Session?' });
     await fireEvent.keyDown(escaped, { key: 'Escape' });
-    await waitFor(() => expect(body.queryByRole('alertdialog')).toBeNull());
+    await waitFor(() => expect(body.queryByRole('dialog')).toBeNull());
     expect(launchMocks.closeSession).not.toHaveBeenCalled();
     await fireEvent.click(view.getByRole('button', { name: 'Close Session' }));
-    const reopened = await body.findByRole('alertdialog', { name: 'Close Session?' });
+    const reopened = await body.findByRole('dialog', { name: 'Close Session?' });
     await fireEvent.click(within(reopened).getByRole('button', { name: 'Close Session' }));
     await waitFor(() => expect(launchMocks.closeSession).toHaveBeenCalledTimes(1));
     expect(launchMocks.closeSession).toHaveBeenCalledWith('A');
-    await waitFor(() => expect(body.queryByRole('alertdialog')).toBeNull());
+    await waitFor(() => expect(body.queryByRole('dialog')).toBeNull());
   });
 
   it('keeps the close confirmation open on Escape while closing is in progress', async () => {
@@ -264,13 +290,41 @@ describe('sidebar project grouping and header navigation', () => {
     const view = render(SessionSidebar);
     await fireEvent.click(view.getByRole('button', { name: 'Close Session' }));
     const body = within(document.body);
-    const dialog = await body.findByRole('alertdialog', { name: 'Close Session?' });
+    const dialog = await body.findByRole('dialog', { name: 'Close Session?' });
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Close Session' }));
     expect((within(dialog).getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true);
     await fireEvent.keyDown(dialog, { key: 'Escape' });
-    expect(body.getByRole('alertdialog', { name: 'Close Session?' })).toBe(dialog);
+    expect(body.getByRole('dialog', { name: 'Close Session?' })).toBe(dialog);
     expect(launchMocks.closeSession).toHaveBeenCalledTimes(1);
     finish();
-    await waitFor(() => expect(body.queryByRole('alertdialog')).toBeNull());
+    await waitFor(() => expect(body.queryByRole('dialog')).toBeNull());
+  });
+
+  it('dismisses an idle close confirmation through its backdrop without closing the session', async () => {
+    load([session('A', 'D:/one')]);
+    const view = render(SessionSidebar);
+    await fireEvent.click(view.getByRole('button', { name: 'Close Session' }));
+    const body = within(document.body);
+    await body.findByRole('dialog', { name: 'Close Session?' });
+    await clickCloseBackdrop();
+    await waitFor(() => expect(body.queryByRole('dialog')).toBeNull());
+    expect(launchMocks.closeSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps the close confirmation open on backdrop interaction while closing is in progress', async () => {
+    let finish!: () => void;
+    launchMocks.closeSession.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    load([session('A', 'D:/one')]);
+    const view = render(SessionSidebar);
+    await fireEvent.click(view.getByRole('button', { name: 'Close Session' }));
+    const body = within(document.body);
+    const dialog = await body.findByRole('dialog', { name: 'Close Session?' });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Close Session' }));
+    expect((within(dialog).getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true);
+    await clickCloseBackdrop();
+    expect(body.getByRole('dialog', { name: 'Close Session?' })).toBe(dialog);
+    expect(launchMocks.closeSession).toHaveBeenCalledTimes(1);
+    finish();
+    await waitFor(() => expect(body.queryByRole('dialog')).toBeNull());
   });
 });

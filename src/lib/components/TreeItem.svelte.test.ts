@@ -115,6 +115,33 @@ describe('dependency rows and G3 focus', () => {
     expect(focus).toHaveBeenCalledWith('foundation');
   });
 
+  it('renders foreign and removed session-agent refs as text without moving focus', async () => {
+    const data = graph();
+    data.nodes.push({ ...data.nodes[0], id: 'foreign', title: 'Other session task',
+      progress: { ...data.nodes[0].progress!, agent_id: 'other-session-agent' } });
+    data.edges.push({ source: 'foreign', target: 'work', kind: 'depends_on', provenance: 'planner' });
+    data.nodes[2] = { ...data.nodes[2], title: 'Other session review',
+      progress: { ...data.nodes[0].progress!, agent_id: 'archived-agent' } };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }));
+    const focus = vi.spyOn(ui, 'setFocusedAgent');
+    const view = render(SessionSidebar);
+    await waitFor(() => expect(within(row(view, 'worker')).getByRole('button', { name: 'Focus agent for Foundation' })).toBeTruthy());
+    const work = within(row(view, 'worker'));
+    for (const title of ['Other session task', 'Other session review']) {
+      expect(work.getByText(title).tagName).toBe('SPAN');
+      expect(work.queryByRole('button', { name: `Focus agent for ${title}` })).toBeNull();
+    }
+    expect(get(ui).focusedAgentId).toBe('queen');
+    expect(focus).not.toHaveBeenCalled();
+
+    (activeAgents as Writable<AgentInfo[]>).set(agents.filter((item) => item.id !== 'foundation'));
+    await tick();
+    expect(work.getByText('Foundation').tagName).toBe('SPAN');
+    expect(work.queryByRole('button', { name: 'Focus agent for Foundation' })).toBeNull();
+    expect(get(ui).focusedAgentId).toBe('queen');
+    expect(focus).not.toHaveBeenCalled();
+  });
+
   it.each([404, 500, 'offline'])('keeps Queen-to-worker delegation and visible status without an error when graph is %s', async (status) => {
     const fetcher = status === 'offline' ? vi.fn().mockRejectedValue(new Error('offline')) : vi.fn().mockResolvedValue({ ok: false, status });
     vi.stubGlobal('fetch', fetcher);

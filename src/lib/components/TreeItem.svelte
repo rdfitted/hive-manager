@@ -9,6 +9,7 @@
 
   export let agent: AgentInfo;
   export let childrenMap: Map<string | null, AgentInfo[]>;
+  export let sessionAgentIds: ReadonlySet<string>;
   export let depth: number = 0;
   export let selectedId: string | null = null;
   export let byAgent: Map<string, AgentDependencies> = new Map();
@@ -134,7 +135,7 @@
           <span class="dependencies">
             <span class="dependency-label">{kind === 'waitingOn' ? 'Waiting on' : 'Blocks'}{refs.length > 1 ? ` (${refs.length})` : ''}:</span>
             {#each refs as ref (ref.nodeId)}
-              {#if ref.agentId}
+              {#if ref.agentId && sessionAgentIds.has(ref.agentId)}
                 <button type="button" class="dependency-ref" title={ref.title}
                   aria-label={`Focus agent for ${ref.title}`}
                   on:click={(event) => { event.stopPropagation(); dispatch('select', ref.agentId!); }}
@@ -161,6 +162,7 @@
         <svelte:self
           agent={child}
           {childrenMap}
+          {sessionAgentIds}
           depth={depth + 1}
           {selectedId}
           {byAgent}
