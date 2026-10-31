@@ -75,6 +75,16 @@ afterEach(() => {
 });
 
 describe('LaunchDialog modal presentation', () => {
+  it('uses the shared modal primitive while inline presentation stays plain', async () => {
+    const view = render(LaunchDialog, { props: { show: true } });
+    expect(view.getByRole('dialog').getAttribute('aria-modal')).toBe('true');
+    // The modal deliberately stays in the render container for frozen parity queries.
+    expect(view.container.querySelector('[role="dialog"]')).toBeTruthy();
+    await view.rerender({ show: true, presentation: 'inline' });
+    expect(view.queryByRole('dialog')).toBeNull();
+    expect(view.getByRole('region', { name: 'Hive Manager' })).toBeTruthy();
+  });
+
   it('keeps Advanced Cancel available and dispatches exactly one close event', async () => {
     const close = vi.fn();
     const view = render(LaunchDialog, {
@@ -92,6 +102,54 @@ describe('LaunchDialog modal presentation', () => {
 
     expect(close).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('LaunchDialog shared state', () => {
+  it.each(['hive', 'research', 'fusion', 'debate', 'solo'] as const)(
+    'retains %s composer edits through Advanced and back in the launched payload',
+    async (mode) => {
+      const launch = vi.fn();
+      const view = render(LaunchDialog, {
+        props: { show: true, initialMode: mode },
+        events: { launchHive: launch, launchResearch: launch, launchFusion: launch, launchDebate: launch, launchSolo: launch },
+      });
+      await fireEvent.click(view.getByRole('button', { name: /Project/ }));
+      await fireEvent.input(view.getByLabelText('What would you like to work on?'), {
+        target: { value: 'Keep this task through every view' },
+      });
+      if (mode !== 'solo') {
+        await fireEvent.change(view.getByLabelText('Workers'), { target: { value: '3' } });
+      }
+      await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
+      await fireEvent.input(view.getByLabelText('Session Name (optional)'), { target: { value: 'Round trip' } });
+      if (mode === 'solo') {
+        expect((view.getByLabelText('Task Description') as HTMLTextAreaElement).value)
+          .toBe('Keep this task through every view');
+      } else if (mode === 'hive') {
+        expect(view.getByRole('heading', { name: 'Coding Principals (3)' })).toBeTruthy();
+      } else if (mode === 'research') {
+        expect(view.getByRole('heading', { name: 'Researcher Roster (3)' })).toBeTruthy();
+      } else {
+        expect((view.getByLabelText(mode === 'fusion' ? 'Number of Variants' : 'Number of Debaters') as HTMLSelectElement).value).toBe('3');
+      }
+      await fireEvent.click(view.getByRole('button', { name: 'Back to composer' }));
+      expect((view.getByLabelText('What would you like to work on?') as HTMLTextAreaElement).value)
+        .toBe('Keep this task through every view');
+      expect((view.getByLabelText('Workers') as HTMLSelectElement).value).toBe(mode === 'solo' ? '1' : '3');
+      await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
+      expect((view.getByLabelText('Session Name (optional)') as HTMLInputElement).value).toBe('Round trip');
+      await fireEvent.click(view.getByRole('button', { name: 'Back to composer' }));
+      await fireEvent.click(view.getByRole('button', { name: 'Launch' }));
+      expect(launch).toHaveBeenCalledTimes(1);
+      const payload = launch.mock.calls[0][0].detail;
+      expect(payload.name).toBe('Round trip');
+      expect(mode === 'solo' ? payload.taskDescription : mode === 'fusion' ? payload.task_description : mode === 'debate' ? payload.topic : payload.prompt)
+        .toBe('Keep this task through every view');
+      if (mode !== 'solo') {
+        expect(mode === 'fusion' ? payload.variants : mode === 'debate' ? payload.debaters : payload.workers).toHaveLength(3);
+      }
+    },
+  );
 });
 
 describe('LaunchDialog tier routing', () => {
