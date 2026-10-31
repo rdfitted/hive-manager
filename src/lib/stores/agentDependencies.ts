@@ -57,6 +57,7 @@ export function dependencyState(graph: WorkGraphResponse): DependencyState {
 
 /** One subscriber-owned loop, regardless of how many rows consume its snapshot. */
 export const agentDependencies = readable<DependencyState>({ byAgent: new Map() }, (set) => {
+  set({ byAgent: new Map() });
   let sessionId: string | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;

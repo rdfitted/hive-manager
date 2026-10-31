@@ -64,6 +64,14 @@ describe('agent dependency mapping', () => {
 });
 
 describe('active-session dependency polling', () => {
+  it('clears a cached snapshot when remounted without an active session', async () => {
+    const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => graph() });
+    vi.stubGlobal('fetch', fetcher); activate('old'); const stop = listen(); await flush();
+    expect(get(agentDependencies).byAgent.size).toBeGreaterThan(0);
+    stop(); activate(null); listen();
+    expect(get(agentDependencies)).toEqual({ byAgent: new Map() });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it('shares exactly one runtime poll across subscribers and stops/replaces it on session change', async () => {
     const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => graph() });
     vi.stubGlobal('fetch', fetcher);
