@@ -515,7 +515,6 @@
   .tasks-title {
     font-size: 12px;
     font-weight: 600;
-    text-transform: uppercase;
     color: var(--text-secondary);
   }
 
@@ -617,7 +616,6 @@
   .raw-label {
     font-size: 12px;
     font-weight: 600;
-    text-transform: uppercase;
     color: var(--text-secondary);
   }
 

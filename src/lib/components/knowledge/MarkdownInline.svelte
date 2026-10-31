@@ -42,7 +42,7 @@
   .inline-markdown :global(a:hover) { text-decoration-color: var(--accent-cyan); }
   .wikilink {
     color: var(--accent-cyan);
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
   }
   .wikilink::before { content: '[['; color: var(--text-disabled); }
   .wikilink::after { content: ']]'; color: var(--text-disabled); }

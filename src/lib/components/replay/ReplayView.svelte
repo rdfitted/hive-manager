@@ -96,7 +96,7 @@
         background: var(--bg-void);
         height: 100%;
         overflow-y: auto;
-        font-family: var(--font-mono);
+        font-family: var(--font-body);
     }
 
     .state-header {
@@ -115,7 +115,6 @@
     .state-section h4 {
         margin: 0 0 12px 0;
         color: var(--text-secondary);
-        text-transform: uppercase;
         font-size: 0.75rem;
         box-shadow: var(--edge-seam);
         padding-bottom: 4px;

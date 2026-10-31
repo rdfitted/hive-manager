@@ -135,8 +135,6 @@
 
     .type-tag {
         font-size: 9px;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
         color: var(--text-disabled);
         font-weight: 800;
     }

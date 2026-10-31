@@ -346,12 +346,10 @@
   .state-tag {
     font-size: 11px;
     font-weight: 700;
-    text-transform: uppercase;
     background: var(--accent-cyan);
     color: var(--bg-void);
     padding: 3px 8px;
     border-radius: var(--radius-sm);
-    letter-spacing: 0.05em;
   }
 
   .state-tag.eval-ready {
@@ -530,7 +528,6 @@
     font-size: 11px;
     font-weight: 600;
     color: var(--text-secondary);
-    text-transform: uppercase;
   }
 
   .debater-card-body {
@@ -549,7 +546,6 @@
   .data-label {
     font-size: 11px;
     color: var(--text-disabled);
-    text-transform: uppercase;
     font-weight: 700;
   }
 
@@ -666,7 +662,7 @@
   .verdict-report {
     margin: 0;
     white-space: pre-wrap;
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: 13px;
     line-height: 1.6;
     color: var(--text-primary);

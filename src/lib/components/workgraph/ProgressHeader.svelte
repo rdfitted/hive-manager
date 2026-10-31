@@ -74,7 +74,7 @@
   dd {
     margin: 0;
     color: var(--text-primary);
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: var(--text-base);
     font-weight: 700;
     white-space: nowrap;

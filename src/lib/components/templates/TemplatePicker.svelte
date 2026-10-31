@@ -211,7 +211,6 @@
 
     .badge {
         font-size: 9px;
-        text-transform: uppercase;
         background: color-mix(in srgb, var(--accent-cyan) 20%, transparent);
         color: var(--accent-cyan);
         padding: 1px 4px;
@@ -238,10 +237,9 @@
 
     .mode-tag, .cells-tag {
         font-size: 9px;
-        text-transform: uppercase;
         color: var(--text-disabled);
         font-weight: 700;
-        font-family: var(--font-mono);
+        font-family: var(--font-body);
     }
 
     .empty-state {

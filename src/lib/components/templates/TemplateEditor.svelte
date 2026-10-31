@@ -364,7 +364,6 @@
     .cell-num {
         font-size: 11px;
         font-weight: 800;
-        text-transform: uppercase;
         color: var(--text-disabled);
     }
 

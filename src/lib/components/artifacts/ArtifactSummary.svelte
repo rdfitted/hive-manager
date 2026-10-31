@@ -126,7 +126,7 @@
     }
 
     .value {
-        font-family: var(--font-mono);
+        font-family: var(--font-body);
         font-weight: 700;
         font-size: 14px;
         color: var(--text-primary);
@@ -134,8 +134,6 @@
 
     .label {
         font-size: 9px;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
         color: var(--text-secondary);
     }
 
@@ -169,7 +167,7 @@
         font-size: 10px;
         font-weight: 700;
         color: var(--text-secondary);
-        font-family: var(--font-mono);
+        font-family: var(--font-body);
     }
 
     .summary-text {
@@ -194,8 +192,6 @@
 
     .detail-header {
         font-size: 10px;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
         color: var(--text-disabled);
         font-weight: 800;
     }

@@ -59,10 +59,9 @@
   }
   h1 {
     margin: 0;
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-size: var(--text-h1);
     font-weight: 700;
-    letter-spacing: 0.04em;
   }
   .subtitle {
     margin: var(--space-1) 0 0 0;

@@ -368,18 +368,14 @@
   .eyebrow {
     margin-bottom: 2px;
     color: var(--text-disabled);
-    font: var(--text-micro) var(--font-mono);
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
+    font: var(--text-micro) var(--font-body);
   }
 
   h1 {
     margin: 0;
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-size: var(--text-h1);
     line-height: 1;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
   }
 
   .corpus-stats {
@@ -397,8 +393,8 @@
     background: var(--bg-chrome);
   }
 
-  .corpus-stats strong { color: var(--accent-cyan); font: 14px var(--font-mono); }
-  .corpus-stats span { color: var(--text-disabled); font: 9px var(--font-mono); text-transform: uppercase; }
+  .corpus-stats strong { color: var(--accent-cyan); font: 14px var(--font-body); }
+  .corpus-stats span { color: var(--text-disabled); font: 9px var(--font-body); }
 
   .toolbar {
     display: flex;
@@ -431,11 +427,11 @@
     outline: 0;
     background: transparent;
     color: var(--text-primary);
-    font: var(--text-small) var(--font-mono);
+    font: var(--text-small) var(--font-body);
   }
 
   .search-field input::placeholder { color: var(--text-disabled); }
-  .search-field kbd { color: var(--accent-cyan); font: var(--text-micro) var(--font-mono); }
+  .search-field kbd { color: var(--accent-cyan); font: var(--text-micro) var(--font-body); }
 
   .folder-field select {
     height: 34px;
@@ -468,7 +464,7 @@
   .notice {
     padding: 5px var(--space-4);
     color: var(--text-secondary);
-    font: var(--text-micro) var(--font-mono);
+    font: var(--text-micro) var(--font-body);
   }
 
   .error-notice { color: var(--status-warning); }
@@ -544,9 +540,7 @@
     justify-content: space-between;
     padding: 5px var(--space-3);
     color: var(--text-disabled);
-    font: 9px var(--font-mono);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    font: 9px var(--font-body);
   }
 
   .view-body {
@@ -578,8 +572,7 @@
     align-items: center;
     gap: 5px;
     color: var(--text-secondary);
-    font: 9px var(--font-mono);
-    text-transform: uppercase;
+    font: 9px var(--font-body);
   }
 
   .legend-group i { width: 6px; height: 6px; }
@@ -605,7 +598,7 @@
   }
 
   .full-state > * { position: relative; }
-  .full-state strong { margin-top: var(--space-3); color: var(--text-primary); font: 18px var(--font-display); }
+  .full-state strong { margin-top: var(--space-3); color: var(--text-primary); font: 18px var(--font-body); }
   .full-state p { max-width: 430px; margin: var(--space-2) 0 0; font-size: var(--text-small); }
   .state-action {
     margin-top: var(--space-4);

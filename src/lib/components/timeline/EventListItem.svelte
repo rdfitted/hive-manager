@@ -67,7 +67,7 @@
         align-items: center;
         width: 100%;
         box-shadow: var(--edge-seam);
-        font-family: var(--font-mono);
+        font-family: var(--font-body);
         font-size: 0.8rem;
     }
 

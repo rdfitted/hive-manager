@@ -64,22 +64,25 @@
 
 <style>
   .card {
-    background-color: var(--bg-panel);
-    border-radius: var(--radius-lg);
-    box-shadow: inset 3px 0 0 var(--session-color), var(--elev-1), var(--edge-lip);
+    background-color: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--control-radius);
+    box-shadow: none;
     padding: var(--space-3);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
     transition:
       background-color var(--motion-duration-fast) var(--motion-ease-standard),
-      box-shadow var(--motion-duration-fast) var(--motion-ease-standard),
-      transform var(--motion-duration-fast) var(--motion-ease-standard);
+      border-color var(--motion-duration-fast) var(--motion-ease-standard);
   }
   .card:hover {
-    background-color: var(--bg-raised);
-    box-shadow: inset 3px 0 0 var(--session-color), var(--elev-2), var(--edge-lip);
-    transform: translateY(-1px);
+    background-color: var(--surface-raised);
+    border-color: var(--text-muted);
+  }
+  .card:focus-within {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
   .card-head {
     display: flex;
@@ -101,14 +104,15 @@
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-sm);
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--canvas);
+    box-shadow: inset 0 0 0 1px var(--session-color);
     color: var(--text-secondary);
     flex: 0 0 auto;
   }
   .title {
     margin: 0;
-    font-family: var(--font-display);
-    font-size: var(--text-base);
+    font-family: var(--font-body);
+    font-size: var(--text-small);
     font-weight: 600;
     color: var(--text-primary);
     white-space: nowrap;
@@ -127,5 +131,9 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
+  }
+  @media (forced-colors: active) {
+    .card { border-color: CanvasText; }
+    .status-icon { box-shadow: none; border: 1px solid CanvasText; }
   }
 </style>

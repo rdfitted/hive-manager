@@ -147,7 +147,7 @@
   .base, pre { font-family: var(--font-mono); font-size: 11px; }
   pre { white-space: pre-wrap; }
   .file-review { padding: 12px 0; border-top: 1px solid var(--border-structural); display: flex; flex-direction: column; gap: 10px; }
-  summary { cursor: pointer; margin-bottom: 8px; font-family: var(--font-mono); }
+  summary { cursor: pointer; margin-bottom: 8px; font-family: var(--font-body); }
   .reviewed { flex-direction: row; align-items: center; }
   .review-view > button { max-width: 100%; white-space: normal; }
   @media (forced-colors: active) {

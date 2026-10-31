@@ -723,7 +723,7 @@
 
   .node text {
     fill: var(--text-primary);
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: 10px;
     paint-order: stroke;
     stroke: var(--bg-void);
@@ -758,8 +758,7 @@
   .pin-count {
     padding: 0 6px;
     color: var(--text-disabled);
-    font: 10px var(--font-mono);
-    text-transform: uppercase;
+    font: 10px var(--font-body);
   }
 
   .graph-hint {
@@ -767,8 +766,7 @@
     left: var(--space-3);
     bottom: var(--space-3);
     color: var(--text-disabled);
-    font: 10px var(--font-mono);
-    letter-spacing: 0.025em;
+    font: 10px var(--font-body);
     pointer-events: none;
   }
 

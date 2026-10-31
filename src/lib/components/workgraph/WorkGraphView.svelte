@@ -788,8 +788,6 @@
     gap: 4px;
     color: var(--text-disabled);
     font-size: 10px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
   }
 
   .wg-source-label {
@@ -833,14 +831,14 @@
 
   .wg-omissions h2 {
     margin: 0;
-    font: var(--text-small) var(--font-display);
+    font: var(--text-small) var(--font-body);
   }
 
   .wg-omissions-total,
   .wg-omission-header span,
   .wg-omission-examples > span {
     color: var(--text-secondary);
-    font: var(--text-micro) var(--font-mono);
+    font: var(--text-micro) var(--font-body);
   }
 
   .wg-omissions-intro,
@@ -865,7 +863,7 @@
   }
 
   .wg-omission-header strong {
-    font: var(--text-small) var(--font-mono);
+    font: var(--text-small) var(--font-body);
   }
 
   .wg-omission-examples {
@@ -925,7 +923,7 @@
 
   .wg-wave-label {
     fill: var(--text-disabled);
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: 9px;
   }
 
@@ -1064,7 +1062,7 @@
 
   .wg-node-progress {
     fill: var(--text-secondary);
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: 8px;
     pointer-events: none;
   }
@@ -1090,7 +1088,7 @@
 
   .wg-label {
     fill: var(--text-primary);
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: 10px;
     pointer-events: none;
   }

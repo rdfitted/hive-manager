@@ -373,8 +373,6 @@
     color: var(--text-muted);
     font-size: 9px;
     font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
   }
 
   .inline-error {
@@ -521,7 +519,7 @@
     /* File metadata header, not a standalone panel surface. */
     background: var(--bg-surface);
     box-shadow: var(--edge-seam);
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: 10px;
   }
 

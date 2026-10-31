@@ -121,7 +121,6 @@
   .agent-status {
     color: var(--text-secondary);
     font-size: 10px;
-    text-transform: uppercase;
   }
 
   .agent-time {

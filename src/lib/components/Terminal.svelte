@@ -1129,8 +1129,6 @@
     color: var(--accent-cyan);
     font-size: 13px;
     font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
   }
 
   .drop-copy {
@@ -1201,7 +1199,6 @@
     font-size: 11px;
     color: var(--status-warning);
     font-weight: 600;
-    text-transform: uppercase;
     margin-right: 4px;
   }
 

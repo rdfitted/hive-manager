@@ -78,7 +78,7 @@
     }
 
     .count {
-        font-family: var(--font-mono);
+        font-family: var(--font-body);
         font-size: 18px;
         font-weight: 700;
         color: var(--text-primary);
@@ -86,8 +86,6 @@
 
     .label {
         font-size: 10px;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
         color: var(--text-secondary);
     }
 
@@ -102,8 +100,6 @@
 
     .failures-header {
         font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
         color: var(--text-disabled);
         font-weight: 700;
     }
@@ -127,7 +123,7 @@
 
     .error-message {
         margin: 0;
-        font-family: var(--font-mono);
+    font-family: var(--font-mono);
         font-size: 11px;
         color: var(--text-secondary);
         /* Inset failure output remains sunken inside the error-detail surface. */
