@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { X } from 'phosphor-svelte';
   import { layout, COLLAPSED_PANEL_WIDTH, type RightPanelTab } from '$lib/stores/layout';
   import { shortcutLabel } from '$lib/platform';
@@ -19,6 +20,21 @@
   function handleResize(clientX: number) {
     layout.setRightWidth(window.innerWidth - clientX);
   }
+
+  async function collapsePanel() {
+    layout.toggleRight();
+    await tick();
+    document.getElementById('title-bar-panel-toggle')?.focus({ preventScroll: true });
+  }
+
+  async function activateTab(tab: RightPanelTab) {
+    const willCollapse = !collapsed && activeTab === tab;
+    layout.activateRightTab(tab);
+    if (willCollapse) {
+      await tick();
+      document.getElementById('title-bar-panel-toggle')?.focus({ preventScroll: true });
+    }
+  }
 </script>
 
 <aside class="right-panel" style:width={`${width}px`} style:min-width={`${width}px`} style:flex-basis={`${width}px`}>
@@ -29,13 +45,13 @@
           <button
             type="button"
             class={`panel-tab lattice-btn lattice-btn--compact ${activeTab === tab.id ? 'lattice-btn--secondary' : 'lattice-btn--ghost'}`}
-            onclick={() => layout.activateRightTab(tab.id)}
+            onclick={() => activateTab(tab.id)}
             aria-label={tab.label}
             aria-pressed={activeTab === tab.id && !collapsed}
           >{tab.label}</button>
         {/each}
       </div>
-      <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={() => layout.toggleRight()} aria-label={`Collapse panel (${shortcutLabel('J')})`}>
+      <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={collapsePanel} aria-label={`Collapse panel (${shortcutLabel('J')})`}>
         <X size={16} aria-hidden="true" />
       </button>
       <h2 class="panel-title">{TABS.find((tab) => tab.id === activeTab)?.label}</h2>

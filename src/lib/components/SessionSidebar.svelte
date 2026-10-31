@@ -92,6 +92,11 @@
 
   let collapsed = $derived($layout.leftCollapsed);
   const toggleShortcut = shortcutLabel('B');
+  async function collapseSidebar() {
+    layout.toggleLeft();
+    await tick();
+    document.getElementById('title-bar-sidebar-toggle')?.focus({ preventScroll: true });
+  }
   let toggleLabel = $derived(`${collapsed ? 'Expand' : 'Collapse'} sidebar (${toggleShortcut})`);
   let sidebarWidth = $derived(collapsed ? COLLAPSED_PANEL_WIDTH : $layout.leftWidth);
   let visibleSessions = $derived($sessions.sessions.filter(s => isActiveState(s.state) || s.id === $activeSession?.id));
@@ -381,7 +386,7 @@
     <button
       type="button"
       class="sidebar-toggle lattice-btn lattice-btn--ghost lattice-btn--icon"
-      onclick={() => layout.toggleLeft()}
+      onclick={collapseSidebar}
       title={toggleLabel}
       aria-label={toggleLabel}
       aria-expanded={!collapsed}

@@ -34,6 +34,42 @@ afterEach(() => {
 });
 
 describe('RightPanel header tabs and title-bar toggle', () => {
+  it.each(['close', 'active tab'])('returns focus after collapsing with the %s control', async (action) => {
+    const panel = render(RightPanel);
+    const toolbar = render(TitleBar);
+    const toggle = toolbar.container.querySelector<HTMLButtonElement>('#title-bar-panel-toggle')!;
+    const focus = vi.spyOn(toggle, 'focus');
+    const control = within(panel.container).getByRole('button', { name: action === 'close' ? /Collapse panel/ : 'Overview' });
+    control.focus();
+    await fireEvent.click(control);
+    expect(get(layout).rightCollapsed).toBe(true);
+    expect(document.activeElement).toBe(toggle);
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps focus on an inactive tab when switching views', async () => {
+    const panel = render(RightPanel);
+    render(TitleBar);
+    const activity = panel.getByRole('button', { name: 'Activity' });
+    activity.focus();
+    await fireEvent.click(activity);
+    expect(get(layout).rightCollapsed).toBe(false);
+    expect(document.activeElement).toBe(activity);
+  });
+
+  it('does not steal terminal focus on an external panel collapse', async () => {
+    render(RightPanel);
+    render(TitleBar);
+    const terminal = document.createElement('textarea');
+    document.body.append(terminal);
+    terminal.focus();
+    layout.toggleRight();
+    await import('svelte').then(({ tick }) => tick());
+    expect(document.activeElement).toBe(terminal);
+    terminal.remove();
+  });
+
   it('exposes exactly three header tabs and preserves activate-to-collapse behavior', async () => {
     const view = render(RightPanel);
     const toolbar = render(TitleBar);

@@ -114,6 +114,32 @@ afterEach(() => {
 });
 
 describe('sidebar toggle moved from rail to TitleBar (D4)', () => {
+  it('returns focus to the title-bar toggle after collapsing inside the drawer', async () => {
+    const sidebar = render(SessionSidebar);
+    const toolbar = render(TitleBar);
+    const toggle = toolbar.container.querySelector<HTMLButtonElement>('#title-bar-sidebar-toggle')!;
+    const focus = vi.spyOn(toggle, 'focus');
+    const close = within(sidebar.container).getByRole('button', { name: /Collapse sidebar/ });
+    close.focus();
+    await fireEvent.click(close);
+    expect(get(layout).leftCollapsed).toBe(true);
+    expect(document.activeElement).toBe(toggle);
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('does not steal terminal focus on an external sidebar collapse', async () => {
+    render(SessionSidebar);
+    render(TitleBar);
+    const terminal = document.createElement('textarea');
+    document.body.append(terminal);
+    terminal.focus();
+    layout.toggleLeft();
+    await import('svelte').then(({ tick }) => tick());
+    expect(document.activeElement).toBe(terminal);
+    terminal.remove();
+  });
+
   it('has a visible button that collapses and expands the sidebar', async () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32');
     const view = render(TitleBar);

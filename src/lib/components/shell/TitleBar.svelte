@@ -81,7 +81,7 @@
     <div class="traffic-light-space" data-tauri-drag-region data-window-chrome></div>
   {/if}
   <div class="shell-actions" inert={modalOpen}>
-    <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={() => layout.toggleLeft()} aria-label={`${$layout.leftCollapsed ? 'Expand' : 'Collapse'} sidebar (${shortcutLabel('B')})`} aria-expanded={!$layout.leftCollapsed}>
+    <button id="title-bar-sidebar-toggle" type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={() => layout.toggleLeft()} aria-label={`${$layout.leftCollapsed ? 'Expand' : 'Collapse'} sidebar (${shortcutLabel('B')})`} aria-expanded={!$layout.leftCollapsed}>
       <SidebarSimple size={18} aria-hidden="true" />
     </button>
   </div>
@@ -95,7 +95,7 @@
   <div class="shell-actions" inert={modalOpen}>
     {#if $activeSession}
       <ViewModeSwitch />
-      <button type="button" class="panel-toggle lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={() => layout.toggleRight()} aria-label={panelLabel} aria-expanded={!$layout.rightCollapsed}>
+      <button id="title-bar-panel-toggle" type="button" class="panel-toggle lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={() => layout.toggleRight()} aria-label={panelLabel} aria-expanded={!$layout.rightCollapsed}>
         <SidebarSimple size={18} aria-hidden="true" />
       </button>
     {/if}

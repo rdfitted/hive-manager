@@ -119,6 +119,9 @@ describe('persistent app layout', () => {
 
   it('toggles the left sidebar exactly once for Ctrl+B', async () => {
     render(Layout);
+    const terminal = document.createElement('textarea');
+    document.body.append(terminal);
+    terminal.focus();
     const event = new KeyboardEvent('keydown', {
       key: 'b',
       ctrlKey: true,
@@ -126,11 +129,12 @@ describe('persistent app layout', () => {
       cancelable: true,
     });
 
-    window.dispatchEvent(event);
+    terminal.dispatchEvent(event);
     await tick();
 
     expect(event.defaultPrevented).toBe(true);
     expect(testMocks.toggleLeft).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(terminal);
   });
 
   it('ignores repeated Ctrl+B keydown events', async () => {

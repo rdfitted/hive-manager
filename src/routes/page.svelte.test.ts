@@ -253,12 +253,16 @@ afterEach(() => {
 describe('page Escape priority', () => {
   it('toggles the right panel closed and open with Ctrl+J', async () => {
     render(Page);
+    const terminal = document.createElement('textarea');
+    document.body.append(terminal);
+    terminal.focus();
     for (const collapsed of [true, false]) {
       const event = new KeyboardEvent('keydown', { key: 'j', ctrlKey: true, bubbles: true, cancelable: true });
-      window.dispatchEvent(event);
+      terminal.dispatchEvent(event);
       await tick();
       expect(event.defaultPrevented).toBe(true);
       expect(get(layout).rightCollapsed).toBe(collapsed);
+      expect(document.activeElement).toBe(terminal);
     }
     expect(testMocks.toggleRight).toHaveBeenCalledTimes(2);
     expect(testMocks.toggleLeft).not.toHaveBeenCalled();
