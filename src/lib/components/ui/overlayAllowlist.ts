@@ -1,6 +1,2 @@
-// Migration debt only. Each lane removes its overlays; the Queen empties this at T22.
-export const overlayAllowlist = [
-  'src/lib/components/SessionSidebar.svelte',
-  'src/lib/components/StatusPanel.svelte',
-  'src/lib/components/LaunchDialog.svelte',
-];
+// Migration finished at T22. Every overlay uses ui/Dialog, so this stays empty.
+export const overlayAllowlist: string[] = [];

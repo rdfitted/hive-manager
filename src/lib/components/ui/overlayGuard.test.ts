@@ -40,4 +40,7 @@ describe('G1 overlay ownership', () => {
     }).map(([path]) => path.slice(1));
     expect(violations).toEqual([]);
   });
+  it('keeps the migration allowlist empty', () => {
+    expect(overlayAllowlist).toEqual([]);
+  });
 });
