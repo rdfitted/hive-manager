@@ -312,3 +312,20 @@ it('D5: keeps chrome interactions live without dismissing, while other outside i
   await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
   expect(onOpenChange).toHaveBeenCalledWith(false);
 });
+
+it.each([
+  { mode: 'default', portal: undefined, inline: false },
+  { mode: 'disabled', portal: false, inline: true },
+])('preserves modal semantics and Escape with the $mode portal', async ({ portal, inline }) => {
+  const onOpenChange = vi.fn();
+  const view = render(Dialog, { open: false, label: 'Portal dialog', portal, onOpenChange });
+  await view.rerender({ open: true });
+  const dialog = await waitFor(() => view.getByRole('dialog', { name: 'Portal dialog' }));
+  expect(view.container.contains(dialog)).toBe(inline);
+  expect(dialog.getAttribute('aria-modal')).toBe('true');
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  const event = await escape();
+  expect(event.defaultPrevented).toBe(true);
+  await waitFor(() => expect(view.queryByRole('dialog', { name: 'Portal dialog' })).toBeNull());
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+});

@@ -10,12 +10,13 @@
     labelledby?: string;
     variant?: 'dialog' | 'alert';
     placement?: 'center' | 'top';
+    portal?: boolean;
     children?: Snippet;
   };
 
   let {
     open = $bindable(false), onOpenChange, label, labelledby,
-    variant = 'dialog', placement = 'center', class: className = '', children, ...rest
+    variant = 'dialog', placement = 'center', portal = true, class: className = '', children, ...rest
   }: Props = $props();
   const Primitive = $derived(variant === 'alert' ? AlertDialog : BitsDialog);
 
@@ -33,7 +34,7 @@
 
 <Primitive.Root {open} onOpenChange={changeOpen}>
   {#if open}
-    <Primitive.Portal>
+    <Primitive.Portal disabled={!portal}>
       <Primitive.Overlay class="dialog-backdrop lattice-modal-backdrop" />
       <Primitive.Content onInteractOutside={interactOutside}>
         {#snippet child({ props })}
