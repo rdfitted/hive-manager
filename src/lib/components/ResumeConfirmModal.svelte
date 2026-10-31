@@ -50,7 +50,7 @@
   }
 </script>
 
-<Dialog {open} label="Resume session" onOpenChange={(value) => { if (!value) cancel(); }}>
+<Dialog {open} dismissible={!confirming} label="Resume session" onOpenChange={(value) => { if (!value) cancel(); }}>
   <div class="modal">
     <header class="modal-header lattice-forced-colors-boundary">
       <h2>Resume {sessionName ?? 'session'}</h2>
