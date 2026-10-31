@@ -1,3 +1,5 @@
+@import "./fonts.css";
+
 :root {
   /* ── Core Surfaces ─────────────────────────────────────────────── */
   --bg-void: #060606;
@@ -48,8 +50,8 @@
   --rgb-blocked: 237, 166, 140;
 
   /* ── Typography ────────────────────────────────────────────────── */
-  --font-display: 'Rajdhani', sans-serif;
-  --font-body: 'Titillium Web', sans-serif;
+  --font-display: 'IBM Plex Sans', sans-serif;
+  --font-body: 'IBM Plex Sans', sans-serif;
   --font-mono: 'IBM Plex Mono', monospace;
 
   /* ── Font Sizes ────────────────────────────────────────────────── */
