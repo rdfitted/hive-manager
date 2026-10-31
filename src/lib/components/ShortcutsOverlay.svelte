@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Dialog } from './ui';
   import { Keyboard, X } from 'phosphor-svelte';
   import { isMacPlatform, modifierKey } from '$lib/platform';
 
@@ -53,70 +54,46 @@
   ];
 </script>
 
-{#if open}
-  <div
-    class="overlay lattice-modal-backdrop"
-    role="presentation"
-    onclick={onClose}
-    onkeydown={(e) => e.key === 'Escape' && onClose()}
-  >
-    <div
-      class="dialog lattice-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Keyboard shortcuts"
-      tabindex="-1"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') onClose(); }}
-    >
-      <div class="dialog-header lattice-forced-colors-boundary">
-        <span class="dialog-icon"><Keyboard size={18} weight="light" /></span>
-        <h2>Keyboard Shortcuts</h2>
-        <button
-          class="lattice-btn lattice-btn--ghost lattice-btn--icon"
-          onclick={onClose}
-          title="Close (Esc)"
-          aria-label="Close"
-          type="button"
-        >
-          <X size={16} weight="light" />
-        </button>
-      </div>
-      <div class="dialog-body lattice-scroll-content">
-        {#each GROUPS as group (group.title)}
-          <section class="group">
-            <h3>{group.title}</h3>
-            <ul>
-              {#each group.shortcuts as shortcut (shortcut.action)}
-                <li>
-                  <span class="keys">
-                    {#each shortcut.keys as key, i (key)}
-                      {#if i > 0}<span class="plus">+</span>{/if}
-                      <kbd class="lattice-forced-colors-boundary">{key}</kbd>
-                    {/each}
-                  </span>
-                  <span class="action">{shortcut.action}</span>
-                </li>
-              {/each}
-            </ul>
-          </section>
-        {/each}
-      </div>
+<Dialog {open} label="Keyboard shortcuts" onOpenChange={(value) => { if (!value) onClose(); }}>
+  <div class="dialog">
+    <div class="dialog-header lattice-forced-colors-boundary">
+      <span class="dialog-icon"><Keyboard size={18} weight="light" /></span>
+      <h2>Keyboard Shortcuts</h2>
+      <button
+        class="lattice-btn lattice-btn--ghost lattice-btn--icon"
+        onclick={onClose}
+        title="Close (Esc)"
+        aria-label="Close"
+        type="button"
+      >
+        <X size={16} weight="light" />
+      </button>
+    </div>
+    <div class="dialog-body lattice-scroll-content">
+      {#each GROUPS as group (group.title)}
+        <section class="group">
+          <h3>{group.title}</h3>
+          <ul>
+            {#each group.shortcuts as shortcut (shortcut.action)}
+              <li>
+                <span class="keys">
+                  {#each shortcut.keys as key, i (key)}
+                    {#if i > 0}<span class="plus">+</span>{/if}
+                    <kbd class="lattice-forced-colors-boundary">{key}</kbd>
+                  {/each}
+                </span>
+                <span class="action">{shortcut.action}</span>
+              </li>
+            {/each}
+          </ul>
+        </section>
+      {/each}
     </div>
   </div>
-{/if}
+</Dialog>
+
 
 <style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: color-mix(in srgb, var(--bg-void) 60%, transparent);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
-
   .dialog {
     width: 440px;
     max-width: 90vw;
@@ -145,8 +122,6 @@
     font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
   }
 
   .dialog-body {
@@ -159,8 +134,6 @@
     font-size: 11px;
     font-weight: 600;
     color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
   }
 
   .group ul {
@@ -193,7 +166,7 @@
       inset 0 -2px 0 var(--border-structural);
     border-radius: var(--radius-sm);
     color: var(--text-primary);
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: 11px;
     line-height: 1.4;
   }

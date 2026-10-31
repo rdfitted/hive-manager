@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Dialog } from './ui';
   import { createEventDispatcher } from 'svelte';
   import { coordination, type WorkerRole, type AddWorkerRequest } from '$lib/stores/coordination';
   import {
@@ -147,165 +148,145 @@
     }
   }
 
-  function handleKeydown(event: KeyboardEvent) {
-    if (open && event.key === 'Escape') {
-      event.preventDefault();
-      close();
-    }
-  }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
+<Dialog {open} label="Add Managed Principal" onOpenChange={(value) => { if (!value) close(); }}>
+  <div class="dialog">
+    <div class="dialog-header lattice-forced-colors-boundary">
+      <h2>Add Managed Principal</h2>
+      <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={close} aria-label="Close add principal dialog">&times;</button>
+    </div>
 
-{#if open}
-  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-  <div class="dialog-overlay lattice-modal-backdrop" on:click={close} role="presentation">
-    <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-    <div class="dialog lattice-modal lattice-scroll-chrome" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
-      <div class="dialog-header lattice-forced-colors-boundary">
-        <h2>Add Managed Principal</h2>
-        <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={close} aria-label="Close add principal dialog">&times;</button>
+    <form on:submit|preventDefault={handleSubmit}>
+      <div class="form-section">
+        <span class="section-label" id="role-label">Role</span>
+
+        <div class="role-category">
+          <span class="category-label">Development</span>
+          <div class="role-grid" role="group" aria-labelledby="role-label">
+            {#each predefinedRoles.filter(r => r.category === 'dev') as role}
+              <button
+                type="button"
+                class="lattice-btn lattice-btn--card role-choice"
+                class:lattice-btn--selected={selectedRoleType === role.type}
+                aria-pressed={selectedRoleType === role.type}
+                on:click={() => (selectedRoleType = role.type)}
+              >
+                <span class="role-name">{role.label}</span>
+                <span class="role-desc">{role.description}</span>
+              </button>
+            {/each}
+          </div>
+        </div>
+
+        <div class="role-category">
+          <span class="category-label">Review & QA</span>
+          <div class="role-grid" role="group" aria-labelledby="role-label">
+            {#each predefinedRoles.filter(r => r.category === 'review') as role}
+              <button
+                type="button"
+                class="lattice-btn lattice-btn--card role-choice"
+                class:lattice-btn--selected={selectedRoleType === role.type}
+                aria-pressed={selectedRoleType === role.type}
+                on:click={() => (selectedRoleType = role.type)}
+              >
+                <span class="role-name">{role.label}</span>
+                <span class="role-desc">{role.description}</span>
+              </button>
+            {/each}
+          </div>
+        </div>
+
+        {#if selectedRoleType === 'custom'}
+          <input
+            type="text"
+            placeholder="Custom role name..."
+            bind:value={customRoleName}
+            class="custom-role-input lattice-input"
+          />
+        {/if}
       </div>
 
-      <form on:submit|preventDefault={handleSubmit}>
+      <div class="form-section">
+        <span class="section-label">Principal Runtime</span>
+        <AgentConfigEditor
+          bind:config={workerConfig}
+          showLabel={false}
+          idPrefix="add-worker-principal"
+          {cliHealth}
+          {cliHealthLoading}
+          {cliHealthError}
+        />
+      </div>
+
+      {#if parentOptions.length > 1}
         <div class="form-section">
-          <span class="section-label" id="role-label">Role</span>
+          <label class="section-label" for="parent-select">Parent (optional)</label>
+          <select id="parent-select" bind:value={selectedParent} class="select-input lattice-input">
+            <option value={null}>Default (Queen)</option>
+            {#each parentOptions as parent}
+              <option value={parent.id}>
+                {parent.config.label || parent.id}
+              </option>
+            {/each}
+          </select>
+        </div>
+      {/if}
 
-          <div class="role-category">
-            <span class="category-label">Development</span>
-            <div class="role-grid" role="group" aria-labelledby="role-label">
-              {#each predefinedRoles.filter(r => r.category === 'dev') as role}
-                <button
-                  type="button"
-                  class="lattice-btn lattice-btn--card role-choice"
-                  class:lattice-btn--selected={selectedRoleType === role.type}
-                  aria-pressed={selectedRoleType === role.type}
-                  on:click={() => (selectedRoleType = role.type)}
-                >
-                  <span class="role-name">{role.label}</span>
-                  <span class="role-desc">{role.description}</span>
-                </button>
-              {/each}
-            </div>
-          </div>
+      <div class="form-section">
+        <label class="section-label" for="name-input">Principal Name</label>
+        <input
+          id="name-input"
+          type="text"
+          placeholder="Worker 2 (Frontend)"
+          bind:value={workerName}
+          class="custom-role-input lattice-input"
+        />
+      </div>
 
-          <div class="role-category">
-            <span class="category-label">Review & QA</span>
-            <div class="role-grid" role="group" aria-labelledby="role-label">
-              {#each predefinedRoles.filter(r => r.category === 'review') as role}
-                <button
-                  type="button"
-                  class="lattice-btn lattice-btn--card role-choice"
-                  class:lattice-btn--selected={selectedRoleType === role.type}
-                  aria-pressed={selectedRoleType === role.type}
-                  on:click={() => (selectedRoleType = role.type)}
-                >
-                  <span class="role-name">{role.label}</span>
-                  <span class="role-desc">{role.description}</span>
-                </button>
-              {/each}
-            </div>
-          </div>
+      <div class="form-section">
+        <label class="section-label" for="description-input">Description</label>
+        <input
+          id="description-input"
+          type="text"
+          placeholder="One-line task summary"
+          bind:value={workerDescription}
+          class="custom-role-input lattice-input"
+        />
+      </div>
 
-          {#if selectedRoleType === 'custom'}
-            <input
-              type="text"
-              placeholder="Custom role name..."
-              bind:value={customRoleName}
-              class="custom-role-input lattice-input"
-            />
+      <div class="form-section">
+        <span class="section-label" id="task-label">Initial Task (optional)</span>
+        <div class="composer-host" aria-labelledby="task-label">
+          <Composer
+            sessionId={$activeSession?.id ?? null}
+            placeholder="Describe the initial task for this worker… (@ to mention, / for commands)"
+            persistDraft={false}
+            bind:value={initialTask}
+          />
+        </div>
+      </div>
+
+      {#if error}
+        <div class="error-message lattice-forced-colors-boundary">{error}</div>
+      {/if}
+
+      <div class="dialog-actions">
+        <button type="button" class="lattice-btn lattice-btn--secondary" on:click={close}>Cancel</button>
+        <button type="submit" class="lattice-btn lattice-btn--primary lattice-btn--filled" disabled={loading} aria-busy={loading}>
+          {#if loading}
+            Adding principal...
+          {:else}
+            Add Managed Principal
           {/if}
-        </div>
-
-        <div class="form-section">
-          <span class="section-label">Principal Runtime</span>
-          <AgentConfigEditor
-            bind:config={workerConfig}
-            showLabel={false}
-            idPrefix="add-worker-principal"
-            {cliHealth}
-            {cliHealthLoading}
-            {cliHealthError}
-          />
-        </div>
-
-        {#if parentOptions.length > 1}
-          <div class="form-section">
-            <label class="section-label" for="parent-select">Parent (optional)</label>
-            <select id="parent-select" bind:value={selectedParent} class="select-input lattice-input">
-              <option value={null}>Default (Queen)</option>
-              {#each parentOptions as parent}
-                <option value={parent.id}>
-                  {parent.config.label || parent.id}
-                </option>
-              {/each}
-            </select>
-          </div>
-        {/if}
-
-        <div class="form-section">
-          <label class="section-label" for="name-input">Principal Name</label>
-          <input
-            id="name-input"
-            type="text"
-            placeholder="Worker 2 (Frontend)"
-            bind:value={workerName}
-            class="custom-role-input lattice-input"
-          />
-        </div>
-
-        <div class="form-section">
-          <label class="section-label" for="description-input">Description</label>
-          <input
-            id="description-input"
-            type="text"
-            placeholder="One-line task summary"
-            bind:value={workerDescription}
-            class="custom-role-input lattice-input"
-          />
-        </div>
-
-        <div class="form-section">
-          <span class="section-label" id="task-label">Initial Task (optional)</span>
-          <div class="composer-host" aria-labelledby="task-label">
-            <Composer
-              sessionId={$activeSession?.id ?? null}
-              placeholder="Describe the initial task for this worker… (@ to mention, / for commands)"
-              persistDraft={false}
-              bind:value={initialTask}
-            />
-          </div>
-        </div>
-
-        {#if error}
-          <div class="error-message lattice-forced-colors-boundary">{error}</div>
-        {/if}
-
-        <div class="dialog-actions">
-          <button type="button" class="lattice-btn lattice-btn--secondary" on:click={close}>Cancel</button>
-          <button type="submit" class="lattice-btn lattice-btn--primary lattice-btn--filled" disabled={loading} aria-busy={loading}>
-            {#if loading}
-              Adding principal...
-            {:else}
-              Add Managed Principal
-            {/if}
-          </button>
-        </div>
-      </form>
-    </div>
+        </button>
+      </div>
+    </form>
   </div>
-{/if}
+</Dialog>
+
 
 <style>
-  .dialog-overlay {
-    position: fixed;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
-
   .dialog {
     border-radius: var(--radius-lg);
     width: 480px;
@@ -341,7 +322,7 @@
     display: block;
     font-size: 12px;
     font-weight: 600;
-    text-transform: uppercase;
+
     color: var(--text-secondary);
     margin-bottom: 8px;
   }
@@ -360,8 +341,6 @@
     font-weight: 500;
     color: var(--text-disabled);
     margin-bottom: 8px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
   }
 
   .role-grid {

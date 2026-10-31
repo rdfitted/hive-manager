@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { Dialog } from '../ui';
+  import { goto } from '$app/navigation';
   import { tick } from 'svelte';
   import { sessions, activeSession } from '$lib/stores/sessions';
   import { ui } from '$lib/stores/ui';
@@ -12,7 +14,6 @@
   let selected = $state(0);
   let input = $state<HTMLInputElement>();
   let dialog = $state<HTMLDivElement>();
-  let previousFocus: HTMLElement | null = null;
   let pending = $state(false);
   let receipt = $state('');
   let error = $state('');
@@ -27,6 +28,9 @@
       { id: 'view-mode', label: 'Toggle Focus / Grid', run: () => layout.toggleSessionViewMode() },
       { id: 'toggle-rail', label: 'Toggle right panel', run: () => layout.toggleRight() },
       ...tabs.map((tab) => ({ id: `tab-${tab}`, label: `Open ${tab[0].toUpperCase()}${tab.slice(1)}`, run: () => layout.setRightTab(tab) })),
+      { id: 'nav-sessions', label: 'Go to Sessions', run: () => goto('/') },
+      { id: 'nav-dashboard', label: 'Go to Dashboard', run: () => goto('/dashboard') },
+      { id: 'nav-knowledge', label: 'Go to Knowledge', run: () => goto('/knowledge') },
       { id: 'shortcuts', label: 'Open keyboard shortcuts', run: () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: '/', ctrlKey: true, bubbles: true })); } },
       ...$sessions.sessions.map((session) => ({ id: `session-${session.id}`, label: `Switch session: ${session.name || session.project_path || session.id}`, run: () => sessions.setActiveSession(session.id) })),
       ...($activeSession?.agents ?? []).map((agent) => ({ id: `agent-${agent.id}`, label: `Focus agent: ${agent.config.label || agent.config.name || agent.id}`, run: () => ui.setFocusedAgent(agent.id) })),
@@ -38,7 +42,6 @@
 
   async function show() {
     if (open) return;
-    previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     opening += 1;
     query = ''; selected = 0; receipt = ''; error = ''; open = true;
     await tick();
@@ -48,7 +51,6 @@
   function close() {
     opening += 1;
     open = false;
-    if (previousFocus?.isConnected) previousFocus.focus();
   }
 
   function handleWindowKey(event: KeyboardEvent) {
@@ -91,8 +93,7 @@
   }
 
   function handleDialogKey(event: KeyboardEvent) {
-    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
-    else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       event.stopPropagation();
       selected = matches.length ? (activeIndex + (event.key === 'ArrowDown' ? 1 : matches.length - 1)) % matches.length : 0;
@@ -112,30 +113,28 @@
 <!-- Bubble phase preserves xterm's ownership of Ctrl+K. -->
 <svelte:window onkeydown={(event) => { handleWindowKey(event); handleViewKey(event); }} />
 
-{#if open}
-  <div class="backdrop lattice-modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) close(); }}>
-    <div bind:this={dialog} class="palette lattice-modal" role="dialog" aria-modal="true" aria-label="Command palette" tabindex="-1" onkeydown={handleDialogKey}>
-      <div class="search-row lattice-forced-colors-boundary">
-        <label for="command-search">Commands</label>
-        <button type="button" class="lattice-btn lattice-btn--ghost" onclick={close} aria-label="Close command palette">Esc</button>
-      </div>
-      <input bind:this={input} id="command-search" class="lattice-input" aria-label="Find command" aria-describedby="command-selection" placeholder="Find a command…" bind:value={query} oninput={() => { selected = 0; }} />
-      <span id="command-selection" class="selection-announcement" aria-live="polite">{matches[activeIndex]?.label ?? 'No matching commands'}</span>
-      <ul class="commands lattice-scroll-content" aria-label="Commands">
-        {#each matches as command, index (command.id)}
-          <li><button type="button" data-command-index={index} class="command lattice-forced-colors-boundary" class:active={index === activeIndex} aria-current={index === activeIndex ? 'true' : undefined} aria-disabled={pending && command.id === 'flush' ? 'true' : undefined} onclick={() => execute(command)}>{command.label}</button></li>
-        {:else}<li class="empty">No commands match “{query}”.</li>{/each}
-      </ul>
-      {#if pending}<p role="status">Flushing Enter to {receiptTarget}…</p>{/if}
-      {#if receipt}<div class="result"><p>Inject receipt · {receiptTarget}</p><pre role="status" aria-label="Inject receipt">{receipt}</pre></div>{/if}
-      {#if error}<p class="result" role="alert">{error}</p>{/if}
-      <p class="hint">↑ ↓ to choose · Enter to run · Esc to close</p>
+<Dialog {open} label="Command palette" placement="top" onOpenChange={(value) => { if (!value) close(); }} onkeydown={handleDialogKey}>
+  <div bind:this={dialog} class="palette">
+    <div class="search-row lattice-forced-colors-boundary">
+      <label for="command-search">Commands</label>
+      <button type="button" class="lattice-btn lattice-btn--ghost" onclick={close} aria-label="Close command palette">Esc</button>
     </div>
+    <input bind:this={input} id="command-search" class="lattice-input" aria-label="Find command" aria-describedby="command-selection" placeholder="Find a command…" bind:value={query} oninput={() => { selected = 0; }} />
+    <span id="command-selection" class="selection-announcement" aria-live="polite">{matches[activeIndex]?.label ?? 'No matching commands'}</span>
+    <ul class="commands lattice-scroll-content" aria-label="Commands">
+      {#each matches as command, index (command.id)}
+        <li><button type="button" data-command-index={index} class="command lattice-forced-colors-boundary" class:active={index === activeIndex} aria-current={index === activeIndex ? 'true' : undefined} aria-disabled={pending && command.id === 'flush' ? 'true' : undefined} onclick={() => execute(command)}>{command.label}</button></li>
+      {:else}<li class="empty">No commands match “{query}”.</li>{/each}
+    </ul>
+    {#if pending}<p role="status">Flushing Enter to {receiptTarget}…</p>{/if}
+    {#if receipt}<div class="result"><p>Inject receipt · {receiptTarget}</p><pre role="status" aria-label="Inject receipt">{receipt}</pre></div>{/if}
+    {#if error}<p class="result" role="alert">{error}</p>{/if}
+    <p class="hint">↑ ↓ to choose · Enter to run · Esc to close</p>
   </div>
-{/if}
+</Dialog>
+
 
 <style>
-  .backdrop { position: fixed; inset: 0; z-index: 110; display: flex; justify-content: center; align-items: flex-start; padding: min(14vh, 6rem) var(--space-4) var(--space-4); background: color-mix(in srgb, var(--bg-void) 60%, transparent); }
   .palette { width: 34rem; max-width: 100%; max-height: 75vh; display: flex; flex-direction: column; padding: var(--space-3); gap: var(--space-2); }
   .search-row { display: flex; align-items: center; justify-content: space-between; color: var(--text-secondary); font-size: var(--text-small); }
   .commands { margin: 0; padding: 0; list-style: none; overflow-y: auto; min-height: 0; }

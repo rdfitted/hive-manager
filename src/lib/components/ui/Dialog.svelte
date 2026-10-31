@@ -9,12 +9,13 @@
     label?: string;
     labelledby?: string;
     variant?: 'dialog' | 'alert';
+    placement?: 'center' | 'top';
     children?: Snippet;
   };
 
   let {
     open = $bindable(false), onOpenChange, label, labelledby,
-    variant = 'dialog', class: className = '', children, ...rest
+    variant = 'dialog', placement = 'center', class: className = '', children, ...rest
   }: Props = $props();
   const Primitive = $derived(variant === 'alert' ? AlertDialog : BitsDialog);
 
@@ -31,16 +32,18 @@
 </script>
 
 <Primitive.Root {open} onOpenChange={changeOpen}>
-  <Primitive.Portal>
-    <Primitive.Overlay class="dialog-backdrop lattice-modal-backdrop" />
-    <Primitive.Content onInteractOutside={interactOutside}>
-      {#snippet child({ props })}
-        <div {...props} {...rest} class="dialog-content lattice-modal lattice-scroll-chrome {className}" aria-modal="true" aria-label={label} aria-labelledby={labelledby}>
-          {@render children?.()}
-        </div>
-      {/snippet}
-    </Primitive.Content>
-  </Primitive.Portal>
+  {#if open}
+    <Primitive.Portal>
+      <Primitive.Overlay class="dialog-backdrop lattice-modal-backdrop" />
+      <Primitive.Content onInteractOutside={interactOutside}>
+        {#snippet child({ props })}
+          <div {...props} {...rest} class="dialog-content lattice-modal lattice-scroll-chrome {className}" class:top={placement === 'top'} aria-modal="true" aria-label={label} aria-labelledby={labelledby}>
+            {@render children?.()}
+          </div>
+        {/snippet}
+      </Primitive.Content>
+    </Primitive.Portal>
+  {/if}
 </Primitive.Root>
 
 <style>
@@ -51,8 +54,10 @@
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
+    width: max-content;
     max-width: calc(100vw - 32px);
     max-height: 90vh;
     font-family: var(--font-body);
   }
+  .dialog-content.top { top: min(14vh, 6rem); transform: translateX(-50%); }
 </style>

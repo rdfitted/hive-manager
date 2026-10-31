@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { Dialog } from '../ui';
     import type { Event } from '$lib/types/domain';
     import { createEventDispatcher } from 'svelte';
 
@@ -25,40 +26,10 @@
         dispatch('close');
     }
 
-    function handleWindowKeydown(event: KeyboardEvent) {
-        if (event.key === 'Escape') {
-            event.preventDefault();
-            closeModal();
-        }
-    }
-
-    function handleBackdropKeydown(event: KeyboardEvent) {
-        if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            closeModal();
-        }
-    }
 </script>
 
-<svelte:window on:keydown={handleWindowKeydown} />
-
-<div class="modal-backdrop lattice-modal-backdrop">
-    <!-- Structural backdrop hit target; Escape and the visible close button provide keyboard dismissal. -->
-    <button
-        type="button"
-        class="modal-dismiss"
-        tabindex="-1"
-        aria-label="Close event details"
-        on:click={closeModal}
-        on:keydown={handleBackdropKeydown}
-    ></button>
-    <div
-        class="modal-content lattice-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Event details"
-        tabindex="-1"
-    >
+<Dialog open={true} label="Event details" onOpenChange={(value) => { if (!value) closeModal(); }}>
+    <div class="modal-content">
         <div class="modal-header lattice-forced-colors-boundary">
             <h3>Event Details</h3>
             <div class="header-actions">
@@ -86,36 +57,15 @@
             </div>
         </div>
     </div>
-</div>
+</Dialog>
+
 
 <style>
-    .modal-backdrop {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100vw;
-        height: 100vh;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 1000;
-        font-family: var(--font-mono);
-    }
-
-    .modal-dismiss {
-        position: absolute;
-        inset: 0;
-        border: 0;
-        background: transparent;
-        padding: 0;
-        cursor: default;
-    }
-
     .modal-content {
         position: relative;
-        width: 80%;
+        width: min(800px, 90vw);
         max-width: 800px;
-        max-height: 80%;
+        max-height: 80vh;
         display: flex;
         flex-direction: column;
     }
@@ -174,6 +124,7 @@
     }
 
     pre {
+        font-family: var(--font-mono);
         margin: 0;
         padding: 12px;
         background: var(--bg-void);
