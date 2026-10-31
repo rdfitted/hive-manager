@@ -81,7 +81,28 @@
   --radius-full:  999px;                          /* pills */
 
   /* ── Motion ────────────────────────────────────────────────────── */
-  --transition-fast: 200ms ease-out;
+  --transition-fast: 120ms ease-out;
+
+  /* UI roles alias the literal palette; terminal readers keep their hex inputs. */
+  --canvas: var(--bg-void);
+  --chrome: var(--bg-chrome);
+  --toolbar: var(--bg-chrome);
+  --toolbar-control: var(--bg-raised);
+  --surface: var(--bg-panel);
+  --surface-raised: var(--bg-raised);
+  --surface-overlay: var(--bg-elevated);
+  --text-muted: var(--text-secondary);
+  --border: var(--border-structural);
+  --input: var(--bg-void);
+  --focus: var(--accent-cyan);
+  --accent: var(--accent-cyan);
+
+  /* Shared geometry for primitives, title bar and sidebar. */
+  --control-radius: 8px;
+  --control-height: 32px;
+  --control-height-sm: 28px;
+  --toolbar-height: 44px;
+  --sidebar-inset: 8px;
 
   --color-bg: var(--bg-void);
   --color-surface: var(--bg-surface);

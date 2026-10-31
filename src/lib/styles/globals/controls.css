@@ -11,25 +11,24 @@
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--text-small);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  text-transform: none;
+  letter-spacing: normal;
   line-height: 1.2;
   text-decoration: none;
   white-space: nowrap;
-  /* The former 1px border contributed to the border box. The extra padding
-     preserves existing button geometry while the inset ring stays layout-free. */
-  padding: calc(var(--space-2) + 1px) calc(var(--space-4) + 1px);
+  min-height: var(--control-height);
+  box-sizing: border-box;
+  padding: var(--space-1) var(--space-3);
   border: 0;
-  border-radius: var(--radius-md);
+  border-radius: var(--control-radius);
   cursor: pointer;
   transition:
-    color var(--motion-duration-standard) var(--motion-ease-standard),
-    background-color var(--motion-duration-standard) var(--motion-ease-standard),
-    box-shadow var(--motion-duration-standard) var(--motion-ease-standard),
-    text-shadow var(--motion-duration-standard) var(--motion-ease-standard),
-    opacity var(--motion-duration-standard) var(--motion-ease-standard);
+    color var(--motion-duration-instant) var(--motion-ease-standard),
+    background-color var(--motion-duration-instant) var(--motion-ease-standard),
+    box-shadow var(--motion-duration-instant) var(--motion-ease-standard),
+    opacity var(--motion-duration-instant) var(--motion-ease-standard);
   background: transparent;
   box-shadow: inset 0 0 0 1px var(--lattice-btn-ring);
 }
@@ -44,11 +43,7 @@
 
 .lattice-btn--primary:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   background-color: rgba(var(--rgb-running), 0.2);
-  box-shadow:
-    inset 0 0 0 1px var(--lattice-btn-ring),
-    0 0 8px rgba(var(--rgb-running), 0.3),
-    inset 0 0 4px rgba(var(--rgb-running), 0.2);
-  text-shadow: 0 0 4px var(--accent-cyan);
+  box-shadow: inset 0 0 0 1px var(--lattice-btn-ring);
 }
 
 .lattice-btn--secondary {
@@ -80,9 +75,7 @@
 
 .lattice-btn--danger:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   background-color: rgba(var(--rgb-error), 0.16);
-  box-shadow:
-    inset 0 0 0 1px var(--lattice-btn-ring),
-    0 0 8px rgba(var(--rgb-error), 0.2);
+  box-shadow: inset 0 0 0 1px var(--lattice-btn-ring);
 }
 
 .lattice-btn--ghost.lattice-btn--danger {
@@ -106,9 +99,7 @@
 
 .lattice-btn--success:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   background-color: rgba(var(--rgb-success), 0.2);
-  box-shadow:
-    inset 0 0 0 1px var(--lattice-btn-ring),
-    0 0 8px rgba(var(--rgb-success), 0.2);
+  box-shadow: inset 0 0 0 1px var(--lattice-btn-ring);
 }
 
 .lattice-btn--warning {
@@ -121,9 +112,7 @@
 
 .lattice-btn--warning:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   background-color: rgba(var(--rgb-warning), 0.2);
-  box-shadow:
-    inset 0 0 0 1px var(--lattice-btn-ring),
-    0 0 8px rgba(var(--rgb-warning), 0.2);
+  box-shadow: inset 0 0 0 1px var(--lattice-btn-ring);
 }
 
 .lattice-btn--filled {
@@ -147,23 +136,30 @@
 }
 
 .lattice-btn--compact {
+  min-height: var(--control-height-sm);
   gap: var(--space-1);
   padding: calc(var(--space-1) + 1px) calc(var(--space-2) + 1px);
   font-size: var(--text-micro);
 }
 
 .lattice-btn--icon {
-  width: var(--space-6);
-  height: var(--space-6);
+  width: var(--control-height);
+  height: var(--control-height);
   padding: 0;
-  flex: 0 0 var(--space-6);
+  flex: 0 0 var(--control-height);
+}
+
+.lattice-btn--icon.lattice-btn--compact {
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  flex-basis: var(--control-height-sm);
 }
 
 .lattice-btn--link {
   justify-content: flex-start;
   padding: 0;
   border: 0;
-  border-radius: var(--radius-md);
+  border-radius: var(--control-radius);
   color: var(--text-secondary);
   text-transform: none;
   letter-spacing: normal;
@@ -280,14 +276,14 @@
 /* Labels and role-controls can share selection/focus without button layout. */
 .lattice-selectable {
   border: 1px solid var(--border-structural);
-  border-radius: var(--radius-md);
+  border-radius: var(--control-radius);
   cursor: pointer;
   transition:
-    color var(--motion-duration-standard) var(--motion-ease-standard),
-    background-color var(--motion-duration-standard) var(--motion-ease-standard),
-    border-color var(--motion-duration-standard) var(--motion-ease-standard),
-    box-shadow var(--motion-duration-standard) var(--motion-ease-standard),
-    opacity var(--motion-duration-standard) var(--motion-ease-standard);
+    color var(--motion-duration-instant) var(--motion-ease-standard),
+    background-color var(--motion-duration-instant) var(--motion-ease-standard),
+    border-color var(--motion-duration-instant) var(--motion-ease-standard),
+    box-shadow var(--motion-duration-instant) var(--motion-ease-standard),
+    opacity var(--motion-duration-instant) var(--motion-ease-standard);
 }
 
 .lattice-selectable:hover:where(:not(:disabled):not(:has(:disabled)):not([aria-disabled="true"]):not([aria-busy="true"])) {
@@ -309,25 +305,27 @@
    ═══════════════════════════════════════════════════════════════════ */
 
 .lattice-input {
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--text-small);
+  min-height: var(--control-height);
+  box-sizing: border-box;
   background-color: var(--bg-void);
   color: var(--text-primary);
   border: 1px solid var(--border-structural);
-  border-radius: var(--radius-md);
+  border-radius: var(--control-radius);
   padding: var(--space-2);
   transition:
-    color var(--motion-duration-standard) var(--motion-ease-standard),
-    background-color var(--motion-duration-standard) var(--motion-ease-standard),
-    border-color var(--motion-duration-standard) var(--motion-ease-standard),
-    box-shadow var(--motion-duration-standard) var(--motion-ease-standard),
-    opacity var(--motion-duration-standard) var(--motion-ease-standard);
+    color var(--motion-duration-instant) var(--motion-ease-standard),
+    background-color var(--motion-duration-instant) var(--motion-ease-standard),
+    border-color var(--motion-duration-instant) var(--motion-ease-standard),
+    box-shadow var(--motion-duration-instant) var(--motion-ease-standard),
+    opacity var(--motion-duration-instant) var(--motion-ease-standard);
 }
 
 .lattice-input:focus {
   outline: none;
   border-color: var(--accent-cyan);
-  box-shadow: 0 0 4px rgba(var(--rgb-running), 0.2);
+  box-shadow: none;
 }
 
 /* ── Keyboard focus and unavailable/wait semantics ──────────────── */
@@ -387,27 +385,29 @@
    ═══════════════════════════════════════════════════════════════════ */
 
 .lattice-tab {
+  min-height: var(--control-height);
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-1);
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--text-small);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  text-transform: none;
+  letter-spacing: normal;
   color: var(--text-secondary);
   padding: var(--space-2) var(--space-4);
   border: none;
   border-bottom: 2px solid transparent;
-  border-radius: var(--radius-md);
+  border-radius: var(--control-radius);
   background: transparent;
   cursor: pointer;
   transition:
-    color var(--motion-duration-standard) var(--motion-ease-standard),
-    background-color var(--motion-duration-standard) var(--motion-ease-standard),
-    border-color var(--motion-duration-standard) var(--motion-ease-standard),
-    box-shadow var(--motion-duration-standard) var(--motion-ease-standard),
-    opacity var(--motion-duration-standard) var(--motion-ease-standard);
+    color var(--motion-duration-instant) var(--motion-ease-standard),
+    background-color var(--motion-duration-instant) var(--motion-ease-standard),
+    border-color var(--motion-duration-instant) var(--motion-ease-standard),
+    box-shadow var(--motion-duration-instant) var(--motion-ease-standard),
+    opacity var(--motion-duration-instant) var(--motion-ease-standard);
 }
 
 .lattice-tab:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])) {
