@@ -662,7 +662,7 @@
   .verdict-report {
     margin: 0;
     white-space: pre-wrap;
-    font-family: var(--font-body);
+    font-family: var(--font-mono);
     font-size: 13px;
     line-height: 1.6;
     color: var(--text-primary);
