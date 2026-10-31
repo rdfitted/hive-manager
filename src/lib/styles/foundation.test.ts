@@ -47,4 +47,10 @@ describe('visual foundation contract', () => {
     }
     expect(controls).toContain('var(--motion-duration-instant)');
   });
+
+  it.each(['status', 'table', 'tooltip'])('uses sans-serif sentence case chrome in %s.css without tracking', (name) => {
+    const chrome = readFileSync(`src/lib/styles/globals/${name}.css`, 'utf8');
+    expect(chrome).toContain('font-family: var(--font-body);');
+    expect(chrome).not.toMatch(/font-mono|text-transform:\s*uppercase|letter-spacing:\s*[\d.]/);
+  });
 });
