@@ -50,9 +50,16 @@
   function rememberAppControlFocus() {
     const active = document.activeElement;
     modalFocusTarget = active instanceof HTMLButtonElement && active.closest('.title-bar .shell-actions') ? active : null;
-    void tick().then(() => {
-      if (!document.querySelector('[aria-modal="true"]')) modalFocusTarget = null;
-    });
+  }
+
+  function clearPendingAppControlFocus(event: FocusEvent | PointerEvent) {
+    // A deferred dialog may not exist yet. Keep its focus intent until the user moves on.
+    if (!modalFocusTarget || modalOpen || document.querySelector('[aria-modal="true"]')) return;
+    if (event.type === 'focusout') {
+      if (event.target === modalFocusTarget) modalFocusTarget = null;
+    } else if (!(event.target instanceof Node) || !modalFocusTarget.contains(event.target)) {
+      modalFocusTarget = null;
+    }
   }
 
   function handleModalShortcut(event: KeyboardEvent) {
@@ -67,7 +74,7 @@
   }
 </script>
 
-<svelte:window onkeydowncapture={handleModalShortcut} />
+<svelte:window onkeydowncapture={handleModalShortcut} onfocusoutcapture={clearPendingAppControlFocus} onpointerdowncapture={clearPendingAppControlFocus} />
 
 <header class="title-bar" class:macos={chrome === 'native-traffic-lights'} data-tauri-drag-region data-window-chrome aria-label="Application title bar">
   {#if chrome === 'native-traffic-lights'}
@@ -121,10 +128,10 @@
     user-select: none;
   }
 
-  /* Bits disables body pointer events. Native chrome must remain usable above dialogs. */
+  /* Reserve a caption layer above nested dialog stacks, even while body pointer events are locked. */
   [data-window-chrome] {
     position: relative;
-    z-index: 112;
+    z-index: 10000;
     pointer-events: auto;
   }
 

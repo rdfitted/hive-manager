@@ -84,7 +84,8 @@ describe('TitleBar', () => {
     const dialog = readFileSync('src/lib/components/ui/Dialog.svelte', 'utf8');
     const overlayBase = Number(dialog.match(/z-index:\s*calc\((\d+)\s*\+/)![1]);
     const chromeLayer = Number(source.match(/\[data-window-chrome\]\s*\{[^}]*z-index:\s*(\d+)/s)![1]);
-    expect(chromeLayer).toBeGreaterThan(overlayBase + 1);
+    // Caption controls must clear even an implausibly deep stack, not merely depth one.
+    expect(chromeLayer).toBeGreaterThan(overlayBase + 1000);
     expect(source).toMatch(/\[data-window-chrome\]\s*\{[^}]*pointer-events:\s*auto/s);
     await fireEvent.click(within(document.body).getByRole('button', { name: 'Close test dialog' }));
     await waitFor(() => expect(view.container.querySelector('[inert]')).toBeNull());
@@ -146,6 +147,55 @@ describe('TitleBar', () => {
     close.focus();
     await fireEvent.click(close);
     await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it('restores the original control when a dialog mounts after multiple ticks', async () => {
+    const view = render(TitleBarDialog, { deferShortcutMount: true });
+    const trigger = view.getByRole('button', { name: /Open command palette/ });
+    const controls = trigger.closest<HTMLElement>('.shell-actions')!;
+    trigger.focus();
+    const focus = trigger.focus.bind(trigger);
+    vi.spyOn(trigger, 'focus').mockImplementation((options) => {
+      if (!controls.inert) focus(options);
+    });
+    await fireEvent.click(trigger);
+    await tick();
+    await tick();
+    expect(document.body.querySelector('[aria-modal="true"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    view.component.mountPendingDialog();
+    await waitFor(() => expect(controls.inert).toBe(true));
+    const close = within(document.body).getByRole('button', { name: 'Close test dialog' });
+    close.focus();
+    await fireEvent.click(close);
+    await waitFor(() => {
+      expect(controls.inert).toBe(false);
+      expect(document.activeElement).toBe(trigger);
+    });
+  });
+
+  it.each(['focusout', 'outside pointer'] as const)('discards unused modal focus intent after %s', async (intent) => {
+    const view = render(TitleBarDialog, { shortcutsEnabled: false });
+    const trigger = view.getByRole('button', { name: /Open command palette/ });
+    const controls = trigger.closest<HTMLElement>('.shell-actions')!;
+    trigger.focus();
+    const focus = trigger.focus.bind(trigger);
+    vi.spyOn(trigger, 'focus').mockImplementation((options) => {
+      if (!controls.inert) focus(options);
+    });
+    await fireEvent.click(trigger);
+    await tick();
+    expect(document.body.querySelector('[aria-modal="true"]')).toBeNull();
+    if (intent === 'focusout') trigger.blur();
+    else await fireEvent.pointerDown(document.body);
+    await fireEvent.click(view.getByRole('button', { name: 'Open test dialog' }));
+    await waitFor(() => expect(controls.inert).toBe(true));
+    const close = within(document.body).getByRole('button', { name: 'Close test dialog' });
+    close.focus();
+    await fireEvent.click(close);
+    await waitFor(() => expect(controls.inert).toBe(false));
+    await tick();
+    expect(document.activeElement).toBe(document.body);
   });
 
   it('reserves macOS traffic lights and leaves Linux controls to the native frame', () => {
