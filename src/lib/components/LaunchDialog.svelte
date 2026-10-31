@@ -697,11 +697,11 @@
 </script>
 
 {#snippet content()}
-  <div class="launch-content">
+  <div data-launch-owned class="launch-content">
     {#if presentation === 'inline'}
-      <p id="launch-dialog-title" class="launch-title">Hive Manager</p>
+      <p data-launch-owned id="launch-dialog-title" class="launch-title">Hive Manager</p>
     {:else}
-      <h2 id="launch-dialog-title">Launch New Session</h2>
+      <h2 data-launch-owned id="launch-dialog-title">Launch New Session</h2>
     {/if}
     {#if showAdvanced}
 <LaunchAdvanced
@@ -766,12 +766,12 @@
 
 {#if show}
   {#if presentation === 'inline'}
-    <section class="launch-inline" aria-labelledby="launch-dialog-title">
+    <section data-launch-owned class="launch-inline" aria-labelledby="launch-dialog-title">
       {@render content()}
     </section>
   {:else}
     <!-- Keep the modal in place to preserve the frozen launch-parity container contract. -->
-    <Dialog open={show} onOpenChange={(open) => { if (!open) handleClose(); }} portal={false} dismissible={!launching} labelledby="launch-dialog-title" class="launch-dialog">
+    <Dialog data-launch-owned open={show} onOpenChange={(open) => { if (!open) handleClose(); }} portal={false} dismissible={!launching} labelledby="launch-dialog-title" class="launch-dialog">
       {@render content()}
     </Dialog>
   {/if}

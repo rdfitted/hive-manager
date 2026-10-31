@@ -9,9 +9,9 @@
   export let cliHealth: CliHealthMap;
   export let cliHealthLoading: boolean;</script>
 
-<div class="form-section">
-            <h3>Solo Configuration</h3>
-            <p class="section-description">Run a single agent for a specific task without any orchestration overhead.</p>
+<div data-launch-owned class="form-section">
+            <h3 data-launch-owned>Solo Configuration</h3>
+            <p data-launch-owned class="section-description">Run a single agent for a specific task without any orchestration overhead.</p>
 
             <AgentConfigEditor
               bind:config={soloConfig}
@@ -22,9 +22,9 @@
               {cliHealthError}
             />
 
-            <div class="form-group">
-              <label for="solo-task">Task Description</label>
-            <textarea
+            <div data-launch-owned class="form-group">
+              <label data-launch-owned for="solo-task">Task Description</label>
+            <textarea data-launch-owned
               id="solo-task"
               class="lattice-input"
                 bind:value={soloTask}

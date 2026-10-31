@@ -87,9 +87,9 @@
   export let handleJudgeConfigChange: (detail: AgentConfig) => void;
   export let handleDebateJudgeConfigChange: (detail: AgentConfig) => void;</script>
 
-<button type="button" class="lattice-btn lattice-btn--ghost" on:click={() => showAdvanced = false} disabled={launching}>Back to composer</button>
-      <div class="mode-tabs">
-        <button
+<button data-launch-owned type="button" class="lattice-btn lattice-btn--ghost" on:click={() => showAdvanced = false} disabled={launching}>Back to composer</button>
+      <div data-launch-owned class="mode-tabs">
+        <button data-launch-owned
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'templates'}
           aria-pressed={mode === 'templates'}
@@ -98,7 +98,7 @@
         >
           Templates
         </button>
-        <button
+        <button data-launch-owned
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'hive'}
           aria-pressed={mode === 'hive'}
@@ -107,7 +107,7 @@
         >
           Hive
         </button>
-        <button
+        <button data-launch-owned
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'fusion'}
           aria-pressed={mode === 'fusion'}
@@ -116,7 +116,7 @@
         >
           Fusion
         </button>
-        <button
+        <button data-launch-owned
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'debate'}
           aria-pressed={mode === 'debate'}
@@ -125,7 +125,7 @@
         >
           Debate
         </button>
-        <button
+        <button data-launch-owned
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'research'}
           aria-pressed={mode === 'research'}
@@ -134,7 +134,7 @@
         >
           Research
         </button>
-        <button
+        <button data-launch-owned
           class="lattice-tab launch-mode-tab"
           class:lattice-tab--active={mode === 'solo'}
           aria-pressed={mode === 'solo'}
@@ -145,17 +145,17 @@
         </button>
       </div>
 
-      <form novalidate on:submit={(e) => { e.preventDefault(); handleSubmit(false); }}>
+      <form data-launch-owned novalidate on:submit={(e) => { e.preventDefault(); handleSubmit(false); }}>
         {#if mode === 'templates'}
-          <div class="form-section">
+          <div data-launch-owned class="form-section">
             <TemplatePicker />
           </div>
         {/if}
 
-        <div class="form-row">
-          <div class="form-group flex-2">
-            <label for="sessionName">Session Name (optional)</label>
-            <input
+        <div data-launch-owned class="form-row">
+          <div data-launch-owned class="form-group flex-2">
+            <label data-launch-owned for="sessionName">Session Name (optional)</label>
+            <input data-launch-owned
               id="sessionName"
               type="text"
               class="lattice-input"
@@ -163,11 +163,11 @@
               placeholder="e.g. Refactor API"
             />
           </div>
-          <div class="form-group flex-1">
-            <span class="group-label">Session Color</span>
-            <div class="color-picker-inline lattice-forced-colors-boundary">
+          <div data-launch-owned class="form-group flex-1">
+            <span data-launch-owned class="group-label">Session Color</span>
+            <div data-launch-owned class="color-picker-inline lattice-forced-colors-boundary">
               {#each COLORS as color}
-                <button
+                <button data-launch-owned
                   type="button"
                   class="lattice-btn lattice-btn--icon color-circle"
                   style:background={color.value}
@@ -177,7 +177,7 @@
                 >
                 </button>
               {/each}
-              <button
+              <button data-launch-owned
                 type="button"
                 class="lattice-btn lattice-btn--icon lattice-btn--secondary color-circle clear"
                 on:click={() => sessionColor = ''}
@@ -188,10 +188,10 @@
           </div>
         </div>
 
-        <div class="form-group">
-          <label for="projectPath">Project Path</label>
-          <div class="path-picker">
-            <input
+        <div data-launch-owned class="form-group">
+          <label data-launch-owned for="projectPath">Project Path</label>
+          <div data-launch-owned class="path-picker">
+            <input data-launch-owned
               id="projectPath"
               type="text"
               class="lattice-input"
@@ -200,17 +200,17 @@
               readonly
               required
             />
-            <button type="button" class="lattice-btn lattice-btn--secondary" on:click={browseForFolder}>
+            <button data-launch-owned type="button" class="lattice-btn lattice-btn--secondary" on:click={browseForFolder}>
               Browse
             </button>
           </div>
         </div>
 
         {#if mode === 'hive' || mode === 'research' || mode === 'fusion' || mode === 'debate'}
-          <div class="form-section queen-section lattice-forced-colors-boundary">
-            <div class="section-heading-copy">
-              <h3>Queen</h3>
-              <p>Sets direction, coordinates the visible principals, and owns the final integration.</p>
+          <div data-launch-owned class="form-section queen-section lattice-forced-colors-boundary">
+            <div data-launch-owned class="section-heading-copy">
+              <h3 data-launch-owned>Queen</h3>
+              <p data-launch-owned>Sets direction, coordinates the visible principals, and owns the final integration.</p>
             </div>
             <AgentConfigEditor
               bind:config={queenConfig}
@@ -270,9 +270,9 @@
 {/if}
 
         {#if mode === 'hive' || mode === 'research' || mode === 'fusion' || mode === 'debate'}
-          <div class="form-group">
-            <span class="composer-label" id="prompt-label">Initial Prompt (optional)</span>
-            <div class="composer-host" aria-labelledby="prompt-label">
+          <div data-launch-owned class="form-group">
+            <span data-launch-owned class="composer-label" id="prompt-label">Initial Prompt (optional)</span>
+            <div data-launch-owned class="composer-host" aria-labelledby="prompt-label">
               <Composer
                 sessionId={null}
                 placeholder="Enter a task for the session… (@ to mention, / for commands)"
@@ -284,7 +284,7 @@
         {/if}
 
         {#if error || launchError}
-          <div class="error-message lattice-forced-colors-boundary" role="alert">{error || launchError}</div>
+          <div data-launch-owned class="error-message lattice-forced-colors-boundary" role="alert">{error || launchError}</div>
         {/if}
 
 <LaunchPreview
@@ -295,14 +295,14 @@
   {adversarialLaneTarget} {activeFusionVariants} {activeDebaters}
 />
 
-        <div class="dialog-actions">
+        <div data-launch-owned class="dialog-actions">
           {#if presentation === 'modal'}
-          <button type="button" class="lattice-btn lattice-btn--secondary" on:click={handleClose} disabled={launching}>
+          <button data-launch-owned type="button" class="lattice-btn lattice-btn--secondary" on:click={handleClose} disabled={launching}>
             Cancel
           </button>
           {/if}
           {#if mode === 'hive' || mode === 'research'}
-          <button
+          <button data-launch-owned
             type="button"
             class="lattice-btn lattice-btn--warning lattice-btn--dashed"
             on:click={handleSmokeTest}
@@ -314,7 +314,7 @@
             Smoke Test
           </button>
           {/if}
-          <button type="submit" class="lattice-btn lattice-btn--primary lattice-btn--filled" disabled={launching || !projectPath.trim() || mode === 'templates'} aria-busy={launching}>
+          <button data-launch-owned type="submit" class="lattice-btn lattice-btn--primary lattice-btn--filled" disabled={launching || !projectPath.trim() || mode === 'templates'} aria-busy={launching}>
             {launching ? 'Launching...' : 'Launch'}
           </button>
         </div>

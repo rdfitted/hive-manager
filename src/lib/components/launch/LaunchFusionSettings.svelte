@@ -14,26 +14,26 @@
   export let handleVariantConfigChange: (index: number, detail: AgentConfig) => void;
   export let handleJudgeConfigChange: (detail: AgentConfig) => void;</script>
 
-<div class="form-section">
-            <h3>Fusion Configuration</h3>
-            <p class="section-description">Run multiple agent variants in parallel to compare their outputs. A judge will evaluate and recommend the best result.</p>
+<div data-launch-owned class="form-section">
+            <h3 data-launch-owned>Fusion Configuration</h3>
+            <p data-launch-owned class="section-description">Run multiple agent variants in parallel to compare their outputs. A judge will evaluate and recommend the best result.</p>
 
-            <div class="field">
-              <label for="variant-count">Number of Variants</label>
-              <select id="variant-count" bind:value={variantCount} class="role-select lattice-input">
-                <option value={2}>2 Variants</option>
-                <option value={3}>3 Variants</option>
-                <option value={4}>4 Variants</option>
+            <div data-launch-owned class="field">
+              <label data-launch-owned for="variant-count">Number of Variants</label>
+              <select data-launch-owned id="variant-count" bind:value={variantCount} class="role-select lattice-input">
+                <option data-launch-owned value={2}>2 Variants</option>
+                <option data-launch-owned value={3}>3 Variants</option>
+                <option data-launch-owned value={4}>4 Variants</option>
               </select>
             </div>
 
-            <div class="subsection lattice-forced-colors-boundary">
-              <h4>Variant Configurations</h4>
-              <div class="workers-list">
+            <div data-launch-owned class="subsection lattice-forced-colors-boundary">
+              <h4 data-launch-owned>Variant Configurations</h4>
+              <div data-launch-owned class="workers-list">
                 {#each activeFusionVariants as variant, i (i)}
-                  <div class="worker-card lattice-panel">
-                    <div class="card-header">
-                      <input
+                  <div data-launch-owned class="worker-card lattice-panel">
+                    <div data-launch-owned class="card-header">
+                      <input data-launch-owned
                         type="text"
                         class="card-title-input lattice-input"
                         bind:value={fusionVariants[i].name}
@@ -54,10 +54,10 @@
               </div>
             </div>
 
-            <div class="subsection lattice-forced-colors-boundary">
-              <h4>Judge Configuration</h4>
-              <p class="section-description">Evaluates variant outputs and recommends a winner.</p>
-              <div class="worker-card lattice-panel">
+            <div data-launch-owned class="subsection lattice-forced-colors-boundary">
+              <h4 data-launch-owned>Judge Configuration</h4>
+              <p data-launch-owned class="section-description">Evaluates variant outputs and recommends a winner.</p>
+              <div data-launch-owned class="worker-card lattice-panel">
                 <AgentConfigEditor
                   config={judgeAgentConfig}
                   showLabel={false}
