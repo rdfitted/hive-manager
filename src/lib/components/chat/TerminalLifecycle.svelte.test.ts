@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import type { Session } from '$lib/stores/sessions';
+import type { AgentEventsState } from '$lib/stores/agentEvents';
 
 const fixture = vi.hoisted(() => ({
   terminals: [] as { buffer: string; disposed: boolean; textarea: HTMLTextAreaElement; keyHandler: (event: KeyboardEvent) => boolean }[],
   webglCreated: 0, webglDisposed: 0, focuses: 0,
+  setAgentEvents: null as ((value: AgentEventsState) => void) | null,
   invoke: vi.fn(async (command: string, args: { id: string }) => command === 'get_pty_snapshot'
     ? { id: args.id, offset_start: 0, offset_end: 17, data: btoa('fixture scrollback') } : undefined),
 }));
@@ -56,11 +58,17 @@ vi.mock('$lib/stores/conversations', async () => {
 });
 vi.mock('$lib/stores/agentEvents', async () => {
   const { writable } = await import('svelte/store');
-  return { agentEvents: { subscribe: writable({ sessionId: 's', feeds: {
-    claude: { agent_id: 'claude', capabilities: { has_terminal: true, event_source: 'transcript' } },
-    codex: { agent_id: 'codex', capabilities: { has_terminal: true, event_source: 'none' } },
-  }, histories: {}, error: null }).subscribe } };
+  const state = writable<AgentEventsState>();
+  fixture.setAgentEvents = state.set;
+  return { agentEvents: { subscribe: state.subscribe } };
 });
+
+function publishFeed(withRecord = true) {
+  fixture.setAgentEvents!({ sessionId: 's', feeds: {
+    claude: { agent_id: 'claude', capabilities: { can_interrupt: true, supports_approvals: false, has_terminal: true, event_source: 'transcript' } },
+    codex: { agent_id: 'codex', capabilities: { can_interrupt: true, supports_approvals: false, has_terminal: true, event_source: 'none' } },
+  }, histories: { claude: { events: withRecord ? [{ agent_id: 'claude', cursor: 'first', source_id: 'first', kind: 'assistant_message', ts: '2026-01-01T00:00:00Z', truncated: false, payload: { text: 'Fixture transcript' } }] : [], before: null, hasMore: false, loading: false, error: null } }, connected: true, error: null });
+}
 
 import TerminalGrid from '../TerminalGrid.svelte';
 import { layout } from '$lib/stores/layout';
@@ -69,6 +77,7 @@ const { readFileSync } = await vi.importActual<{ readFileSync(path: string, enco
 beforeEach(() => {
   fixture.terminals.length = 0; fixture.webglCreated = 0; fixture.webglDisposed = 0; fixture.focuses = 0;
   localStorage.clear(); layout.setMaximizedTerminalId(null);
+  publishFeed();
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
   // Real terminal palette resolution requires concrete hex values in jsdom.
   const source = readFileSync('src/lib/components/Terminal.svelte', 'utf8');
@@ -88,6 +97,39 @@ const session: Session = {
 };
 
 describe('real Terminal component behind chat (renderer doubles)', () => {
+  it.each(['focus', 'grid'] as const)('F3: %s empty PTY feed reveals startup prompts until the first record without focus or remount', async (mode) => {
+    layout.setSessionViewMode(mode); publishFeed(false);
+    const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
+    await waitFor(() => expect(fixture.terminals).toHaveLength(2));
+    const original = [...fixture.terminals];
+    const layer = view.container.querySelector<HTMLElement>('.terminal-layer')!;
+    expect(layer.inert, 'empty transcript PTY must default to terminal').toBe(false);
+    expect(view.getByRole('button', { name: 'Terminal' }).getAttribute('aria-pressed')).toBe('true');
+    expect(view.queryByRole('region', { name: 'Agent needs attention' })).toBeNull();
+    expect(fixture.focuses).toBe(0);
+    publishFeed(); await tick();
+    expect(layer.inert).toBe(true);
+    expect(view.getByRole('button', { name: 'Chat' }).getAttribute('aria-pressed')).toBe('true');
+    expect(fixture.terminals).toEqual(original);
+    expect(fixture.focuses).toBe(0);
+  });
+
+  it.each(['chat', 'terminal'] as const)('F3: preserves an explicit %s choice when the first transcript arrives', async (choice) => {
+    publishFeed(false);
+    const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
+    await fireEvent.click(view.getByRole('button', { name: choice === 'chat' ? 'Chat' : 'Terminal' }));
+    publishFeed(); await tick();
+    expect(view.getByRole('button', { name: choice === 'chat' ? 'Chat' : 'Terminal' }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('F3: an archived empty transcript remains terminal-only without a feed error', async () => {
+    publishFeed(false);
+    const view = render(TerminalGrid, { session: { ...session, state: 'Completed' }, focusedAgentId: 'claude', onSelect: vi.fn() });
+    await tick();
+    expect(view.container.querySelector<HTMLElement>('.terminal-layer')!.inert).toBe(false);
+    expect(view.queryByRole('region', { name: 'Agent needs attention' })).toBeNull();
+  });
+
   it.each(['focus', 'grid'] as const)('G9: %s twenty toggles keep xterm scrollback, instances and WebGL allocation count flat', async (mode) => {
     layout.setSessionViewMode(mode);
     const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });

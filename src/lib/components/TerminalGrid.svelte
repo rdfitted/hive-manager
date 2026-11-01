@@ -382,9 +382,10 @@
       {@const feed = pane.kind === 'agent' && $agentEvents.sessionId === session.id ? $agentEvents.feeds[pane.id] : undefined}
       {@const chatEligible = !!feed && feed.capabilities.event_source !== 'none'}
       {@const hasTerminal = feed?.capabilities.has_terminal !== false}
-      {@const mode = chatEligible ? (paneModes[pane.id] ?? 'chat') : 'terminal'}
-      {@const chatShowing = chatEligible && (mode !== 'terminal' || !hasTerminal)}
       {@const history = $agentEvents.sessionId === session.id ? $agentEvents.histories[pane.id]?.events ?? [] : []}
+      {@const defaultMode = hasTerminal && feed?.capabilities.event_source === 'transcript' && history.length === 0 ? 'terminal' : 'chat'}
+      {@const mode = chatEligible ? (paneModes[pane.id] ?? defaultMode) : 'terminal'}
+      {@const chatShowing = chatEligible && (mode !== 'terminal' || !hasTerminal)}
       <!-- Container click is a convenience; the dedicated header button carries
            accessible focus semantics without wrapping the terminal or other controls. -->
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->

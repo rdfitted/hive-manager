@@ -131,7 +131,7 @@ afterEach(() => {
 });
 
 describe('Focus/Grid session terminals', () => {
-  function chatFeed(events: AgentEvent[] = [], hasTerminal = true, error: string | null = null) {
+  function chatFeed(events: AgentEvent[] = [{ agent_id: 'session-a-agent-0', cursor: 'initial', kind: 'assistant_message', ts: '2026-01-01T00:00:00Z', source_id: 'initial', truncated: false, payload: { text: 'Fixture transcript' } }], hasTerminal = true, error: string | null = null) {
     const id = 'session-a-agent-0';
     fixture.setAgentEvents!({ sessionId: 'session-a', feeds: {
       [id]: { agent_id: id, capabilities: { has_terminal: hasTerminal, can_interrupt: true, supports_approvals: !hasTerminal, event_source: hasTerminal ? 'transcript' : 'protocol' } },
@@ -165,7 +165,7 @@ describe('Focus/Grid session terminals', () => {
     ['focus', true, 'needs_approval'], ['grid', true, 'needs_input'],
     ['focus', false, 'needs_input'], ['grid', false, 'needs_approval'],
   ] as const)('G10: %s attention with terminal=%s and %s points to the right view without moving composer focus', async (mode, hasTerminal, status) => {
-    layout.setSessionViewMode(mode); chatFeed([], hasTerminal);
+    layout.setSessionViewMode(mode); chatFeed(undefined, hasTerminal);
     const view = render(SessionOverview); await tick();
     const pane = view.container.querySelector<HTMLElement>('.terminal-item')!;
     const editor = within(pane).getByRole('textbox', { name: 'Message this agent…' }); editor.focus();
@@ -196,7 +196,7 @@ describe('Focus/Grid session terminals', () => {
     const failed = session(); failed.agents[0].status = { Error: 'fixture error' }; publish(failed); await tick();
     expect(within(pane).getByText('This agent reported an error.')).toBeTruthy();
     expect(document.activeElement).toBe(editor);
-    publish(session()); chatFeed([], true, 'Agent feed disconnected; reconnecting.'); await tick();
+    publish(session()); chatFeed(undefined, true, 'Agent feed disconnected; reconnecting.'); await tick();
     expect(within(pane).getByText('Agent feed disconnected; reconnecting.')).toBeTruthy();
     expect(document.activeElement).toBe(editor);
   });
