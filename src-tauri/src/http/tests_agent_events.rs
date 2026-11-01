@@ -41,27 +41,52 @@ pub(super) fn setup() -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
     let queue_repo = Arc::new(QueueRepo::new(db.clone()));
     queue_repo.ensure_schema().unwrap();
     let queue = Arc::new(QueueManager::new(queue_repo, bus.clone()));
-    let state = Arc::new(AppState::new(
-        Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap())),
-        pty,
-        controller,
-        injection,
-        storage.clone(),
-        bus,
-        db,
-        queue,
-        None,
-    ));
-    state
-        .transports
-        .set(Arc::new(TransportRegistry::new(
+    // Supply the scrubbed root before attaching the registry. AppState::new now
+    // initializes and attaches its default registry immediately.
+    let state = Arc::new(AppState {
+        config: Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap())),
+        pty_manager: pty,
+        session_controller: controller,
+        injection_manager: injection,
+        storage: storage.clone(),
+        event_bus: bus,
+        app_state_db: db,
+        queue_manager: queue,
+        app_handle: None,
+        registry: std::sync::OnceLock::new(),
+        transports: std::sync::OnceLock::from(Arc::new(TransportRegistry::new(
             storage.sessions_dir(),
             Some(temp.path().join("claude-projects")),
-        )))
-        .ok()
-        .unwrap();
+        ))),
+    });
+    state
+        .pty_manager
+        .read()
+        .attach_transports(Arc::clone(state.transports()));
     let app = create_router(state.clone());
     (temp, state, app)
+}
+
+#[test]
+fn app_state_new_attaches_the_same_registry_used_by_http() {
+    let (_temp, fixture, _app) = setup();
+    let pty = Arc::new(RwLock::new(PtyManager::new()));
+    let state = AppState::new(
+        fixture.config.clone(),
+        pty.clone(),
+        fixture.session_controller.clone(),
+        fixture.injection_manager.clone(),
+        fixture.storage.clone(),
+        fixture.event_bus.clone(),
+        fixture.app_state_db.clone(),
+        fixture.queue_manager.clone(),
+        None,
+    );
+    let attached = pty
+        .read()
+        .transport_registry()
+        .expect("registry attached at construction");
+    assert!(Arc::ptr_eq(&attached, state.transports()));
 }
 
 pub(super) fn event(agent: &str, text: &str) -> AgentEvent {

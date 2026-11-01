@@ -46,7 +46,7 @@ impl AppState {
         queue_manager: Arc<QueueManager>,
         app_handle: Option<AppHandle>,
     ) -> Self {
-        Self {
+        let state = Self {
             config,
             pty_manager,
             session_controller,
@@ -58,7 +58,12 @@ impl AppState {
             app_handle,
             registry: std::sync::OnceLock::new(),
             transports: std::sync::OnceLock::new(),
-        }
+        };
+        state
+            .pty_manager
+            .read()
+            .attach_transports(Arc::clone(state.transports()));
+        state
     }
 
     /// Attach the action registry. Idempotent — the first set wins.
