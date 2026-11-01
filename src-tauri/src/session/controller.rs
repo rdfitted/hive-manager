@@ -2,7 +2,7 @@ use crate::tauri_shim::{AppHandle, Emitter};
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -720,6 +720,9 @@ pub struct HiveLaunchConfig {
     /// created for old callers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_graph_archetype: Option<String>,
+    /// Worker/solo protocol opt-ins. Empty preserves the legacy JSON shape.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub agent_transports: crate::domain::agent_transport::AgentTransports,
     /// Per-session values used to fill archetype holes (for example
     /// `component`). Empty parameters are omitted from persisted legacy launch
     /// configs so old sessions retain their prior serialized shape.
@@ -3579,7 +3582,7 @@ impl SessionController {
             .map(|pair| pair[1].clone())
     }
 
-    fn build_command(config: &AgentConfig) -> (String, Vec<String>) {
+    pub(crate) fn build_command(config: &AgentConfig) -> (String, Vec<String>) {
         let mut args = Vec::new();
         let (effective_model, mut extra_flags) = CliRegistry::resolve_model_and_flags(
             &config.cli,
@@ -9240,8 +9243,10 @@ Last updated: {timestamp}
         qa_workers: Option<Vec<QaWorkerConfig>>,
         smoke_test: bool,
         execution_policy: HiveExecutionPolicy,
+        agent_transports: crate::domain::agent_transport::AgentTransports,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
+        self.configure_agent_transports(&session_id, agent_transports)?;
         let base_ref = resolve_fresh_base(&project_path);
         let solo_branch = format!("solo/{}/worker-1", session_id);
         let mut created_cells = Vec::new();
@@ -9446,6 +9451,14 @@ Last updated: {timestamp}
             .ok_or_else(|| format!("Session disappeared after evaluator launch: {}", session_id))
     }
 
+    fn configure_agent_transports(&self, session_id: &str, enabled: crate::domain::agent_transport::AgentTransports) -> Result<(), String> {
+        if let Some(storage) = &self.storage {
+            storage.save_agent_transports(session_id, &enabled).map_err(|e| format!("Cannot persist agent transports: {e}"))?;
+        }
+        self.pty_manager.read().configure_transports(session_id, enabled);
+        Ok(())
+    }
+
     pub fn launch_solo(&self, config: HiveLaunchConfig) -> Result<Session, String> {
         let project_path = PathBuf::from(&config.project_path);
         let task_description = config
@@ -9471,6 +9484,7 @@ Last updated: {timestamp}
             config.qa_workers.clone(),
             config.smoke_test,
             execution_policy,
+            config.agent_transports.clone(),
         )
     }
 
@@ -9535,9 +9549,11 @@ Last updated: {timestamp}
 
         // If with_planning is true, spawn Master Planner first
         if config.with_planning {
+            self.configure_agent_transports(&session_id, config.agent_transports.clone())?;
             return self.launch_planning_phase(session_id, config);
         }
 
+        self.configure_agent_transports(&session_id, config.agent_transports.clone())?;
         let shared_cell = use_worktrees && topology.uses_shared_cell();
 
         // Fetch latest from origin so all worktrees branch from the most
@@ -10044,6 +10060,7 @@ Last updated: {timestamp}
                 ..HiveExecutionPolicy::default()
             },
             work_graph_archetype: None,
+            agent_transports: Default::default(),
             work_graph_parameters: BTreeMap::new(),
         };
 
@@ -15778,6 +15795,8 @@ The backend composed and persisted the following authoritative skeleton before l
             execution_policy.workspace_strategy = WorkspaceStrategy::None;
         }
 
+        let enabled = self.storage.as_ref().map(|s| s.load_agent_transports(&persisted.id)).transpose().map_err(|e| format!("Cannot restore agent transports: {e}"))?.unwrap_or_default();
+        self.pty_manager.read().configure_transports(&persisted.id, enabled);
         Ok(Session {
             id: persisted.id.clone(),
             name: persisted.name.clone(),

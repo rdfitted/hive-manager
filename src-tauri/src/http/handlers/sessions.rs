@@ -276,6 +276,8 @@ pub struct LaunchDebateRequest {
 
 #[derive(Deserialize)]
 pub struct LaunchSoloRequest {
+    #[serde(default)]
+    pub agent_transports: crate::domain::agent_transport::AgentTransports,
     pub project_path: String,
     pub task_description: Option<String>,
     pub cli: String,
@@ -291,6 +293,8 @@ pub struct LaunchSoloRequest {
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
+    #[serde(default)]
+    pub agent_transports: crate::domain::agent_transport::AgentTransports,
     pub project_path: String,
     pub mode: String,
     pub objective: Option<String>,
@@ -510,6 +514,7 @@ pub async fn create_session(
                 evaluator_config,
                 qa_workers: req.qa_workers,
                 smoke_test: req.smoke_test.unwrap_or(false),
+                agent_transports: req.agent_transports,
                 work_graph_archetype: req.work_graph_archetype,
                 work_graph_parameters: req.work_graph_parameters,
             };
@@ -950,6 +955,7 @@ pub async fn launch_solo(
         evaluator_config,
         qa_workers: None,
         smoke_test: false,
+        agent_transports: req.agent_transports,
         work_graph_archetype: None,
         work_graph_parameters: Default::default(),
     };

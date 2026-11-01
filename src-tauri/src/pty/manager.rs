@@ -330,6 +330,7 @@ pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
     transports: RwLock<Option<Arc<crate::transport::TransportRegistry>>>,
     agent_transports: RwLock<HashMap<String, crate::domain::agent_transport::AgentTransports>>,
+    starting_transports: RwLock<HashMap<String, Arc<dyn crate::transport::AgentTransport>>>,
     heartbeat_credentials: RwLock<HashMap<String, HeartbeatCredential>>,
     heartbeat_verify_when_present: RwLock<HashMap<String, bool>>,
     /// Serialize create/kill so a same-id kill cannot pass between process spawn and
@@ -358,6 +359,7 @@ impl PtyManager {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             transports: RwLock::new(None),
             agent_transports: RwLock::new(HashMap::new()),
+            starting_transports: RwLock::new(HashMap::new()),
             heartbeat_credentials: RwLock::new(HashMap::new()),
             heartbeat_verify_when_present: RwLock::new(HashMap::new()),
             lifecycle: Mutex::new(()),
@@ -381,6 +383,46 @@ impl PtyManager {
 
     pub fn configure_transports(&self, session_id: &str, enabled: crate::domain::agent_transport::AgentTransports) {
         self.agent_transports.write().insert(session_id.into(), enabled);
+    }
+
+    pub fn protocol_agent(&self, id: &str) -> Option<crate::transport::RegisteredTransport> {
+        self.transport_registry()?.get_agent(id).map(|(_,entry)|entry)
+    }
+
+    fn create_codex_session(&self, id: String, role: AgentRole, command: &str, args: &[&str], cwd: Option<&str>) -> Result<String,PtyError> {
+        use crate::transport::AgentTransport;
+        let registry=self.transport_registry().ok_or_else(||PtyError::CreateError("Transport registry unavailable; select PTY".into()))?;
+        let mut identity=agent_identity_env(&id,&role);
+        let session_id=identity.first().map(|(_,v)|v.clone()).ok_or_else(||PtyError::CreateError("Protocol agent needs a session-qualified ID".into()))?;
+        let token=Self::new_heartbeat_token();identity.push(("HIVE_AGENT_TOKEN".into(),token.clone()));
+        let options=crate::transport::codex::CodexOptions::from_pty(command,args,std::path::PathBuf::from(cwd.unwrap_or(".")),identity,session_id.clone(),id.clone()).map_err(PtyError::CreateError)?;
+        let transport=crate::transport::codex::CodexTransport::new(options,&registry);
+        {
+            let mut starting=self.starting_transports.write();
+            if starting.contains_key(&id) || registry.get_agent(&id).is_some() || self.sessions.read().contains_key(&id) {
+                return Err(PtyError::CreateError(format!("Agent runtime already exists: {id}")));
+            }
+            starting.insert(id.clone(),transport.clone());
+        }
+        let _lifecycle=self.lifecycle.lock();
+        let mut registered=false;
+        let result=(|| {
+            transport.start_blocking()?;
+            registry.register(&session_id,&id,transport.thread_id(),transport.clone())?;
+            registered=true;
+            transport.activate()?;
+            if !transport.is_alive() {return Err("Codex startup cancelled".into());}
+            self.bind_heartbeat_token(&id,&session_id,false,&token);
+            if let Some(prompt)=transport.initial_prompt() {transport.send_input(&prompt,true)?;}
+            Ok(id.clone())
+        })();
+        if result.is_err() {
+            if let Err(error)=transport.stop_sync() {return Err(PtyError::CreateError(format!("Codex startup failed and cleanup needs retry: {error}")));}
+            if registered {registry.stop_agent_sync(&session_id,&id).map_err(PtyError::CreateError)?;}
+            self.heartbeat_credentials.write().remove(&id);
+        }
+        self.starting_transports.write().remove(&id);
+        result.map_err(PtyError::CreateError)
     }
 
     pub fn set_app_handle(&mut self, handle: AppHandle) {
@@ -451,6 +493,9 @@ impl PtyManager {
         token
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_heartbeat_credential_for_test(&self,id:&str)->bool {self.heartbeat_credentials.read().contains_key(id)}
+
     pub fn create_session(
         &self,
         id: String,
@@ -461,6 +506,14 @@ impl PtyManager {
         cols: u16,
         rows: u16,
     ) -> Result<String, PtyError> {
+        if let Some((_,session_id))=agent_identity_env(&id,&role).first() {
+            let enabled=self.agent_transports.read().get(session_id).cloned().unwrap_or_default();
+            match crate::domain::agent_transport::selected_transport(&enabled,command,&role) {
+                Some(crate::domain::agent_transport::AgentTransportKind::CodexAppServer)=>return self.create_codex_session(id,role,command,args,cwd),
+                Some(crate::domain::agent_transport::AgentTransportKind::ClaudeStreamJson)=>return Err(PtyError::CreateError("Claude stream JSON transport is not installed; select PTY".into())),
+                None=>{},
+            }
+        }
         #[cfg(not(windows))]
         if std::path::Path::new(command)
             .file_name()
@@ -665,6 +718,7 @@ impl PtyManager {
     }
 
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
+        if self.protocol_agent(id).is_some() {return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));}
         tracing::debug!("PtyManager::write called for session: {}", id);
         let sessions = self.sessions.read();
         tracing::debug!("Available sessions: {:?}", sessions.keys().collect::<Vec<_>>());
@@ -678,6 +732,7 @@ impl PtyManager {
 
     /// Deliver a payload as a bracketed paste and then a discrete bare Enter to submit it.
     pub fn submit(&self, id: &str, data: &[u8]) -> Result<PtySubmitResult, PtyError> {
+        if self.protocol_agent(id).is_some() {return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));}
         tracing::debug!("PtyManager::submit called for session: {}", id);
         let sessions = self.sessions.read();
         let session = sessions
@@ -688,6 +743,7 @@ impl PtyManager {
 
     /// Write with bracketed paste mode wrapping for large pastes
     pub fn write_bracketed(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
+        if self.protocol_agent(id).is_some() {return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));}
         tracing::debug!("PtyManager::write_bracketed called for session: {} ({} bytes)", id, data.len());
         let sessions = self.sessions.read();
         let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
@@ -702,7 +758,17 @@ impl PtyManager {
     }
 
     pub fn kill(&self, id: &str) -> Result<(), PtyError> {
+        // Cancellation reaches a starting server without waiting for startup's
+        // lifecycle guard (up to 180 s). The same guard then orders token cleanup.
+        let starting=self.starting_transports.read().get(id).cloned();
+        if let Some(starting)=starting {starting.stop_sync().map_err(PtyError::CreateError)?;}
         let _lifecycle_guard = self.lifecycle.lock();
+        if let Some(registry)=self.transport_registry() {
+            if let Some((session_id,_))=registry.get_agent(id) {
+                registry.stop_agent_sync(&session_id,id).map_err(PtyError::CreateError)?;
+                self.heartbeat_credentials.write().remove(id);
+            }
+        }
         let session = self.sessions.read().get(id).cloned();
         if let Some(session) = session {
             // Direct-child liveness cannot prove that its descendants were reaped.
@@ -720,15 +786,21 @@ impl PtyManager {
                 self.heartbeat_credentials.write().remove(id);
             }
         }
+        self.heartbeat_credentials.write().remove(id);
         Ok(())
     }
 
     pub fn get_status(&self, id: &str) -> Option<AgentStatus> {
+        if let Some(entry)=self.protocol_agent(id) {
+            return Some(if entry.transport.is_alive() {AgentStatus::Running} else {AgentStatus::Completed});
+        }
         let sessions = self.sessions.read();
         sessions.get(id).map(|s| s.status.read().clone())
     }
 
     pub fn is_alive(&self, id: &str) -> bool {
+        if let Some(entry)=self.protocol_agent(id) {return entry.transport.is_alive();}
+        if let Some(entry)=self.starting_transports.read().get(id) {return entry.is_alive();}
         let sessions = self.sessions.read();
         sessions
             .get(id)

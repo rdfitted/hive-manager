@@ -530,6 +530,16 @@ async fn observe_injection_with_retry(
     state: &Arc<AppState>, session_id: &str, agent_id: &str,
     receipt: &InjectionReceipt, pre_write_baseline: PreWriteActivityBaseline,
 ) -> InjectionMeasurement {
+    if let Some(delivery)=&receipt.protocol_delivery {
+        record_delivery(state,session_id,agent_id,receipt,delivery);
+        return InjectionMeasurement {
+            delivery:delivery.clone(),delivery_elapsed_ms:receipt.observation_elapsed_ms,pre_write_baseline,
+            observation:InjectionObservation {pty_observation_available:false,pty_output_bytes_after:None,pty_activity_observed:None,
+                observation_window_ms:0,observation_elapsed_ms:0,submit_confirmed:None,submit_confirmation_basis:"unavailable",
+                submit_confirmation_window_ms:0,submit_confirmation_elapsed_ms:0},
+            submit_attempts:0,submit_bytes_written:0,submit_retry_failure:None,submit_retry_keystroke:None,receiver_turn_running:None,
+        };
+    }
     let started = Instant::now();
     let since = SystemTime::from(receipt.confirmation_since.unwrap_or(receipt.write_started_at));
     let reader = Arc::new(parking_lot::Mutex::new(if receipt.nonce.is_some() {
@@ -645,7 +655,7 @@ fn record_injection_submission(
         session_id,
         agent_id,
         receipt.submitted_at,
-        receipt.submit_keystroke_issued,
+        receipt.submit_keystroke_issued || (receipt.protocol_submission_requested && receipt.payload_bytes_written > 0),
     ) {
         tracing::warn!(
             "Injection succeeded but its awaiting-turn observation was not recorded for {session_id}/{agent_id}: {error}"

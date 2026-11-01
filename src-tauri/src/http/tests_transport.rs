@@ -24,6 +24,23 @@ impl FakeTransport {
 }
 #[async_trait]
 impl AgentTransport for FakeTransport {
+    fn send_input(&self, text: &str, submit: bool) -> Result<Delivery, String> {
+        Ok(if submit && text == "confirm" {
+            Delivery::protocol_turn_started("fixture-turn".into())
+        } else {
+            Delivery::protocol_pending()
+        })
+    }
+    fn is_alive(&self) -> bool {
+        !self.stopped.load(Ordering::Acquire)
+    }
+    fn stop_sync(&self) -> Result<(), String> {
+        self.stopped.store(true, Ordering::Release);
+        Ok(())
+    }
+    fn interrupt_sync(&self) -> Result<(), String> {
+        Ok(())
+    }
     async fn start(&self) -> Result<(), String> {
         Ok(())
     }
@@ -48,6 +65,93 @@ impl AgentTransport for FakeTransport {
             event_source: EventSource::Protocol,
         }
     }
+}
+
+#[tokio::test]
+async fn protocol_inject_keeps_receipt_shape_without_terminal_writes_and_cleanup() {
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+    };
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    let (temp, state, app) = super::tests_agent_events::setup();
+    state.storage.create_session_dir("session").unwrap();
+    let mut session = super::tests::make_test_session_with_agents(
+        "session",
+        temp.path().to_str().unwrap(),
+        &["worker-a"],
+    );
+    session.agents[0].config.cli = "codex".into();
+    state.session_controller.read().insert_test_session(session);
+    let fake = FakeTransport::new();
+    state
+        .transports()
+        .register(
+            "session",
+            "worker-a",
+            Some("held-fixture".into()),
+            fake.clone(),
+        )
+        .unwrap();
+    assert!(
+        state.pty_manager.read().is_alive("worker-a"),
+        "protocol worker must survive the startup liveness check"
+    );
+    for (message, submit, confirmed) in [
+        ("confirm", true, Some(true)),
+        ("staged", false, None),
+        ("queued", true, None),
+        ("", true, None),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/session/inject")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"target_agent_id":"worker-a","message":message,"submit":submit})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(value["submit_confirmed"].as_bool(), confirmed);
+        assert_eq!(value["submit_confirmation_source"], "protocol");
+        assert_eq!(value["submit_bytes_written"], 0);
+        assert_eq!(value["submit_attempts"], 0);
+        assert_eq!(value["submit_keystroke_issued"], false);
+        assert_eq!(value["pty_observation_available"], false);
+        assert!(value["submit_retry_keystroke"].is_null());
+        assert_eq!(
+            value["submit_confirmation_basis"],
+            if confirmed.is_some() {
+                "protocol-turn-started"
+            } else {
+                "protocol-pending"
+            }
+        );
+    }
+    for write in [b"\t".as_slice(), b"\r".as_slice()] {
+        assert!(state
+            .pty_manager
+            .read()
+            .write("worker-a", write)
+            .unwrap_err()
+            .to_string()
+            .contains("no terminal"));
+    }
+    state.pty_manager.read().kill("worker-a").unwrap();
+    assert!(fake.stopped.load(Ordering::Acquire));
+    assert!(!state.pty_manager.read().is_alive("worker-a"));
+    assert!(state.transports().get("session", "worker-a").is_none());
 }
 
 #[tokio::test]

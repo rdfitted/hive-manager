@@ -475,6 +475,26 @@ impl SessionStorage {
         self.sessions_dir().join(session_id)
     }
 
+    /// Additive session setting, separate from legacy session.json literals.
+    /// Empty launches create no file; old persisted session JSON stays byte-identical.
+    pub fn save_agent_transports(&self, session_id: &str, enabled: &crate::domain::agent_transport::AgentTransports) -> Result<(), StorageError> {
+        let dir = self.session_dir(session_id);
+        if enabled.is_empty() { return Ok(()); }
+        if !dir.exists() {self.create_session_dir(session_id)?;}
+        let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
+        serde_json::to_writer(&mut temp, enabled)?;
+        temp.persist(dir.join("agent-transports.json")).map_err(|e| StorageError::Io(e.error))?;
+        Ok(())
+    }
+
+    pub fn load_agent_transports(&self, session_id: &str) -> Result<crate::domain::agent_transport::AgentTransports, StorageError> {
+        match fs::read(self.session_dir(session_id).join("agent-transports.json")) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Create a new session directory structure
     pub fn create_session_dir(&self, session_id: &str) -> Result<PathBuf, StorageError> {
         let session_dir = self.session_dir(session_id);

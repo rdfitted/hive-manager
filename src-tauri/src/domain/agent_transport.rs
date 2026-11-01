@@ -2,7 +2,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTransportKind {
     CodexAppServer,
@@ -17,8 +19,10 @@ pub fn selected_transport(
     role: &crate::pty::AgentRole,
 ) -> Option<AgentTransportKind> {
     // In particular, Queen and MasterPlanner never acquire a protocol transport.
-    if matches!(role, crate::pty::AgentRole::Queen | crate::pty::AgentRole::MasterPlanner)
-        || !matches!(role, crate::pty::AgentRole::Worker { .. })
+    if matches!(
+        role,
+        crate::pty::AgentRole::Queen | crate::pty::AgentRole::MasterPlanner
+    ) || !matches!(role, crate::pty::AgentRole::Worker { .. })
     {
         return None;
     }
