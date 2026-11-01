@@ -7,6 +7,7 @@
   import { layout, type RightPanelTab } from '$lib/stores/layout';
   import { shell } from '$lib/stores/shell';
   import { flushEnter } from '../attention/flush';
+  import FlushReceipt from '../attention/FlushReceipt.svelte';
 
   interface Command { id: string; label: string; run: () => void | Promise<void>; keepOpen?: boolean }
   let open = $state(false);
@@ -15,7 +16,7 @@
   let input = $state<HTMLInputElement>();
   let dialog = $state<HTMLDivElement>();
   let pending = $state(false);
-  let receipt = $state('');
+  let receipt = $state<string | null>(null);
   let error = $state('');
   let receiptTarget = $state('');
   let opening = 0;
@@ -43,7 +44,7 @@
   async function show() {
     if (open) return;
     opening += 1;
-    query = ''; selected = 0; receipt = ''; error = ''; open = true;
+    query = ''; selected = 0; receipt = null; error = ''; open = true;
     await tick();
     input?.focus();
   }
@@ -75,7 +76,7 @@
     const session = $activeSession;
     const agent = focusedAgent;
     if (!session || !agent || pending) return;
-    pending = true; receipt = ''; error = '';
+    pending = true; receipt = null; error = '';
     const sentOpening = opening;
     receiptTarget = agent.config.label || agent.id;
     try {
@@ -102,7 +103,7 @@
     } else if (event.key === 'Enter' && event.target === input) {
       event.preventDefault(); execute(matches[activeIndex]);
     } else if (event.key === 'Tab') {
-      const controls = Array.from(dialog?.querySelectorAll<HTMLElement>('input, button:not(:disabled)') ?? []);
+      const controls = Array.from(dialog?.querySelectorAll<HTMLElement>('input, button:not(:disabled), summary') ?? []);
       const first = controls[0]; const last = controls.at(-1);
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -127,7 +128,7 @@
       {:else}<li class="empty">No commands match “{query}”.</li>{/each}
     </ul>
     {#if pending}<p role="status">Flushing Enter to {receiptTarget}…</p>{/if}
-    {#if receipt}<div class="result"><p>Inject receipt · {receiptTarget}</p><pre role="status" aria-label="Inject receipt">{receipt}</pre></div>{/if}
+    {#if receipt !== null}<div class="result"><p>{receiptTarget}</p><FlushReceipt body={receipt} ondismiss={() => { receipt = null; }} /></div>{/if}
     {#if error}<p class="result" role="alert">{error}</p>{/if}
     <p class="hint">↑ ↓ to choose · Enter to run · Esc to close</p>
   </div>
@@ -146,5 +147,4 @@
   .selection-announcement { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .result { margin: 0; font-size: var(--text-small); }
   .result p { margin: 0; }
-  pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 8rem; overflow: auto; }
 </style>

@@ -47,15 +47,36 @@ describe('AttentionCard', () => {
     expect(view.queryByRole('region')).toBeNull();
     expect(view.container.textContent).toBe('');
   });
-  it('flushes once and displays the exact receipt', async () => {
+  it('flushes once and displays a sentence with the exact receipt in closed Details', async () => {
     const receipt = '{"submit_confirmed":null,"submit_bytes_written":1}';
     const fetcher = vi.fn().mockResolvedValue({ ok: true, text: async () => receipt });
     vi.stubGlobal('fetch', fetcher);
     const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
     await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
-    await waitFor(() => expect(view.getByRole('status').textContent).toBe(receipt));
+    await waitFor(() => expect(view.getByRole('status').textContent).toBe("Enter sent. Delivery isn't confirmed yet."));
+    const details = view.container.querySelector('details')!;
+    expect(details.open).toBe(false);
+    expect(details.querySelector('pre')?.textContent).toBe(receipt);
     expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ target_agent_id: 'worker-5', message: '', submit: true });
     expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ['{"submit_confirmed":true}', 'Enter delivered.'],
+    ['{"submit_confirmed":false}', 'Enter may not have landed. Check the terminal.'],
+    ['legacy receipt', 'Enter sent.'],
+    ['', 'Enter sent.'],
+  ])('G21: summarizes %s and dismisses both sentence and raw receipt', async (receipt, sentence) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => receipt }));
+    const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+    const flush = view.getByRole('button', { name: 'Flush Enter' }); flush.focus();
+    await fireEvent.click(flush);
+    await waitFor(() => expect(view.getByRole('status').textContent, 'receipt status must be a plain sentence').toBe(sentence));
+    expect(document.activeElement).toBe(flush);
+    expect(view.container.querySelector('details')?.open).toBe(false);
+    expect(view.container.querySelector('pre')?.textContent).toBe(receipt);
+    await fireEvent.click(view.getByRole('button', { name: 'Dismiss Enter receipt' }));
+    expect(view.queryByRole('status')).toBeNull();
+    expect(view.container.querySelector('details')).toBeNull();
   });
   it('shows a failed flush without resending', async () => {
     const fetcher = vi.fn().mockRejectedValue(new Error('offline'));
@@ -64,6 +85,31 @@ describe('AttentionCard', () => {
     await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
     await waitFor(() => expect(view.getByRole('alert').textContent).toContain('offline'));
     expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it('G21: keeps a failed flush visible after the receipt clear interval', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline fixture')));
+      const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+      await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(view.getByRole('alert').textContent).toContain('offline fixture');
+    } finally { vi.useRealTimers(); }
+  });
+  it('G21: removes successful sentence and Details at eight seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '{"submit_confirmed":true}' }));
+      const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+      await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(view.getByRole('status').textContent).toBe('Enter delivered.');
+      await vi.advanceTimersByTimeAsync(7999);
+      expect(view.getByRole('status')).toBeTruthy();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(view.queryByRole('status')).toBeNull();
+      expect(view.container.querySelector('details')).toBeNull();
+    } finally { vi.useRealTimers(); }
   });
   it('opens Focus mode and focuses the same agent', async () => {
     const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
