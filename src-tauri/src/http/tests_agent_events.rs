@@ -1207,6 +1207,72 @@ fn codex_fixture(
 }
 
 #[tokio::test]
+async fn g391_fusion_http_uses_captured_project_cwd_live_and_persisted() {
+    for persisted in [false, true] {
+        let (temp, state, app) = setup();
+        let mut session =
+            make_test_session_with_agents("session", "D:/fixture/fusion-project", &["queen"]);
+        session.session_type = crate::session::SessionType::Fusion {
+            variants: vec!["variant".into()],
+        };
+        session.worktree_path = Some("D:/fixture/variant-worktree".into());
+        session.agents[0].role = crate::pty::AgentRole::Queen;
+        session.agents[0].transcript_session_id = Some("fusion-held".into());
+        state
+            .pty_manager
+            .read()
+            .create_session(
+                "queen".into(),
+                crate::pty::AgentRole::Queen,
+                "claude",
+                &[],
+                Some("D:/fixture/fusion-project"),
+                120,
+                30,
+            )
+            .unwrap();
+        write_records(
+            &transcript_path(
+                &temp.path().join("claude-projects"),
+                Path::new("D:/fixture/fusion-project"),
+                "fusion-held",
+            ),
+            &[
+                json!({"type":"assistant","uuid":"own","message":{"role":"assistant",
+                "content":[{"type":"text","text":"fusion-project-reply"}]}}),
+            ],
+        );
+        session.worktree_path = Some("D:/fixture/changed-worktree".into());
+        state.session_controller.read().insert_test_session(session);
+        state
+            .session_controller
+            .read()
+            .persist_test_session("session");
+        assert_eq!(
+            state.storage.load_session("session").unwrap().agents[0]
+                .transcript_cwd
+                .as_deref(),
+            Some("D:/fixture/fusion-project"),
+            "G391 snapshot records captured spawn argument"
+        );
+        if persisted {
+            // Exercise storage-only configure with a truly empty manager/map.
+            let pty = Arc::new(RwLock::new(PtyManager::new()));
+            let mut cold = SessionController::new(pty);
+            cold.set_storage(state.storage.clone());
+            *state.session_controller.write() = cold;
+        }
+        let page = body_json(get(&app, "/api/sessions/session/agents/queen/events").await).await;
+        assert_eq!(
+            page["events"].as_array().unwrap().len(),
+            1,
+            "G391 Fusion HTTP must find the record only under its captured project cwd"
+        );
+        assert_eq!(page["events"][0]["payload"]["text"], "fusion-project-reply");
+    }
+}
+
+#[tokio::test]
 async fn g21_codex_peer_seats_bind_project_cwd_live_and_cold_without_decoys() {
     for solo in [false, true] {
         for persisted in [false, true] {

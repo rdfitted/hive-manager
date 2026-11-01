@@ -726,14 +726,14 @@ impl PtyManager {
 
     /// Restore attribution for a persisted seat that has no live PTY entry.
     pub fn seed_spawn_cwd(&self, id: &str, cwd: &str) {
-        self.spawn_cwds.write().insert(id.to_string(), cwd.to_string());
+        self.spawn_cwds.write().entry(id.to_string()).or_insert_with(|| cwd.to_string());
     }
 
     fn record_spawn_cwd(&self, id: &str, cwd: Option<&str>) {
         // Keep the exact argument, and publish under the runtime's lifecycle guard
         // so a rejected duplicate cannot overwrite the existing seat's attribution.
         if let Some(cwd) = cwd {
-            self.seed_spawn_cwd(id, cwd);
+            self.spawn_cwds.write().insert(id.to_string(), cwd.to_string());
         } else {
             self.spawn_cwds.write().remove(id);
         }
@@ -1140,6 +1140,52 @@ impl Default for PtyManager {
 #[cfg(test)]
 mod cross_platform_spawn_tests {
     use super::{AgentRole, PtyManager};
+
+    #[test]
+    fn restore_seed_cannot_clobber_actual_spawn_and_respawn_overwrites() {
+        let manager = PtyManager::new();
+        let role = AgentRole::Worker {
+            index: 1,
+            parent: None,
+        };
+        let id = "atomic-cwd-fixture";
+        manager.seed_spawn_cwd(id, "saved before spawn");
+        manager
+            .create_session(
+                id.into(),
+                role.clone(),
+                "claude",
+                &[],
+                Some("actual spawn"),
+                80,
+                24,
+            )
+            .unwrap();
+        manager.seed_spawn_cwd(id, "stale restore");
+        assert_eq!(
+            manager.spawn_cwd(id).as_deref(),
+            Some("actual spawn"),
+            "restore seed must never clobber the actual spawn"
+        );
+        manager.kill(id).unwrap();
+        manager
+            .create_session(
+                id.into(),
+                role,
+                "claude",
+                &[],
+                Some("new actual spawn"),
+                80,
+                24,
+            )
+            .unwrap();
+        manager.seed_spawn_cwd(id, "older restore");
+        assert_eq!(
+            manager.spawn_cwd(id).as_deref(),
+            Some("new actual spawn"),
+            "respawn must overwrite the earlier actual spawn and resist stale restore"
+        );
+    }
 
     #[test]
     fn spawn_cwd_can_be_seeded_without_a_live_session_and_survives_kill() {

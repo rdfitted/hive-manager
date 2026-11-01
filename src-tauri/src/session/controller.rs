@@ -1697,7 +1697,7 @@ impl SessionController {
             return;
         };
 
-        let current_persisted = Self::session_to_persisted_snapshot(&current_session);
+        let current_persisted = self.session_to_persisted(&current_session);
         let current_hash = SessionStorage::session_content_hash(&current_persisted);
         let refresh = match storage.load_session_if_newer_and_clean(session_id, current_hash) {
             Ok(Some(refresh)) => refresh,
@@ -1729,7 +1729,7 @@ impl SessionController {
             return;
         };
         let current_hash = SessionStorage::session_content_hash(
-            &Self::session_to_persisted_snapshot(current_session),
+            &self.session_to_persisted(current_session),
         );
         let still_clean =
             match storage.should_apply_session_refresh(session_id, &refresh, current_hash) {
@@ -2104,7 +2104,9 @@ impl SessionController {
         };
 
         if let (Some(storage), Some(session)) = (self.storage.as_ref(), session_snapshot.as_ref()) {
-            Self::persist_session_snapshot(storage, session, session_id, &self.principal_bindings)?;
+            Self::persist_session_snapshot(
+                storage, session, session_id, &self.principal_bindings, &self.pty_manager,
+            )?;
         }
         let status_changed = prev_status.as_ref().map(|s| s != status).unwrap_or(true);
         if status_changed {
@@ -13126,6 +13128,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 &updated_session,
                 session_id,
                 &self.principal_bindings,
+                &self.pty_manager,
             ) {
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
@@ -13229,6 +13232,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 &updated_session,
                 session_id,
                 &self.principal_bindings,
+                &self.pty_manager,
             ) {
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
@@ -13344,6 +13348,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 &updated_session,
                 session_id,
                 &self.principal_bindings,
+                &self.pty_manager,
             ) {
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
@@ -13559,7 +13564,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
             session.qa_timeout_secs = timeout_secs.unwrap_or_else(default_qa_timeout_secs);
             let persistence = if let Some(storage) = self.storage.as_ref() {
-                let snapshot = Self::session_to_persisted_snapshot(session);
+                let snapshot = self.session_to_persisted(session);
                 self.persist_session_qa_timeout(storage, &snapshot)
                     .map_err(|error| format!("Failed to persist QA timeout: {}", error))
             } else {
@@ -13886,6 +13891,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let event_emitter = self.event_emitter.clone();
         let storage = self.storage.clone();
         let principal_bindings = Arc::clone(&self.principal_bindings);
+        let pty_manager = Arc::clone(&self.pty_manager);
         let armed_qa_generation = self.sessions.read().get(session_id).and_then(|session| {
             session.qa_inconclusive_at.clone()
         });
@@ -13999,6 +14005,7 @@ The backend composed and persisted the following authoritative skeleton before l
                                 &updated_session,
                                 &sid,
                                 &principal_bindings,
+                                &pty_manager,
                             ) {
                                 tracing::warn!(
                                     "Failed to persist QA timeout state for {}: {}",
@@ -15617,6 +15624,7 @@ The backend composed and persisted the following authoritative skeleton before l
                     session,
                     session_id,
                     &self.principal_bindings,
+                    &self.pty_manager,
                 ) {
                     *session = previous_session;
                     Self::emit_work_graph_snapshot_for_session_state(
@@ -15839,6 +15847,11 @@ The backend composed and persisted the following authoritative skeleton before l
             .iter()
             .filter_map(|pa| {
                 let role = parse_agent_role(&pa.role)?;
+                if let Some(cwd) = pa.transcript_cwd.as_deref() {
+                    let manager = self.pty_manager.read();
+                    // Atomic fill-only restore cannot replace a newer actual spawn.
+                    manager.seed_spawn_cwd(&pa.id, cwd);
+                }
                 let config = AgentConfig {
                     cli: pa.config.cli.clone(),
                     model: pa.config.model.clone(),
@@ -17596,7 +17609,35 @@ The backend composed and persisted the following authoritative skeleton before l
     /// Initialize session storage for a new session
     /// Convert a Session to PersistedSession for storage
     fn session_to_persisted(&self, session: &Session) -> crate::storage::PersistedSession {
-        Self::session_to_persisted_snapshot(session)
+        Self::session_to_persisted_with_cwds(session, &self.pty_manager, self.storage.as_deref())
+    }
+
+    fn session_to_persisted_with_cwds(
+        session: &Session,
+        pty_manager: &RwLock<PtyManager>,
+        storage: Option<&SessionStorage>,
+    ) -> crate::storage::PersistedSession {
+        let mut snapshot = Self::session_to_persisted_snapshot(session);
+        let previous = storage.and_then(|storage| storage.load_session(&session.id).ok());
+        let manager = pty_manager.read();
+        for agent in &mut snapshot.agents {
+            agent.transcript_cwd = manager.spawn_cwd(&agent.id).or_else(|| {
+                // A snapshot after restart can have no live PTY entry. Preserve
+                // the saved fact only for the same transcript incarnation.
+                previous
+                    .as_ref()?
+                    .agents
+                    .iter()
+                    .find(|old| {
+                        old.id == agent.id
+                            && old.transcript_session_id == agent.transcript_session_id
+                            && old.transcript_spawned_at == agent.transcript_spawned_at
+                    })?
+                    .transcript_cwd
+                    .clone()
+            });
+        }
+        snapshot
     }
 
     fn session_to_persisted_snapshot(session: &Session) -> crate::storage::PersistedSession {
@@ -17630,6 +17671,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 let role_str = serialize_persisted_agent_role(&a.role);
 
                 PersistedAgentInfo {
+                    transcript_cwd: None,
                     transcript_spawned_at: a.transcript_spawned_at,
                     transcript_session_id: a.transcript_session_id.clone(),
                     id: a.id.clone(),
@@ -17829,6 +17871,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 &session,
                 session_id,
                 &self.principal_bindings,
+                &self.pty_manager,
             )?;
         }
 
@@ -17840,8 +17883,9 @@ The backend composed and persisted the following authoritative skeleton before l
         session: &Session,
         session_id: &str,
         principal_bindings: &RwLock<HashMap<String, String>>,
+        pty_manager: &RwLock<PtyManager>,
     ) -> Result<(), String> {
-        let persisted = Self::session_to_persisted_snapshot(session);
+        let persisted = Self::session_to_persisted_with_cwds(session, pty_manager, Some(storage));
         storage
             .save_session(&persisted)
             .map_err(|e| format!("Failed to update session metadata: {}", e))?;
@@ -24240,6 +24284,395 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert_eq!(controller.get_session(id).unwrap().qa_timeout_secs, 720,
             "a running launch keeps the requested setting even when persistence fails");
         assert!(matches!(controller.get_session(id).unwrap().state, SessionState::Running));
+    }
+
+    #[tokio::test]
+    async fn g391_spawn_sites_capture_actual_launch_cwd_live_and_persisted() {
+        for mode in [
+            "legacy",
+            "solo",
+            "hive-isolated",
+            "hive-shared",
+            "research",
+            "swarm",
+            "fusion",
+            "debate",
+            "hive-planning",
+            "fusion-planning",
+            "debate-planning",
+            "swarm-planning",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            run_git(&repo, &["init", "-b", "main"]);
+            run_git(&repo, &["config", "user.name", "Hive Test"]);
+            run_git(&repo, &["config", "user.email", "hive@example.com"]);
+            std::fs::write(repo.join("README.md"), "fixture\n").unwrap();
+            std::fs::write(
+                repo.join(".gitignore"),
+                ".hive-manager/\n.hive-fusion/\n.hive-debate/\n",
+            )
+            .unwrap();
+            run_git(&repo, &["add", "README.md", ".gitignore"]);
+            run_git(&repo, &["commit", "-m", "fixture"]);
+            let storage =
+                Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+            let mut app_config = storage.load_config().unwrap();
+            app_config.global_wiki_path =
+                Some(temp.path().join("absent-wiki").to_string_lossy().into());
+            storage.save_config(&app_config).unwrap();
+            let mut controller = test_controller();
+            controller.set_storage(storage.clone());
+            let planning = mode.ends_with("-planning");
+            let mut hive_json = serde_json::json!({"project_path":repo,
+                "queen_config":{"cli":"claude"}, "workers":[{"cli":"claude"}],
+                "prompt":"fixture", "with_planning":planning});
+            if mode == "hive-shared" {
+                hive_json["execution_policy"] =
+                    serde_json::json!({"workspace_strategy":"shared_cell"});
+            }
+            let session = match mode {
+                "legacy" => controller.launch_hive(repo.clone(), 1, "claude", Some("fixture".into()), None, None),
+                "solo" => controller.launch_solo(serde_json::from_value(hive_json.clone()).unwrap()),
+                "research" => controller.launch_research(serde_json::from_value(hive_json.clone()).unwrap()),
+                "swarm" | "swarm-planning" => controller.launch_swarm(serde_json::from_value(serde_json::json!({
+                    "project_path":repo,"queen_config":{"cli":"claude"}, "planner_count":1,
+                    "planner_config":{"cli":"claude"},"workers_per_planner":[{"cli":"claude"}],
+                    "prompt":"fixture", "with_planning":planning})).unwrap()),
+                "fusion" | "fusion-planning" => controller.launch_fusion(serde_json::from_value(serde_json::json!({
+                    "project_path":repo,"judge_config":{"cli":"claude"},
+                    "queen_config":{"cli":"claude","flags":if planning {vec!["--stub-tree-kill-fails-once"]} else {vec![]}},
+                    "task_description":"fixture","with_planning":planning,
+                    "variants":[{"name":"A B","cli":"claude"},{"name":"A-B","cli":"claude"}]})).unwrap()),
+                "debate" | "debate-planning" => controller.launch_debate(serde_json::from_value(serde_json::json!({
+                    "project_path":repo,"judge_config":{"cli":"claude"},
+                    "queen_config":{"cli":"claude","flags":if planning {vec!["--stub-tree-kill-fails-once"]} else {vec![]}},
+                    "topic":"fixture","rounds":2,"with_planning":planning,
+                    "debaters":[{"name":"A B","cli":"claude"},{"name":"A-B","cli":"claude"}]})).unwrap()),
+                _ => controller.launch_hive_v2(serde_json::from_value(hive_json.clone()).unwrap()),
+            }.unwrap_or_else(|error| panic!("G391 {mode} launch: {error}"));
+            let sid = &session.id;
+            let worktrees = repo.join(".hive-manager").join("worktrees").join(sid);
+            let variant_rows = |debate: bool, round: u8| -> Vec<(String, PathBuf)> {
+                ["a-b", "a-b-2"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, slug)| {
+                        (
+                            if debate {
+                                format!("{sid}-debate-{}-r{round}", i + 1)
+                            } else {
+                                format!("{sid}-fusion-{}", i + 1)
+                            },
+                            repo.join(if debate {
+                                ".hive-debate"
+                            } else {
+                                ".hive-fusion"
+                            })
+                            .join(sid)
+                            .join(format!(
+                                "{}-{slug}",
+                                if debate { "debater" } else { "variant" }
+                            )),
+                        )
+                    })
+                    .collect()
+            };
+            let check = |rows: &[(String, PathBuf)]| {
+                controller.update_session_storage_checked(sid).unwrap();
+                let saved = storage.load_session(sid).unwrap();
+                for (aid, expected) in rows {
+                    let expected = expected.to_string_lossy();
+                    assert_eq!(controller.pty_manager.read().spawn_cwd(aid).as_deref(), Some(expected.as_ref()),
+                        "G391 {mode} {aid}: captured argument differs from independent launch contract");
+                    let agent = saved.agents.iter().find(|agent| &agent.id == aid).unwrap();
+                    assert_eq!(
+                        agent.transcript_cwd.as_deref(),
+                        Some(expected.as_ref()),
+                        "G391 {mode} {aid}: persisted cwd must equal the captured spawn argument"
+                    );
+                }
+            };
+            let initial: Vec<_> = if planning {
+                assert_eq!(session.agents.len(), 1);
+                assert!(matches!(session.agents[0].role, AgentRole::MasterPlanner));
+                vec![(
+                    session.agents[0].id.clone(),
+                    if mode == "hive-planning" {
+                        worktrees.join("queen")
+                    } else {
+                        repo.clone()
+                    },
+                )]
+            } else {
+                match mode {
+                    "fusion" => variant_rows(false, 1),
+                    "debate" => variant_rows(true, 1),
+                    "solo" => vec![(format!("{sid}-worker-1"), worktrees.join("worker-1"))],
+                    "hive-isolated" => vec![
+                        (format!("{sid}-queen"), worktrees.join("queen")),
+                        (format!("{sid}-worker-1"), worktrees.join("worker-1")),
+                    ],
+                    "hive-shared" => vec![
+                        (format!("{sid}-queen"), worktrees.join("primary")),
+                        (format!("{sid}-worker-1"), worktrees.join("primary")),
+                    ],
+                    _ => session
+                        .agents
+                        .iter()
+                        .map(|a| (a.id.clone(), repo.clone()))
+                        .collect(),
+                }
+            };
+            assert_eq!(
+                initial.len(),
+                session.agents.len(),
+                "G391 initial roster coverage: {mode}"
+            );
+            check(&initial);
+            if planning {
+                // Exercise the actual continuation spawn sites; PlanReady is a
+                // fixture precondition, independent of graph derivation tests.
+                controller.sessions.write().get_mut(sid).unwrap().state = SessionState::PlanReady;
+                controller.continue_after_planning_checked(sid).unwrap();
+                let mut rows = match mode {
+                    "fusion-planning" => {
+                        let mut rows = variant_rows(false, 1);
+                        rows.push((format!("{sid}-queen"), repo.clone()));
+                        rows
+                    }
+                    "debate-planning" => variant_rows(true, 1),
+                    "hive-planning" => vec![(format!("{sid}-queen"), worktrees.join("queen"))],
+                    _ => vec![(format!("{sid}-queen"), repo.clone())],
+                };
+                let current = controller.get_session(sid).unwrap();
+                for planner in current
+                    .agents
+                    .iter()
+                    .filter(|a| matches!(a.role, AgentRole::MasterPlanner))
+                {
+                    rows.push((
+                        planner.id.clone(),
+                        if mode == "hive-planning" {
+                            worktrees.join("queen")
+                        } else {
+                            repo.clone()
+                        },
+                    ));
+                }
+                if matches!(mode, "fusion-planning" | "debate-planning") {
+                    assert!(
+                        current
+                            .agents
+                            .iter()
+                            .any(|a| matches!(a.role, AgentRole::MasterPlanner)),
+                        "G391 retained planner must be exercised after failed stop"
+                    );
+                }
+                check(&rows);
+            }
+            if matches!(
+                mode,
+                "legacy" | "hive-isolated" | "hive-shared" | "research"
+            ) {
+                let worker = controller
+                    .add_worker(
+                        sid,
+                        AgentConfig::default(),
+                        WorkerRole::new(
+                            if mode == "research" { "researcher" } else { "general" },
+                            "Worker", "claude",
+                        ),
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                let expected = match mode {
+                    "hive-shared" => worktrees.join("primary"),
+                    "research" => repo.clone(),
+                    _ => worktrees.join("worker-2"),
+                };
+                check(&[(worker.id, expected)]);
+            }
+            if mode == "hive-isolated" {
+                let mut config: HiveLaunchConfig = serde_json::from_value(hive_json).unwrap();
+                config.workers = vec![AgentConfig::default(); 3];
+                controller
+                    .spawn_next_worker(sid, 2, &config, &format!("{sid}-queen"))
+                    .await
+                    .unwrap();
+                check(&[(format!("{sid}-worker-3"), worktrees.join("worker-3"))]);
+            }
+            if mode == "swarm" {
+                let planner = controller
+                    .add_planner(sid, AgentConfig::default(), "api".into(), vec![])
+                    .unwrap();
+                check(&[(planner.id, repo.clone())]);
+            }
+            if matches!(mode, "solo" | "hive-shared") {
+                let evaluator = controller
+                    .launch_evaluator(sid, AgentConfig::default(), false)
+                    .unwrap();
+                let prince = controller
+                    .launch_prince(sid, AgentConfig::default(), false)
+                    .unwrap();
+                let qa = controller
+                    .add_qa_worker(sid, AgentConfig::default(), "api".into(), None)
+                    .unwrap();
+                check(&[
+                    (evaluator.id, repo.clone()),
+                    (prince.id, repo.clone()),
+                    (qa.id, repo.clone()),
+                ]);
+                controller.cancel_qa_timeout(sid);
+            }
+            if mode == "debate" {
+                controller
+                    .spawn_debate_round(
+                        sid,
+                        2,
+                        Some(crate::wiki::WikiBatch::probe(
+                            temp.path().join("absent-wiki"),
+                        )),
+                    )
+                    .unwrap();
+                let mut rows = variant_rows(true, 1);
+                rows.extend(variant_rows(true, 2));
+                controller
+                    .spawn_debate_judge(
+                        sid,
+                        Some(crate::wiki::WikiBatch::probe(
+                            temp.path().join("absent-wiki"),
+                        )),
+                    )
+                    .unwrap();
+                rows.push((format!("{sid}-judge"), repo.clone()));
+                check(&rows);
+            }
+            if mode == "fusion" {
+                controller.spawn_fusion_judge(sid).unwrap();
+                let mut rows = variant_rows(false, 1);
+                rows.push((format!("{sid}-judge"), repo.clone()));
+                check(&rows);
+                let winner = repo.join(".hive-fusion").join(sid).join("variant-a-b");
+                std::fs::write(winner.join("winner.txt"), "winner\n").unwrap();
+                run_git(&winner, &["add", "winner.txt"]);
+                run_git(&winner, &["commit", "-m", "winner"]);
+                controller.sessions.write().get_mut(sid).unwrap().state =
+                    SessionState::AwaitingVerdictSelection;
+                // Associated syntax keeps this test invocation out of the
+                // source guard that counts production operator call sites.
+                SessionController::select_fusion_winner(&controller, sid, "A B").unwrap();
+                assert!(controller.get_session(sid).unwrap().worktree_path.is_none());
+                check(&rows);
+            }
+        }
+    }
+
+    #[test]
+    fn g391_recorded_cwd_survives_restart_snapshots_without_reusing_old_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        let mut controller = test_controller();
+        controller.set_storage(storage.clone());
+        let mut session = waiting_worker_session("cwd-restart", temp.path(), 1);
+        let agent = &mut session.agents[0];
+        agent.transcript_session_id = Some("held-transcript".into());
+        agent.transcript_spawned_at = Some(Utc::now());
+        let aid = agent.id.clone();
+        let expected = temp
+            .path()
+            .join("original cwd")
+            .to_string_lossy()
+            .to_string();
+        controller
+            .pty_manager
+            .read()
+            .create_session(
+                aid.clone(),
+                agent.role.clone(),
+                "claude",
+                &[],
+                Some(&expected),
+                120,
+                30,
+            )
+            .unwrap();
+        controller.insert_test_session(session.clone());
+        controller.persist_test_session(&session.id);
+        let saved = storage.load_session(&session.id).unwrap();
+        assert_eq!(
+            saved.agents[0].transcript_cwd.as_deref(),
+            Some(expected.as_str())
+        );
+
+        // No PTY or map survives restart; reconstruction seeds the saved fact.
+        let mut cold = test_controller();
+        cold.set_storage(storage.clone());
+        assert!(cold.pty_manager.read().spawn_cwd(&aid).is_none());
+        let mut restored = cold.session_from_persisted(&saved).unwrap();
+        assert_eq!(
+            cold.pty_manager.read().spawn_cwd(&aid).as_deref(),
+            Some(expected.as_str())
+        );
+        restored.worktree_path = Some("D:/different/worktree-after-restart".into());
+        cold.insert_test_session(restored.clone());
+        cold.set_session_qa_timeout(&restored.id, Some(456))
+            .unwrap();
+        cold.persist_test_session(&restored.id);
+        assert_eq!(
+            storage.load_session(&restored.id).unwrap().agents[0]
+                .transcript_cwd
+                .as_deref(),
+            Some(expected.as_str()),
+            "G391 restart snapshot preserves the spawn cwd"
+        );
+
+        let absent_manager = RwLock::new(PtyManager::new());
+        let snapshot = SessionController::session_to_persisted_with_cwds(
+            &restored,
+            &absent_manager,
+            Some(&storage),
+        );
+        assert_eq!(
+            snapshot.agents[0].transcript_cwd.as_deref(),
+            Some(expected.as_str())
+        );
+        let mut respawned = restored.clone();
+        respawned.agents[0].transcript_session_id = Some("new-transcript".into());
+        respawned.agents[0].transcript_spawned_at = Some(Utc::now() + Duration::seconds(1));
+        assert!(
+            SessionController::session_to_persisted_with_cwds(
+                &respawned,
+                &absent_manager,
+                Some(&storage),
+            )
+            .agents[0]
+                .transcript_cwd
+                .is_none(),
+            "G391 cannot borrow a prior incarnation's cwd"
+        );
+
+        cold.pty_manager.read().create_session(
+            aid.clone(), restored.agents[0].role.clone(), "claude", &[],
+            Some("newer actual spawn"), 120, 30,
+        ).unwrap();
+        cold.session_from_persisted(&saved).unwrap();
+        assert_eq!(
+            cold.pty_manager.read().spawn_cwd(&aid).as_deref(),
+            Some("newer actual spawn"),
+            "G391 stale refresh cannot overwrite the newest spawn"
+        );
+        let mut old_json = serde_json::to_value(&saved).unwrap();
+        for agent in old_json["agents"].as_array_mut().unwrap() {
+            agent.as_object_mut().unwrap().remove("transcript_cwd");
+        }
+        let old: crate::storage::PersistedSession = serde_json::from_value(old_json).unwrap();
+        assert!(old
+            .agents
+            .iter()
+            .all(|agent| agent.transcript_cwd.is_none()));
     }
 
     #[test]
