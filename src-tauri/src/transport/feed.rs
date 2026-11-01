@@ -240,6 +240,15 @@ impl FeedStore {
         fs::write(mode_path, b"protocol").map_err(|e| e.to_string())?;
         Ok(())
     }
+    /// Load the durable source even when no child has been registered after restart.
+    pub fn is_protocol(&self, session: &str, agent: &str) -> Result<bool, String> {
+        let mut journals = self.journals.lock();
+        let key = (session.into(), agent.into());
+        if !journals.contains_key(&key) {
+            journals.insert(key.clone(), self.journal(session, agent)?);
+        }
+        Ok(journals.get(&key).unwrap().protocol)
+    }
     pub fn use_transcript(
         &self,
         session: &str,
@@ -264,6 +273,10 @@ impl FeedStore {
             }
         } // Protocol wins; a changed held transcript rotates the derived source.
         let mut journal = self.journal(session, agent)?;
+        if journal.protocol {
+            journals.insert(key, journal);
+            return Ok(());
+        }
         journal.source = Some(source);
         // Rebuild derived transcript materialization with a fresh generation on app restart.
         File::create(&journal.path).map_err(|e| e.to_string())?;

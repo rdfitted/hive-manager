@@ -109,6 +109,18 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
         validate_agent_id(&agent_id)?;
         let capabilities = if let Some(entry) = registry.get(session_id, &agent_id) {
             entry.transport.capabilities()
+        } else if registry
+            .feeds
+            .is_protocol(session_id, &agent_id)
+            .map_err(ApiError::internal)?
+        {
+            // Saved protocol seats expose their journal without advertising live controls.
+            Capabilities {
+                has_terminal: false,
+                can_interrupt: false,
+                supports_approvals: false,
+                event_source: EventSource::Protocol,
+            }
         } else {
             let has_transcript = cli == "claude"
                 && transcript_session_id

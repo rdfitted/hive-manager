@@ -525,6 +525,85 @@ fn restart_source_mode_prevents_double_feed_and_preserves_protocol_history() {
 }
 
 #[tokio::test]
+async fn cold_http_preserves_saved_protocol_without_registration() {
+    let (temp, state, app) = setup();
+    let mut session = make_test_session_with_agents("session", "D:/fixture/project", &["worker-a"]);
+    session.no_git = true;
+    session.agents[0].transcript_session_id = Some("held-transcript".into());
+    write_records(
+        &transcript_path(
+            &temp.path().join("claude-projects"),
+            &session.project_path,
+            "held-transcript",
+        ),
+        &[json!({"type":"user","message":{"role":"user","content":"transcript fallback"}})],
+    );
+    state.session_controller.read().insert_test_session(session);
+    state
+        .session_controller
+        .read()
+        .persist_test_session("session");
+    let mut cold = SessionController::new(state.pty_manager.clone());
+    cold.set_storage(state.storage.clone());
+    *state.session_controller.write() = cold;
+    // Simulate the earlier process writing a protocol journal, then dropping its registry.
+    let previous = TransportRegistry::new(state.storage.sessions_dir(), None);
+    previous
+        .register("session", "worker-a", None, FakeTransport::new())
+        .unwrap();
+    let saved = previous
+        .append_event(
+            "session",
+            "worker-a",
+            event("worker-a", "protocol-only history"),
+        )
+        .unwrap();
+    drop(previous);
+    let journal = state
+        .storage
+        .sessions_dir()
+        .join("session/agent-feeds/worker-a.jsonl");
+    let bytes = std::fs::read(&journal).unwrap();
+    assert!(state.transports().get("session", "worker-a").is_none());
+    // Read history first: the old configure fallback truncated the file here.
+    let page = body_json(get(&app, "/api/sessions/session/agents/worker-a/events").await).await;
+    assert_eq!(
+        page["events"][0]["payload"]["text"], "protocol-only history",
+        "cold HTTP read preserves protocol-only history"
+    );
+    assert_eq!(page["latest_cursor"], saved.cursor);
+    let feeds = body_json(get(&app, "/api/sessions/session/agent-feeds").await).await;
+    assert_eq!(
+        feeds["agents"][0]["capabilities"],
+        json!({"event_source":"protocol","has_terminal":false,"can_interrupt":false,"supports_approvals":false})
+    );
+    assert_eq!(
+        std::fs::read(&journal).unwrap(),
+        bytes,
+        "cold read never rewrites the protocol journal"
+    );
+    assert_eq!(
+        std::fs::read(journal.with_extension("source")).unwrap(),
+        b"protocol"
+    );
+    // Direct callers are protected too, without configure having warmed their cache.
+    let direct = TransportRegistry::new(
+        state.storage.sessions_dir(),
+        Some(temp.path().join("claude-projects")),
+    );
+    direct
+        .feeds
+        .use_transcript(
+            "session",
+            "worker-a",
+            Path::new("D:/fixture/project"),
+            "held-transcript",
+        )
+        .unwrap();
+    assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+}
+
+#[tokio::test]
 async fn persisted_worker_uses_its_own_cwd_and_held_transcript_id() {
     let (temp, state, app) = setup();
     let mut session = make_test_session_with_agents("session", "D:/fixture/project", &["worker-a"]);
