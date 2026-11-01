@@ -9268,6 +9268,62 @@ Last updated: {timestamp}
 
         Ok(file_path)
     }
+    /// Select file contents independently of launch/spawn. Only evaluator-backed
+    /// launches receive the verification contract; plain Codex receives task bytes.
+    fn solo_prompt_content(
+        cli: &str,
+        task: Option<&str>,
+        with_evaluator: bool,
+        session_id: &str,
+        project_path: &Path,
+        solo_cwd: &str,
+    ) -> Option<String> {
+        if with_evaluator {
+            Some(Self::build_solo_evaluator_prompt(
+                session_id,
+                project_path,
+                solo_cwd,
+                task,
+                cli,
+            ))
+        } else if cli == "codex" {
+            task.map(str::to_owned)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn prepare_solo_launch_command(
+        config: &AgentConfig,
+        task: Option<&str>,
+        with_evaluator: bool,
+        session_id: &str,
+        project_path: &Path,
+        solo_cwd: &str,
+    ) -> Result<(String, Vec<String>), String> {
+        let prompt = Self::solo_prompt_content(
+            &config.cli,
+            task,
+            with_evaluator,
+            session_id,
+            project_path,
+            solo_cwd,
+        );
+        let (cmd, mut args) =
+            Self::build_solo_command(config, if prompt.is_some() { None } else { task });
+        if let Some(prompt) = prompt {
+            let path = Self::write_prompt_file(
+                &project_path.to_path_buf(),
+                session_id,
+                "solo-prompt.md",
+                &prompt,
+            )?;
+            // Keep the only positional last: app-server's from_pty requires this.
+            Self::add_prompt_to_args(&cmd, &mut args, &path.to_string_lossy());
+        }
+        Ok((cmd, args))
+    }
+
     fn launch_solo_internal(
         &self,
         project_path: PathBuf,
@@ -9312,41 +9368,22 @@ Last updated: {timestamp}
             role: None,
             initial_prompt: task_description.clone(),
         };
-        let (cmd, mut args) = Self::build_solo_command(
+        let (cmd, args) = match Self::prepare_solo_launch_command(
             &solo_config,
-            if with_evaluator {
-                None
-            } else {
-                task_description.as_deref()
-            },
-        );
-        if with_evaluator {
-            let solo_prompt = Self::build_solo_evaluator_prompt(
-                &session_id,
-                &project_path,
-                &solo_cwd,
-                task_description.as_deref(),
-                &solo_config.cli,
-            );
-            let prompt_file = match Self::write_prompt_file(
-                &project_path,
-                &session_id,
-                "solo-prompt.md",
-                &solo_prompt,
-            ) {
-                Ok(path) => path,
-                Err(err) => {
-                    self.rollback_launch_allocations(
-                        &project_path,
-                        &session_id,
-                        &created_cells,
-                        &spawned_agent_ids,
-                    );
-                    return Err(err);
-                }
-            };
-            Self::add_prompt_to_args(&cmd, &mut args, &prompt_file.to_string_lossy());
-        }
+            task_description.as_deref(),
+            with_evaluator,
+            &session_id,
+            &project_path,
+            &solo_cwd,
+        ) {
+            Ok(command) => command,
+            Err(err) => {
+                self.rollback_launch_allocations(
+                    &project_path, &session_id, &created_cells, &spawned_agent_ids,
+                );
+                return Err(err);
+            }
+        };
         let solo_id = format!("{}-worker-1", session_id);
 
         let transcript_spawned_at = Some(Utc::now());
@@ -24203,6 +24240,145 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert_eq!(controller.get_session(id).unwrap().qa_timeout_secs, 720,
             "a running launch keeps the requested setting even when persistence fails");
         assert!(matches!(controller.get_session(id).unwrap().state, SessionState::Running));
+    }
+
+    #[test]
+    fn g22_inline_solo_codex_prompt_is_verbatim_last_and_transport_compatible() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project with spaces");
+        let task = "Keep the whole task.\r\nSecond line: 100% & | \"quoted\".\nUnicode: café 🐝\n";
+        let config = AgentConfig {
+            cli: "codex".into(),
+            model: Some("gpt-6.1-sol".into()),
+            flags: vec!["-c".into(), "model_reasoning_effort=high".into()],
+            ..Default::default()
+        };
+        let (cmd, args) = SessionController::prepare_solo_launch_command(
+            &config,
+            Some(task),
+            false,
+            "g22",
+            &project,
+            "separate-worktree",
+        )
+        .unwrap();
+        let file = project.join(".hive-manager").join("g22").join("prompts").join("solo-prompt.md");
+        assert_eq!(
+            std::fs::read(&file).expect("G22 plain Codex task must have a prompt file"),
+            task.as_bytes(),
+            "G22 prompt file is task bytes with no evaluator wrapper"
+        );
+        let expected = format!("Read {} and execute.", file.display());
+        let (legacy_cmd, mut expected_args) = SessionController::build_solo_command(&config, None);
+        expected_args.push(expected.clone());
+        assert_eq!(
+            (cmd.clone(), args.clone()),
+            (legacy_cmd, expected_args),
+            "G11 deliberate Solo Codex change adds only the final file prompt"
+        );
+        let key = SessionController::transcript_key(&cmd, &args);
+        assert_eq!(
+            key,
+            Some(format!(
+                "codex-prompt-{}",
+                uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, expected.as_bytes())
+            ))
+        );
+        let options = crate::transport::codex::CodexOptions::from_pty(
+            &cmd,
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            temp.path().into(),
+            vec![],
+            "g22".into(),
+            format!("g22-{}", uuid::Uuid::new_v4()),
+        )
+        .unwrap();
+        assert_eq!(options.initial_prompt.as_deref(), Some(expected.as_str()));
+        assert_eq!(options.effort.as_deref(), Some("high"));
+        assert!(!expected.contains(['\n', '\r', '%']));
+        assert_eq!(
+            SessionController::prepare_solo_launch_command(
+                &config,
+                None,
+                false,
+                "interactive",
+                &project,
+                "separate-worktree",
+            )
+            .unwrap(),
+            SessionController::build_solo_command(&config, None)
+        );
+        assert!(!project.join(".hive-manager/interactive").exists());
+        assert!(SessionController::solo_prompt_content(
+            "codex",
+            Some(task),
+            true,
+            "g22",
+            &project,
+            "separate-worktree",
+        )
+        .unwrap()
+        .contains("# Solo Implementation Contract"));
+    }
+
+    #[test]
+    fn g22_claude_solo_argv_keeps_inline_task_and_flags_byte_identical() {
+        let temp = tempfile::tempdir().unwrap();
+        let task = "Plain Claude task\n100% & | \"quoted\"";
+        let config = AgentConfig {
+            cli: "claude".into(),
+            flags: vec!["--verbose".into()],
+            ..Default::default()
+        };
+        let (cmd, args) = SessionController::prepare_solo_launch_command(
+            &config,
+            Some(task),
+            false,
+            "g22",
+            temp.path(),
+            "worktree",
+        )
+        .unwrap();
+        let (expected_cmd, mut expected_args) =
+            SessionController::build_solo_command(&config, Some(task));
+        // Each builder assigns a fresh UUID; every other byte must be identical.
+        let id_index = expected_args
+            .iter()
+            .position(|arg| arg == "--session-id")
+            .unwrap()
+            + 1;
+        expected_args[id_index] = args[id_index].clone();
+        assert_eq!((cmd, args), (expected_cmd, expected_args));
+        assert!(!temp.path().join(".hive-manager").exists());
+        assert!(SessionController::solo_prompt_content(
+            "claude",
+            Some(task),
+            false,
+            "g22",
+            temp.path(),
+            "worktree",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn g22_solo_prompt_write_failure_returns_error_before_spawn() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".hive-manager"), "blocked-directory").unwrap();
+        let result = SessionController::prepare_solo_launch_command(
+            &AgentConfig {
+                cli: "codex".into(),
+                ..Default::default()
+            },
+            Some("task"),
+            false,
+            "g22",
+            temp.path(),
+            "worktree",
+        );
+        assert!(result
+            .unwrap_err()
+            .contains("Failed to create prompts directory"));
     }
 
     #[test]

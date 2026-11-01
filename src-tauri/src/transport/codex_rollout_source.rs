@@ -426,6 +426,70 @@ mod binding_tests {
     }
 
     #[test]
+    fn g22_inline_solo_prompt_binds_only_its_rollout_live_and_cold() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let task = "Task line one\r\nTask line two: 100% & | café\n";
+        let (_, args) = crate::session::SessionController::prepare_solo_launch_command(
+            &crate::pty::AgentConfig {
+                cli: "codex".into(),
+                ..Default::default()
+            },
+            Some(task),
+            false,
+            "g22",
+            &project,
+            "C:/fixture",
+        )
+        .unwrap();
+        let prompt = args.last().unwrap();
+        assert_eq!(
+            fs::read(project.join(".hive-manager/g22/prompts/solo-prompt.md")).unwrap(),
+            task.as_bytes(),
+            "G22 complete task is delivered through the prompt file"
+        );
+        let key = prompt_key(prompt);
+        let root = temp.path().join("rollouts");
+        let own = write(
+            &root,
+            1,
+            &[
+                meta(1, json!("cli"), "2026-11-01T12:00:00Z", "C:/fixture"),
+                user(prompt),
+            ],
+        );
+        write(
+            &root,
+            2,
+            &[
+                meta(2, json!("cli"), "2026-11-01T12:00:00Z", "C:/fixture"),
+                user("Read C:/fixture/other-solo-prompt.md and execute."),
+            ],
+        );
+        let sidecar = temp.path().join("solo.binding");
+        for _ in 0..2 {
+            let mut binder = CodexBinder::new(Some(root.clone()));
+            let held = binder
+                .resolve(
+                    "g22",
+                    "solo",
+                    Some(&key),
+                    Some(spawn()),
+                    Path::new("C:/fixture"),
+                    &sidecar,
+                    Instant::now(),
+                    || {},
+                )
+                .unwrap();
+            assert_eq!(
+                held.rollout_path, own,
+                "G22 exact prompt rejects same-cwd same-time decoy"
+            );
+            assert_eq!(held.thread_id, id(1));
+        }
+    }
+
+    #[test]
     fn g16_same_second_same_cwd_worker_and_queen_bind_only_their_first_prompt() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("rollouts");
