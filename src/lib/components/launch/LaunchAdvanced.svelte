@@ -15,6 +15,8 @@
   import LaunchPreview from './LaunchPreview.svelte';
   // Values are bound to LaunchDialog; mounting this section never creates defaults.
   export let mode: SessionMode;
+  export let codexAppServer = false;
+  export let claudeStreamJson = false;
   export let projectPath: string;
   export let sessionName: string;
   export let sessionColor: string;
@@ -222,6 +224,16 @@
             />
           </div>
         {/if}
+
+{#if mode === 'hive' || mode === 'solo'}
+  <fieldset data-launch-owned>
+    <legend data-launch-owned>Agent transport</legend>
+    <label data-launch-owned><input data-launch-owned type="checkbox" bind:checked={codexAppServer} disabled={launching} /> Codex app server (experimental)</label>
+    <label data-launch-owned><input data-launch-owned type="checkbox" bind:checked={claudeStreamJson} disabled={launching} /> Claude stream JSON (experimental)</label>
+    <p data-launch-owned>Applies to matching workers and solo agents. PTY is the default; Queen and Master Planner use PTY.</p>
+    <p data-launch-owned>Sub-agents aren't confined to the assignment, the same as PTY Codex.</p>
+  </fieldset>
+{/if}
 
 <LaunchHiveSettings
   {mode} {projectPath}

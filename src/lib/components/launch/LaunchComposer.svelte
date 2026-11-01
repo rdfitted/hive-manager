@@ -2,6 +2,10 @@
   import type { SessionTemplate } from '$lib/types/domain';
 
   export let mode = 'hive';
+  export let codexAppServer = false;
+  export let claudeStreamJson = false;
+  export let oncodextransport: (enabled: boolean) => void = () => {};
+  export let onclaudetransport: (enabled: boolean) => void = () => {};
   export let value = '';
   export let projectPath = '';
   export let workerCount = 1;
@@ -90,6 +94,22 @@
         <span id="launch-project-value">{projectPath || 'Choose folder…'}</span>
       </button>
     </div>
+    {#if mode === 'hive' || mode === 'solo'}
+      <label class="launch-chip">
+        <span>Codex transport</span>
+        <select class="lattice-input" value={codexAppServer ? 'protocol' : 'pty'} on:change={(event) => oncodextransport(event.currentTarget.value === 'protocol')} disabled={launching}>
+          <option value="pty">PTY</option>
+          <option value="protocol">App server (experimental)</option>
+        </select>
+      </label>
+      <label class="launch-chip">
+        <span>Claude transport</span>
+        <select class="lattice-input" value={claudeStreamJson ? 'protocol' : 'pty'} on:change={(event) => onclaudetransport(event.currentTarget.value === 'protocol')} disabled={launching}>
+          <option value="pty">PTY</option>
+          <option value="protocol">Stream JSON (experimental)</option>
+        </select>
+      </label>
+    {/if}
     {#if showQa}
       <button type="button" class="lattice-btn lattice-btn--secondary qa-chip" aria-pressed={qaEnabled} aria-describedby={qaCaveat ? 'launch-qa-caveat' : undefined} on:click={() => onqa(!qaEnabled)} disabled={launching}>{qaSummary}</button>
     {/if}

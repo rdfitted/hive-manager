@@ -46,3 +46,5 @@ Compare actual event details using independent expected fields, including absent
 ## Composer QA and smoke reachability (#376)
 
 Hive and Solo expose QA directly in the composer, bound to the same Advanced variables. QA remains on by default; off emits `with_evaluator:false` with no evaluator config or QA roster. The summary uses the live roster's count and uppercase specialisations, and its accessible description retains the browser caveat. Hive and Research expose the same secondary Smoke Test action as Advanced (`smoke_test:true`). Fusion, Debate and ordinary Research launch payloads are unchanged.
+
+Transport opt-ins: Hive/Solo `agent_transports` accepts `codex_app_server` and `claude_stream_json`. The composer and Advanced default to PTY. Empty sets are omitted. Values persist per session in `agent-transports.json`; legacy `session.json` is unchanged. Queen/Master Planner never use a protocol transport. Codex native child confinement is behavioral only.

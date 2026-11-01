@@ -178,6 +178,12 @@
   // Solo config
   let soloConfig: AgentConfig = { cli: 'claude', flags: [], label: undefined };
   let soloTask = '';
+  let codexAppServer = false;
+  let claudeStreamJson = false;
+  $: agentTransports = [
+    ...(codexAppServer ? ['codex_app_server' as const] : []),
+    ...(claudeStreamJson ? ['claude_stream_json' as const] : []),
+  ];
 
   const defaultHiveForm = createDefaultHiveFormState();
   let queenConfig: AgentConfig = defaultHiveForm.queenConfig;
@@ -561,6 +567,7 @@
         }));
 
         const config = buildHiveLaunchConfig({
+          agentTransports,
           name: sessionName.trim() || undefined,
           color: sessionColor || undefined,
           projectPath,
@@ -613,6 +620,7 @@
         dispatch('launchResearch', config);
       } else if (mode === 'solo') {
         const config: SoloLaunchConfig = {
+          ...(agentTransports.length ? { agent_transports: agentTransports } : {}),
           name: sessionName.trim() || undefined,
           color: sessionColor || undefined,
           projectPath,
@@ -705,6 +713,7 @@
     {/if}
     {#if showAdvanced}
 <LaunchAdvanced
+  bind:codexAppServer bind:claudeStreamJson
   {mode} bind:projectPath bind:sessionName
   bind:sessionColor bind:prompt bind:soloTask
   bind:error {launchError} bind:showPreview
@@ -732,6 +741,9 @@
 />
     {:else}
         <LaunchComposer
+          {codexAppServer} {claudeStreamJson}
+          oncodextransport={(enabled) => { codexAppServer = enabled; }}
+          onclaudetransport={(enabled) => { claudeStreamJson = enabled; }}
           {mode}
           value={mode === 'solo' ? soloTask : prompt}
           onvalue={(value) => { if (mode === 'solo') soloTask = value; else prompt = value; }}
