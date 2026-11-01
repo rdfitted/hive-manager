@@ -1002,6 +1002,9 @@ pub struct AgentHeartbeatInfo {
     pub summary: Option<String>,
 }
 
+/// Marks an `AgentStatus::Error` as a startup death. The UI reads this prefix.
+const STARTUP_EXIT_PREFIX: &str = "exited_during_startup:";
+
 pub struct SessionController {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     pty_manager: Arc<RwLock<PtyManager>>,
@@ -2370,6 +2373,143 @@ impl SessionController {
         }
 
         stalled
+    }
+
+    /// Flag seats whose process died unexpectedly during startup, once each. Without
+    /// this such a seat stays `Running` on the roster and nothing tells the Queen. The
+    /// seat is left dead on purpose: nothing here respawns it.
+    pub fn sweep_dead_startup_seats(&self, session_id: &str) -> Vec<String> {
+        let exits = self.probe_startup_exits(session_id);
+        self.flag_dead_startup_seats(session_id, exits)
+    }
+
+    fn probe_startup_exits(&self, session_id: &str) -> Vec<String> {
+        let candidates: Vec<String> = {
+            let sessions = self.sessions.read();
+            let Some(session) = sessions.get(session_id) else {
+                return Vec::new();
+            };
+            session
+                .agents
+                .iter()
+                .filter(|agent| !matches!(agent.status, AgentStatus::Completed | AgentStatus::Error(_)))
+                .map(|agent| agent.id.clone())
+                .collect()
+        };
+        let heartbeats = self.agent_heartbeats.read();
+        let reported = heartbeats.get(session_id);
+        let pty_manager = self.pty_manager.read();
+        candidates
+            .into_iter()
+            .filter_map(|id| {
+                let (_, age) = pty_manager.startup_exit(&id)?;
+                let now = Utc::now();
+                // Evaluator and Prince respawns reuse their ID, so only a completion
+                // reported by this PTY counts. An older one belongs to its predecessor.
+                let completed = reported.and_then(|agents| agents.get(&id)).is_some_and(|info| {
+                    info.status == "completed"
+                        && (now - info.last_activity).to_std().is_ok_and(|ago| ago <= age)
+                });
+                (!completed).then_some(id)
+            })
+            .collect()
+    }
+
+    fn flag_dead_startup_seats(&self, session_id: &str, exits: Vec<String>) -> Vec<String> {
+        if exits.is_empty() {
+            return Vec::new();
+        }
+        let flagged = {
+            let pty_manager = self.pty_manager.read();
+            let mut sessions = self.sessions.write();
+            let Some(session) = sessions.get_mut(session_id) else {
+                return Vec::new();
+            };
+            let mut flagged = Vec::new();
+            for id in exits {
+                // Re-checked under the lock: a concurrent retire or DELETE wins.
+                let Some(agent) = session.agents.iter_mut().find(|agent| agent.id == id) else {
+                    continue;
+                };
+                if matches!(agent.status, AgentStatus::Completed | AgentStatus::Error(_)) {
+                    continue;
+                }
+                // A same-ID respawn since the probe means this roster entry is the healthy
+                // replacement. A respawn after this point overwrites the entry itself.
+                let Some((code, _)) = pty_manager.startup_exit(&id) else {
+                    continue;
+                };
+                agent.status = AgentStatus::Error(format!("{STARTUP_EXIT_PREFIX}{code}"));
+                flagged.push((agent.clone(), code));
+            }
+            (!flagged.is_empty()).then(|| (session.clone(), flagged))
+        };
+        let Some((session, flagged)) = flagged else {
+            return Vec::new();
+        };
+        self.update_session_storage(session_id);
+        self.emit_session_update(session_id);
+        flagged
+            .into_iter()
+            .map(|(agent, code)| {
+                self.report_dead_startup_seat(&session, &agent, code);
+                agent.id
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flag_after_respawn_for_test(
+        &self,
+        session_id: &str,
+        respawn: impl FnOnce(),
+    ) -> Vec<String> {
+        let exits = self.probe_startup_exits(session_id);
+        respawn();
+        self.flag_dead_startup_seats(session_id, exits)
+    }
+
+    /// The event reaches the roster, event log and work graph. The conversation files are
+    /// the inboxes the Queen and Evaluator already read.
+    fn report_dead_startup_seat(&self, session: &Session, agent: &AgentInfo, code: u32) {
+        let Some(emitter) = self.event_emitter.clone() else {
+            return;
+        };
+        let error = format!(
+            "{} process exited during startup with code {code}. It has not been respawned.",
+            agent.id
+        );
+        let session_id = session.id.clone();
+        let cell_id = agent_cell_id(session, agent);
+        let agent_id = agent.id.clone();
+        let storage = self.storage.clone();
+        let inboxes: Vec<String> = session
+            .agents
+            .iter()
+            .filter(|peer| {
+                matches!(peer.role, AgentRole::Queen | AgentRole::Evaluator) && peer.id != agent.id
+            })
+            .map(|peer| peer.id.clone())
+            .collect();
+        tokio::spawn(async move {
+            if let Err(failure) = emitter
+                .emit_agent_failed(&session_id, &cell_id, &agent_id, &error)
+                .await
+            {
+                tracing::warn!("Failed to emit agent failed event: {}", failure);
+            }
+            let Some(storage) = storage else {
+                return;
+            };
+            for inbox in inboxes {
+                if let Err(failure) = storage
+                    .append_conversation_message(&session_id, &inbox, "hive-manager", &error)
+                    .await
+                {
+                    tracing::warn!("Failed to notify {} of a dead seat: {}", inbox, failure);
+                }
+            }
+        });
     }
 
     #[cfg(test)]

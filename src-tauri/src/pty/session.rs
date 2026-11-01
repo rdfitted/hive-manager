@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -368,6 +369,9 @@ pub struct PtySession {
     /// *why* a worker failed instead of just that it did. Since #287 the same ring also
     /// serves terminal replay, so a freshly mounted pane can show the agent's screen.
     output_ring: Arc<Mutex<OutputRing>>,
+    spawned_at: Instant,
+    /// Set before any deliberate kill, so that exit is never read as a crash.
+    kill_requested: AtomicBool,
 }
 
 // Make PtySession Send + Sync
@@ -494,6 +498,8 @@ impl PtySession {
             child_pid,
             master: Arc::new(Mutex::new(MasterPtyHandle(master))),
             output_ring: Arc::new(Mutex::new(OutputRing::new(replay_capacity))),
+            spawned_at: Instant::now(),
+            kill_requested: AtomicBool::new(false),
         })
     }
 
@@ -604,6 +610,7 @@ impl PtySession {
     }
 
     pub fn kill(&self) -> Result<(), PtyError> {
+        self.kill_requested.store(true, Ordering::SeqCst);
         #[cfg(windows)]
         return self.kill_with_tree_killer(kill_windows_tree);
 
@@ -650,6 +657,23 @@ impl PtySession {
             c.kill().map_err(into_io_error)?;
         }
         Ok(())
+    }
+
+    pub fn age(&self) -> Duration {
+        self.spawned_at.elapsed()
+    }
+
+    /// Exit code of a child that died non-zero without anyone asking it to.
+    ///
+    /// Polled, because a ConPTY child's exit does not end the reader while the master
+    /// is open. `try_lock` keeps a sweep from waiting on a tree kill holding the child.
+    pub fn unexpected_exit(&self) -> Option<u32> {
+        if self.kill_requested.load(Ordering::SeqCst) {
+            return None;
+        }
+        let mut child = self.child.try_lock()?;
+        let status = child.as_mut()?.try_wait().ok()??;
+        (!status.success()).then(|| status.exit_code())
     }
 
     /// Check if the process is still running
@@ -885,6 +909,43 @@ mod tests {
             assert_eq!(attempted_pid, session.child_pid);
             session.kill().unwrap();
             session.kill().unwrap();
+        }
+
+        fn exited_session(id: &str, args: &[&str]) -> (TempDir, PtySession) {
+            let temp = TempDir::new().unwrap();
+            let session = PtySession::new(
+                id.to_string(),
+                AgentRole::QaWorker { index: 1, parent: None },
+                "cmd.exe",
+                pty_submit_policy("cmd.exe"),
+                &[],
+                args,
+                temp.path().to_str(),
+                80,
+                24,
+                8192,
+            ).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while session.is_alive() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(25));
+            }
+            assert!(!session.is_alive(), "synthetic child did not exit");
+            (temp, session)
+        }
+
+        #[test]
+        fn real_pty_reports_a_crash_code_through_the_batch_launcher_but_not_a_clean_exit() {
+            let (_temp, crashed) = exited_session("synthetic-crash", &["/c", "exit", "101"]);
+            assert_eq!(crashed.unexpected_exit(), Some(101));
+            let (_temp, clean) = exited_session("synthetic-clean", &["/c", "exit", "0"]);
+            assert_eq!(clean.unexpected_exit(), None);
+        }
+
+        #[test]
+        fn a_deliberately_killed_real_pty_never_reads_as_a_crash() {
+            let (_temp, session) = exited_session("synthetic-killed", &["/c", "exit", "101"]);
+            session.kill().unwrap();
+            assert_eq!(session.unexpected_exit(), None);
         }
 
         #[test]

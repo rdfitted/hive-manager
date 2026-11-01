@@ -37,6 +37,30 @@ beforeEach(() => {
 afterEach(() => { store.disconnect(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('session agent event feed', () => {
+  const rosterCalls = () => fetcher.mock.calls.filter(([url]) => url.includes('agent-feeds')).length;
+
+  it('polls the roster sooner only while a seat is due its first transcript', async () => {
+    let pending = true;
+    fetcher.mockImplementation(async (url: string) => url.includes('agent-feeds')
+      ? ok({ session_id: 's', agents: [{ ...feed('a', 'none'), binding_pending: pending }] }) : ok(page([])));
+    store.setSessionId('s'); await flush();
+    expect(rosterCalls()).toBe(1);
+    await vi.advanceTimersByTimeAsync(2_499);
+    expect(rosterCalls()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(rosterCalls(), 'an unbound seat is polled at 2.5s').toBe(2);
+    pending = false;
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(rosterCalls()).toBe(3);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(rosterCalls(), 'no extra polling once nothing is pending').toBe(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(rosterCalls()).toBe(4);
+    store.disconnect();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(rosterCalls(), 'a closed session stops polling').toBe(4);
+  });
+
   it('loads the tail before one multiplexed stream, without fetching unsupported feeds', async () => {
     store.setSessionId('s');
     store.setSessionId('s');

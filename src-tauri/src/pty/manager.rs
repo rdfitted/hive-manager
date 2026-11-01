@@ -319,6 +319,11 @@ const CODEX_SPAWN_GAP: Duration = Duration::from_millis(750);
 #[cfg(test)]
 const CODEX_SPAWN_GAP: Duration = Duration::from_millis(10);
 
+/// A seat that dies this long after spawn is past startup and left to the stall sweep.
+const STARTUP_EXIT_WINDOW: Duration = Duration::from_secs(300);
+/// `add_worker`'s own startup check owns the first 1.5 seconds and frees the slot itself.
+const STARTUP_EXIT_GRACE: Duration = Duration::from_secs(3);
+
 // Deliberately neither Debug nor Serialize: credentials never enter diagnostics or disk.
 struct HeartbeatCredential {
     session_id: String,
@@ -1090,6 +1095,22 @@ impl PtyManager {
             .get(id)
             .map(|session| session.is_alive())
             .unwrap_or(false)
+    }
+
+    /// Exit code and PTY age of a seat whose process died unexpectedly while starting up.
+    /// Deliberate kills, clean exits and removed sessions all answer `None`.
+    pub fn startup_exit(&self, id: &str) -> Option<(u32, Duration)> {
+        let session = self.sessions.read().get(id).cloned()?;
+        let age = session.age();
+        if age < STARTUP_EXIT_GRACE || age > STARTUP_EXIT_WINDOW {
+            return None;
+        }
+        session.unexpected_exit().map(|code| (code, age))
+    }
+
+    #[cfg(test)]
+    pub fn set_session_age_for_test(&self, id: &str, age: Duration) {
+        self.sessions.read().get(id).expect("session fixture").set_age_for_test(age);
     }
 
     /// Retained tail of an agent's output (#207).

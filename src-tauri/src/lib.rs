@@ -274,6 +274,25 @@ pub fn run() {
                 }
             });
 
+            // Desktop-only, like stall detection above. Probes each live seat's exit status.
+            let dead_seat_controller = session_controller.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+                    let controller = dead_seat_controller.read();
+                    let session_ids: Vec<String> = controller
+                        .list_sessions()
+                        .iter()
+                        .filter(|session| session.state.is_monitorable())
+                        .map(|session| session.id.clone())
+                        .collect();
+                    for session_id in &session_ids {
+                        controller.sweep_dead_startup_seats(session_id);
+                    }
+                }
+            });
+
             // #126: durable run-queue maintenance — every 30s, reclaim stuck running rows
             // (heartbeat older than STUCK_CUTOFF flips back to 'queued', emits
             // WorkerReclaimed) and finalize no-progress / continuation-exceeded runs (emits

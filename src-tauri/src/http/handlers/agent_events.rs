@@ -3,6 +3,7 @@ use super::{validate_agent_id, validate_session_id};
 use crate::{
     http::{error::ApiError, state::AppState},
     transport::{
+        codex_rollout_source::eager_scan_remaining,
         feed::{self, Cursor, HistoryPage},
         Capabilities, EventSource,
     },
@@ -22,6 +23,9 @@ pub struct AgentFeed {
     pub agent_id: String,
     pub transcript_session_id: Option<String>,
     pub capabilities: Capabilities,
+    /// A live seat is still due its first transcript, so the roster is worth polling sooner.
+    #[serde(default)]
+    pub binding_pending: bool,
 }
 #[derive(Serialize, Deserialize)]
 pub struct AgentFeeds {
@@ -176,10 +180,18 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
             }
             Capabilities::pty(has_transcript)
         };
+        let binding_pending = cli == "codex"
+            && capabilities.event_source == EventSource::None
+            && transcript_session_id.is_some()
+            && spawned_at.is_some_and(|spawned_at| {
+                !eager_scan_remaining(spawned_at, chrono::Utc::now()).is_zero()
+            })
+            && state.pty_manager.read().is_alive(&agent_id);
         output.push(AgentFeed {
             agent_id,
             transcript_session_id,
             capabilities,
+            binding_pending,
         });
     }
     Ok(output)
