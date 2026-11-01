@@ -123,6 +123,18 @@ pub trait AgentTransport: Send + Sync {
     async fn send(&self, text: &str) -> Result<Delivery, String>;
     async fn interrupt(&self) -> Result<(), String>;
     async fn stop(&self) -> Result<(), String>;
+    fn send_input(&self, _text: &str, _submit: bool) -> Result<Delivery, String> {
+        Err("Transport does not support synchronous input".into())
+    }
+    fn is_alive(&self) -> bool {
+        true
+    }
+    fn stop_sync(&self) -> Result<(), String> {
+        Err("Transport does not support synchronous stop".into())
+    }
+    fn interrupt_sync(&self) -> Result<(), String> {
+        Err("Transport does not support synchronous interrupt".into())
+    }
     fn subscribe(&self) -> broadcast::Receiver<AgentEvent>;
     fn capabilities(&self) -> Capabilities;
 }
@@ -175,6 +187,16 @@ impl TransportRegistry {
             .get(&(session_id.into(), agent_id.into()))
             .cloned()
     }
+    /// Session-less callers may resolve only an unambiguous registered identity.
+    pub fn get_agent(&self, agent_id: &str) -> Option<(String, RegisteredTransport)> {
+        let entries = self.entries.read();
+        let mut matches = entries.iter().filter(|((_, agent), _)| agent == agent_id);
+        let ((session, _), entry) = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some((session.clone(), entry.clone()))
+    }
     pub fn set_thread_id(
         &self,
         session_id: &str,
@@ -200,6 +222,22 @@ impl TransportRegistry {
         }
         self.feeds.append_protocol(session_id, agent_id, event)
     }
+    pub fn stop_agent_sync(&self, session_id: &str, agent_id: &str) -> Result<(), String> {
+        if let Some(entry) = self.get(session_id, agent_id) {
+            // Keep the handle available for retries until stopping succeeds.
+            // Do not hold the registry lock while calling the transport.
+            entry.transport.stop_sync()?;
+            let mut entries = self.entries.write();
+            let key = (session_id.into(), agent_id.into());
+            if entries
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(&current.transport, &entry.transport))
+            {
+                entries.remove(&key);
+            }
+        }
+        Ok(())
+    }
     pub async fn stop_agent(&self, session_id: &str, agent_id: &str) -> Result<(), String> {
         if let Some(entry) = self.get(session_id, agent_id) {
             entry.transport.stop().await?;
@@ -218,5 +256,179 @@ impl TransportRegistry {
             }
         }
         errors
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct FakeTransport {
+        fail_stop: AtomicBool,
+        stop_calls: AtomicUsize,
+        on_stop: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    #[async_trait]
+    impl AgentTransport for FakeTransport {
+        async fn start(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn send(&self, _text: &str) -> Result<Delivery, String> {
+            Ok(Delivery::protocol_pending())
+        }
+        async fn interrupt(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn stop_sync(&self) -> Result<(), String> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_stop.load(Ordering::SeqCst) {
+                return Err("fixture stop failed".into());
+            }
+            if let Some(on_stop) = self.on_stop.lock().take() {
+                on_stop();
+            }
+            Ok(())
+        }
+        fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
+            broadcast::channel(1).1
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::pty(false)
+        }
+    }
+
+    #[test]
+    fn synchronous_defaults_preserve_fake_liveness_and_reject_unsupported_input() {
+        let transport = FakeTransport::default();
+        assert!(transport.is_alive());
+        assert_eq!(
+            transport.send_input("fixture", true).unwrap_err(),
+            "Transport does not support synchronous input"
+        );
+        assert_eq!(
+            transport.interrupt_sync().unwrap_err(),
+            "Transport does not support synchronous interrupt"
+        );
+    }
+
+    #[test]
+    fn get_agent_requires_unique_identity_across_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = TransportRegistry::new(root.path().into(), None);
+        let first = Arc::new(FakeTransport::default());
+        registry
+            .register(
+                "session-a",
+                "worker",
+                Some("thread-a".into()),
+                first.clone(),
+            )
+            .unwrap();
+        assert!(registry.get_agent("missing").is_none());
+        let (session, entry) = registry.get_agent("worker").unwrap();
+        assert_eq!(session, "session-a");
+        assert_eq!(entry.thread_id.as_deref(), Some("thread-a"));
+        let expected: Arc<dyn AgentTransport> = first;
+        assert!(Arc::ptr_eq(&entry.transport, &expected));
+
+        registry
+            .register(
+                "session-b",
+                "worker",
+                None,
+                Arc::new(FakeTransport::default()),
+            )
+            .unwrap();
+        assert!(
+            registry.get_agent("worker").is_none(),
+            "ambiguous agent must not resolve"
+        );
+        assert!(registry.get("session-a", "worker").is_some());
+        assert!(registry.get("session-b", "worker").is_some());
+    }
+
+    #[test]
+    fn stop_agent_sync_removes_only_the_successfully_stopped_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = TransportRegistry::new(root.path().into(), None);
+        let transport = Arc::new(FakeTransport::default());
+        let other = Arc::new(FakeTransport::default());
+        registry
+            .register("session-a", "worker", None, transport.clone())
+            .unwrap();
+        registry
+            .register("session-b", "worker", None, other.clone())
+            .unwrap();
+
+        registry.stop_agent_sync("session-a", "worker").unwrap();
+        assert!(registry.get("session-a", "worker").is_none());
+        assert!(registry.get("session-b", "worker").is_some());
+        assert_eq!(transport.stop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(other.stop_calls.load(Ordering::SeqCst), 0);
+        registry.stop_agent_sync("session-a", "worker").unwrap();
+        assert_eq!(transport.stop_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn stop_agent_sync_keeps_failed_handle_for_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = TransportRegistry::new(root.path().into(), None);
+        let transport = Arc::new(FakeTransport::default());
+        transport.fail_stop.store(true, Ordering::SeqCst);
+        registry
+            .register("session", "worker", None, transport.clone())
+            .unwrap();
+
+        assert_eq!(
+            registry.stop_agent_sync("session", "worker").unwrap_err(),
+            "fixture stop failed"
+        );
+        let retained = registry.get("session", "worker").unwrap();
+        let expected: Arc<dyn AgentTransport> = transport.clone();
+        assert!(
+            Arc::ptr_eq(&retained.transport, &expected),
+            "failed stop must retain exact handle"
+        );
+        transport.fail_stop.store(false, Ordering::SeqCst);
+        registry.stop_agent_sync("session", "worker").unwrap();
+        assert!(registry.get("session", "worker").is_none());
+        assert_eq!(transport.stop_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn stop_agent_sync_preserves_replacement_registered_during_stop() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TransportRegistry::new(root.path().into(), None));
+        let transport = Arc::new(FakeTransport::default());
+        let replacement: Arc<dyn AgentTransport> = Arc::new(FakeTransport::default());
+        registry
+            .register("session", "worker", None, transport.clone())
+            .unwrap();
+        let weak_registry = Arc::downgrade(&registry);
+        let replacement_for_stop = replacement.clone();
+        *transport.on_stop.lock() = Some(Box::new(move || {
+            let registry = weak_registry.upgrade().unwrap();
+            registry
+                .entries
+                .write()
+                .remove(&("session".into(), "worker".into()));
+            registry
+                .register("session", "worker", None, replacement_for_stop)
+                .unwrap();
+        }));
+
+        registry.stop_agent_sync("session", "worker").unwrap();
+        let retained = registry
+            .get("session", "worker")
+            .expect("replacement must remain registered");
+        assert!(Arc::ptr_eq(&retained.transport, &replacement));
+        assert_eq!(transport.stop_calls.load(Ordering::SeqCst), 1);
     }
 }
