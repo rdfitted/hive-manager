@@ -19,10 +19,12 @@
   let atBottom = $state(true);
   let sending = $state(false);
   let error = $state('');
+  let expandedTools = $state<Record<string, boolean>>({});
+  let lastView = $state('');
 
   $effect(() => {
-    void agentId; void sessionId; void raw;
-    end = null;
+    const key = JSON.stringify([sessionId, agentId, raw]);
+    if (key !== lastView) { lastView = key; end = null; expandedTools = {}; }
   });
   $effect(() => {
     void events; void visible;
@@ -46,6 +48,10 @@
     } catch (cause) { error = String(cause); }
     finally { sending = false; }
   }
+  function scroll() {
+    atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 40;
+    if (!atBottom && end === null) end = count;
+  }
 </script>
 
 <section class="chat-pane lattice-forced-colors-boundary" aria-label={raw ? 'Raw agent event log' : 'Agent chat'}>
@@ -56,7 +62,7 @@
     {#if end !== null}<button type="button" class="lattice-btn lattice-btn--ghost" onclick={() => { end = null; atBottom = true; }}>Latest</button>{/if}
   </nav>
   {#if history?.error}<p class="feed-error" role="alert">{history.error}</p>{/if}
-  <div class="transcript lattice-scroll-content" bind:this={container} onscroll={() => { atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 40; }}>
+  <div class="transcript lattice-scroll-content" bind:this={container} onscroll={scroll}>
     {#if raw}
       {#each events.slice(start, stop) as event (event.cursor)}
         <article class="raw-event" aria-label={event.kind}><span>{event.kind}</span><pre>{formatRaw(event)}</pre></article>
@@ -64,8 +70,9 @@
     {:else}
       {#each rows.slice(start, stop) as row (row.id)}
         {#if row.type === 'tool'}
-          <details class="tool-call lattice-forced-colors-boundary">
+          <details class="tool-call lattice-forced-colors-boundary" open={expandedTools[row.id] ?? false} ontoggle={(event) => { expandedTools[row.id] = event.currentTarget.open; }}>
             <summary>{row.name} · {row.failed ? 'Failed' : row.complete ? 'Complete' : 'Running'}</summary>
+            {#if expandedTools[row.id]}
             {#if row.input !== undefined}<pre aria-label="Tool input">{formatRaw(row.input)}</pre>{/if}
             {#if row.result !== undefined}
               {@const passive = passiveToolResult(row.result)}
@@ -74,6 +81,7 @@
               {:else}<pre aria-label="Tool result">{formatRaw(row.result)}</pre>{/if}
             {/if}
             {#if row.truncated}<span class="truncation">Output truncated</span>{/if}
+            {/if}
           </details>
         {:else}
           <article class="message" aria-label={row.type === 'user' ? 'User message' : row.type === 'assistant' ? 'Assistant message' : 'Agent error'}>

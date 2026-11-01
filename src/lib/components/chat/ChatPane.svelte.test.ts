@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import type { AgentEvent } from '$lib/stores/agentEvents';
 import { CHAT_WINDOW_SIZE, passiveToolResult, protocolAttention, transcriptRows } from './transcript';
 
@@ -41,9 +42,11 @@ describe('agent chat', () => {
     expect(view.container.querySelectorAll('details')).toHaveLength(1);
     const details = view.container.querySelector('details')!;
     expect(details.open).toBe(false);
+    expect(details.querySelector('[aria-label="Tool input"]')).toBeNull();
     expect(details.querySelector('summary')?.textContent).toBe('Fixture tool · Complete');
     details.open = true;
-    details.dispatchEvent(new Event('toggle'));
+    await fireEvent(details, new Event('toggle'));
+    expect(details.querySelector('[aria-label="Tool input"]')?.textContent).toContain('fixture.txt');
     expect(view.queryByRole('button', { name: /approve|reject/i })).toBeNull();
     expect(view.queryByText('Protocol prompt')).toBeNull();
     expect(passiveToolResult({ renderer: 'approval' })).toBeNull();
@@ -74,6 +77,22 @@ describe('agent chat', () => {
       request: { session_id: 's', target_agent_id: 'a', message: 'Continue with fixture' },
     }));
     expect(fixture.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds the current reading window when new live records arrive after scrolling up', async () => {
+    const events = Array.from({ length: 200 }, (_, index) => event(`fixture-${index}`));
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events } });
+    await tick();
+    const transcript = view.container.querySelector<HTMLElement>('.transcript')!;
+    Object.defineProperties(transcript, { scrollHeight: { value: 1000 }, clientHeight: { value: 100 } });
+    transcript.scrollTop = 200;
+    await fireEvent.scroll(transcript);
+    expect(view.getByRole('button', { name: 'Latest' })).toBeTruthy();
+    await view.rerender({ sessionId: 's', agentId: 'a', events: [...events, event('new-live')] });
+    expect(view.getByText('fixture-120')).toBeTruthy();
+    expect(view.queryByText('new-live')).toBeNull();
+    await fireEvent.click(view.getByRole('button', { name: 'Latest' }));
+    expect(view.getByText('new-live')).toBeTruthy();
   });
 
   it('offers a raw log instead of a Terminal toggle when there is no terminal, with bounded raw records', async () => {

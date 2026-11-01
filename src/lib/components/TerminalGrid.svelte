@@ -12,6 +12,7 @@
   } from 'phosphor-svelte';
 
   import { layout } from '$lib/stores/layout';
+  import { agentEvents } from '$lib/stores/agentEvents';
   import {
     scratchTerminals,
     shellCommand,
@@ -23,6 +24,9 @@
   import AgentActivityLine from './agent/AgentActivityLine.svelte';
   import AttentionCard from './attention/AttentionCard.svelte';
   import Terminal from './Terminal.svelte';
+  import ChatPane from './chat/ChatPane.svelte';
+  import PaneToggle from './chat/PaneToggle.svelte';
+  import { protocolAttention } from './chat/transcript';
 
   interface Props {
     session: Session;
@@ -61,6 +65,8 @@
   let openingScratchId = $state<string | null>(null);
   let scratchError = $state<string | null>(null);
   let previousFocusedAgentId = $state<string | null>(null);
+  let paneModes = $state<Record<string, 'chat' | 'terminal' | 'raw'>>({});
+  let terminalFocusId = $state<string | null>(null);
 
   let sessionId = $derived(session.id);
   let sessionState = $derived(serdeEnumVariantName(session.state));
@@ -373,6 +379,12 @@
   >
     {#each panes as pane (pane.id)}
       {@const focused = isPaneFocused(pane)}
+      {@const feed = pane.kind === 'agent' && $agentEvents.sessionId === session.id ? $agentEvents.feeds[pane.id] : undefined}
+      {@const chatEligible = !!feed && feed.capabilities.event_source !== 'none'}
+      {@const hasTerminal = feed?.capabilities.has_terminal !== false}
+      {@const mode = chatEligible ? (paneModes[pane.id] ?? 'chat') : 'terminal'}
+      {@const chatShowing = chatEligible && (mode !== 'terminal' || !hasTerminal)}
+      {@const history = $agentEvents.sessionId === session.id ? $agentEvents.histories[pane.id]?.events ?? [] : []}
       <!-- Container click is a convenience; the dedicated header button carries
            accessible focus semantics without wrapping the terminal or other controls. -->
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
@@ -398,11 +410,13 @@
             <span class="role-label" title={pane.title}>{pane.title}</span>
           </button>
           <div class="terminal-meta">
+            {#if chatEligible}<PaneToggle {hasTerminal} mode={chatShowing ? mode === 'raw' ? 'raw' : 'chat' : 'terminal'} onchange={(next) => { paneModes[pane.id] = next; }} />{/if}
             {#if pane.kind === 'agent'}
               {@const status = serdeEnumVariantName(pane.agent.status)}
               {@const waiting = typeof pane.agent.status === 'object' && 'WaitingForInput' in pane.agent.status}
               {@const failed = status === 'Error'}
               <span class="cli-badge">{pane.agent.config?.cli || 'unknown'}</span>
+              <span class="pane-status-text">{status ?? 'Unknown'}</span>
               <span
                 class={`status-indicator status-badge ${waiting ? 'status-warning lattice-motion-status-pulse' : failed ? 'status-error pulse-error' : status === 'Running' ? 'status-running' : status === 'Completed' ? 'status-success' : 'status-queued'}`}
               >
@@ -449,22 +463,35 @@
             {/if}
           </div>
         </div>
-        {#if focusMode && visible && pane.kind === 'agent' && pane.id === localMaximizedId}
-          <div class="focused-agent-info">
+        {#if visible && pane.kind === 'agent' && ((focusMode && pane.id === localMaximizedId) || chatEligible)}
+          <div class={focusMode ? 'focused-agent-info' : 'agent-info'}>
             <AgentActivityLine agentId={pane.id} />
-            <AttentionCard sessionId={session.id} agent={pane.agent} />
+            <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} chatAvailable={chatEligible}
+              eventAttention={protocolAttention(history)} feedError={chatEligible ? $agentEvents.error ?? $agentEvents.histories[pane.id]?.error : null}
+              onOpen={chatEligible ? () => { paneModes[pane.id] = hasTerminal ? 'terminal' : 'raw'; } : undefined} />
           </div>
         {/if}
         <div class="terminal-container">
-          <Terminal
-            agentId={pane.id}
-            isAgent={pane.kind === 'agent'}
-            isFocused={visible && focused}
-            isVisible={visible && (localMaximizedId === null || pane.id === localMaximizedId)}
-            layoutRevision={localMaximizedId}
-            onReady={pane.kind === 'scratch' ? () => markTerminalReady(pane.id) : undefined}
-            onStatusChange={pane.kind === 'scratch' ? (status) => handlePaneStatus(pane, status) : undefined}
-          />
+          {#if hasTerminal}
+            <div class="terminal-layer" class:chat-hidden={chatShowing} inert={chatShowing} aria-hidden={chatShowing}
+              onfocusin={() => { terminalFocusId = pane.id; }}
+              onfocusout={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) { if (terminalFocusId === pane.id) terminalFocusId = null; } }}>
+              <Terminal
+                agentId={pane.id}
+                isAgent={pane.kind === 'agent'}
+                isFocused={visible && focused && (!chatEligible || (!chatShowing && terminalFocusId === pane.id))}
+                isVisible={visible && (localMaximizedId === null || pane.id === localMaximizedId)}
+                layoutRevision={localMaximizedId}
+                onReady={pane.kind === 'scratch' ? () => markTerminalReady(pane.id) : undefined}
+                onStatusChange={pane.kind === 'scratch' ? (status) => handlePaneStatus(pane, status) : undefined}
+              />
+            </div>
+          {/if}
+          {#if chatEligible}
+            <div class="chat-layer" class:pane-hidden={!chatShowing} inert={!chatShowing} aria-hidden={!chatShowing}>
+              <ChatPane sessionId={session.id} agentId={pane.id} events={history} raw={mode === 'raw'} visible={visible && chatShowing && (localMaximizedId === null || pane.id === localMaximizedId)} />
+            </div>
+          {/if}
         </div>
       </div>
     {/each}
@@ -522,7 +549,7 @@
     text-overflow: ellipsis;
   }
 
-  .focused-agent-info {
+  .focused-agent-info, .agent-info {
     flex: 0 0 auto;
     min-width: 0;
     padding: var(--space-2) var(--space-3);
@@ -664,7 +691,17 @@
   .terminal-container {
     flex: 1;
     min-height: 0;
+    min-width: 0;
+    display: grid;
+    grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+    overflow: hidden;
   }
+
+  .terminal-layer, .chat-layer { grid-area: 1 / 1; min-width: 0; min-height: 0; }
+  /* Keep xterm's initial fit measurable and move its native drop rectangle offscreen. */
+  .terminal-layer.chat-hidden { visibility: hidden; pointer-events: none; transform: translateX(-200vw); }
+  .chat-layer.pane-hidden { visibility: hidden; pointer-events: none; }
+  .pane-status-text { font-size: var(--text-small); color: var(--text-secondary); }
 
   .empty-state {
     display: flex;

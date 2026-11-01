@@ -4,6 +4,7 @@
     import { cells } from '../../stores/cells';
     import { agents } from '../../stores/agents';
     import { events } from '../../stores/events';
+    import { agentEvents } from '../../stores/agentEvents';
     import { conversationStore } from '../../stores/conversations';
     import { activeSession, serdeEnumVariantName, sessions } from '../../stores/sessions';
     import { TERMINAL_SESSION_STATES, terminalPool } from '../../stores/terminalPool';
@@ -19,6 +20,10 @@
 
     const sessionNotFound = $derived($cells.sessionNotFound);
     let connectedSessionId: string | null = null;
+
+    $effect(() => {
+        agentEvents.setSessionId(sessionNotFound ? null : sessionId ?? null);
+    });
 
     // Keep-alive pool (#286): the active session plus the most recently visited ones keep
     // their terminal grids mounted (hidden), so switching back shows the panes exactly as
@@ -124,6 +129,7 @@
         clearPollTimeout();
         cells.setExternalRefreshHandler(null);
         events.disconnect();
+        agentEvents.disconnect();
     });
 </script>
 

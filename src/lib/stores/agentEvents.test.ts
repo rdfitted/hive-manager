@@ -123,6 +123,7 @@ describe('session agent event feed', () => {
 
   it('refreshes newly added agents without opening extra streams and surfaces failures', async () => {
     store.setSessionId('s'); await flush();
+    Stream.instances[0].onopen?.();
     fetcher.mockImplementation(async (url: string) => url.includes('agent-feeds')
       ? ok({ session_id: 's', agents: [feed('a'), feed('c')] })
       : ok(page([event('c-tail', 'c')], { agent_id: 'c' })));
@@ -132,5 +133,8 @@ describe('session agent event feed', () => {
     fetcher.mockRejectedValueOnce(new Error('offline'));
     await store.refresh();
     expect(get(store).error).toContain('offline');
+    await store.refresh();
+    expect(get(store).error).toBeNull();
+    expect(Stream.instances).toHaveLength(1);
   });
 });

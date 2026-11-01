@@ -166,7 +166,9 @@ export function createAgentEventsStore() {
       if (roster.session_id !== sid) throw new Error('Agent feed session mismatch');
       const previous = get(state).feeds;
       const feeds = Object.fromEntries(roster.agents.map((feed) => [feed.agent_id, feed]));
-      state.update((s) => ({ ...s, feeds, histories: Object.fromEntries(Object.entries(s.histories).filter(([id]) => feeds[id])) }));
+      for (const id of Object.keys(previous)) if (!feeds[id]) revisions.set(id, (revisions.get(id) ?? 0) + 1);
+      state.update((s) => ({ ...s, feeds, error: s.connected ? null : s.error,
+        histories: Object.fromEntries(Object.entries(s.histories).filter(([id]) => feeds[id])) }));
       await Promise.all(roster.agents.filter((feed) => feed.capabilities.event_source !== 'none'
         && (!previous[feed.agent_id] || previous[feed.agent_id].capabilities.event_source !== feed.capabilities.event_source
           || !get(state).histories[feed.agent_id] || get(state).histories[feed.agent_id].error))
