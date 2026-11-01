@@ -1001,11 +1001,11 @@ mod tests {
         assert!(manager.spawn_env_for_test(&id).unwrap().is_empty());
         assert_eq!(
             manager.removed_spawn_env_for_test(&id).unwrap(),
-            vec![
-                "HIVE_SESSION_ID".to_string(),
-                "HIVE_AGENT_ID".to_string(),
-                "HIVE_ROLE".to_string(),
-            ]
+            ["HIVE_SESSION_ID", "HIVE_AGENT_ID", "HIVE_ROLE"]
+                .into_iter()
+                .chain(crate::adapters::wsl::PARENT_SESSION_ENV_NAMES.iter().copied())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
         );
     }
 
