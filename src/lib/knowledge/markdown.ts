@@ -119,7 +119,7 @@ function isTableStart(line: string, next = ''): boolean {
   if (!line.includes('|')) return false;
   const headers = tableCells(line);
   const separator = tableCells(next);
-  return headers.length === separator.length && separator.every((cell) => /^:?-{3,}:?$/.test(cell));
+  return headers.length === separator.length && separator.every((cell) => /^:?-+:?$/.test(cell));
 }
 
 function listItem(line: string) {
@@ -204,7 +204,7 @@ export function parseMarkdown(source: string, depth = 0): MarkdownBlock[] {
         cell.startsWith(':') && cell.endsWith(':') ? 'center' : cell.endsWith(':') ? 'right' : cell.startsWith(':') ? 'left' : null);
       const rows: string[][] = [];
       index += 2;
-      while (index < lines.length && lines[index].trim() && lines[index].includes('|')) {
+      while (index < lines.length && lines[index].trim() && !isBlockStart(lines[index], lines[index + 1])) {
         const cells = tableCells(lines[index++]);
         rows.push(headers.map((_, column) => cells[column] ?? ''));
       }

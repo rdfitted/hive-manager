@@ -49,6 +49,34 @@ const answer = 42;
     ]);
   });
 
+  it.each([1, 2])('accepts_one_and_two_hyphen_gfm_delimiters_with_alignment: %i', (count) => {
+    const hyphens = '-'.repeat(count);
+    expect(parseMarkdown(`| A | B | C | D |\n| ${hyphens} | :${hyphens} | ${hyphens}: | :${hyphens}: |\n| a | b | c | d |`)).toEqual([
+      { type: 'table', headers: ['A', 'B', 'C', 'D'], align: [null, 'left', 'right', 'center'], rows: [['a', 'b', 'c', 'd']] },
+    ]);
+  });
+
+  it.each(['| - |', '| : | - |', '| :: | - |', '| x- | - |'])('rejects malformed GFM delimiters and mismatched column counts: %s', (delimiter) => {
+    expect(parseMarkdown(`| A | B |\n${delimiter}\n| a | b |`).some((block) => block.type === 'table')).toBe(false);
+  });
+
+  it('keeps_pipe_free_gfm_body_rows_until_blank_or_new_block', () => {
+    const table = '| A | B |\n| --- | --- |\nplain\n| extra | kept | discarded |';
+    const expectedTable = { type: 'table', headers: ['A', 'B'], align: [null, null], rows: [['plain', ''], ['extra', 'kept']] };
+    const interruptions = [
+      { source: '\nAfter', blocks: [{ type: 'paragraph', text: 'After' }] },
+      { source: '# Heading | title', blocks: [{ type: 'heading', level: 1, text: 'Heading | title' }] },
+      { source: '> quote | still quote', blocks: [{ type: 'quote', text: 'quote | still quote' }] },
+      { source: '- item | still item', blocks: [{ type: 'list', ordered: false, items: ['item | still item'] }] },
+      { source: '2. item | still item', blocks: [{ type: 'list', ordered: true, start: 2, items: ['item | still item'] }] },
+      { source: '```txt\ncode | literal\n```', blocks: [{ type: 'code', language: 'txt', text: 'code | literal' }] },
+      { source: '---', blocks: [{ type: 'rule' }] },
+    ];
+    for (const { source, blocks } of interruptions) {
+      expect(parseMarkdown(`${table}\n${source}`), source).toEqual([expectedTable, ...blocks]);
+    }
+  });
+
   it.each(['[', '[a](', '*', '_', '`'])('bounds character work for long malformed input: %s', (fragment) => {
     for (const length of [32000, 64000]) {
       const source = fragment.repeat(Math.ceil(length / fragment.length)).slice(0, length);
