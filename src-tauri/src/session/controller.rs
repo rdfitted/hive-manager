@@ -1265,6 +1265,37 @@ Stop only when the orchestrator accepts your work or the session ends.
     )
 }
 
+/// Armed only for newly allocated launch IDs; continuation rollback keeps settings.
+struct NewLaunchTransportSettings<'a> {
+    controller: &'a SessionController,
+    session_id: String,
+    armed: bool,
+}
+
+impl NewLaunchTransportSettings<'_> {
+    fn commit(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for NewLaunchTransportSettings<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.controller.pty_manager.read().forget_transport_settings(&self.session_id);
+        if let Some(storage) = &self.controller.storage {
+            // Remove only the newly allocated setting, never its session directory.
+            let path = storage.session_dir(&self.session_id).join("agent-transports.json");
+            if let Err(error) = std::fs::remove_file(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to remove transport settings for failed launch {}: {error}", self.session_id);
+                }
+            }
+        }
+    }
+}
+
 impl SessionController {
     pub fn new(pty_manager: Arc<RwLock<PtyManager>>) -> Self {
         Self {
@@ -9246,7 +9277,7 @@ Last updated: {timestamp}
         agent_transports: crate::domain::agent_transport::AgentTransports,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
-        self.configure_agent_transports(&session_id, agent_transports)?;
+        let settings = self.configure_new_launch_transports(&session_id, agent_transports)?;
         let base_ref = resolve_fresh_base(&project_path);
         let solo_branch = format!("solo/{}/worker-1", session_id);
         let mut created_cells = Vec::new();
@@ -9447,8 +9478,12 @@ Last updated: {timestamp}
             err
         })?;
 
-        self.get_session(&session_id)
-            .ok_or_else(|| format!("Session disappeared after evaluator launch: {}", session_id))
+        let result = self.get_session(&session_id)
+            .ok_or_else(|| format!("Session disappeared after evaluator launch: {}", session_id));
+        if result.is_ok() {
+            settings.commit();
+        }
+        result
     }
 
     fn configure_agent_transports(&self, session_id: &str, enabled: crate::domain::agent_transport::AgentTransports) -> Result<(), String> {
@@ -9457,6 +9492,12 @@ Last updated: {timestamp}
         }
         self.pty_manager.read().configure_transports(session_id, enabled);
         Ok(())
+    }
+
+    fn configure_new_launch_transports(&self, session_id: &str, enabled: crate::domain::agent_transport::AgentTransports) -> Result<NewLaunchTransportSettings<'_>, String> {
+        let settings = NewLaunchTransportSettings { controller: self, session_id: session_id.into(), armed: true };
+        self.configure_agent_transports(session_id, enabled)?;
+        Ok(settings)
     }
 
     pub fn launch_solo(&self, config: HiveLaunchConfig) -> Result<Session, String> {
@@ -9547,13 +9588,16 @@ Last updated: {timestamp}
             return self.launch_solo(config);
         }
 
+        let settings = self.configure_new_launch_transports(&session_id, config.agent_transports.clone())?;
         // If with_planning is true, spawn Master Planner first
         if config.with_planning {
-            self.configure_agent_transports(&session_id, config.agent_transports.clone())?;
-            return self.launch_planning_phase(session_id, config);
+            let result = self.launch_planning_phase(session_id, config);
+            if result.is_ok() {
+                settings.commit();
+            }
+            return result;
         }
 
-        self.configure_agent_transports(&session_id, config.agent_transports.clone())?;
         let shared_cell = use_worktrees && topology.uses_shared_cell();
 
         // Fetch latest from origin so all worktrees branch from the most
@@ -10010,6 +10054,7 @@ Last updated: {timestamp}
                 err
             })?;
 
+        settings.commit();
         Ok(session)
     }
 
@@ -19305,6 +19350,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn new_launch_transport_settings_are_removed_on_solo_hive_and_planning_failure() {
+        for mode in ["solo", "hive", "planning"] {
+            let temp = tempfile::tempdir().unwrap();
+            let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+            let mut controller = test_controller();
+            controller.set_storage(storage.clone());
+            // A file cannot host launch worktrees/prompts. Fail after configuration,
+            // without reaching any real provider or using a live configuration home.
+            let project = temp.path().join("blocked-project");
+            std::fs::write(&project, "fixture").unwrap();
+            let config: HiveLaunchConfig = serde_json::from_value(serde_json::json!({
+                "project_path":project, "queen_config":{"cli":"claude"},
+                "workers":[{"cli":"codex"}], "prompt":"fixture task",
+                "with_planning":mode == "planning", "agent_transports":["codex_app_server"]
+            })).unwrap();
+            let result = if mode == "solo" {
+                controller.launch_solo(config)
+            } else {
+                controller.launch_hive_internal(config, None, HashMap::new(), mode == "planning", true)
+            };
+            assert!(result.is_err(), "{mode} must exercise post-configuration failure");
+            assert_eq!(controller.pty_manager.read().transport_settings_count_for_test(), 0,
+                "{mode} failed new launch removes the manager setting");
+            let directories: Vec<_> = std::fs::read_dir(storage.sessions_dir()).unwrap().map(Result::unwrap).collect();
+            assert_eq!(directories.len(), 1, "retain the new session directory; remove only the sidecar");
+            assert!(!directories[0].path().join("agent-transports.json").exists(),
+                "{mode} failed new launch removes the sidecar");
+        }
+    }
+
+    #[test]
+    fn new_launch_transport_settings_commit_and_continuation_rollback_preserve_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        let mut controller = test_controller();
+        controller.set_storage(storage.clone());
+        let enabled: crate::domain::agent_transport::AgentTransports =
+            [crate::domain::agent_transport::AgentTransportKind::CodexAppServer].into_iter().collect();
+        let guard = controller.configure_new_launch_transports("successful-new-launch", enabled.clone()).unwrap();
+        assert_eq!(storage.load_agent_transports("successful-new-launch").unwrap(), enabled);
+        guard.commit();
+        controller.rollback_launch_allocations(&temp.path().to_path_buf(), "successful-new-launch", &[], &[]);
+        assert_eq!(storage.load_agent_transports("successful-new-launch").unwrap(), enabled,
+            "shared continuation rollback must retain retry settings");
+        assert_eq!(controller.pty_manager.read().transport_settings_count_for_test(), 1);
     }
 
     fn assert_removed_continuation_rejected(kind: &str, pointer: &str) {

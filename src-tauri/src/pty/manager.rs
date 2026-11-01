@@ -387,6 +387,15 @@ impl PtyManager {
         self.agent_transports.write().insert(session_id.into(), enabled);
     }
 
+    pub(crate) fn forget_transport_settings(&self, session_id: &str) {
+        self.agent_transports.write().remove(session_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transport_settings_count_for_test(&self) -> usize {
+        self.agent_transports.read().len()
+    }
+
     pub fn protocol_agent(&self, id: &str) -> Option<crate::transport::RegisteredTransport> {
         self.transport_registry()?.get_agent(id).map(|(_,entry)|entry)
     }
