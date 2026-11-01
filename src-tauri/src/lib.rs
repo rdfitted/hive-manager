@@ -700,10 +700,8 @@ pub fn run() {
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 if let Some(state) = app.try_state::<Arc<AppState>>() {
-                    if let Some(registry) = state.transports.get() {
-                        for error in tauri::async_runtime::block_on(registry.stop_all()) {
-                            tracing::error!("Transport shutdown failed: {error}");
-                        }
+                    for error in state.pty_manager.read().shutdown_transports() {
+                        tracing::error!("Transport shutdown failed: {error}");
                     }
                 }
             }

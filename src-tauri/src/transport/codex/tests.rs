@@ -380,6 +380,72 @@ fn child_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 #[test]
+fn manager_shutdown_cancels_stalled_initialize_without_blocking_unrelated_pty() {
+    let (temp, manager, registry, session, agent) = fake_server(true);
+    let owner = manager.clone();
+    let id = agent.clone();
+    let path = temp.path().to_path_buf();
+    let start = std::thread::spawn(move || {
+        owner.create_session(
+            id,
+            crate::pty::AgentRole::Worker {
+                index: 1,
+                parent: None,
+            },
+            &path.join("codex.cmd").to_string_lossy(),
+            &[],
+            Some(&path.to_string_lossy()),
+            80,
+            24,
+        )
+    });
+    wait_until(|| {
+        std::fs::read_to_string(temp.path().join("requests.jsonl"))
+            .unwrap_or_default()
+            .contains("initialize")
+    });
+    let pid: u32 = std::fs::read_to_string(temp.path().join("child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let (sent, received) = std::sync::mpsc::channel();
+    let pty_owner = manager.clone();
+    let unrelated = std::thread::spawn(move || {
+        let result = pty_owner
+            .create_session(
+                "unrelated-pty".into(),
+                crate::pty::AgentRole::ScratchShell,
+                "fixture",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .and_then(|_| pty_owner.kill("unrelated-pty"));
+        sent.send(result.is_ok()).unwrap();
+    });
+    let responsive = received.recv_timeout(Duration::from_secs(2));
+    let errors = manager.shutdown_transports();
+    assert!(start.join().unwrap().is_err());
+    unrelated.join().unwrap();
+    assert!(errors.is_empty(), "shutdown errors: {errors:?}");
+    assert_eq!(
+        responsive.unwrap_or(false),
+        true,
+        "unrelated PTY create/kill must finish while protocol initialize stalls"
+    );
+    wait_until(|| !child_alive(pid));
+    assert!(registry.get(&session, &agent).is_none());
+    assert!(
+        !manager.has_heartbeat_credential_for_test(&agent),
+        "cancelled start cannot bind a late heartbeat token"
+    );
+    assert!(manager.shutdown_transports().is_empty());
+}
+
+#[cfg(windows)]
+#[test]
 fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
     for mode in ["cancel", "stop", "exit", "app-exit", "closed-stdin"] {
         let (temp, manager, registry, session, agent) = fake_server(mode == "cancel");

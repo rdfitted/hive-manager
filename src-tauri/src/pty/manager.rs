@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -331,6 +331,7 @@ pub struct PtyManager {
     transports: RwLock<Option<Arc<crate::transport::TransportRegistry>>>,
     agent_transports: RwLock<HashMap<String, crate::domain::agent_transport::AgentTransports>>,
     starting_transports: RwLock<HashMap<String, Arc<dyn crate::transport::AgentTransport>>>,
+    transport_shutdown: AtomicBool,
     heartbeat_credentials: RwLock<HashMap<String, HeartbeatCredential>>,
     heartbeat_verify_when_present: RwLock<HashMap<String, bool>>,
     /// Serialize create/kill so a same-id kill cannot pass between process spawn and
@@ -360,6 +361,7 @@ impl PtyManager {
             transports: RwLock::new(None),
             agent_transports: RwLock::new(HashMap::new()),
             starting_transports: RwLock::new(HashMap::new()),
+            transport_shutdown: AtomicBool::new(false),
             heartbeat_credentials: RwLock::new(HashMap::new()),
             heartbeat_verify_when_present: RwLock::new(HashMap::new()),
             lifecycle: Mutex::new(()),
@@ -389,72 +391,244 @@ impl PtyManager {
         self.transport_registry()?.get_agent(id).map(|(_,entry)|entry)
     }
 
-    fn create_codex_session(&self, id: String, role: AgentRole, command: &str, args: &[&str], cwd: Option<&str>) -> Result<String,PtyError> {
-        use crate::transport::AgentTransport;
-        let registry=self.transport_registry().ok_or_else(||PtyError::CreateError("Transport registry unavailable; select PTY".into()))?;
-        let mut identity=agent_identity_env(&id,&role);
-        let session_id=identity.first().map(|(_,v)|v.clone()).ok_or_else(||PtyError::CreateError("Protocol agent needs a session-qualified ID".into()))?;
-        let token=Self::new_heartbeat_token();identity.push(("HIVE_AGENT_TOKEN".into(),token.clone()));
-        let options=crate::transport::codex::CodexOptions::from_pty(command,args,std::path::PathBuf::from(cwd.unwrap_or(".")),identity,session_id.clone(),id.clone()).map_err(PtyError::CreateError)?;
-        let transport=crate::transport::codex::CodexTransport::new(options,&registry);
-        {
-            let mut starting=self.starting_transports.write();
-            if starting.contains_key(&id) || registry.get_agent(&id).is_some() || self.sessions.read().contains_key(&id) {
-                return Err(PtyError::CreateError(format!("Agent runtime already exists: {id}")));
-            }
-            starting.insert(id.clone(),transport.clone());
+    fn begin_transport_start(
+        &self,
+        id: &str,
+        transport: Arc<dyn crate::transport::AgentTransport>,
+        registry: &crate::transport::TransportRegistry,
+    ) -> Result<(), String> {
+        let mut starting = self.starting_transports.write();
+        if self.transport_shutdown.load(Ordering::Acquire) {
+            return Err("Transport manager is shutting down".into());
         }
-        let _lifecycle=self.lifecycle.lock();
-        let mut registered=false;
-        let result=(|| {
+        if starting.contains_key(id)
+            || registry.get_agent(id).is_some()
+            || self.sessions.read().contains_key(id)
+        {
+            return Err(format!("Agent runtime already exists: {id}"));
+        }
+        starting.insert(id.into(), transport);
+        Ok(())
+    }
+
+    /// Caller holds lifecycle through publication, activation and heartbeat binding.
+    fn register_started_transport(
+        &self,
+        registry: &crate::transport::TransportRegistry,
+        session_id: &str,
+        id: &str,
+        thread_id: Option<String>,
+        transport: Arc<dyn crate::transport::AgentTransport>,
+    ) -> Result<(), String> {
+        let starting = self.starting_transports.read();
+        if self.transport_shutdown.load(Ordering::Acquire) {
+            drop(starting);
+            transport.stop_sync()?;
+            return Err("Transport startup cancelled by shutdown".into());
+        }
+        if !transport.is_alive() {
+            return Err("Transport startup cancelled".into());
+        }
+        // The source fence and registration are ordered by the starting map lock.
+        registry.register(session_id, id, thread_id, transport)
+    }
+
+    /// Desktop Exit fences new transport admission/publication and stops pending as
+    /// well as registered runtimes. Failed cleanup retains its exact retryable handle.
+    pub fn shutdown_transports(&self) -> Vec<String> {
+        let starting: Vec<_> = {
+            let starting = self.starting_transports.write();
+            self.transport_shutdown.store(true, Ordering::Release);
+            starting
+                .iter()
+                .map(|(id, transport)| (id.clone(), transport.clone()))
+                .collect()
+        };
+        let mut errors = Vec::new();
+        let mut stopped = Vec::new();
+        for (id, transport) in starting {
+            match transport.stop_sync() {
+                Ok(()) => stopped.push((id, transport)),
+                Err(error) => errors.push(format!("{id}: {error}")),
+            }
+        }
+        // A startup's final publication/bind and kill use this same short guard.
+        let _lifecycle = self.lifecycle.lock();
+        if let Some(registry) = self.transport_registry() {
+            let credential_ids: Vec<_> =
+                self.heartbeat_credentials.read().keys().cloned().collect();
+            let protocol_ids: Vec<_> = credential_ids
+                .into_iter()
+                .filter(|id| registry.get_agent(id).is_some())
+                .collect();
+            errors.extend(registry.stop_all_sync());
+            for id in protocol_ids {
+                if registry.get_agent(&id).is_none() {
+                    self.heartbeat_credentials.write().remove(&id);
+                }
+            }
+        }
+        let mut pending = self.starting_transports.write();
+        for (id, transport) in stopped {
+            if pending
+                .get(&id)
+                .is_some_and(|held| Arc::ptr_eq(held, &transport))
+            {
+                pending.remove(&id);
+                self.heartbeat_credentials.write().remove(&id);
+            }
+        }
+        errors
+    }
+
+    fn create_codex_session(
+        &self,
+        id: String,
+        role: AgentRole,
+        command: &str,
+        args: &[&str],
+        cwd: Option<&str>,
+    ) -> Result<String, PtyError> {
+        use crate::transport::AgentTransport;
+        let registry = self.transport_registry().ok_or_else(|| {
+            PtyError::CreateError("Transport registry unavailable; select PTY".into())
+        })?;
+        let mut identity = agent_identity_env(&id, &role);
+        let session_id = identity.first().map(|(_, v)| v.clone()).ok_or_else(|| {
+            PtyError::CreateError("Protocol agent needs a session-qualified ID".into())
+        })?;
+        let token = Self::new_heartbeat_token();
+        identity.push(("HIVE_AGENT_TOKEN".into(), token.clone()));
+        let options = crate::transport::codex::CodexOptions::from_pty(
+            command,
+            args,
+            std::path::PathBuf::from(cwd.unwrap_or(".")),
+            identity,
+            session_id.clone(),
+            id.clone(),
+        )
+        .map_err(PtyError::CreateError)?;
+        let transport = crate::transport::codex::CodexTransport::new(options, &registry);
+        self.begin_transport_start(&id, transport.clone(), &registry)
+            .map_err(PtyError::CreateError)?;
+        let mut registered = false;
+        let result = (|| {
+            // Protocol initialize and initial input never hold the global PTY guard.
             transport.start_blocking()?;
-            registry.register(&session_id,&id,transport.thread_id(),transport.clone())?;
-            registered=true;
-            transport.activate()?;
-            if !transport.is_alive() {return Err("Codex startup cancelled".into());}
-            self.bind_heartbeat_token(&id,&session_id,false,&token);
-            if let Some(prompt)=transport.initial_prompt() {transport.send_input(&prompt,true)?;}
+            {
+                let _lifecycle = self.lifecycle.lock();
+                self.register_started_transport(
+                    &registry,
+                    &session_id,
+                    &id,
+                    transport.thread_id(),
+                    transport.clone(),
+                )?;
+                registered = true;
+                transport.activate()?;
+                if !transport.is_alive() {
+                    return Err("Codex startup cancelled".into());
+                }
+                // Keep binding ordered with kill: no late bind may recreate a token.
+                self.bind_heartbeat_token(&id, &session_id, false, &token);
+            }
+            if let Some(prompt) = transport.initial_prompt() {
+                transport.send_input(&prompt, true)?;
+            }
+            if !transport.is_alive() {
+                return Err("Codex startup cancelled".into());
+            }
             Ok(id.clone())
         })();
         if result.is_err() {
-            if let Err(error)=transport.stop_sync() {return Err(PtyError::CreateError(format!("Codex startup failed and cleanup needs retry: {error}")));}
-            if registered {registry.stop_agent_sync(&session_id,&id).map_err(PtyError::CreateError)?;}
+            if let Err(error) = transport.stop_sync() {
+                return Err(PtyError::CreateError(format!(
+                    "Codex startup failed and cleanup needs retry: {error}"
+                )));
+            }
+            let _lifecycle = self.lifecycle.lock();
+            if registered {
+                registry
+                    .stop_agent_sync(&session_id, &id)
+                    .map_err(PtyError::CreateError)?;
+            }
             self.heartbeat_credentials.write().remove(&id);
         }
         self.starting_transports.write().remove(&id);
         result.map_err(PtyError::CreateError)
     }
 
-    fn create_claude_session(&self, id: String, role: AgentRole, command: &str, args: &[&str], cwd: Option<&str>) -> Result<String,PtyError> {
+    fn create_claude_session(
+        &self,
+        id: String,
+        role: AgentRole,
+        command: &str,
+        args: &[&str],
+        cwd: Option<&str>,
+    ) -> Result<String, PtyError> {
         use crate::transport::AgentTransport;
-        let registry=self.transport_registry().ok_or_else(||PtyError::CreateError("Transport registry unavailable; select PTY".into()))?;
-        let mut identity=agent_identity_env(&id,&role);
-        let session_id=identity.first().map(|(_,v)|v.clone()).ok_or_else(||PtyError::CreateError("Protocol agent needs a session-qualified ID".into()))?;
-        let token=Self::new_heartbeat_token();identity.push(("HIVE_AGENT_TOKEN".into(),token.clone()));
-        let options=crate::transport::claude::ClaudeOptions::from_pty(command,args,std::path::PathBuf::from(cwd.unwrap_or(".")),identity,session_id.clone(),id.clone()).map_err(PtyError::CreateError)?;
-        let transport=crate::transport::claude::ClaudeTransport::new(options,&registry);
-        {
-            let mut starting=self.starting_transports.write();
-            if starting.contains_key(&id) || registry.get_agent(&id).is_some() || self.sessions.read().contains_key(&id) {
-                return Err(PtyError::CreateError(format!("Agent runtime already exists: {id}")));
-            }
-            starting.insert(id.clone(),transport.clone());
-        }
-        let _lifecycle=self.lifecycle.lock();
-        let mut registered=false;
-        let result=(|| {
+        let registry = self.transport_registry().ok_or_else(|| {
+            PtyError::CreateError("Transport registry unavailable; select PTY".into())
+        })?;
+        let mut identity = agent_identity_env(&id, &role);
+        let session_id = identity.first().map(|(_, v)| v.clone()).ok_or_else(|| {
+            PtyError::CreateError("Protocol agent needs a session-qualified ID".into())
+        })?;
+        let token = Self::new_heartbeat_token();
+        identity.push(("HIVE_AGENT_TOKEN".into(), token.clone()));
+        let options = crate::transport::claude::ClaudeOptions::from_pty(
+            command,
+            args,
+            std::path::PathBuf::from(cwd.unwrap_or(".")),
+            identity,
+            session_id.clone(),
+            id.clone(),
+        )
+        .map_err(PtyError::CreateError)?;
+        let transport = crate::transport::claude::ClaudeTransport::new(options, &registry);
+        self.begin_transport_start(&id, transport.clone(), &registry)
+            .map_err(PtyError::CreateError)?;
+        let mut registered = false;
+        let result = (|| {
+            // Protocol initialize and initial input never hold the global PTY guard.
             transport.start_blocking()?;
-            registry.register(&session_id,&id,transport.thread_id(),transport.clone())?;
-            registered=true;
-            transport.activate()?;
-            if !transport.is_alive() {return Err("Claude startup cancelled".into());}
-            self.bind_heartbeat_token(&id,&session_id,false,&token);
-            if let Some(prompt)=transport.initial_prompt() {transport.send_input(&prompt,true)?;}
+            {
+                let _lifecycle = self.lifecycle.lock();
+                self.register_started_transport(
+                    &registry,
+                    &session_id,
+                    &id,
+                    transport.thread_id(),
+                    transport.clone(),
+                )?;
+                registered = true;
+                transport.activate()?;
+                if !transport.is_alive() {
+                    return Err("Claude startup cancelled".into());
+                }
+                // Keep binding ordered with kill: no late bind may recreate a token.
+                self.bind_heartbeat_token(&id, &session_id, false, &token);
+            }
+            if let Some(prompt) = transport.initial_prompt() {
+                transport.send_input(&prompt, true)?;
+            }
+            if !transport.is_alive() {
+                return Err("Claude startup cancelled".into());
+            }
             Ok(id.clone())
         })();
         if result.is_err() {
-            if let Err(error)=transport.stop_sync() {return Err(PtyError::CreateError(format!("Claude startup failed and cleanup needs retry: {error}")));}
-            if registered {registry.stop_agent_sync(&session_id,&id).map_err(PtyError::CreateError)?;}
+            if let Err(error) = transport.stop_sync() {
+                return Err(PtyError::CreateError(format!(
+                    "Claude startup failed and cleanup needs retry: {error}"
+                )));
+            }
+            let _lifecycle = self.lifecycle.lock();
+            if registered {
+                registry
+                    .stop_agent_sync(&session_id, &id)
+                    .map_err(PtyError::CreateError)?;
+            }
             self.heartbeat_credentials.write().remove(&id);
         }
         self.starting_transports.write().remove(&id);
@@ -795,7 +969,7 @@ impl PtyManager {
 
     pub fn kill(&self, id: &str) -> Result<(), PtyError> {
         // Cancellation reaches a starting server without waiting for startup's
-        // lifecycle guard (up to 180 s). The same guard then orders token cleanup.
+        // publication guard. The same guard then orders token cleanup.
         let starting=self.starting_transports.read().get(id).cloned();
         if let Some(starting)=starting {starting.stop_sync().map_err(PtyError::CreateError)?;}
         let _lifecycle_guard = self.lifecycle.lock();
@@ -1849,4 +2023,108 @@ mod transport_tests {
         manager.kill(&id).unwrap();
     }
 
+}
+
+#[cfg(test)]
+mod transport_shutdown_tests {
+    use super::*;
+    use crate::{
+        delivery::Delivery,
+        transport::{AgentEvent, AgentTransport, Capabilities, TransportRegistry},
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    struct LateStart {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        stops: AtomicUsize,
+        alive: AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl AgentTransport for LateStart {
+        async fn start(&self) -> Result<(), String> {
+            self.entered.send(()).unwrap();
+            self.release
+                .lock()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            // Deliberately simulate initialize returning success after cancellation.
+            self.alive.store(true, Ordering::Release);
+            Ok(())
+        }
+        async fn send(&self, _: &str) -> Result<Delivery, String> {
+            Ok(Delivery::protocol_pending())
+        }
+        async fn interrupt(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<(), String> {
+            self.stop_sync()
+        }
+        fn stop_sync(&self) -> Result<(), String> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            self.alive.store(false, Ordering::Release);
+            Ok(())
+        }
+        fn is_alive(&self) -> bool {
+            self.alive.load(Ordering::Acquire)
+        }
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AgentEvent> {
+            tokio::sync::broadcast::channel(1).1
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::pty(false)
+        }
+    }
+
+    #[test]
+    fn manager_shutdown_fence_stops_late_success_and_rejects_new_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TransportRegistry::new(temp.path().join("feeds"), None));
+        let manager = Arc::new(PtyManager::new());
+        manager.attach_transports(registry.clone());
+        let (entered, started) = mpsc::channel();
+        let (finish, release) = mpsc::channel();
+        let transport = Arc::new(LateStart {
+            entered,
+            release: Mutex::new(release),
+            stops: AtomicUsize::new(0),
+            alive: AtomicBool::new(false),
+        });
+        let owner = manager.clone();
+        let child = transport.clone();
+        let registered = registry.clone();
+        let startup = thread::spawn(move || {
+            owner
+                .begin_transport_start("worker", child.clone(), &registered)
+                .unwrap();
+            futures::executor::block_on(child.start()).unwrap();
+            let _lifecycle = owner.lifecycle.lock();
+            let result =
+                owner.register_started_transport(&registered, "session", "worker", None, child);
+            owner.starting_transports.write().remove("worker");
+            result
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(manager.shutdown_transports().is_empty());
+        assert!(manager.starting_transports.read().is_empty());
+        assert_eq!(transport.stops.load(Ordering::Acquire), 1);
+        finish.send(()).unwrap();
+        assert!(startup.join().unwrap().unwrap_err().contains("shutdown"));
+        assert_eq!(
+            transport.stops.load(Ordering::Acquire),
+            2,
+            "late successful initialize must stop itself after the fence"
+        );
+        assert!(!transport.is_alive());
+        assert!(
+            registry.get("session", "worker").is_none(),
+            "shutdown must fence late registration"
+        );
+        assert!(manager
+            .begin_transport_start("new-worker", transport, &registry)
+            .unwrap_err()
+            .contains("shutting down"));
+        assert!(manager.shutdown_transports().is_empty());
+    }
 }

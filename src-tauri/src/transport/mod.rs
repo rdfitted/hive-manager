@@ -253,6 +253,16 @@ impl TransportRegistry {
         }
         Ok(())
     }
+    pub fn stop_all_sync(&self) -> Vec<String> {
+        let keys: Vec<_> = self.entries.read().keys().cloned().collect();
+        let mut errors = Vec::new();
+        for (session, agent) in keys {
+            if let Err(error) = self.stop_agent_sync(&session, &agent) {
+                errors.push(format!("{agent}: {error}"));
+            }
+        }
+        errors
+    }
     pub async fn stop_all(&self) -> Vec<String> {
         let keys: Vec<_> = self.entries.read().keys().cloned().collect();
         let mut errors = Vec::new();

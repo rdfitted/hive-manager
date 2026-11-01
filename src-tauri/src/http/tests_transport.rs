@@ -274,7 +274,9 @@ async fn protocol_inject_keeps_receipt_shape_without_terminal_writes_and_cleanup
 #[tokio::test]
 async fn contract_fake_start_send_interrupt_subscribe_and_exit_stop_all() {
     let temp = tempfile::tempdir().unwrap();
-    let registry = TransportRegistry::new(temp.path().join("sessions"), None);
+    let registry = Arc::new(TransportRegistry::new(temp.path().join("sessions"), None));
+    let manager = crate::pty::PtyManager::new();
+    manager.attach_transports(registry.clone());
     let a = FakeTransport::new();
     let b = FakeTransport::new();
     a.start().await.unwrap();
@@ -309,18 +311,18 @@ async fn contract_fake_start_send_interrupt_subscribe_and_exit_stop_all() {
             .as_deref(),
         Some("thread-b")
     );
-    assert!(registry.stop_all().await.is_empty());
+    assert!(manager.shutdown_transports().is_empty());
     assert!(
         a.stopped.load(Ordering::Acquire) && b.stopped.load(Ordering::Acquire),
         "G15 exit stops every registered transport"
     );
     assert!(registry.get("session-a", "worker-a").is_none());
-    assert!(registry.stop_all().await.is_empty());
+    assert!(manager.shutdown_transports().is_empty());
     // The desktop callback invokes the same exercised shutdown function.
     let desktop = include_str!("../lib.rs");
     assert!(
         desktop.contains("tauri::RunEvent::Exit")
-            && desktop.contains("block_on(registry.stop_all())")
+            && desktop.contains("state.pty_manager.read().shutdown_transports()")
     );
 }
 
