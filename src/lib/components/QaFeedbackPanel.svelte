@@ -244,11 +244,11 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .panel-content {
-    padding: 14px;
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -259,8 +259,9 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
     padding: 10px;
-    border-radius: var(--radius-sm);
-    box-shadow: var(--edge-seam);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    box-shadow: var(--edge-lip);
   }
 
   .verdict-comparison.disagreement,
@@ -279,7 +280,7 @@
   .verdict-source {
     font-size: 11px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .disagreement-label,
@@ -294,7 +295,6 @@
     line-height: 1.5;
     color: var(--text-primary);
     padding-bottom: 12px;
-    box-shadow: var(--edge-seam);
   }
 
   .summary p {
@@ -309,7 +309,7 @@
 
   .criterion-item {
     padding: 10px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--status-error) 5%, transparent);
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 10%, transparent);
   }
@@ -325,7 +325,7 @@
     gap: 4px 12px;
     padding-left: 20px;
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .criterion-flag {
@@ -361,14 +361,14 @@
 
   .criterion-number {
     margin-right: 6px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-variant-numeric: tabular-nums;
   }
 
   .criterion-evidence {
     margin: 0;
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     line-height: 1.4;
     padding-left: 20px;
   }
@@ -381,6 +381,6 @@
 
   .timestamp {
     font-size: 10px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 </style>

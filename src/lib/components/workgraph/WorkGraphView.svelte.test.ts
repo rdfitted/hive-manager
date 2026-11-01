@@ -195,7 +195,7 @@ describe('WorkGraphView', () => {
     expect(contextElement?.classList.contains('wg-node--context')).toBe(true);
     expect(taskElement?.classList.contains('wg-node--context')).toBe(false);
     expect(contextElement?.querySelector('.wg-box')?.getAttribute('rx')).toBe('13');
-    expect(taskElement?.querySelector('.wg-box')?.getAttribute('rx')).toBe('5');
+    expect(taskElement?.querySelector('.wg-box')?.getAttribute('rx')).toBe('10');
     expect(contextElement?.getAttribute('aria-label')).toContain(`Runtime context — ${contextId}`);
 
     contextElement?.focus();

@@ -140,13 +140,13 @@
   .review-view { overflow: auto; padding: 12px; color: var(--text-primary); font-size: var(--text-small); }
   .pickers, label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   .pickers { gap: 10px; }
-  select, textarea, input { max-width: 100%; color: var(--text-primary); background: var(--bg-sunken); border: 1px solid var(--border-structural); border-radius: var(--radius-sm); padding: 6px; font: inherit; }
+  select, textarea, input { max-width: 100%; color: var(--text-primary); background: var(--input); border: 1px solid var(--border-control); border-radius: var(--radius-md); padding: 6px; font: inherit; }
   textarea { resize: vertical; min-height: 52px; }
-  .muted, .base { color: var(--text-secondary); }
+  .muted, .base { color: var(--text-muted); }
   .base, pre, summary { overflow-wrap: anywhere; }
   .base, pre { font-family: var(--font-mono); font-size: 11px; }
   pre { white-space: pre-wrap; }
-  .file-review { padding: 12px 0; border-top: 1px solid var(--border-structural); display: flex; flex-direction: column; gap: 10px; }
+  .file-review { margin-top: var(--space-3); padding: var(--space-4); background: var(--surface); border-radius: var(--radius-lg); box-shadow: var(--depth-1); display: flex; flex-direction: column; gap: 10px; }
   summary { cursor: pointer; margin-bottom: 8px; font-family: var(--font-body); }
   .reviewed { flex-direction: row; align-items: center; }
   .review-view > button { max-width: 100%; white-space: normal; }

@@ -64,25 +64,18 @@
 
 <style>
   .card {
-    background-color: var(--surface);
-    border: 1px solid var(--border);
+    background-color: var(--surface-raised);
+    border: 0;
     border-radius: var(--control-radius);
-    box-shadow: none;
-    padding: var(--space-3);
+    box-shadow: var(--depth-1);
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    transition:
-      background-color var(--motion-duration-fast) var(--motion-ease-standard),
-      border-color var(--motion-duration-fast) var(--motion-ease-standard);
+    transition: background-color var(--motion-ui);
   }
   .card:hover {
-    background-color: var(--surface-raised);
-    border-color: var(--text-muted);
-  }
-  .card:focus-within {
-    outline: 2px solid var(--focus);
-    outline-offset: 2px;
+    background-color: var(--surface-overlay);
   }
   .card-head {
     display: flex;
@@ -103,10 +96,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: var(--radius-sm);
-    background: var(--canvas);
-    box-shadow: inset 0 0 0 1px var(--session-color);
-    color: var(--text-secondary);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--session-color) 12%, var(--surface-raised));
+    color: var(--text-muted);
     flex: 0 0 auto;
   }
   .title {
@@ -125,7 +117,7 @@
     display: flex;
     gap: var(--space-3);
     font-size: var(--text-small);
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
   .meta-item {
     display: inline-flex;
@@ -133,7 +125,7 @@
     gap: var(--space-1);
   }
   @media (forced-colors: active) {
-    .card { border-color: CanvasText; }
+    .card { border: 1px solid CanvasText; }
     .status-icon { box-shadow: none; border: 1px solid CanvasText; }
   }
 </style>

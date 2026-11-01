@@ -43,9 +43,9 @@
     align-items: center;
     padding: var(--space-3) var(--space-4);
     color: var(--text-primary);
-    background-color: var(--bg-chrome);
+    background-color: var(--surface);
     border-radius: var(--radius-lg);
-    box-shadow: var(--edge-lip), var(--edge-seam);
+    box-shadow: var(--depth-1);
   }
 
   .progress-list {
@@ -65,7 +65,7 @@
   }
 
   dt {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-family: var(--font-body);
     font-size: var(--text-small);
     font-weight: 600;

@@ -127,7 +127,7 @@
     }
 
     .label {
-        color: var(--color-text-muted);
+        color: var(--text-muted);
         font-weight: bold;
         font-size: 0.7rem;
     }

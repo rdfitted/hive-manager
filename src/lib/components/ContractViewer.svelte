@@ -96,9 +96,9 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    background: var(--bg-chrome);
+    background: var(--chrome);
     border-radius: var(--radius-shell);
-    box-shadow: var(--edge-lip);
+    box-shadow: var(--depth-1);
   }
 
   .contract-header {
@@ -106,7 +106,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 12px 16px;
-    background: var(--bg-void);
+    background: var(--canvas);
     box-shadow: var(--edge-seam);
   }
 
@@ -119,13 +119,13 @@
 
   .milestone-id {
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .contract-empty {
     margin: 0;
     padding: 16px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 13px;
   }
 
@@ -135,8 +135,8 @@
   }
 
   .pass-threshold {
-    background: var(--bg-void);
-    box-shadow: var(--edge-seam-top);
+    background: var(--canvas);
+    box-shadow: none;
   }
 
   .typed-criteria ol,
@@ -157,9 +157,9 @@
     display: inline-block;
     margin-right: 8px;
     padding: 2px 6px;
-    border-radius: var(--radius-sm);
-    background: var(--border-structural);
-    color: var(--accent-cyan);
+    border-radius: var(--radius-md);
+    background: var(--accent-tint);
+    color: var(--accent);
     font-family: var(--font-body);
     font-size: 11px;
   }
@@ -175,7 +175,7 @@
     margin: 0 0 8px 0;
     font-size: 12px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
 </style>

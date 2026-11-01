@@ -9,7 +9,7 @@
     status?: CellStatus;
     accent?: string;
   }
-  let { label, sessions: items, status = 'queued', accent = 'var(--text-secondary)' }: Props = $props();
+  let { label, sessions: items, status = 'queued', accent = 'var(--text-muted)' }: Props = $props();
 </script>
 
 <section class="column lattice-forced-colors-boundary" style="--col-accent: {accent};" aria-label={label}>
@@ -36,9 +36,10 @@
     width: 240px;
     max-height: 100%;
     overflow: hidden;
-    background: var(--chrome);
-    border: 1px solid var(--border);
-    border-radius: var(--control-radius);
+    background: var(--surface);
+    border: 0;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--depth-1);
   }
   .col-head {
     display: flex;
@@ -46,7 +47,6 @@
     gap: var(--space-2);
     min-height: var(--toolbar-height);
     padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border);
     font-family: var(--font-body);
     font-size: var(--text-small);
     font-weight: 600;
@@ -66,8 +66,8 @@
     font-family: var(--font-body);
     font-variant-numeric: tabular-nums;
     padding: 1px 6px;
-    border-radius: var(--radius-sm);
-    background: var(--surface);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
   }
   .col-body {
     display: flex;
@@ -84,7 +84,7 @@
     padding: var(--space-3) 0;
   }
   @media (forced-colors: active) {
-    .column, .col-head { border-color: CanvasText; }
+    .column { border: 1px solid CanvasText; }
     .dot { forced-color-adjust: none; background: CanvasText; }
   }
 </style>

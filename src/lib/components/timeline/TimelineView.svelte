@@ -57,7 +57,7 @@
         display: flex;
         flex-direction: column;
         height: 100%;
-        background: var(--color-bg);
+        background: var(--canvas);
         overflow: hidden;
     }
 
@@ -66,12 +66,12 @@
         grid-template-columns: 4px 80px 140px 120px 1fr;
         gap: 12px;
         padding: 8px 12px;
-        background: var(--color-surface-hover);
+        background: var(--surface-raised);
         box-shadow: var(--edge-seam);
         font-family: var(--font-body);
         font-size: 0.7rem;
         font-weight: bold;
-        color: var(--color-text-muted);
+        color: var(--text-muted);
     }
 
     .header-item {
@@ -89,7 +89,7 @@
         align-items: center;
         justify-content: center;
         padding: 40px;
-        color: var(--color-text-muted);
+        color: var(--text-muted);
         text-align: center;
     }
 

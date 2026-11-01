@@ -4,9 +4,9 @@
   import KanbanColumn from './KanbanColumn.svelte';
 
   const PRIMARY_COLUMNS: { status: CellStatus; label: string; accent: string }[] = [
-    { status: 'queued', label: 'Queued', accent: 'var(--status-queued)' },
+    { status: 'queued', label: 'Queued', accent: 'var(--state-queued)' },
     { status: 'preparing', label: 'Preparing', accent: 'var(--accent-chrome)' },
-    { status: 'launching', label: 'Launching', accent: 'var(--accent-amber)' },
+    { status: 'launching', label: 'Launching', accent: 'var(--accent)' },
     { status: 'running', label: 'Running', accent: 'var(--status-running)' },
     { status: 'waiting_input', label: 'Waiting Input', accent: 'var(--status-warning)' },
     { status: 'summarizing', label: 'Summarizing', accent: 'var(--accent-chrome)' },

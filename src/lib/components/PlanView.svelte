@@ -208,9 +208,9 @@
   function getStatusColor(status: PlanTask['status']): string {
     switch (status) {
       case 'completed': return 'var(--status-success)';
-      case 'in_progress': return 'var(--accent-cyan)';
+      case 'in_progress': return 'var(--accent)';
       case 'blocked': return 'var(--status-error)';
-      default: return 'var(--text-secondary)';
+      default: return 'var(--text-muted)';
     }
   }
 
@@ -470,7 +470,7 @@
 
   .empty-state p {
     margin: 0;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 14px;
   }
 
@@ -496,7 +496,7 @@
   .plan-header .summary {
     margin: 0 0 8px 0;
     font-size: 13px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     line-height: 1.5;
   }
 
@@ -515,7 +515,7 @@
   .tasks-title {
     font-size: 12px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .tasks-count {
@@ -532,8 +532,10 @@
   .task-item {
     display: flex;
     gap: 10px;
-    padding: 12px;
-    transition: opacity var(--motion-duration-fast) var(--motion-ease-standard);
+    padding: var(--space-4);
+    background: var(--surface);
+    border-radius: var(--radius-md);
+    transition: opacity var(--motion-ui);
   }
 
   .task-item.completed {
@@ -547,7 +549,7 @@
     flex-shrink: 0;
     width: 20px;
     text-align: center;
-    text-shadow: 0 0 4px currentColor;
+    color: var(--accent);
   }
 
   .task-content {
@@ -571,7 +573,7 @@
   .task-description {
     margin: 0;
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     line-height: 1.4;
   }
 
@@ -579,7 +581,7 @@
     display: inline-block;
     margin-top: 6px;
     font-size: 11px;
-    color: var(--accent-cyan);
+    color: var(--accent);
   }
 
   .error {
@@ -587,7 +589,7 @@
     /* Semantic error feedback, not a structural surface. */
     background: color-mix(in srgb, var(--status-error) 10%, transparent);
     color: var(--status-error);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     font-size: 12px;
     margin-top: 12px;
     box-shadow: inset 0 0 0 1px var(--status-error);
@@ -616,7 +618,7 @@
   .raw-label {
     font-size: 12px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .writing-indicator {
@@ -625,15 +627,15 @@
     gap: 6px;
     margin-left: auto;
     font-size: 11px;
-    color: var(--accent-cyan);
+    color: var(--accent);
   }
 
   .raw-markdown {
     margin: 0;
     padding: 16px;
     /* Plan document well, not a structural panel. */
-    background: var(--bg-sunken);
-    border-radius: var(--radius-sm);
+    background: var(--input);
+    border-radius: var(--radius-md);
     font-size: 12px;
     font-family: var(--font-mono);
     color: var(--text-primary);
@@ -676,7 +678,7 @@
 
   .planning-description {
     margin: 0 0 24px 0;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 14px;
     max-width: 300px;
     line-height: 1.5;
@@ -687,7 +689,7 @@
     align-items: center;
     gap: 10px;
     padding: 12px 20px;
-    color: var(--accent-cyan);
+    color: var(--accent);
     font-size: 13px;
   }
 
@@ -699,7 +701,7 @@
   .plan-actions {
     margin-top: 24px;
     padding-top: 20px;
-    box-shadow: var(--edge-seam-top);
+    box-shadow: none;
     display: flex;
     flex-direction: column;
     gap: 20px;
@@ -713,7 +715,7 @@
 
   .refinement-hint {
     margin: 0;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 12px;
   }
 
@@ -727,7 +729,7 @@
   }
 
   .refinement-input::placeholder {
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .approve-section {
@@ -735,14 +737,15 @@
     flex-direction: column;
     align-items: center;
     gap: 12px;
-    padding-top: 16px;
-    border-top: 1px dashed var(--border-structural);
+    background: var(--surface);
+    padding: var(--space-4);
+    border-radius: var(--radius-lg);
   }
 
   .plan-ready-hint {
     margin: 0;
     text-align: center;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 13px;
     max-width: 280px;
     line-height: 1.5;
