@@ -31,6 +31,7 @@ pub struct AppState {
     /// exists and then have it attached once (avoids a construction-order cycle:
     /// the registry's actions reach back into `AppState` via `ActionContext`).
     pub registry: std::sync::OnceLock<Arc<ActionRegistry>>,
+    pub transports: std::sync::OnceLock<Arc<crate::transport::TransportRegistry>>,
 }
 
 impl AppState {
@@ -56,12 +57,25 @@ impl AppState {
             queue_manager,
             app_handle,
             registry: std::sync::OnceLock::new(),
+            transports: std::sync::OnceLock::new(),
         }
     }
 
     /// Attach the action registry. Idempotent — the first set wins.
     pub fn set_registry(&self, registry: Arc<ActionRegistry>) {
         let _ = self.registry.set(registry);
+    }
+
+    pub fn transports(&self) -> &Arc<crate::transport::TransportRegistry> {
+        self.transports.get_or_init(|| {
+            // Tests must explicitly supply a scrubbed fixture root.
+            #[cfg(test)]
+            let claude_root = None;
+            #[cfg(not(test))]
+            let claude_root = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+                .map(|home| std::path::PathBuf::from(home).join(".claude").join("projects"));
+            Arc::new(crate::transport::TransportRegistry::new(self.storage.sessions_dir(), claude_root))
+        })
     }
 
     /// The attached registry. Panics if dispatched-through before

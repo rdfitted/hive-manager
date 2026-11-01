@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod agents;
+pub mod agent_events;
 pub mod application_state;
 pub mod artifacts;
 pub mod cells;
