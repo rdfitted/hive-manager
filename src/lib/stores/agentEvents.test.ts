@@ -86,6 +86,31 @@ describe('session agent event feed', () => {
     expect(get(store).histories.a.events.map((e) => e.cursor)).toEqual(['old', 'tail', 'live']);
   });
 
+  it('keeps late-bound SSE history ordered when the roster loads an overlapping tail and reconnects from the newest event', async () => {
+    let bound = false;
+    const records = Array.from({ length: 250 }, (_, i) => event(`e${i + 1}`));
+    fetcher.mockImplementation(async (url: string) => url.includes('agent-feeds')
+      ? ok({ session_id: 's', agents: [feed('a', bound ? 'transcript' : 'none')] })
+      : ok(page(records.slice(150), { next_before: 'e151', has_more: true })));
+    store.setSessionId('s'); await flush();
+    const stream = Stream.instances[0];
+    const initialToken = new URL(stream.url).searchParams.get('cursors')!;
+    expect(JSON.parse(atob(initialToken.replaceAll('-', '+').replaceAll('_', '/')))).toEqual({});
+    expect(fetcher.mock.calls).toHaveLength(1);
+    for (const record of records.slice(50)) stream.emit('agent_event', record);
+    bound = true;
+    await store.refresh();
+    const history = get(store).histories.a.events;
+    expect(history.map((item) => item.cursor), 'late-bound tail must preserve e51 through e250 in server order')
+      .toEqual(records.slice(50).map((item) => item.cursor));
+    expect(new Set(history.map((item) => item.cursor)).size, 'late-bound tail must not duplicate SSE records').toBe(200);
+    stream.emit('feed_error', { error: 'fixture unavailable' });
+    await vi.advanceTimersByTimeAsync(1000);
+    const reconnectToken = new URL(Stream.instances[1].url).searchParams.get('cursors')!;
+    expect(JSON.parse(atob(reconnectToken.replaceAll('-', '+').replaceAll('_', '/'))), 'late-bind reconnect checkpoint must be the newest event')
+      .toEqual({ a: 'e250' });
+  });
+
   it('F5: refetches a replacement generation longer than one page and retains paging, SSE order/dedup and revision guards', async () => {
     fetcher.mockReset().mockImplementation(async (url: string) => url.includes('agent-feeds')
       ? ok({ session_id: 's', agents: [feed('a')] })

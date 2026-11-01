@@ -57,6 +57,51 @@ const activity = (id: string, kind: AgentEvent['kind'], payload: Record<string, 
 });
 
 describe('G19 activity model', () => {
+  it.each([
+    [1000, 'Thinking'],
+    [91000, 'Waiting for 91s without an event · Check the terminal'],
+  ])('keeps a Codex turn live after its initial user item at %ims', (elapsed, expected) => {
+    const events = [activity('start', 'turn_start'), activity('user', 'user_message', { text: 'Fixture request' })];
+    expect(liveActivity(events, 'Running', Date.parse(events[0].ts) + elapsed),
+      'Codex turn_start followed by user_message must retain its live activity').toBe(expected);
+  });
+
+  it('keeps the in-flight Codex tool label across a mid-turn steer', () => {
+    const events = [activity('start', 'turn_start'), activity('user', 'user_message', { text: 'Fixture request' }),
+      activity('tool', 'tool_start', { tool_id: 'tool', name: 'Read' }, 1),
+      activity('steer', 'user_message', { text: 'Fixture steer' }, 2)];
+    const now = Date.parse(events[0].ts) + 3000;
+    expect(liveActivity(events, 'Running', now), 'steering must not discard the running tool').toBe('Reading a file');
+    expect(liveActivity([...events, activity('result', 'tool_result', { tool_id: 'tool' }, 4)], 'Running', now + 1000)).toBe('Thinking');
+    expect(liveActivity([...events, activity('end', 'turn_end')], 'Running', now)).toBeNull();
+  });
+
+  it.each(['needs_input', 'needs_approval'])('clears Codex %s on a user answer while retaining its running tool', (status) => {
+    const events = [activity('start', 'turn_start'), activity('tool', 'tool_start', { tool_id: 'tool', name: 'Read' }, 1),
+      activity('question', 'status', { status }, 2), activity('answer', 'user_message', { text: 'Fixture answer' }, 3)];
+    const now = Date.parse(events[0].ts) + 4000;
+    expect(liveActivity(events, 'Running', now), 'a user answer must clear pending attention without discarding its running tool').toBe('Reading a file');
+    expect(liveActivity([...events, activity('result', 'tool_result', { tool_id: 'tool' }, 5)], 'Running', now + 1000),
+      'answered input must not persist after the running tool completes').toBe('Thinking');
+  });
+
+  it('retires stale Claude work without a turn_end before inferring the next activity', () => {
+    const oldWork = [activity('old', 'tool_start', { tool_id: 'old', name: 'Read' })];
+    const nextUser = [...oldWork, activity('user', 'user_message', { text: 'Fixture next request' }, 10)];
+    const now = Date.parse(oldWork[0].ts) + 11000;
+    expect(liveActivity(nextUser, 'Running', now)).toBeNull();
+    expect(liveActivity([...nextUser, activity('next', 'assistant_message', { text: 'Fixture reply' }, 11)], 'Running', now),
+      'the next inferred Claude turn must not inherit the stale tool').toBe('Thinking');
+  });
+
+  it('retires stale Codex tools and pending input at the next explicit turn_start', () => {
+    const events = [activity('old-start', 'turn_start'), activity('old-tool', 'tool_start', { tool_id: 'old', name: 'Read' }),
+      activity('question', 'status', { status: 'needs_input' }), activity('start', 'turn_start', {}, 10),
+      activity('user', 'user_message', { text: 'Fixture next request' }, 10)];
+    expect(liveActivity(events, 'Running', Date.parse(events[0].ts) + 11000),
+      'a fresh explicit turn must not inherit stale tools or pending input').toBe('Thinking');
+  });
+
   it('keeps a failure when a partial history begins just before its result', () => {
     expect(transcriptRows([activity('f', 'status', { status: 'tool_failed' }),
       activity('r', 'tool_result', { tool_id: 'a', result: 'fixture' })])[0].failedCount).toBe(1);

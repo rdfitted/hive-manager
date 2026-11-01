@@ -111,18 +111,21 @@ export function transcriptRows(events: AgentEvent[]): TranscriptRow[] {
   return grouped;
 }
 
-/** Missing Claude start markers are inferred; a new user item retires old work. */
+/** Explicit Codex turns survive steering; user items retire inferred Claude work. */
 export function liveActivity(events: AgentEvent[], status: AgentStatus | undefined, now = Date.now()): string | null {
   if (status !== 'Running') return null;
   let open = false;
+  let explicit = false;
   let last: AgentEvent | undefined;
   const running = new Map<string, AgentEvent>();
   let pending: string | null = null;
   for (const event of events) {
     const p = event.payload;
-    if (event.kind === 'turn_end' || event.kind === 'user_message') {
-      open = false; last = undefined; running.clear(); pending = null; continue;
+    if (event.kind === 'turn_end' || (event.kind === 'user_message' && !explicit)) {
+      open = false; explicit = false; last = undefined; running.clear(); pending = null; continue;
     }
+    if (event.kind === 'user_message') pending = null;
+    if (event.kind === 'turn_start') { explicit = true; running.clear(); pending = null; }
     if (event.kind === 'turn_start' || event.kind === 'assistant_message' || event.kind === 'assistant_delta'
       || event.kind === 'tool_start' || event.kind === 'tool_result') { open = true; last = event; }
     if (event.kind === 'tool_start') running.set(String(p.tool_id ?? event.source_id ?? event.cursor), event);
