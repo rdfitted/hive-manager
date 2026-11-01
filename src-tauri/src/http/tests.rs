@@ -700,12 +700,13 @@ async fn test_preset_catalogue_returns_all_entries_with_matching_expansions() {
     let presets = json["presets"]
         .as_array()
         .expect("presets should be an array");
-    assert_eq!(presets.len(), 77);
+    assert_eq!(presets.len(), 71);
 
     for preset in presets {
         let provider = preset["provider"]
             .as_str()
             .expect("provider should be a string");
+        assert!(crate::adapters::is_valid_cli(provider), "unsupported catalogue provider {provider}");
         let id = preset["id"].as_str().expect("id should be a string");
         let expansion = crate::cli::tier_ladder::expand_preset(provider, id)
             .unwrap_or_else(|| panic!("endpoint returned unknown preset {provider}/{id}"));
@@ -3976,12 +3977,12 @@ async fn test_add_worker_explicit_cli_overrides_session_default() {
     session.default_cli = "codex".to_string();
     controller.read().insert_test_session(session);
 
-    // POST with explicit cli: "droid" - should pass CLI validation (not 400)
+    // POST with explicit cli: "cursor" - should pass CLI validation (not 400)
     // The handler may fail downstream at PTY spawn (500), but should NOT reject
-    // the CLI itself since "droid" is in the allowlist.
+    // the CLI itself since "cursor" is in the allowlist.
     let body = serde_json::json!({
         "role_type": "backend",
-        "cli": "droid"
+        "cli": "cursor"
     });
 
     let response = app
@@ -3996,11 +3997,11 @@ async fn test_add_worker_explicit_cli_overrides_session_default() {
         .await
         .unwrap();
 
-    // Should NOT be 400 - "droid" is a valid CLI that overrides session default "codex"
+    // Should NOT be 400 - "cursor" is a valid CLI that overrides session default "codex"
     assert_ne!(
         response.status(),
         StatusCode::BAD_REQUEST,
-        "Explicit CLI 'droid' should override session default 'codex' and pass validation"
+        "Explicit CLI 'cursor' should override session default 'codex' and pass validation"
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -4021,7 +4022,7 @@ async fn test_add_worker_rejects_removed_gemini_and_antigravity_clis() {
         temp_dir.to_str().unwrap(),
     ));
 
-    for cli in ["gemini", "antigravity"] {
+    for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
         let body = serde_json::json!({
             "role_type": "frontend",
             "cli": cli
@@ -4045,9 +4046,50 @@ async fn test_add_worker_rejects_removed_gemini_and_antigravity_clis() {
             StatusCode::BAD_REQUEST,
             "POST with cli: \"{cli}\" must be rejected by VALID_CLIS validation"
         );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains(cli), "rejection must name {cli}: {body}");
+        assert!(body.contains("claude, codex, cursor"), "rejection must list supported CLIs: {body}");
     }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_add_worker_rejects_removed_inherited_principal_cli() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp = TempDir::new().unwrap();
+    for cli in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+        let mut session = make_test_session("stale-principal", temp.path().to_str().unwrap());
+        session.default_principal_cli = Some(cli.to_string());
+        controller.read().insert_test_session(session);
+        let response = app.clone().oneshot(Request::builder().method("POST")
+            .uri("/api/sessions/stale-principal/workers").header("content-type", "application/json")
+            .body(Body::from(r#"{"role_type":"backend"}"#)).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let message = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(message.contains(cli) && message.contains("claude, codex, cursor"), "{message}");
+    }
+}
+
+#[tokio::test]
+async fn test_launch_rejects_removed_clis_with_supported_names() {
+    let app = setup_test_app().await;
+    let temp = TempDir::new().unwrap();
+    for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+        let body = serde_json::json!({
+            "project_path": temp.path().to_str().unwrap(), "mode": "hive",
+            "objective": "Check validation", "default_cli": removed,
+        });
+        let response = app.clone().oneshot(Request::builder().method("POST")
+            .uri("/api/sessions").header("content-type", "application/json")
+            .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "launch {removed}");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let message = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(message.contains(removed) && message.contains("claude, codex, cursor"), "{message}");
+    }
 }
 
 #[tokio::test]
@@ -4062,7 +4104,7 @@ async fn test_add_worker_accepts_latest_worker_models() {
         temp_dir.to_str().unwrap(),
     ));
 
-    for (cli, model) in [("codex", "gpt-5.5"), ("droid", "glm-5.1")] {
+    for (cli, model) in [("codex", "gpt-5.5"), ("cursor", "composer-2.5")] {
         let body = serde_json::json!({
             "role_type": "backend",
             "cli": cli,
@@ -4381,7 +4423,7 @@ async fn test_add_qa_worker_valid_request_reaches_controller() {
 
     let body = serde_json::json!({
         "specialization": "a11y",
-        "cli": "droid"
+        "cli": "cursor"
     });
 
     let response = app
@@ -4614,10 +4656,10 @@ async fn test_create_hive_accepts_per_worker_model_overrides() {
                 "label": "Codex worker"
             },
             {
-                "cli": "droid",
-                "model": "glm-5.1",
+                "cli": "cursor",
+                "model": "composer-2.5",
                 "flags": [],
-                "label": "Droid worker"
+                "label": "Cursor worker"
             }
         ],
         "smoke_test": true
@@ -4666,11 +4708,11 @@ async fn test_create_hive_accepts_per_worker_model_overrides() {
             .find(|worker| worker.config.cli == "codex")
             .expect("codex worker should be present");
         assert_eq!(codex_worker.config.model.as_deref(), Some("gpt-5.5"));
-        let droid_worker = workers
+        let cursor_worker = workers
             .iter()
-            .find(|worker| worker.config.cli == "droid")
-            .expect("droid worker should be present");
-        assert_eq!(droid_worker.config.model.as_deref(), Some("glm-5.1"));
+            .find(|worker| worker.config.cli == "cursor")
+            .expect("cursor worker should be present");
+        assert_eq!(cursor_worker.config.model.as_deref(), Some("composer-2.5"));
     }
 }
 
@@ -4806,13 +4848,13 @@ async fn test_launch_swarm_accepts_model_capable_configs() {
         "default_cli": "codex",
         "default_model": "gpt-5.5",
         "queen_config": {
-            "cli": "qwen",
-            "model": "qwen3-coder",
+            "cli": "claude",
+            "model": "opus",
             "flags": []
         },
         "planner_config": {
-            "cli": "droid",
-            "model": "glm-5.1",
+            "cli": "cursor",
+            "model": "composer-2.5",
             "flags": []
         },
         "workers_per_planner": [
@@ -4861,8 +4903,8 @@ async fn test_launch_swarm_accepts_model_capable_configs() {
             .iter()
             .find(|agent| matches!(agent.role, AgentRole::Queen))
             .expect("swarm session should include queen");
-        assert_eq!(queen.config.cli, "qwen");
-        assert_eq!(queen.config.model.as_deref(), Some("qwen3-coder"));
+        assert_eq!(queen.config.cli, "claude");
+        assert_eq!(queen.config.model.as_deref(), Some("opus"));
         let planners_path = temp_dir
             .path()
             .join(".hive-manager")
@@ -4873,11 +4915,11 @@ async fn test_launch_swarm_accepts_model_capable_configs() {
         let planner_config = planners[0].get("config").unwrap();
         assert_eq!(
             planner_config.get("cli").and_then(|value| value.as_str()),
-            Some("droid")
+            Some("cursor")
         );
         assert_eq!(
             planner_config.get("model").and_then(|value| value.as_str()),
-            Some("glm-5.1")
+            Some("composer-2.5")
         );
         let worker_config = planners[0]
             .get("workers")
@@ -4932,15 +4974,15 @@ async fn test_launch_swarm_rejects_explicit_empty_workers_per_planner() {
 }
 
 #[tokio::test]
-async fn test_launch_solo_accepts_droid_model_config() {
+async fn test_launch_solo_accepts_cursor_model_config() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = TempDir::new().unwrap();
 
     let body = serde_json::json!({
         "project_path": temp_dir.path().to_string_lossy(),
         "task_description": "Investigate the issue",
-        "cli": "droid",
-        "model": "glm-5.1"
+        "cli": "cursor",
+        "model": "composer-2.5"
     });
 
     let response = app
@@ -4956,7 +4998,7 @@ async fn test_launch_solo_accepts_droid_model_config() {
         .unwrap();
 
     let status = response.status();
-    // Droid launches through the generic Solo endpoint; there is no dedicated Droid endpoint.
+    // Cursor launches through the generic Solo endpoint; there is no dedicated Cursor endpoint.
     assert!(
         status == StatusCode::CREATED || status == StatusCode::INTERNAL_SERVER_ERROR,
         "launch should either create the session or fail at PTY/worktree setup, got {status}"
@@ -4974,16 +5016,16 @@ async fn test_launch_solo_accepts_droid_model_config() {
             .read()
             .get_session(session_id)
             .expect("created solo session should be stored");
-        assert_eq!(session.default_cli, "droid");
-        assert_eq!(session.default_model.as_deref(), Some("glm-5.1"));
+        assert_eq!(session.default_cli, "cursor");
+        assert_eq!(session.default_model.as_deref(), Some("composer-2.5"));
         assert_eq!(
             session.execution_policy.workspace_strategy,
             crate::domain::WorkspaceStrategy::IsolatedCell
         );
         match &session.session_type {
             SessionType::Solo { cli, model } => {
-                assert_eq!(cli, "droid");
-                assert_eq!(model.as_deref(), Some("glm-5.1"));
+                assert_eq!(cli, "cursor");
+                assert_eq!(model.as_deref(), Some("composer-2.5"));
             }
             other => panic!("expected solo session, got {other:?}"),
         }
@@ -5000,8 +5042,8 @@ async fn test_launch_solo_accepts_droid_model_config() {
                 )
             })
             .expect("solo session should include solo agent");
-        assert_eq!(solo_agent.config.cli, "droid");
-        assert_eq!(solo_agent.config.model.as_deref(), Some("glm-5.1"));
+        assert_eq!(solo_agent.config.cli, "cursor");
+        assert_eq!(solo_agent.config.model.as_deref(), Some("composer-2.5"));
     }
 }
 

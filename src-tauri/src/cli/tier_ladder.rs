@@ -1188,6 +1188,18 @@ mod tests {
     }
 
     #[test]
+    fn removed_presets_cannot_be_selected_by_saved_ladders() {
+        for (provider, preset) in [("droid", "glm-5.1"), ("opencode", "opencode/big-pickle"), ("qwen", "qwen3-coder"), ("agy", "old-model")] {
+            assert!(expand_preset(provider, preset).is_none(), "removed {provider} preset must not expand");
+            let project = tempfile::tempdir().unwrap();
+            write_override(project.path(), &serde_json::json!({"tier_ladder": {"codex": {"low": preset}}}).to_string());
+            let resolved = resolve_tier_ladder(project.path(), None);
+            assert!(resolved.issues.iter().any(|issue| issue.kind == TierLadderResolutionIssueKind::UnknownPreset));
+            assert_eq!(resolved.ladder.unwrap().codex.low, embedded_tier_ladder().unwrap().codex.low);
+        }
+    }
+
+    #[test]
     fn project_override_replaces_only_one_cell() {
         let project = tempfile::tempdir().unwrap();
         write_override(

@@ -2023,6 +2023,26 @@ mod tests {
         assert_eq!(restored.default_roles["principal"].model, "gpt-5.6-sol");
     }
 
+    #[test]
+    fn removed_cli_config_loads_but_registry_ignores_retired_entries() {
+        let (storage, _temp) = create_test_storage();
+        let mut config = storage.load_config().unwrap();
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+            config.clis.insert(removed.to_string(), config.clis["claude"].clone());
+            config.default_roles.insert(removed.to_string(), RoleDefaults { cli: removed.to_string(), model: "old-model".to_string() });
+        }
+        storage.save_config(&config).unwrap();
+        let loaded = storage.load_config().unwrap();
+        assert_eq!(loaded.clis.len(), 9, "stale config remains readable without migration");
+        let registry = crate::cli::CliRegistry::new(loaded);
+        assert_eq!(registry.list_clis().len(), 3);
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+            assert!(registry.get_cli(removed).is_none());
+            assert!(registry.get_role_defaults(removed).is_none());
+            assert!(registry.build_command(&crate::pty::AgentConfig { cli: removed.to_string(), ..Default::default() }).is_err());
+        }
+    }
+
     fn sample_persisted_session(session_id: &str) -> PersistedSession {
         PersistedSession {
             id: session_id.to_string(),

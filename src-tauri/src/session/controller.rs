@@ -3612,13 +3612,6 @@ impl SessionController {
                     args.push(model.to_string());
                 }
             }
-            "opencode" => {
-                // OpenCode relies on OPENCODE_YOLO=true env var (set in batch file)
-                if let Some(ref model) = effective_model {
-                    args.push("-m".to_string());
-                    args.push(model.to_string());
-                }
-            }
             "cursor" => {
                 // Cursor Agent via WSL - interactive TUI mode
                 args.push("-d".to_string());
@@ -3628,19 +3621,6 @@ impl SessionController {
                 args.push("--trust".to_string());
                 if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
-                    args.push(model.to_string());
-                }
-            }
-            "droid" => {
-                // Droid CLI - interactive TUI mode
-                // Model selected via /model command or config
-                // No auto-approve flag available in interactive mode
-            }
-            "qwen" => {
-                // Qwen Code CLI - interactive mode with auto-approve
-                args.push("-y".to_string()); // YOLO mode for auto-approve
-                if let Some(ref model) = effective_model {
-                    args.push("-m".to_string());
                     args.push(model.to_string());
                 }
             }
@@ -3675,18 +3655,8 @@ impl SessionController {
         };
         let prompt_arg = format!("Read {} and execute.", prompt_path);
         match cli {
-            "claude" | "codex" | "cursor" | "droid" => {
-                // Claude, Codex, Cursor, Droid accept prompt as positional argument
-                args.push(prompt_arg);
-            }
-            "qwen" => {
-                // Qwen uses -i for interactive mode with initial prompt
-                args.push("-i".to_string());
-                args.push(prompt_arg);
-            }
-            "opencode" => {
-                // OpenCode uses --prompt flag
-                args.push("--prompt".to_string());
+            "claude" | "codex" | "cursor" => {
+                // Claude, Codex, Cursor accept prompt as positional argument
                 args.push(prompt_arg);
             }
             _ => {
@@ -3709,7 +3679,7 @@ impl SessionController {
                 // Codex uses positional prompt argument (no -q flag exists)
                 args.push(task.to_string());
             }
-            "cursor" | "droid" => {
+            "cursor" => {
                 args.push(task.to_string());
             }
             _ => {
@@ -3752,19 +3722,6 @@ impl SessionController {
                     args.push(model.to_string());
                 }
             }
-            "qwen" => {
-                args.push("-y".to_string());
-                if let Some(ref model) = effective_model {
-                    args.push("-m".to_string());
-                    args.push(model.to_string());
-                }
-            }
-            "opencode" => {
-                if let Some(ref model) = effective_model {
-                    args.push("-m".to_string());
-                    args.push(model.to_string());
-                }
-            }
             "cursor" => {
                 args.push("-d".to_string());
                 args.push("Ubuntu".to_string());
@@ -3780,9 +3737,6 @@ impl SessionController {
                     Self::add_inline_task_to_args(&config.cli, &mut args, task);
                 }
                 return ("wsl".to_string(), args);
-            }
-            "droid" => {
-                // No auto-approve flag available
             }
             _ => {
                 if let Some(ref model) = effective_model {
@@ -8453,7 +8407,7 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality, researcher |
-| cli | string | No | CLI override: codex, opencode, cursor, droid, qwen, or claude. Omit to inherit the session principal CLI (`{default_cli}`). |
+| cli | string | No | CLI override: claude, codex, or cursor. Omit to inherit the session principal CLI (`{default_cli}`). |
 | model | string | No | Model override (for example gpt-6.1-sol for Codex or fable/opus for Claude). Omit to inherit the principal model. |
 | flags | string[] | No | CLI flag override. Omit to inherit principal flags; send `[]` to clear them. |
 | name | string | No | Stable worker name; defaults to `Worker N (Role)` |
@@ -8578,7 +8532,7 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | specialization | string | Yes | QA specialization: `ui`, `api`, or `a11y` |
-| cli | string | No | CLI to use: {default_cli} (default), codex, opencode, cursor, droid, qwen |
+| cli | string | No | CLI to use: {default_cli} (default), claude, codex, cursor |
 | model | string | No | Optional model override |
 | label | string | No | Custom label for the QA worker |
 | initial_task | string | No | Initial QA assignment |
@@ -8960,8 +8914,8 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
-| cli | string | No | CLI to use: {default_cli} (default), codex, opencode, cursor, droid, qwen |
-| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-6.1-sol`, `gpt-6-luna`, `glm-5.1`, `qwen3-coder`) |
+| cli | string | No | CLI to use: {default_cli} (default), claude, codex, cursor |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-6.1-sol`, `gpt-6-luna`, `composer-2.5`) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -11816,6 +11770,7 @@ The backend composed and persisted the following authoritative skeleton before l
             .map_err(|e| format!("Failed to read pending fusion config: {}", e))?;
         let config: FusionLaunchConfig = serde_json::from_str(&config_json)
             .map_err(|e| format!("Failed to parse pending fusion config: {}", e))?;
+        Self::validate_fusion_continuation_clis(&config)?;
 
         self.retire_master_planner(session_id, "Fusion Queen");
 
@@ -12148,6 +12103,7 @@ The backend composed and persisted the following authoritative skeleton before l
             .map_err(|e| format!("Failed to read pending debate config: {}", e))?;
         let mut config: DebateLaunchConfig = serde_json::from_str(&config_json)
             .map_err(|e| format!("Failed to parse pending debate config: {}", e))?;
+        Self::validate_debate_continuation_clis(&config)?;
         config.rounds = Self::validate_debate_rounds(config.rounds)?;
 
         self.retire_master_planner(session_id, "Debate debaters");
@@ -14822,6 +14778,137 @@ The backend composed and persisted the following authoritative skeleton before l
         Ok(())
     }
 
+    fn validate_launch_cli(cli: &str) -> Result<(), String> {
+        if crate::adapters::is_valid_cli(cli) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Unsupported CLI '{}'. Supported CLIs: {}",
+                cli,
+                crate::adapters::VALID_CLIS.join(", ")
+            ))
+        }
+    }
+
+    fn validate_hive_continuation_clis(config: &HiveLaunchConfig) -> Result<(), String> {
+        Self::validate_launch_cli(&config.queen_config.cli)?;
+        for worker in &config.workers {
+            Self::validate_launch_cli(&worker.cli)?;
+        }
+        Self::validate_qa_continuation_clis(
+            config.evaluator_config.as_ref(),
+            config.qa_workers.as_deref(),
+        )
+    }
+
+    fn validate_qa_continuation_clis(
+        evaluator: Option<&AgentConfig>,
+        workers: Option<&[QaWorkerConfig]>,
+    ) -> Result<(), String> {
+        if let Some(evaluator) = evaluator.filter(|agent| !agent.cli.trim().is_empty()) {
+            Self::validate_launch_cli(&evaluator.cli)?;
+        }
+        for worker in workers.unwrap_or_default() {
+            Self::validate_launch_cli(&worker.cli)?;
+        }
+        Ok(())
+    }
+
+    fn validate_swarm_continuation_clis(
+        config: &SwarmLaunchConfig,
+        session: &Session,
+    ) -> Result<(), String> {
+        Self::validate_launch_cli(if config.default_cli.trim().is_empty() {
+            &session.default_cli
+        } else {
+            config.default_cli.trim()
+        })?;
+        Self::validate_launch_cli(&config.queen_config.cli)?;
+        Self::validate_launch_cli(&config.planner_config.cli)?;
+        for worker in &config.workers_per_planner {
+            Self::validate_launch_cli(&worker.cli)?;
+        }
+        for planner in &config.planners {
+            Self::validate_launch_cli(&planner.config.cli)?;
+            for worker in &planner.workers {
+                Self::validate_launch_cli(&worker.cli)?;
+            }
+        }
+        Self::validate_qa_continuation_clis(
+            config.evaluator_config.as_ref(),
+            config.qa_workers.as_deref(),
+        )
+    }
+
+    fn validate_fusion_continuation_clis(config: &FusionLaunchConfig) -> Result<(), String> {
+        Self::validate_launch_cli(if config.default_cli.trim().is_empty() {
+            "claude"
+        } else {
+            config.default_cli.trim()
+        })?;
+        Self::validate_launch_cli(&config.judge_config.cli)?;
+        if let Some(queen) = &config.queen_config {
+            Self::validate_launch_cli(&queen.cli)?;
+        }
+        for variant in &config.variants {
+            Self::validate_launch_cli(&variant.cli)?;
+        }
+        Ok(())
+    }
+
+    fn validate_debate_continuation_clis(config: &DebateLaunchConfig) -> Result<(), String> {
+        Self::validate_launch_cli(if config.default_cli.trim().is_empty() {
+            "claude"
+        } else {
+            config.default_cli.trim()
+        })?;
+        Self::validate_launch_cli(&config.judge_config.cli)?;
+        if let Some(queen) = &config.queen_config {
+            Self::validate_launch_cli(&queen.cli)?;
+        }
+        for debater in &config.debaters {
+            Self::validate_launch_cli(&debater.cli)?;
+        }
+        Ok(())
+    }
+
+    /// Reject stale launch selections before Planning becomes PlanReady. Missing pending
+    /// files keep the existing graph-persistence/recovery path; no process can spawn there.
+    fn preflight_pending_continuation_clis(session: &Session) -> Result<(), String> {
+        let filename = match &session.session_type {
+            SessionType::Swarm { .. } => "pending-swarm-config.json",
+            SessionType::Fusion { .. } => "pending-fusion-config.json",
+            SessionType::Debate { .. } => "pending-debate-config.json",
+            _ => "pending-config.json",
+        };
+        let path = session
+            .project_path
+            .join(".hive-manager")
+            .join(&session.id)
+            .join(filename);
+        let json = match std::fs::read_to_string(path) {
+            Ok(json) => json,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("Failed to read {filename}: {error}")),
+        };
+        let parse_error = |error| format!("Failed to parse {filename}: {error}");
+        match &session.session_type {
+            SessionType::Swarm { .. } => Self::validate_swarm_continuation_clis(
+                &serde_json::from_str(&json).map_err(parse_error)?,
+                session,
+            ),
+            SessionType::Fusion { .. } => Self::validate_fusion_continuation_clis(
+                &serde_json::from_str(&json).map_err(parse_error)?,
+            ),
+            SessionType::Debate { .. } => Self::validate_debate_continuation_clis(
+                &serde_json::from_str(&json).map_err(parse_error)?,
+            ),
+            _ => Self::validate_hive_continuation_clis(
+                &serde_json::from_str(&json).map_err(parse_error)?,
+            ),
+        }
+    }
+
     /// Continue a session after planning phase - spawns Queen + Workers/Planners
     pub fn continue_after_planning(&self, session_id: &str) -> Result<Session, String> {
         self.continue_after_planning_checked(session_id)
@@ -14862,6 +14949,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 "Solo sessions do not support planning continuation".to_string(),
             ));
         }
+
+        Self::preflight_pending_continuation_clis(&session)?;
 
         // The production continue action is the authoritative exit from Planning.
         // Build and persist the plan-derived graph before any session-type branch
@@ -14906,6 +14995,7 @@ The backend composed and persisted the following authoritative skeleton before l
             .map_err(|e| format!("Failed to read pending config: {}", e))?;
         let config: HiveLaunchConfig = serde_json::from_str(&config_json)
             .map_err(|e| format!("Failed to parse pending config: {}", e))?;
+        Self::validate_hive_continuation_clis(&config)?;
         let mut continuation_created_cells = Vec::new();
         let (cwd, worktree_branch) = match session.execution_policy.workspace_strategy {
             WorkspaceStrategy::SharedCell => (
@@ -15734,6 +15824,7 @@ The backend composed and persisted the following authoritative skeleton before l
             .map_err(|e| format!("Failed to read pending swarm config: {}", e))?;
         let config: SwarmLaunchConfig = serde_json::from_str(&config_json)
             .map_err(|e| format!("Failed to parse pending swarm config: {}", e))?;
+        Self::validate_swarm_continuation_clis(&config, session)?;
         let default_cli = if config.default_cli.trim().is_empty() {
             session.default_cli.clone()
         } else {
@@ -19152,6 +19243,164 @@ mod tests {
         }
     }
 
+    fn assert_removed_continuation_rejected(kind: &str, pointer: &str) {
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+            for state in [SessionState::Planning, SessionState::PlanReady] {
+                let temp = tempfile::tempdir().unwrap();
+                let controller = test_controller();
+                let id = "removed-continuation";
+                planning_session_with_planner(&controller, id, &[]);
+                let mut session = controller.get_session(id).unwrap();
+                session.project_path = temp.path().to_path_buf();
+                session.state = state.clone();
+                let mut config = serde_json::json!({
+                    "project_path": temp.path().to_str().unwrap(),
+                    "default_cli": "claude", "queen_config": {"cli": "claude"},
+                    "workers": [{"cli": "codex"}], "evaluator_config": {"cli": "claude"},
+                    "qa_workers": [{"cli": "codex", "specialization": "api"}],
+                    "planner_count": 1, "planner_config": {"cli": "codex"},
+                    "workers_per_planner": [{"cli": "codex"}],
+                    "planners": [{"config": {"cli": "codex"}, "domain": "api", "workers": [{"cli": "codex"}]}],
+                    "judge_config": {"cli": "claude"}, "task_description": "Compare candidates",
+                    "variants": [{"name": "candidate", "cli": "codex"}],
+                    "topic": "Compare approaches", "rounds": 2,
+                    "debaters": [{"name": "candidate", "cli": "codex", "stance": "Test it"}]
+                });
+                let filename = match kind {
+                    "swarm" => {
+                        session.session_type = SessionType::Swarm { planner_count: 1 };
+                        "pending-swarm-config.json"
+                    }
+                    "fusion" => {
+                        session.session_type = SessionType::Fusion { variants: vec![] };
+                        "pending-fusion-config.json"
+                    }
+                    "debate" => {
+                        session.session_type = SessionType::Debate { variants: vec![] };
+                        "pending-debate-config.json"
+                    }
+                    _ => {
+                        session.session_type = SessionType::Hive { worker_count: 1 };
+                        "pending-config.json"
+                    }
+                };
+                if pointer == "inherited" {
+                    session.default_cli = removed.to_string();
+                    config["default_cli"] = serde_json::json!("");
+                } else {
+                    *config.pointer_mut(pointer).expect("CLI field") = serde_json::json!(removed);
+                }
+                controller.insert_test_session(session);
+                let directory = temp.path().join(".hive-manager").join(id);
+                std::fs::create_dir_all(&directory).unwrap();
+                let pending = directory.join(filename);
+                let original = serde_json::to_string(&config).unwrap();
+                std::fs::write(&pending, &original).unwrap();
+                let before_ids = agent_ids(&controller, id);
+                let error = controller
+                    .continue_after_planning_checked(id)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains(removed) && error.contains("claude, codex, cursor"),
+                    "{kind} {pointer}: {error}"
+                );
+                let after = controller.get_session(id).unwrap();
+                assert_eq!(
+                    after.state, state,
+                    "removed CLI must be rejected before the planning state flip"
+                );
+                assert_eq!(agent_ids(&controller, id), before_ids);
+                assert!(matches!(after.agents[0].status, AgentStatus::Running));
+                assert!(
+                    controller.pty_manager.read().is_alive(&before_ids[0]),
+                    "planner must not be retired"
+                );
+                assert_eq!(std::fs::read_to_string(&pending).unwrap(), original);
+                assert!(
+                    !directory.join("prompts").exists(),
+                    "no spawn artifacts before validation"
+                );
+            }
+        }
+    }
+
+    macro_rules! removed_continuation_test {
+        ($name:ident, $kind:literal, $pointer:literal) => {
+            #[test]
+            fn $name() {
+                assert_removed_continuation_rejected($kind, $pointer);
+            }
+        };
+    }
+    removed_continuation_test!(removed_hive_queen, "hive", "/queen_config/cli");
+    removed_continuation_test!(removed_hive_worker, "hive", "/workers/0/cli");
+    removed_continuation_test!(removed_hive_evaluator, "hive", "/evaluator_config/cli");
+    removed_continuation_test!(removed_hive_qa, "hive", "/qa_workers/0/cli");
+    removed_continuation_test!(removed_swarm_default, "swarm", "/default_cli");
+    removed_continuation_test!(removed_swarm_inherited_default, "swarm", "inherited");
+    removed_continuation_test!(removed_swarm_queen, "swarm", "/queen_config/cli");
+    removed_continuation_test!(removed_swarm_planner, "swarm", "/planner_config/cli");
+    removed_continuation_test!(removed_swarm_worker, "swarm", "/workers_per_planner/0/cli");
+    removed_continuation_test!(
+        removed_swarm_legacy_planner,
+        "swarm",
+        "/planners/0/config/cli"
+    );
+    removed_continuation_test!(
+        removed_swarm_legacy_worker,
+        "swarm",
+        "/planners/0/workers/0/cli"
+    );
+    removed_continuation_test!(removed_swarm_evaluator, "swarm", "/evaluator_config/cli");
+    removed_continuation_test!(removed_swarm_qa, "swarm", "/qa_workers/0/cli");
+    removed_continuation_test!(removed_fusion_default, "fusion", "/default_cli");
+    removed_continuation_test!(removed_fusion_queen, "fusion", "/queen_config/cli");
+    removed_continuation_test!(removed_fusion_judge, "fusion", "/judge_config/cli");
+    removed_continuation_test!(removed_fusion_variant, "fusion", "/variants/0/cli");
+    removed_continuation_test!(removed_debate_default, "debate", "/default_cli");
+    removed_continuation_test!(removed_debate_queen, "debate", "/queen_config/cli");
+    removed_continuation_test!(removed_debate_judge, "debate", "/judge_config/cli");
+    removed_continuation_test!(removed_debate_debater, "debate", "/debaters/0/cli");
+
+    #[test]
+    fn removed_cli_stored_sessions_still_list_load_and_resume_without_spawning() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+            let id = format!("stored-{removed}");
+            let mut original = waiting_worker_session(&id, temp.path(), 1);
+            original.default_cli = removed.to_string();
+            original.default_principal_cli = Some(removed.to_string());
+            original.agents[0].config.cli = removed.to_string();
+            let persisted = SessionController::session_to_persisted_snapshot(&original);
+            storage.save_session(&persisted).unwrap();
+            assert!(storage
+                .list_sessions()
+                .unwrap()
+                .iter()
+                .any(|summary| summary.id == id));
+            assert_eq!(
+                storage.load_session(&id).unwrap().agents[0].config.cli,
+                removed
+            );
+            let mut controller = test_controller();
+            controller.set_storage(storage.clone());
+            let restored = controller.resume_session(&id).unwrap();
+            assert_eq!(restored.default_cli, removed);
+            assert_eq!(restored.agents[0].config.cli, removed);
+            assert!(controller
+                .list_sessions()
+                .iter()
+                .any(|session| session.id == id));
+            assert!(controller
+                .pty_manager
+                .read()
+                .get_status(&restored.agents[0].id)
+                .is_none());
+        }
+    }
+
     fn planning_session_with_planner(controller: &SessionController, session_id: &str, stub_args: &[&str]) {
         let temp = tempfile::tempdir().expect("temp project");
         let planner_id = format!("{session_id}-master-planner");
@@ -19892,15 +20141,21 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         assert!(prompt.contains(&SessionController::prompt_path(&task_path)));
     }
 
-    /// Every `CliBehavior` must name a CLI here. Adding a variant breaks this match at
+    /// Every `CliBehavior` must name a supported CLI here (roles may override behavior). Adding a variant breaks this match at
     /// compile time, which forces the new behavior into the coverage test below instead of
     /// letting it silently ship without a heartbeat instruction (#141 defect A).
+    fn behavior_definition(behavior: CliBehavior) -> crate::orchestrator::org_graph::RoleDefinition {
+        let mut definition = crate::orchestrator::org_graph::RoleDefinition::empty("backend");
+        definition.behavior = Some(behavior);
+        definition
+    }
+
     fn representative_cli_for(behavior: &CliBehavior) -> &'static str {
         match behavior {
             CliBehavior::ActionProne => "claude",
-            CliBehavior::InstructionFollowing => "qwen",
+            CliBehavior::InstructionFollowing => "claude",
             CliBehavior::ExplicitPolling => "codex",
-            CliBehavior::Interactive => "droid",
+            CliBehavior::Interactive => "cursor",
         }
     }
 
@@ -19928,12 +20183,19 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
     }
 
     fn worker_prompt_for_cli(cli: &str) -> String {
+        worker_prompt_for_behavior(cli, None)
+    }
+
+    fn worker_prompt_for_behavior(cli: &str, behavior: Option<CliBehavior>) -> String {
         let temp = tempfile::tempdir().expect("temp project");
-        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+        let mut resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
             temp.path(),
             None,
             "backend",
         );
+        if let Some(behavior) = behavior {
+            resolved.definition.as_mut().expect("backend definition").behavior = Some(behavior);
+        }
         SessionController::build_worker_prompt(
             1,
             &AgentConfig {
@@ -19962,12 +20224,12 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         for behavior in all_cli_behaviors() {
             let cli = representative_cli_for(&behavior);
             assert_eq!(
-                CliRegistry::get_behavior(cli),
+                CliRegistry::get_behavior_for_role(cli, Some(&behavior_definition(behavior))),
                 behavior,
                 "representative CLI {cli} no longer maps to the behavior it stands in for"
             );
 
-            let prompt = worker_prompt_for_cli(cli);
+            let prompt = worker_prompt_for_behavior(cli, Some(behavior));
             assert!(
                 prompt.contains(&cadence),
                 "{behavior:?} ({cli}) prompt carries no heartbeat cadence instruction"
@@ -20025,7 +20287,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         }
     }
 
-    /// The behavior enum is only reachable in production through real CLI names, so cover
+    /// In addition to role behavior overrides, cover
     /// the allowlist too: a CLI whose behavior mapping changes must not lose its cadence.
     #[test]
     fn every_allowlisted_cli_receives_the_heartbeat_cadence() {
@@ -20066,9 +20328,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             let instructions = super::get_polling_instructions(
                 representative_cli_for(&behavior),
                 "worker-1-task.md",
-                Some(&crate::orchestrator::org_graph::RoleDefinition::empty(
-                    "backend",
-                )),
+                Some(&behavior_definition(behavior)),
                 Some("HEARTBEAT_COMMAND"),
             );
             assert!(instructions.contains("Queue Activation"));
@@ -20123,7 +20383,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             "Read /mnt/d/repo/.hive-manager/worktrees/session-123/worker-2/.hive-manager/prompts/worker-2-prompt.md and execute."
                 .to_string();
 
-        for cli in ["claude", "codex", "droid"] {
+        for cli in ["claude", "codex"] {
             let mut args = Vec::new();
             SessionController::add_prompt_to_args(cli, &mut args, prompt_path);
             assert_eq!(args, vec![expected_prompt.clone()], "cli {cli}");
@@ -20137,13 +20397,6 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         SessionController::add_prompt_to_args("wsl", &mut args, prompt_path);
         assert_eq!(args, vec![expected_cursor_prompt], "cli wsl");
 
-        let mut args = Vec::new();
-        SessionController::add_prompt_to_args("qwen", &mut args, prompt_path);
-        assert_eq!(
-            args,
-            vec!["-i".to_string(), expected_prompt.clone()],
-            "cli qwen"
-        );
     }
 
     #[test]
@@ -21048,7 +21301,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
 
         let hardened_queen_prompt = SessionController::build_swarm_queen_prompt(
             "claude",
-            "qwen",
+            "cursor",
             project_path,
             "session-swarm",
             &[],
@@ -21056,7 +21309,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             false,
         );
         let unhardened_queen_prompt = SessionController::build_swarm_queen_prompt(
-            "qwen",
+            "cursor",
             "claude",
             project_path,
             "session-swarm",
@@ -21146,8 +21399,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             },
             &[QaWorkerConfig {
                 specialization: "ui".to_string(),
-                cli: "droid".to_string(),
-                model: Some("glm-5.1".to_string()),
+                cli: "cursor".to_string(),
+                model: Some("composer-2.5".to_string()),
                 label: Some("Visual QA".to_string()),
                 flags: None,
             }],
@@ -21168,8 +21421,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             prompt.contains("configured QA workers below (1 total) before you grade any criterion")
         );
         assert!(prompt.contains(r#""specialization":"ui""#));
-        assert!(prompt.contains(r#""cli":"droid""#));
-        assert!(prompt.contains(r#""model":"glm-5.1""#));
+        assert!(prompt.contains(r#""cli":"cursor""#));
+        assert!(prompt.contains(r#""model":"composer-2.5""#));
         assert!(
             prompt.contains("You MUST spawn all 1 QA workers one at a time in this exact order:")
         );
@@ -23932,7 +24185,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let controller = test_controller();
         let id = "delivery-unavailable-recovery";
         let mut session = qa_session_with(id, SessionState::Running, PathBuf::from("."), false);
-        session.agents[0].config.cli = "droid".to_string();
+        session.agents[0].config.cli = "cursor".to_string();
         let agent_id = session.agents[0].id.clone();
         controller.insert_test_session(session);
         let submitted_at = Utc::now() - Duration::seconds(1);

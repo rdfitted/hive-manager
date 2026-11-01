@@ -1626,12 +1626,12 @@ mod tests {
         );
         let mut unsupported = enabled_policy();
         unsupported.ladder.insert(
-            "droid".to_string(),
+            "cursor".to_string(),
             crate::cli::tier_ladder::embedded_resolved_tier_ladder(),
         );
         assert!(resolve_worker_execution(
             &unsupported,
-            "droid",
+            "cursor",
             &AgentRole::Queen,
             Some(&graph),
             None,

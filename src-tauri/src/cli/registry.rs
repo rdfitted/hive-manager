@@ -63,16 +63,27 @@ impl CliRegistry {
 
     /// Get CLI configuration for a specific CLI name
     pub fn get_cli(&self, name: &str) -> Option<&CliConfig> {
+        if !crate::adapters::is_valid_cli(name) {
+            return None;
+        }
         self.config.clis.get(name)
     }
 
     /// Get all registered CLIs
     pub fn list_clis(&self) -> Vec<String> {
-        self.config.clis.keys().cloned().collect()
+        self.config
+            .clis
+            .keys()
+            .filter(|name| crate::adapters::is_valid_cli(name))
+            .cloned()
+            .collect()
     }
 
     /// Build command, arguments, and environment variables from an agent config
     pub fn build_command(&self, agent_config: &AgentConfig) -> Result<BuiltCommand, RegistryError> {
+        if !crate::adapters::is_valid_cli(&agent_config.cli) {
+            return Err(RegistryError::UnknownCli(agent_config.cli.clone()));
+        }
         let cli = self
             .config
             .clis
@@ -148,6 +159,7 @@ impl CliRegistry {
         self.config
             .default_roles
             .get(role_type)
+            .filter(|defaults| crate::adapters::is_valid_cli(&defaults.cli))
             .map(|defaults| (defaults.cli.as_str(), defaults.model.as_str()))
     }
 
@@ -746,8 +758,19 @@ mod tests {
 
     #[test]
     fn test_build_command_rejects_removed_clis() {
-        let registry = CliRegistry::new(test_config());
+        let mut stale = test_config();
         for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+            stale.clis.insert(cli.to_string(), stale.clis["claude"].clone());
+            stale.default_roles.insert(cli.to_string(), crate::storage::RoleDefaults {
+                cli: cli.to_string(), model: "stale-model".to_string(),
+            });
+        }
+        let registry = CliRegistry::new(stale);
+        assert_eq!(registry.list_clis().len(), 3);
+        for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+            assert!(registry.get_cli(cli).is_none());
+            assert!(registry.get_role_defaults(cli).is_none());
+            assert!(CliRegistry::default_model(cli).is_none());
             let config = AgentConfig {
                 cli: cli.to_string(),
                 model: None,

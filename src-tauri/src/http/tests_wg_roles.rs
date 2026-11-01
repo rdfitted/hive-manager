@@ -140,7 +140,7 @@ fn a13_empty_definition_preserves_spawn_prompt_bytes() {
     assert!(empty.lens.is_none());
     assert!(empty.behavior.is_none());
 
-    for cli in ["claude", "qwen", "codex", "droid", "unknown-cli"] {
+    for cli in ["claude", "cursor", "codex", "unknown-cli"] {
         assert_eq!(
             CliRegistry::get_behavior_for_role(cli, Some(&empty)),
             CliRegistry::get_behavior(cli),
