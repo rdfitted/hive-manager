@@ -1,0 +1,12 @@
+{"type":"user","uuid":"initial-user","timestamp":"2026-11-01T12:00:00Z","message":{"role":"user","content":"Initial request"}}
+{"type":"assistant","uuid":"before","parentUuid":"initial-user","timestamp":"2026-11-01T12:00:01Z","message":{"role":"assistant","id":"msg-before","content":"Before queued input"}}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-01T12:00:02Z","content":"Queue only\n[hive-msg:ffffffff]"}
+{"type":"queue-operation","operation":"remove","timestamp":"2026-11-01T12:00:03Z","deliveryId":"delivery-a","reason":"absorbed_mid_turn"}
+{"type":"user","uuid":"compact","isCompactSummary":true,"timestamp":"2026-11-01T12:00:04Z","message":{"role":"user","content":"Compact summary repeats\n[hive-msg:1234abcd]"}}
+{"type":"attachment","uuid":"queued-a","parentUuid":"before","timestamp":"2026-11-01T12:00:05Z","attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"delivery_id":"delivery-a","prompt":"Busy request\n[hive-msg:1234abcd]","rendered":"RENDERED_MUST_NOT_APPEAR"}}
+{"type":"attachment","uuid":"queued-a","parentUuid":"before","timestamp":"2026-11-01T12:00:05Z","attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"delivery_id":"delivery-a","prompt":"Busy request\n[hive-msg:1234abcd]","rendered":"RENDERED_MUST_NOT_APPEAR"}}
+{"type":"attachment","uuid":"bridge","parentUuid":"queued-a","timestamp":"2026-11-01T12:00:06Z","attachment":{"type":"queued_command","commandMode":"task-notification","origin":{"kind":"task-notification"},"delivery_id":"notice","prompt":"TASK_NOTICE_MUST_NOT_APPEAR\n[hive-msg:ffffffff]"}}
+{"type":"attachment","uuid":"wrong-origin","parentUuid":"bridge","timestamp":"2026-11-01T12:00:07Z","attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"task-notification"},"delivery_id":"wrong-origin","prompt":"WRONG_ORIGIN_MUST_NOT_APPEAR\n[hive-msg:ffffffff]"}}
+{"type":"attachment","uuid":"other","parentUuid":"wrong-origin","timestamp":"2026-11-01T12:00:08Z","attachment":{"type":"other","prompt":"OTHER_ATTACHMENT_MUST_NOT_APPEAR"}}
+{"type":"attachment","uuid":"queued-b","parentUuid":"other","timestamp":"2026-11-01T12:00:09Z","attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"delivery_id":"delivery-b","prompt":"Second busy request\n[hive-msg:bbbbbbbb]"}}
+{"type":"assistant","uuid":"after","parentUuid":"queued-b","timestamp":"2026-11-01T12:00:10Z","message":{"role":"assistant","id":"msg-after","content":"After queued input"}}

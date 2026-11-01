@@ -1040,3 +1040,50 @@ async fn multiplexed_sse_reconnect_replays_both_agents_without_duplicate_or_skip
     let mut stream = response.into_body().into_data_stream();
     assert_eq!(next_sse(&mut stream).await.1["source_id"], "a4");
 }
+
+#[tokio::test]
+async fn g17_claude_busy_prompt_once_in_order_after_reconnect() {
+    let (temp, state, app) = setup();
+    let mut session = make_test_session_with_agents("session", "fixture", &["worker-a"]);
+    session.no_git = true;
+    session.agents[0].transcript_session_id = Some("queued-transcript".into());
+    let path = transcript_path(&temp.path().join("claude-projects"), &session.project_path, "queued-transcript");
+    let fixture = include_str!("../delivery/fixtures/claude-queued.jsonl");
+    let records: Vec<Value> = fixture.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    write_records(&path, &records[..2]);
+    state.session_controller.read().insert_test_session(session);
+    let first = body_json(get(&app, "/api/sessions/session/agents/worker-a/events").await).await;
+    let cursor = first["latest_cursor"].as_str().unwrap().to_owned();
+    use std::io::Write;
+    let tail: String = records[2..].iter().map(|record| format!("{record}\n")).collect();
+    std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(tail.as_bytes()).unwrap();
+    let page = body_json(get(&app, &format!("/api/sessions/session/agents/worker-a/events?after={cursor}")).await).await;
+    let events = page["events"].as_array().unwrap();
+    assert_eq!(events.iter().map(|event| event["source_id"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["delivery-a", "delivery-b", "msg-after"], "G17 queued human prompts appear once in transcript order");
+    assert_eq!(events[0]["payload"], json!({"text":"Busy request","nonce":"[hive-msg:1234abcd]"}));
+    assert!(!page.to_string().contains("MUST_NOT_APPEAR"));
+    assert!(!page.to_string().contains("Compact summary"));
+    let checkpoint = crate::transport::feed::encode_checkpoint(&[("worker-a".into(), cursor)].into_iter().collect());
+    let response = app.clone().oneshot(Request::builder().uri("/api/sessions/session/agent-events/stream")
+        .header("last-event-id", checkpoint).body(Body::empty()).unwrap()).await.unwrap();
+    let mut stream = response.into_body().into_data_stream();
+    for id in ["delivery-a", "delivery-b", "msg-after"] {
+        assert_eq!(next_sse(&mut stream).await.1["source_id"], id);
+    }
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(400), next_sse(&mut stream)).await.is_err(),
+        "G17 reconnect must not duplicate a queued message");
+    drop(stream);
+    let fresh = TransportRegistry::new(temp.path().join("cold-sessions"), Some(temp.path().join("claude-projects")));
+    fresh.feeds.use_transcript("session", "worker-a", Path::new("fixture"), "queued-transcript").unwrap();
+    fresh.feeds.refresh_transcript("session", "worker-a").unwrap();
+    assert_eq!(fresh.feeds.history("session", "worker-a", None, None, 100).unwrap().events.len(), 5);
+}
+
+#[test]
+fn user_nonce_stripping_keeps_non_exact_lines_and_normal_user_text() {
+    let payload = crate::delivery::user_message_payload("hello\n[hive-msg:1234abcd]\ninline [hive-msg:1234abcd]\n [hive-msg:1234abcd]\n[hive-msg:bad]");
+    assert_eq!(payload["nonce"], "[hive-msg:1234abcd]");
+    assert_eq!(payload["text"], "hello\ninline [hive-msg:1234abcd]\n [hive-msg:1234abcd]\n[hive-msg:bad]");
+    assert_eq!(crate::delivery::user_message_payload("unchanged\n")["text"], "unchanged\n");
+}

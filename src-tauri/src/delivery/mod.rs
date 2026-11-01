@@ -7,6 +7,41 @@ use std::path::{Path, PathBuf};
 pub mod codex_rollout;
 pub mod claude_transcript;
 
+/// Hive's receipt marker is a whole line, never a substring of operator text.
+pub(crate) fn is_nonce_line(line: &str) -> bool {
+    line.strip_prefix("[hive-msg:")
+        .and_then(|value| value.strip_suffix(']'))
+        .is_some_and(|hex| hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+pub(crate) fn user_message_payload(text: &str) -> serde_json::Value {
+    let mut nonce = None;
+    let visible: Vec<_> = text.lines().filter(|line| {
+        if is_nonce_line(line) {
+            nonce.get_or_insert(*line);
+            false
+        } else {
+            true
+        }
+    }).collect();
+    match nonce {
+        Some(nonce) => serde_json::json!({"text": visible.join("\n"), "nonce": nonce}),
+        None => serde_json::json!({"text": text}),
+    }
+}
+
+/// Only human prompts are messages; task notifications use the same envelope.
+pub(crate) fn queued_prompt(record: &serde_json::Value) -> Option<(&str, &str)> {
+    let attachment = &record["attachment"];
+    if record["type"] != "attachment" || record["isCompactSummary"] == true
+        || attachment["type"] != "queued_command" || attachment["commandMode"] != "prompt"
+        || attachment["origin"]["kind"] != "human" {
+        return None;
+    }
+    Some((attachment["delivery_id"].as_str().filter(|id| !id.is_empty())?,
+        attachment["prompt"].as_str()?))
+}
+
 pub const TRANSCRIPT_CONFIRMED: &str = "transcript-confirmed";
 pub const TRANSCRIPT_PENDING: &str = "transcript-pending";
 /// Pending while the receiver is mid-turn and the message was handed to its queue key;

@@ -1,5 +1,5 @@
 //! Incremental reads of one explicitly assigned Claude session transcript.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -20,6 +20,7 @@ pub struct ClaudeTranscriptReader {
     partial: Vec<u8>,
     discard_line: bool,
     users: HashMap<String, (String, SystemTime)>,
+    parents: HashMap<String, String>,
     confirmed: HashMap<String, (String, SystemTime)>,
 }
 
@@ -35,7 +36,7 @@ impl ClaudeTranscriptReader {
         Self {
             root, direct, filename, fallback_checked: false, fallback: None,
             path: None, offset: 0, partial: Vec::new(), discard_line: false,
-            users: HashMap::new(), confirmed: HashMap::new(),
+            users: HashMap::new(), parents: HashMap::new(), confirmed: HashMap::new(),
         }
     }
 
@@ -74,6 +75,7 @@ impl ClaudeTranscriptReader {
             self.partial.clear();
             self.discard_line = false;
             self.users.clear();
+            self.parents.clear();
             self.confirmed.clear();
         }
         file.seek(SeekFrom::Start(self.offset)).ok()?;
@@ -115,9 +117,19 @@ impl ClaudeTranscriptReader {
     }
 
     fn record(&mut self, record: &Value) {
+        if record["isCompactSummary"] == true { return; }
         let Some(timestamp) = record["timestamp"].as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(SystemTime::from) else { return };
+        if let (Some(id), Some(parent)) = (record["uuid"].as_str(), record["parentUuid"].as_str()) {
+            self.parents.insert(id.into(), parent.into());
+        }
+        if let Some((_, text)) = super::queued_prompt(record) {
+            if let Some(id) = record["uuid"].as_str() {
+                self.record_user(id, text, timestamp);
+            }
+            return;
+        }
         match record["type"].as_str() {
             Some("user") if record["message"]["role"] == "user" => {
                 let Some(uuid) = record["uuid"].as_str() else { return };
@@ -130,25 +142,31 @@ impl ClaudeTranscriptReader {
                         .filter_map(|item| item["text"].as_str()).collect()).unwrap_or_default()
                 };
                 for text in texts {
-                    for line in text.lines() {
-                        if let Some(hex) = line.strip_prefix("[hive-msg:").and_then(|s| s.strip_suffix(']')) {
-                            if hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-                                self.users.insert(uuid.to_owned(), (line.to_owned(), timestamp));
-                            }
-                        }
-                    }
+                    self.record_user(uuid, text, timestamp);
                 }
             }
             Some("assistant") if record["message"]["role"] == "assistant" => {
                 let Some(parent) = record["parentUuid"].as_str() else { return };
                 let Some(turn_id) = record["message"]["id"].as_str().filter(|id| !id.is_empty()) else { return };
-                if let Some((nonce, user_time)) = self.users.get(parent) {
-                    if timestamp >= *user_time {
-                        self.confirmed.insert(nonce.clone(), (turn_id.to_owned(), *user_time));
+                let mut ancestor = Some(parent);
+                let mut visited = HashSet::new();
+                while let Some(id) = ancestor {
+                    if !visited.insert(id) { break; }
+                    if let Some((nonce, user_time)) = self.users.get(id) {
+                        if timestamp >= *user_time {
+                            self.confirmed.entry(nonce.clone()).or_insert((turn_id.to_owned(), *user_time));
+                        }
                     }
+                    ancestor = self.parents.get(id).map(String::as_str);
                 }
             }
             _ => {}
+        }
+    }
+
+    fn record_user(&mut self, id: &str, text: &str, timestamp: SystemTime) {
+        for line in text.lines().filter(|line| super::is_nonce_line(line)) {
+            self.users.insert(id.into(), (line.into(), timestamp));
         }
     }
 }
@@ -161,6 +179,38 @@ mod tests {
 
     const FIXTURE: &str = include_str!("fixtures/claude-success.jsonl");
     const NONCE: &str = "[hive-msg:1234abcd]";
+
+    #[test]
+    fn g17_claude_queued_prompt_requires_descendant_and_exact_nonce() {
+        let (_temp, path, mut reader) = setup();
+        let fixture = include_str!("fixtures/claude-queued.jsonl");
+        let (pending, assistant) = fixture.rsplit_once("{\"type\":\"assistant\"").unwrap();
+        fs::write(&path, pending).unwrap();
+        assert_eq!(reader.poll(NONCE, UNIX_EPOCH), None, "attachment alone never confirms");
+        assert!(reader.message_recorded(NONCE), "G17 queued human attachment prevents Enter retry");
+        assert!(!reader.message_recorded("[hive-msg:ffffffff]"), "queue operations and task notices are not evidence");
+        File::options().append(true).open(&path).unwrap()
+            .write_all(format!("{{\"type\":\"assistant\"{assistant}").as_bytes()).unwrap();
+        assert_eq!(reader.poll(NONCE, UNIX_EPOCH), Some("msg-after".into()),
+            "G17 assistant descends through intervening attachments");
+        assert_eq!(reader.poll("[hive-msg:bbbbbbbb]", UNIX_EPOCH), Some("msg-after".into()));
+        assert_eq!(reader.poll("[hive-msg:ffffffff]", UNIX_EPOCH), None);
+        assert_eq!(reader.poll("[hive-msg:1234abce]", UNIX_EPOCH), None);
+    }
+
+    #[test]
+    fn g17_claude_enqueue_remove_summary_and_wrong_parent_never_confirm() {
+        let fixture = include_str!("fixtures/claude-queued.jsonl");
+        for text in [
+            fixture.lines().filter(|line| line.contains("queue-operation")).collect::<Vec<_>>().join("\n") + "\n",
+            fixture.replace("\"parentUuid\":\"queued-b\"", "\"parentUuid\":\"foreign\""),
+            FIXTURE.replace("\"type\":\"user\"", "\"isCompactSummary\":true,\"type\":\"user\""),
+        ] {
+            let (_temp, path, mut reader) = setup();
+            fs::write(&path, text).unwrap();
+            assert_eq!(reader.poll(NONCE, UNIX_EPOCH), None);
+        }
+    }
 
     fn setup() -> (tempfile::TempDir, PathBuf, ClaudeTranscriptReader) {
         let temp = tempfile::tempdir().unwrap();
