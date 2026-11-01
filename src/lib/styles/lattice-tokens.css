@@ -5,19 +5,28 @@
   --bg-void: #060606;
 
   /* ── Surface ladder (#198) — tonal steps, not hairlines ───────── */
-  --bg-chrome: #0A0A0A;   /* app chrome: rails, toolbars, headers, tab strips */
-  --bg-panel:  #111111;   /* panels, cards, modals — the .lattice-panel tone   */
-  --bg-raised: #181818;   /* hover / raised card state                          */
+  --bg-chrome: #0E2748;   /* app chrome: rails, toolbars, headers, tab strips */
+  --bg-panel:  #122D52;   /* panels, cards, modals */
+  --bg-raised: #16345D;   /* hover / raised card state */
 
   /* D3: --bg-surface stays a value-preserving chrome alias. The large lit
      .main-content card deliberately consumes --bg-panel in shell.css. */
   --bg-surface: var(--bg-chrome);
-  --bg-elevated: #161616;
-  --bg-sunken: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+  --bg-elevated: #1A3B67;
+  --bg-sunken: var(--fitted-navy);
 
-  --border-structural: #191919;
+  --border-structural: #24466D;
   /* Meaningful control boundaries need 3:1 against the neutral surface ladder. */
-  --border-control: #666666;
+  --border-control: #8A9FBD;
+
+  /* UI palette is independent of the terminal's literal inputs. */
+  --fitted-navy: #0B213E;
+  --fitted-main: #0074FF;
+  --fitted-stroke: #0064E1;
+  --fitted-sky: #00B3FF;
+  --fitted-dodger: #2699FF;
+  --fitted-orchid: #C142C4;
+  --fitted-whitesmoke: #F5F5F5;
 
   /* ── Text ──────────────────────────────────────────────────────── */
   --text-primary: #E8E8E8;
@@ -74,45 +83,57 @@
   --space-7: 48px;
 
   /* ── Radius ────────────────────────────────────────────────────── */
-  --radius-root:  8px;                            /* the one knob */
-  --radius-shell: calc(var(--radius-root) * 1.5); /* 12px — outermost card only (#183) */
-  --radius-lg:    var(--radius-root);             /*  8px — panels, modals, cards */
-  --radius-md:    calc(var(--radius-root) - 2px); /*  6px — buttons, inputs, tabs, selects */
-  --radius-sm:    calc(var(--radius-root) - 4px); /*  4px — badges, chips, tags (WAS 2px) */
+  --radius-root:  12px;
+  --radius-shell: 12px;
+  --radius-lg:    var(--radius-root);             /* panels, modals, cards */
+  --radius-md:    calc(var(--radius-root) - 2px); /* controls and inner cards */
+  --radius-sm:    calc(var(--radius-root) - 4px); /* badges, chips, tags */
   --radius-none:  0px;                            /* flush-edge cases */
   --radius-full:  999px;                          /* pills */
 
   /* ── Motion ────────────────────────────────────────────────────── */
-  --transition-fast: 120ms ease-out;
+  --motion-ui: 170ms cubic-bezier(.2,.7,.2,1);
+  --transition-fast: var(--motion-ui);
 
   /* UI roles alias the literal palette; terminal readers keep their hex inputs. */
-  --canvas: var(--bg-void);
+  --canvas: var(--fitted-navy);
   --chrome: var(--bg-chrome);
   --toolbar: var(--bg-chrome);
   --toolbar-control: var(--bg-raised);
   --surface: var(--bg-panel);
   --surface-raised: var(--bg-raised);
   --surface-overlay: var(--bg-elevated);
-  --text-muted: var(--text-secondary);
+  --text-muted: #A9B8CC;
   --border: var(--border-structural);
-  --input: var(--bg-void);
-  --focus: var(--accent-cyan);
-  --accent: var(--accent-cyan);
+  --input: var(--fitted-navy);
+  --focus: var(--fitted-sky);
+  --accent: var(--fitted-sky);
+  --on-accent: var(--fitted-navy);
+  --accent-tint: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  --accent-shape: var(--fitted-main);
+  --orchid-shape: var(--fitted-orchid);
+  --danger-tint: color-mix(in srgb, var(--status-error) 8%, var(--surface));
+  --state-queued: #A9B8CC;
+  --state-canceled: #A0AAB8;
+  --track: var(--chrome);
+  --track-active: var(--surface-raised);
+  --depth-1: var(--elev-1), var(--edge-lip);
+  --depth-2: var(--elev-2), var(--edge-lip);
 
   /* Shared geometry for primitives, title bar and sidebar. */
-  --control-radius: 8px;
+  --control-radius: 10px;
   --control-height: 32px;
   --control-height-sm: 28px;
   --toolbar-height: 44px;
   --sidebar-inset: 8px;
 
-  --color-bg: var(--bg-void);
+  --color-bg: var(--canvas);
   --color-surface: var(--bg-surface);
   --color-surface-hover: var(--bg-elevated);
   --color-border: var(--border-structural);
   --color-text: var(--text-primary);
-  --color-text-muted: var(--text-secondary);
-  --color-accent: var(--accent-cyan);
+  --color-text-muted: var(--text-muted);
+  --color-accent: var(--accent);
   --color-success: var(--status-success);
   --color-warning: var(--status-warning);
   --color-error: var(--status-error);

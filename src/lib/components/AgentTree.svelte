@@ -99,7 +99,7 @@
     margin: 0;
     padding: 12px;
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     text-align: center;
   }
 </style>

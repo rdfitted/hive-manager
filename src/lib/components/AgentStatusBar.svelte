@@ -27,7 +27,7 @@
     if ($heartbeatStore.stalledAgents.has(agentId)) return 'var(--status-error)';
     if (agentStatus === 'Running') return 'var(--status-success)';
     if (agentStatus === 'Starting') return 'var(--status-warning)';
-    if (agentStatus === 'Completed') return 'var(--text-secondary)';
+    if (agentStatus === 'Completed') return 'var(--text-muted)';
     return 'var(--status-warning)';
   }
 
@@ -94,8 +94,8 @@
     align-items: center;
     gap: 5px;
     padding: 4px 10px;
-    background: var(--bg-void);
-    box-shadow: inset 0 0 0 1px var(--border-structural);
+    background: var(--canvas);
+    box-shadow: var(--depth-1);
     border-radius: var(--radius-sm);
     font-size: 11px;
     cursor: default;
@@ -119,12 +119,12 @@
   }
 
   .agent-status {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 10px;
   }
 
   .agent-time {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 10px;
   }
 </style>

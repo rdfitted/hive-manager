@@ -3,7 +3,8 @@ export type MarkdownBlock =
   | { type: 'paragraph'; text: string }
   | { type: 'quote'; text: string }
   | { type: 'code'; language: string; text: string }
-  | { type: 'list'; ordered: boolean; items: string[] }
+  | { type: 'list'; ordered: boolean; items: string[]; start?: number; children?: Record<number, MarkdownBlock[]> }
+  | { type: 'table'; headers: string[]; align: ('left' | 'center' | 'right' | null)[]; rows: string[][] }
   | { type: 'rule' };
 
 export type MarkdownInline =
@@ -23,16 +24,55 @@ function safeLink(value: string): string | null {
   }
 }
 
-/** Parse a deliberately small inline subset without ever emitting HTML. */
+/** Parse a deliberately small inline subset without ever emitting HTML, in O(n) work. */
 export function parseInlineMarkdown(source: string): MarkdownInline[] {
   const tokens: MarkdownInline[] = [];
-  const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_([^_\n]+)_|\[([^\]\n]+)\]\(([^)\n]+)\)|\[\[([^\]\n]+)\]\])/g;
+  // Cache each candidate's exclusive end in one reverse pass. Failed openers
+  // must not search the same suffix again (notably '[' and unfinished links).
+  // Entries for '(' cache URL ends for the '[' candidate to its left.
+  const ends = new Uint32Array(source.length);
+  let newline = source.length;
+  let backtick = source.length;
+  let star = source.length;
+  let secondStar = source.length;
+  let underscore = source.length;
+  let secondUnderscore = source.length;
+  let bracket = source.length;
+  let parenthesis = source.length;
+  for (let index = source.length - 1; index >= 0; index--) {
+    const character = source.charAt(index);
+    if (character === '\n') newline = index;
+    else if (character === '`') {
+      if (backtick > index + 1 && backtick < newline) ends[index] = backtick + 1;
+      backtick = index;
+    } else if (character === '*' || character === '_') {
+      const next = character === '*' ? star : underscore;
+      const second = character === '*' ? secondStar : secondUnderscore;
+      if (next === index + 1 && second > index + 2 && second < newline && source.charAt(second + 1) === character) {
+        ends[index] = second + 2;
+      } else if (next > index + 1 && next < newline) ends[index] = next + 1;
+      if (character === '*') { secondStar = star; star = index; }
+      else { secondUnderscore = underscore; underscore = index; }
+    } else if (character === ']') bracket = index;
+    else if (character === ')') parenthesis = index;
+    else if (character === '(') {
+      if (parenthesis > index + 1 && parenthesis < newline) ends[index] = parenthesis + 1;
+    } else if (character === '[' && bracket < newline) {
+      // Links precede wiki links, matching the existing inline subset.
+      if (bracket > index + 1 && source.charAt(bracket + 1) === '(' && ends[bracket + 1]) {
+        ends[index] = ends[bracket + 1];
+      } else if (source.charAt(index + 1) === '[' && bracket > index + 2 && source.charAt(bracket + 1) === ']') {
+        ends[index] = bracket + 2;
+      }
+    }
+  }
   let cursor = 0;
 
-  for (const match of source.matchAll(pattern)) {
-    const start = match.index ?? 0;
+  for (let start = 0; start < source.length; start++) {
+    const end = ends[start];
+    if (!end || source.charAt(start) === '(') continue;
     if (start > cursor) tokens.push({ type: 'text', text: source.slice(cursor, start) });
-    const raw = match[0];
+    const raw = source.slice(start, end);
 
     if (raw.startsWith('`')) {
       tokens.push({ type: 'code', text: raw.slice(1, -1) });
@@ -51,26 +91,65 @@ export function parseInlineMarkdown(source: string): MarkdownInline[] {
     } else {
       tokens.push({ type: 'emphasis', text: raw.slice(1, -1) });
     }
-    cursor = start + raw.length;
+    cursor = end;
+    start = end - 1;
   }
 
   if (cursor < source.length) tokens.push({ type: 'text', text: source.slice(cursor) });
   return tokens.length > 0 ? tokens : [{ type: 'text', text: source }];
 }
 
-function isBlockStart(line: string): boolean {
+function tableCells(line: string): string[] {
+  const row = line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '');
+  const cells: string[] = [];
+  let cell = '';
+  let code = false;
+  for (let index = 0; index < row.length; index++) {
+    const character = row[index];
+    if (character === '\\' && row[index + 1] === '|') { cell += '|'; index++; }
+    else if (character === '`') { code = !code; cell += character; }
+    else if (character === '|' && !code) { cells.push(cell.trim()); cell = ''; }
+    else cell += character;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function isTableStart(line: string, next = ''): boolean {
+  if (!line.includes('|')) return false;
+  const headers = tableCells(line);
+  const separator = tableCells(next);
+  return headers.length === separator.length && separator.every((cell) => /^:?-+:?$/.test(cell));
+}
+
+function listItem(line: string) {
+  const match = line.match(/^(\s*)(?:([-*+])|(\d+)[.)])\s+(.*)$/);
+  if (!match) return null;
+  return {
+    indent: match[1].replace(/\t/g, '    ').length,
+    contentIndent: match[0].slice(0, match[0].length - match[4].length).replace(/\t/g, '    ').length,
+    ordered: match[3] !== undefined,
+    number: match[3] ? Number(match[3]) : 1,
+    text: match[4],
+  };
+}
+
+function isBlockStart(line: string, next = ''): boolean {
   return (
     /^#{1,6}\s+/.test(line) ||
     /^```/.test(line) ||
     /^>\s?/.test(line) ||
     /^\s*[-*+]\s+/.test(line) ||
     /^\s*\d+[.)]\s+/.test(line) ||
-    /^\s*(?:---+|___+|\*\*\*+)\s*$/.test(line)
+    /^\s*(?:---+|___+|\*\*\*+)\s*$/.test(line) ||
+    isTableStart(line, next)
   );
 }
 
 /** A small, safe block-level markdown parser. Svelte escapes every text field. */
-export function parseMarkdown(source: string): MarkdownBlock[] {
+export function parseMarkdown(source: string, depth = 0): MarkdownBlock[] {
+  // Bound recursion for deeply indented, untrusted output; retain it as readable text.
+  if (depth >= 32) return [{ type: 'paragraph', text: source }];
   const lines = source.replace(/\r\n?/g, '\n').split('\n');
   const blocks: MarkdownBlock[] = [];
   let index = 0;
@@ -119,25 +198,56 @@ export function parseMarkdown(source: string): MarkdownBlock[] {
       continue;
     }
 
-    const unordered = line.match(/^\s*[-*+]\s+(.+)/);
-    const ordered = line.match(/^\s*\d+[.)]\s+(.+)/);
-    if (unordered || ordered) {
-      const isOrdered = Boolean(ordered);
-      const pattern = isOrdered ? /^\s*\d+[.)]\s+(.+)/ : /^\s*[-*+]\s+(.+)/;
-      const items: string[] = [];
-      while (index < lines.length) {
-        const item = lines[index].match(pattern);
-        if (!item) break;
-        items.push(item[1]);
-        index += 1;
+    if (isTableStart(line, lines[index + 1])) {
+      const headers = tableCells(line);
+      const align = tableCells(lines[index + 1]).map((cell): 'left' | 'center' | 'right' | null =>
+        cell.startsWith(':') && cell.endsWith(':') ? 'center' : cell.endsWith(':') ? 'right' : cell.startsWith(':') ? 'left' : null);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && lines[index].trim() && !isBlockStart(lines[index], lines[index + 1])) {
+        const cells = tableCells(lines[index++]);
+        rows.push(headers.map((_, column) => cells[column] ?? ''));
       }
-      blocks.push({ type: 'list', ordered: isOrdered, items });
+      blocks.push({ type: 'table', headers, align, rows });
+      continue;
+    }
+
+    const first = listItem(line);
+    if (first) {
+      const items: string[] = [];
+      const children: Record<number, MarkdownBlock[]> = {};
+      while (index < lines.length) {
+        const item = listItem(lines[index]);
+        if (!item || item.indent !== first.indent || item.ordered !== first.ordered) break;
+        items.push(item.text);
+        index += 1;
+        const continuation: string[] = [];
+        while (index < lines.length) {
+          if (!lines[index].trim()) {
+            let next = index + 1;
+            while (next < lines.length && !lines[next].trim()) next++;
+            const sibling = next < lines.length ? listItem(lines[next]) : null;
+            if (sibling && sibling.indent === first.indent && sibling.ordered === first.ordered) { index = next; break; }
+            if (next >= lines.length || (lines[next].match(/^\s*/)?.[0].replace(/\t/g, '    ').length ?? 0) <= first.indent) break;
+          } else {
+            const indent = lines[index].match(/^\s*/)?.[0].replace(/\t/g, '    ').length ?? 0;
+            if (indent <= first.indent) break;
+          }
+          const expanded = lines[index++].replace(/^\t+/, (tabs) => '    '.repeat(tabs.length));
+          continuation.push(expanded.slice(Math.min(item.contentIndent, expanded.match(/^ */)?.[0].length ?? 0)));
+        }
+        if (continuation.some((entry) => entry.trim())) children[items.length - 1] = parseMarkdown(continuation.join('\n'), depth + 1);
+      }
+      blocks.push({ type: 'list', ordered: first.ordered, items,
+        ...(first.ordered && first.number !== 1 ? { start: first.number } : {}),
+        ...(Object.keys(children).length ? { children } : {}),
+      });
       continue;
     }
 
     const paragraph = [line.trim()];
     index += 1;
-    while (index < lines.length && lines[index].trim() && !isBlockStart(lines[index])) {
+    while (index < lines.length && lines[index].trim() && !isBlockStart(lines[index], lines[index + 1])) {
       paragraph.push(lines[index].trim());
       index += 1;
     }

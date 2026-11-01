@@ -92,7 +92,7 @@
         display: flex;
         flex-direction: column;
         gap: 20px;
-        background: var(--bg-chrome);
+        background: var(--chrome);
         border-radius: var(--radius-shell);
         box-shadow: var(--edge-lip);
     }
@@ -114,13 +114,13 @@
 
     .label {
         font-size: 11px;
-        color: var(--accent-cyan);
+        color: var(--accent);
         font-weight: 700;
     }
 
     .selected-badge {
         font-size: 13px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
     }
 
     .candidate-name {
@@ -130,7 +130,7 @@
     .section h4 {
         margin: 0 0 8px 0;
         font-size: 12px;
-        color: var(--text-disabled);
+        color: var(--text-muted);
     }
 
     .rationale {
@@ -143,7 +143,7 @@
     .tradeoffs {
         margin: 0;
         padding-left: 20px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         font-size: 13px;
         display: flex;
         flex-direction: column;
@@ -151,14 +151,14 @@
     }
 
     .hybrid {
-        background: var(--bg-sunken);
-        padding: 12px;
-        border: 1px solid var(--status-warning);
+        background: color-mix(in srgb, var(--status-warning) 8%, var(--surface));
+        padding: 16px;
+        border-radius: var(--radius-md);
     }
 
     .plan-content {
         font-size: 13px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         line-height: 1.5;
         white-space: pre-wrap;
     }
@@ -166,11 +166,11 @@
     .recommendation {
         margin-top: 12px;
         /* Semantic recommendation treatment intentionally remains accent-filled. */
-        background: var(--accent-cyan);
-        color: var(--bg-void);
+        background: var(--accent);
+        color: var(--on-accent);
         padding: 16px;
-        border-radius: var(--radius-sm);
-        box-shadow: 0 4px 12px color-mix(in srgb, var(--accent-cyan) 30%, transparent);
+        border-radius: var(--radius-md);
+        box-shadow: var(--depth-1);
     }
 
     .rec-label {
@@ -191,7 +191,7 @@
         align-items: center;
         justify-content: center;
         padding: 60px 20px;
-        color: var(--text-disabled);
+        color: var(--text-muted);
         text-align: center;
         gap: 16px;
         max-width: 400px;
@@ -202,7 +202,7 @@
         margin: 0 auto;
         max-width: 480px;
         padding: 14px 16px;
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-md);
         /* Semantic error treatment intentionally remains state-tinted. */
         background: color-mix(in srgb, var(--status-error) 12%, transparent);
         box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 30%, transparent);

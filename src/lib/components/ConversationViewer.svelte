@@ -145,10 +145,10 @@
   }
 
   function getSenderColor(from: string): string {
-    if (from === 'queen') return 'var(--accent-cyan)';
+    if (from === 'queen') return 'var(--accent)';
     if (from === 'system' || from === 'SYSTEM') return 'var(--accent-chrome)';
-    if (from === 'operator') return 'var(--accent-amber)';
-    if (from.startsWith('worker')) return 'var(--accent-amber)';
+    if (from === 'operator') return 'var(--accent)';
+    if (from.startsWith('worker')) return 'var(--accent)';
     return 'var(--text-primary)';
   }
 
@@ -285,15 +285,16 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    background: var(--bg-void);
+    background: var(--canvas);
   }
 
   .agent-tabs {
     display: flex;
     flex-wrap: wrap;
-    gap: 0;
-    box-shadow: var(--edge-seam);
-    padding: 0 4px;
+    gap: var(--space-1);
+    background: var(--track);
+    border-radius: var(--radius-lg);
+    padding: var(--space-1);
     overflow-x: auto;
   }
 
@@ -318,7 +319,7 @@
   }
 
   .empty {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     text-align: center;
     padding: 24px;
     font-style: italic;
@@ -342,15 +343,15 @@
     display: flex;
     gap: 6px;
     padding: 3px 0;
-    box-shadow: var(--edge-seam);
+    border-radius: var(--radius-md);
   }
 
-  .message:last-child {
-    box-shadow: none;
+  .message:nth-child(even) {
+    background: var(--surface);
   }
 
   .msg-time {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 11px;
     flex-shrink: 0;
   }
@@ -376,7 +377,7 @@
     padding: 8px 12px;
     box-shadow: var(--edge-seam-top);
     /* Composer dock remains a distinct full-width input surface. */
-    background: var(--bg-surface);
+    background: var(--surface);
   }
 
   .error {
@@ -385,7 +386,7 @@
     align-items: center;
     padding: 8px 12px;
     /* Full-width semantic error strip intentionally remains state-adjacent chrome. */
-    background: var(--bg-surface);
+    background: var(--surface);
     color: var(--status-error);
     font-size: 12px;
     box-shadow: inset 0 0 0 1px var(--status-error);

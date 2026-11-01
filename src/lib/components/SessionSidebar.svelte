@@ -13,6 +13,7 @@
   import { shortcutLabel } from '$lib/platform';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, tick } from 'svelte';
+  import { COLORS } from './launch/launchForm';
   import AgentTree from './AgentTree.svelte';
   import QueenControls from './QueenControls.svelte';
   import ResizeHandle from './ResizeHandle.svelte';
@@ -284,17 +285,6 @@
     }
   }
 
-  const COLORS = [
-    { name: 'Blue', value: '#7aa2f7' },
-    { name: 'Purple', value: '#bb9af7' },
-    { name: 'Green', value: '#9ece6a' },
-    { name: 'Yellow', value: '#e0af68' },
-    { name: 'Cyan', value: '#7dcfff' },
-    { name: 'Red', value: '#f7768e' },
-    { name: 'Orange', value: '#ff9e64' },
-    { name: 'Pink', value: '#f7b1d1' },
-  ];
-
   let editingSessionId = $state<string | null>(null);
   let editName = $state('');
   let editColor = $state<string | null | undefined>(undefined);
@@ -450,7 +440,7 @@
                             class="color-toggle lattice-btn lattice-btn--ghost lattice-btn--icon"
                             onclick={() => showColorPicker = !showColorPicker}
                             title="Choose Color"
-                            style="width: 18px; height: 18px; flex-basis: 18px; border-radius: 50%; background: {editColor || 'var(--bg-void)'};"
+                            style="width: 18px; height: 18px; flex-basis: 18px; border-radius: 50%; background: {editColor || 'var(--canvas)'};"
                             type="button"
                           >
                           </button>
@@ -459,7 +449,7 @@
                               {#each COLORS as color}
                                 <button
                                   class="color-option lattice-btn lattice-btn--ghost lattice-btn--icon"
-                                  style="width: 16px; height: 16px; flex-basis: 16px; border-radius: 50%; padding: 0; border: 1px solid color-mix(in srgb, var(--bg-void) 20%, transparent); background: {color.value};"
+                                  style="width: 16px; height: 16px; flex-basis: 16px; border-radius: 50%; padding: 0; border: 1px solid color-mix(in srgb, var(--canvas) 20%, transparent); background: {color.value};"
                                   aria-pressed={editColor === color.value}
                                   onclick={() => { editColor = color.value; showColorPicker = false; }}
                                   title={color.name}
@@ -470,7 +460,7 @@
                               <button
                                 class="color-option clear lattice-btn lattice-btn--ghost lattice-btn--icon"
                                 aria-pressed={editColor === null}
-                                style="width: 16px; height: 16px; flex-basis: 16px; border-radius: 50%; padding: 0; font-size: 12px; color: var(--text-secondary); background: var(--bg-void);"
+                                style="width: 16px; height: 16px; flex-basis: 16px; border-radius: 50%; padding: 0; font-size: 12px; color: var(--text-muted); background: var(--canvas);"
                                 onclick={() => { editColor = null; showColorPicker = false; }}
                                 title="Clear Color"
                                 aria-label="Clear Color"
@@ -684,7 +674,7 @@
     overflow: hidden;
     flex: 1;
     background: var(--chrome);
-    border-right: 1px solid var(--border);
+    box-shadow: var(--depth-1);
   }
 
   .sidebar-drawer.collapsed {
@@ -700,9 +690,9 @@
     min-width: 0;
   }
 
-  .sidebar-header { display: flex; align-items: flex-start; gap: 4px; padding: var(--sidebar-inset); border-bottom: 1px solid var(--border); }
+  .sidebar-header { display: flex; align-items: flex-start; gap: 4px; padding: var(--sidebar-inset); }
   .destination { display: flex; gap: 4px; padding-inline: 5px; font-size: 11px; }
-  .destination[aria-current="page"] { background: var(--toolbar-control); color: var(--text-primary); }
+  .destination[aria-current="page"] { background: var(--accent-tint); color: var(--accent); }
   .sidebar-toggle { margin-left: auto; flex-shrink: 0; }
   .project-heading { margin: 12px 8px 4px; font-size: 12px; font-weight: 600; color: var(--text-muted); overflow-wrap: anywhere; }
   .session-color { display: inline-block; width: 7px; height: 7px; border: 1px solid var(--border); border-radius: 50%; flex-shrink: 0; }
@@ -727,13 +717,13 @@
 
   .chevron {
     font-size: 8px;
-    color: var(--text-secondary);
-    transition: transform var(--motion-duration-standard) var(--motion-ease-standard);
+    color: var(--text-muted);
+    transition: transform var(--motion-ui);
   }
 
   .empty-state {
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     padding: 8px 4px;
     margin: 0;
   }
@@ -805,7 +795,7 @@
     grid-template-columns: repeat(4, 1fr);
     gap: 4px;
     z-index: 20;
-    box-shadow: var(--elev-3), var(--edge-lip);
+    box-shadow: var(--depth-2);
   }
 
   .session-row {
@@ -821,7 +811,7 @@
 
   .session-meta {
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     margin-top: 2px;
     display: flex;
     align-items: center;
@@ -830,29 +820,29 @@
 
   .type-tag {
     padding: 1px 4px;
-    border-radius: var(--radius-sm);
-    font-size: 9px;
+    border-radius: var(--radius-full);
+    font-size: var(--text-micro);
     font-weight: 600;
-    background: var(--bg-void);
-    color: var(--text-secondary);
-    box-shadow: inset 0 0 0 1px var(--border-structural);
+    background: var(--canvas);
+    color: var(--text-muted);
   }
 
   .type-tag.solo {
-    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
-    color: var(--accent-cyan);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 30%, transparent);
+    background: var(--accent-tint);
+    color: var(--accent);
   }
 
   .queen-controls-section {
     margin-top: 8px;
     padding-top: 8px;
-    box-shadow: var(--edge-seam-top);
+    background: var(--surface);
+    border-radius: var(--radius-lg);
   }
 
   .sidebar-footer {
     padding: 12px;
-    box-shadow: var(--edge-seam-top);
+    background: var(--surface);
+    border-radius: var(--radius-lg);
   }
 
   .sidebar-footer .icon {
@@ -867,12 +857,12 @@
     gap: 8px;
     padding: 8px 10px;
     border-radius: var(--radius-md);
-    transition: background-color var(--motion-duration-fast) var(--motion-ease-standard);
+    transition: background-color var(--motion-ui);
   }
 
   .session-item.recent:hover {
     /* Recent-session hover is a row state, not a structural panel. */
-    background: var(--bg-elevated);
+    background: var(--surface-overlay);
   }
 
   .session-info {
@@ -897,7 +887,7 @@
   .confirm-dialog p {
     margin: 0 0 16px 0;
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     line-height: 1.5;
   }
 
@@ -908,7 +898,7 @@
   }
 
   @media (forced-colors: active) {
-    .sidebar-drawer, .sidebar-header { border-color: CanvasText; }
+    .sidebar-drawer { border-right: 1px solid CanvasText; box-shadow: none; }
     .session-color { background: CanvasText !important; border-color: CanvasText; }
     .destination[aria-current="page"] { outline: 1px solid Highlight; }
   }

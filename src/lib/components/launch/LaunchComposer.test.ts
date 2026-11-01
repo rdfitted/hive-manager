@@ -22,8 +22,8 @@ function composer(mode = 'hive', overrides = {}) {
 describe('LaunchComposer controls', () => {
   it('F6: declares the editor focus-visible accent outline before its forced-colors override (source check only)', () => {
     const [normal, forced] = source.split('@media (forced-colors: active)');
-    expect(normal, 'normal-color editor focus outline declaration').toMatch(/textarea:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent-cyan\);[^}]*outline-offset:\s*2px;/);
-    expect(normal).toContain('.composer-input:focus-within { border-color: var(--accent-cyan); }');
+    expect(normal, 'normal-color editor focus outline declaration').toMatch(/textarea:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\);[^}]*outline-offset:\s*2px;/);
+    expect(normal).toContain('.composer-input:focus-within { border-color: var(--accent); }');
     expect(forced).toContain('textarea:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }');
   });
   it('keeps every configuration chip and action inside the card after the editor', async () => {

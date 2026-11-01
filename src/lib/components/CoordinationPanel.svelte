@@ -156,7 +156,7 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    background: var(--bg-void);
+    background: var(--canvas);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
@@ -167,7 +167,7 @@
     align-items: center;
     padding: 12px 16px;
     /* The fixed log header remains visually distinct from scrolling content. */
-    background: var(--bg-surface);
+    background: var(--surface);
     box-shadow: var(--edge-seam);
   }
 
@@ -198,7 +198,7 @@
   }
 
   .empty {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     text-align: center;
     padding: 24px;
     font-style: italic;
@@ -223,15 +223,15 @@
     flex-wrap: wrap;
     gap: 4px;
     padding: 4px 0;
-    box-shadow: var(--edge-seam);
+    border-radius: var(--radius-md);
   }
 
-  .message:last-child {
-    box-shadow: none;
+  .message:nth-child(even) {
+    background: var(--surface);
   }
 
   .timestamp {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 11px;
   }
 
@@ -244,16 +244,16 @@
   }
 
   .arrow {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     margin: 0 2px;
   }
 
   .recipient {
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .colon {
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .content {
@@ -263,11 +263,11 @@
   }
 
   .text-purple-400 {
-    color: var(--accent-amber);
+    color: var(--accent);
   }
 
   .text-cyan-400 {
-    color: var(--accent-cyan);
+    color: var(--accent);
   }
 
   .text-yellow-400 {
@@ -275,7 +275,7 @@
   }
 
   .text-gray-400 {
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .text-gray-300 {
@@ -288,7 +288,7 @@
     align-items: center;
     padding: 8px 12px;
     /* Full-width semantic error strip is not a compact status badge. */
-    background: var(--bg-elevated);
+    background: var(--surface-overlay);
     color: var(--status-error);
     font-size: 12px;
   }

@@ -37,14 +37,14 @@
     const sk = serdeEnumVariantName(status);
     const isQaWorkerRole = typeof role === 'object' && role !== null && 'QaWorker' in role;
     if (rk === 'Evaluator' || isQaWorkerRole) {
-      if (sk === 'Running') return 'var(--accent-cyan)';
+      if (sk === 'Running') return 'var(--accent)';
     }
 
-    if (sk === 'Running') return 'var(--accent-cyan)';
+    if (sk === 'Running') return 'var(--accent)';
     if (typeof status === 'object' && status !== null && 'WaitingForInput' in status)
       return 'var(--status-warning)';
     if (sk === 'Completed') return 'var(--status-success)';
-    if (sk === 'Starting') return 'var(--text-secondary)';
+    if (sk === 'Starting') return 'var(--text-muted)';
     if (typeof status === 'object' && status !== null && 'Error' in status) return 'var(--status-error)';
     return 'var(--text-primary)';
   }
@@ -186,20 +186,21 @@
     padding: 6px 8px;
     cursor: pointer;
     border-radius: var(--radius-md);
-    transition: background-color var(--motion-duration-fast) ease;
+    transition: background-color var(--motion-ui);
   }
 
   .tree-row:hover {
-    background: var(--bg-void);
+    background: var(--surface-raised);
   }
 
   .tree-row.selected {
-    background: color-mix(in srgb, var(--accent-cyan) 15%, transparent);
+    background: var(--accent-tint);
+    color: var(--accent);
   }
 
   .tree-row:focus-visible {
-    outline: none;
-    box-shadow: inset 0 0 0 1px var(--accent-cyan);
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
   }
 
   .indent {
@@ -217,7 +218,7 @@
   .dependencies { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 5px; margin-top: 3px; font-size: 11px; }
   .dependency-label { color: var(--text-muted); }
   .dependency-ref, .dependency-text { max-width: 100%; overflow-wrap: anywhere; }
-  .dependency-ref { font: inherit; color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--control-radius); padding: 1px 5px; background: var(--surface); cursor: pointer; text-align: left; }
+  .dependency-ref { font: inherit; color: var(--text-primary); border: 1px solid var(--border-control); border-radius: var(--control-radius); padding: 1px 5px; background: var(--surface); cursor: pointer; text-align: left; }
   .dependency-ref:hover { text-decoration: underline; }
   .dependency-ref:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 
@@ -228,6 +229,8 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+
+  .tree-row.selected .label { color: var(--accent); }
 
   .attention-badge { font-size: 10px; padding: 2px 5px; min-height: 22px; flex-shrink: 0; }
 

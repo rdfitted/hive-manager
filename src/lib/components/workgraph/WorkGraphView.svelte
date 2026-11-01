@@ -35,12 +35,12 @@
   // Lanes are categorical, so token colours are assigned by first-seen order
   // and kept stable for the lifetime of the payload.
   const LANE_COLOURS = [
-    'var(--accent-cyan)',
+    'var(--accent)',
     'var(--accent-chrome)',
     'var(--status-warning)',
     'var(--status-error)',
     'var(--status-success)',
-    'var(--text-secondary)'
+    'var(--text-muted)'
   ];
 
   const OMISSION_LABELS: Record<WorkGraphOmissionReason, string> = {
@@ -671,7 +671,7 @@
                 y={node.y}
                 width={NODE_W}
                 height={NODE_H}
-                rx={node.kind === 'context' ? NODE_H / 2 : 5}
+                rx={node.kind === 'context' ? NODE_H / 2 : 10}
                 class={`wg-box wg-box--${node.status}`}
                 class:wg-box--inferred={node.status === 'completed' && node.completionProvenance === 'inferred'}
                 style={`--lane: ${laneColour(node.laneK)}`}
@@ -779,6 +779,9 @@
     max-width: 100%;
     margin-left: auto;
     gap: 4px;
+    padding: var(--space-1);
+    background: var(--track);
+    border-radius: var(--radius-lg);
     overflow-x: auto;
   }
 
@@ -791,7 +794,7 @@
   }
 
   .wg-source-label {
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .wg-omissions {
@@ -800,25 +803,24 @@
     margin: var(--space-2);
     padding: var(--space-3);
     overflow: auto;
-    border: 1px solid var(--status-warning);
+    border: 0;
     border-radius: var(--radius-md);
-    background: color-mix(in srgb, var(--status-warning) 8%, var(--bg-panel));
-    box-shadow: var(--edge-seam);
+    background: color-mix(in srgb, var(--status-warning) 8%, var(--surface));
+    box-shadow: var(--depth-1);
     color: var(--text-primary);
   }
 
   .wg-omissions:focus-visible {
-    outline: 2px solid var(--accent-cyan);
+    outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
 
   .wg-omissions--informational {
-    border-color: var(--border-structural);
-    background: color-mix(in srgb, var(--accent-cyan) 5%, var(--bg-panel));
+    background: color-mix(in srgb, var(--accent) 5%, var(--surface));
   }
 
   .wg-omission--expected .wg-omission-header strong {
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .wg-omissions-header,
@@ -837,14 +839,14 @@
   .wg-omissions-total,
   .wg-omission-header span,
   .wg-omission-examples > span {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font: var(--text-micro) var(--font-body);
   }
 
   .wg-omissions-intro,
   .wg-omission p {
     margin: var(--space-1) 0 0;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font: var(--text-small) var(--font-body);
   }
 
@@ -859,7 +861,9 @@
 
   .wg-omission {
     padding-top: var(--space-2);
-    box-shadow: var(--edge-seam-top);
+    background: var(--surface);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
   }
 
   .wg-omission-header strong {
@@ -884,7 +888,6 @@
   .wg-progress {
     flex: 0 0 auto;
     padding: var(--space-2);
-    box-shadow: var(--edge-seam);
   }
 
   .wg-canvas {
@@ -907,7 +910,7 @@
     max-height: calc(100% - 16px);
     overflow: auto;
     border-radius: var(--radius-lg);
-    box-shadow: var(--elev-3);
+    box-shadow: var(--depth-2);
   }
 
   .wg-pad {
@@ -934,7 +937,7 @@
 
   .wg-msg {
     padding: 28px 16px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .wg-msg-title {
@@ -963,7 +966,7 @@
   }
 
   .wg-edge--codegraph {
-    stroke: var(--accent-cyan);
+    stroke: var(--accent);
     stroke-dasharray: 3 3;
   }
 
@@ -996,11 +999,11 @@
   }
 
   .wg-box--ready {
-    fill: color-mix(in srgb, var(--accent-cyan) 18%, transparent);
+    fill: color-mix(in srgb, var(--accent) 18%, transparent);
   }
 
   .wg-box--running {
-    fill: color-mix(in srgb, var(--accent-cyan) 45%, transparent);
+    fill: color-mix(in srgb, var(--accent) 45%, transparent);
   }
 
   .wg-box--completed {
@@ -1038,7 +1041,7 @@
 
   .wg-node:focus-visible .wg-box,
   .wg-node.pinned .wg-box {
-    stroke: var(--accent-cyan);
+    stroke: var(--accent);
     stroke-width: 3;
   }
 
@@ -1061,7 +1064,7 @@
   }
 
   .wg-node-progress {
-    fill: var(--text-secondary);
+    fill: var(--text-muted);
     font-family: var(--font-body);
     font-size: 8px;
     pointer-events: none;
@@ -1098,8 +1101,7 @@
     flex-wrap: wrap;
     gap: 4px 10px;
     padding: 6px 10px;
-    box-shadow: var(--edge-seam);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 10px;
   }
 
@@ -1127,11 +1129,11 @@
   }
 
   .sw--running {
-    background: color-mix(in srgb, var(--accent-cyan) 45%, transparent);
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
 
   .sw--ready {
-    background: color-mix(in srgb, var(--accent-cyan) 18%, transparent);
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
   }
 
   .sw--blocked {

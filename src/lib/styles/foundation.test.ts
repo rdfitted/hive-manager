@@ -24,15 +24,19 @@ describe('visual foundation contract', () => {
 
   it('exposes additive UI roles and compact geometry without reversing palette aliases', () => {
     for (const [role, target] of Object.entries({
-      canvas: 'bg-void', chrome: 'bg-chrome', toolbar: 'bg-chrome', 'toolbar-control': 'bg-raised',
+      canvas: 'fitted-navy', chrome: 'bg-chrome', toolbar: 'bg-chrome', 'toolbar-control': 'bg-raised',
       surface: 'bg-panel', 'surface-raised': 'bg-raised', 'surface-overlay': 'bg-elevated',
-      'text-muted': 'text-secondary', border: 'border-structural', input: 'bg-void',
-      focus: 'accent-cyan', accent: 'accent-cyan',
+      border: 'border-structural', input: 'fitted-navy',
+      focus: 'fitted-sky', accent: 'fitted-sky',
+      'on-accent': 'fitted-navy', 'accent-shape': 'fitted-main', 'orchid-shape': 'fitted-orchid',
+      track: 'chrome', 'track-active': 'surface-raised',
     })) expect(tokens[`--${role}`]).toBe(`var(--${target})`);
     for (const [name, value] of Object.entries({
-      'control-radius': '8px', 'control-height': '32px', 'control-height-sm': '28px',
+      'control-radius': '10px', 'radius-root': '12px', 'radius-shell': '12px', 'control-height': '32px', 'control-height-sm': '28px',
       'toolbar-height': '44px', 'sidebar-inset': '8px',
     })) expect(tokens[`--${name}`]).toBe(value);
+    expect(tokens['--text-muted']).toBe('#A9B8CC');
+    expect(tokens['--motion-ui']).toBe('170ms cubic-bezier(.2,.7,.2,1)');
     expect(tokens['--accent-cyan']).toBe('#B5DAEC');
   });
 

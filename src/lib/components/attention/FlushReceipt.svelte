@@ -46,7 +46,7 @@
   .flush-receipt { margin-top: var(--space-2); font-size: var(--text-small); }
   .receipt-line { display: flex; align-items: center; gap: var(--space-2); }
   p { margin: 0; }
-  summary { cursor: pointer; color: var(--text-secondary); }
+  summary { cursor: pointer; color: var(--text-muted); }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 10rem; overflow: auto; }
   @media (forced-colors: active) { summary { color: ButtonText; } }
 </style>

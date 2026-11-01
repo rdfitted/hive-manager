@@ -143,16 +143,16 @@
 <style>
   .launch-composer { display: flex; flex-direction: column; gap: var(--space-4); }
   .task-label { color: var(--text-primary); font-size: var(--text-base); }
-  .composer-input { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; padding: var(--space-3); border: 1px solid var(--border-control); border-radius: var(--radius-shell); background: var(--bg-void); }
-  .composer-input:focus-within { border-color: var(--accent-cyan); }
+  .composer-input { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; padding: var(--space-3); border: 1px solid var(--border-control); border-radius: var(--radius-shell); background: var(--input); }
+  .composer-input:focus-within { border-color: var(--accent); }
   textarea { display: block; box-sizing: border-box; width: 100%; min-height: 12rem; resize: vertical; line-height: 1.6; padding: 0; border: 0; border-radius: 0; background: transparent; }
   textarea:focus { border: 0; outline: none; box-shadow: none; }
-  textarea:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; }
-  .composer-send { flex-shrink: 0; min-height: 32px; border: 1px solid transparent; border-radius: var(--radius-full); background: var(--text-primary); color: var(--bg-void); }
-  .composer-send:hover:enabled { background: var(--text-secondary); }
+  textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .composer-send { flex-shrink: 0; min-height: 32px; border: 1px solid transparent; border-radius: var(--control-radius); background: var(--accent); color: var(--on-accent); }
+  .composer-send:hover:enabled { background: var(--accent); }
   .launch-chips { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; min-width: 0; }
   .launch-chip { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
-  .launch-chip > span { font-size: var(--text-small); color: var(--text-secondary); }
+  .launch-chip > span { font-size: var(--text-small); color: var(--text-muted); }
   .launch-chip select { width: 100%; }
   .preset-chip, .project-chip { flex: 1 1 12rem; }
   .project-chip button { max-width: 100%; text-transform: none; }
@@ -160,7 +160,7 @@
   #launch-project-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
   .composer-actions .hint { flex: 1 1 10rem; }
-  .hint { margin: 0; color: var(--text-secondary); font-size: var(--text-small); }
+  .hint { margin: 0; color: var(--text-muted); font-size: var(--text-small); }
   .error-message { color: var(--status-error); }
   @media (forced-colors: active) {
     .composer-input { border-color: CanvasText; }

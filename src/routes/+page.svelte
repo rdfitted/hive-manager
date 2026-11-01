@@ -269,17 +269,17 @@
 
   .open-recent {
     font-size: var(--text-small);
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .cta {
     margin: 0;
     font-size: var(--text-base);
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .cta strong {
-    color: var(--accent-cyan);
+    color: var(--accent);
   }
 
   .cta.hint {
@@ -302,7 +302,7 @@
     justify-content: center;
     min-height: 100%;
     padding: var(--space-6);
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .no-agents-content {

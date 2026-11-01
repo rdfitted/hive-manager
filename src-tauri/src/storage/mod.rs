@@ -292,6 +292,9 @@ pub enum SessionTypeInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct PersistedAgentInfo {
+    /// Exact cwd argument recorded at the PTY/protocol spawn boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_cwd: Option<String>,
     #[serde(default)]
     pub transcript_spawned_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -2073,6 +2076,7 @@ mod tests {
             created_at: Utc::now(),
             last_activity_at: Some(Utc::now()),
             agents: vec![PersistedAgentInfo {
+                transcript_cwd: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{session_id}-worker-1"),
@@ -2265,6 +2269,7 @@ mod tests {
         }"#;
 
         let agent: PersistedAgentInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(agent.transcript_cwd, None);
         assert_eq!(agent.commit_sha, None);
         assert_eq!(agent.role_definition_id, None);
         assert_eq!(agent.role_definition_version, None);
@@ -2273,6 +2278,7 @@ mod tests {
     #[test]
     fn a33_populated_persisted_agent_role_reference_round_trips() {
         let agent = PersistedAgentInfo {
+            transcript_cwd: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: "agent-reviewer".to_string(),

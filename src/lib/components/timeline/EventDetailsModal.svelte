@@ -80,7 +80,7 @@
 
     .modal-header h3 {
         margin: 0;
-        color: var(--color-accent);
+        color: var(--accent);
     }
 
     .header-actions {
@@ -95,7 +95,7 @@
 
     .copy-feedback {
         margin: 0 0 16px 0;
-        color: var(--color-text-muted);
+        color: var(--text-muted);
         font-size: 0.85rem;
     }
 
@@ -108,18 +108,17 @@
     }
 
     .label {
-        color: var(--color-text-muted);
+        color: var(--text-muted);
         font-weight: bold;
     }
 
-    .value.error { color: var(--color-error); }
-    .value.warning { color: var(--color-warning); }
-    .value.info { color: var(--color-accent); }
+    .value.error { color: var(--status-error); }
+    .value.warning { color: var(--status-warning); }
+    .value.info { color: var(--accent); }
 
     .payload-section h4 {
         margin: 0 0 12px 0;
-        color: var(--color-text-muted);
-        box-shadow: var(--edge-seam);
+        color: var(--text-muted);
         padding-bottom: 4px;
     }
 
@@ -127,7 +126,7 @@
         font-family: var(--font-mono);
         margin: 0;
         padding: 12px;
-        background: var(--bg-void);
+        background: var(--canvas);
         border-radius: var(--radius-md);
         color: var(--status-success);
         font-size: 0.85rem;

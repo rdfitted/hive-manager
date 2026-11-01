@@ -66,7 +66,7 @@
         display: flex;
         flex-direction: column;
         height: 100%;
-        background: var(--color-bg);
+        background: var(--canvas);
         overflow: hidden;
         font-family: var(--font-body);
     }
@@ -74,7 +74,7 @@
     .browser-header {
         padding: 16px;
         /* Workspace control strip, not a standalone structural panel. */
-        background: var(--color-surface);
+        background: var(--surface);
         box-shadow: var(--edge-seam);
         display: flex;
         justify-content: space-between;
@@ -84,7 +84,7 @@
     .browser-header h3 {
         margin: 0;
         font-size: 1.1rem;
-        color: var(--color-accent);
+        color: var(--accent);
     }
 
     .cell-filters {
@@ -95,7 +95,7 @@
 
     .label {
         font-size: 0.7rem;
-        color: var(--color-text-muted);
+        color: var(--text-muted);
         font-weight: bold;
     }
 
@@ -118,14 +118,18 @@
         display: flex;
         flex-direction: column;
         height: 100%;
+        background: var(--surface);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--depth-1);
+        overflow: hidden;
     }
 
     .column-header {
         padding: 10px 16px;
-        background: var(--color-surface-hover);
+        background: var(--surface-raised);
         box-shadow: var(--edge-seam);
         font-weight: bold;
-        color: var(--color-text);
+        color: var(--text-primary);
         font-size: 0.9rem;
     }
 
@@ -137,7 +141,7 @@
 
     .empty-state, .no-artifact {
         padding: 40px;
-        color: var(--color-text-muted);
+        color: var(--text-muted);
         text-align: center;
         font-size: 0.9rem;
     }

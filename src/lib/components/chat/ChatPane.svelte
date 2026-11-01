@@ -7,6 +7,7 @@
   import ComposerToolbar from '../composer/ComposerToolbar.svelte';
   import { toolbarFacts } from '../composer/toolbarFacts';
   import ActivityGroup from './ActivityGroup.svelte';
+  import MarkdownBlocks from '../ui/MarkdownBlocks.svelte';
   import { CHAT_WINDOW_SIZE, formatRaw, liveActivityState, transcriptRows } from './transcript';
 
   let { sessionId, agentId, events, raw = false, visible = true }: {
@@ -103,7 +104,11 @@
           {@const longMessage = row.text.split('\n').length > 6 || row.text.length > 480}
           <article class="message" class:user-message={row.type === 'user'} aria-label={row.type === 'user' ? 'User message' : row.type === 'assistant' ? 'Assistant message' : row.type === 'decision' ? 'Approval decision' : 'Agent error'} title={new Date(row.ts).toLocaleString()}>
             {#if row.type === 'decision' || row.type === 'error'}<strong>{row.type === 'decision' ? 'Approval' : 'Error'}</strong>{/if}
-            <p use:measureOverflow={row.type === 'user' ? row.id : undefined} class:clamped={row.type === 'user' && !expandedMessages[row.id] && (canMeasure || longMessage)}>{row.text}</p>
+            {#if row.type === 'assistant'}
+              <MarkdownBlocks source={row.text} />
+            {:else}
+              <p use:measureOverflow={row.type === 'user' ? row.id : undefined} class:clamped={row.type === 'user' && !expandedMessages[row.id] && (canMeasure || longMessage)}>{row.text}</p>
+            {/if}
             {#if row.type === 'user' && (longMessage || overflowingMessages[row.id])}
               <button type="button" class="lattice-btn lattice-btn--ghost" aria-expanded={expandedMessages[row.id] ?? false} onclick={() => { expandedMessages[row.id] = !expandedMessages[row.id]; }}>{expandedMessages[row.id] ? 'Show less' : 'Show more'}</button>
             {/if}
@@ -127,18 +132,18 @@
 </section>
 
 <style>
-  .chat-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; color: var(--text-primary); background: var(--bg-surface); }
-  .history-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2); font-size: var(--text-small); color: var(--text-secondary); }
+  .chat-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; color: var(--text-primary); background: var(--surface); }
+  .history-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2); font-size: var(--text-small); color: var(--text-muted); }
   .transcript { flex: 1; min-height: 0; overflow: auto; padding: var(--space-3); overflow-wrap: anywhere; }
-  .message { padding: var(--space-2) 0 var(--space-4); }
-  .user-message { margin: var(--space-2) 0 var(--space-4) auto; width: fit-content; max-width: 85%; padding: var(--space-3); border-radius: var(--radius-shell); background: var(--bg-elevated); }
+  .message { min-width: 0; padding: var(--space-2) 0 var(--space-4); }
+  .user-message { margin: var(--space-2) 0 var(--space-4) auto; width: fit-content; max-width: 85%; padding: var(--space-3); border-radius: var(--radius-shell); background: var(--surface-overlay); }
   .message p { margin: 0; white-space: pre-wrap; }
   .message .clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }
-  .truncation, .live-activity { color: var(--text-secondary); font-size: var(--text-small); }
+  .truncation, .live-activity { color: var(--text-muted); font-size: var(--text-small); }
   .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-small); }
   .chat-composer { flex: 0 0 auto; padding: var(--space-2); }
   .feed-error { margin: 0; padding: var(--space-2); color: var(--status-error); }
-  .empty-chat { color: var(--text-secondary); }
+  .empty-chat { color: var(--text-muted); }
   @media (forced-colors: active) { .user-message { border: 1px solid CanvasText; } .live-activity { color: CanvasText; } }
 </style>

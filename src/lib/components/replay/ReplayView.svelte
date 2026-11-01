@@ -93,7 +93,7 @@
 <style>
     .replay-view {
         padding: 16px;
-        background: var(--bg-void);
+        background: var(--canvas);
         height: 100%;
         overflow-y: auto;
         font-family: var(--font-body);
@@ -114,9 +114,8 @@
 
     .state-section h4 {
         margin: 0 0 12px 0;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         font-size: 0.75rem;
-        box-shadow: var(--edge-seam);
         padding-bottom: 4px;
     }
 
@@ -132,14 +131,14 @@
         gap: 8px;
         padding: 6px 12px;
         /* Replay entity rows are compact state records, not structural panels. */
-        background: var(--bg-surface);
-        box-shadow: var(--edge-seam), var(--edge-lip);
-        border-radius: var(--radius-sm);
+        background: var(--surface);
+        box-shadow: var(--depth-1);
+        border-radius: var(--radius-md);
         font-size: 0.85rem;
     }
 
     .label {
-        color: var(--accent-cyan);
+        color: var(--accent);
         font-weight: bold;
     }
 

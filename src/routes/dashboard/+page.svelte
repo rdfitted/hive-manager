@@ -43,8 +43,8 @@
     flex: 1;
     min-width: 0;
     height: 100%;
-    background: var(--color-bg);
-    color: var(--color-text);
+    background: var(--canvas);
+    color: var(--text-primary);
     padding: var(--space-5);
     gap: var(--space-4);
     font-family: var(--font-body);
@@ -65,7 +65,7 @@
   }
   .subtitle {
     margin: var(--space-1) 0 0 0;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: var(--text-small);
   }
   .board-wrap {

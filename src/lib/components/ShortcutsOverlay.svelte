@@ -113,7 +113,7 @@
   .dialog-icon {
     display: flex;
     align-items: center;
-    color: var(--accent-cyan);
+    color: var(--accent);
   }
 
   .dialog-header h2 {
@@ -133,7 +133,7 @@
     margin: 14px 0 8px;
     font-size: 11px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .group ul {
@@ -160,7 +160,7 @@
 
   kbd {
     padding: 2px 6px;
-    background: var(--bg-void);
+    background: var(--canvas);
     box-shadow:
       inset 0 0 0 1px var(--border-structural),
       inset 0 -2px 0 var(--border-structural);
@@ -172,12 +172,12 @@
   }
 
   .plus {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 11px;
   }
 
   .action {
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 </style>

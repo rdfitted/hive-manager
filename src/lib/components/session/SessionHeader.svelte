@@ -442,7 +442,7 @@
 
 <style>
     .session-header {
-        background: var(--bg-void);
+        background: var(--canvas);
         box-shadow: var(--edge-seam);
         padding: 12px 20px;
         display: flex;
@@ -477,15 +477,15 @@
         padding: 2px 6px;
         border-radius: var(--radius-sm);
         /* A compact mode badge uses a neutral semantic backing, not a panel surface. */
-        background: var(--bg-surface);
+        background: var(--surface);
         color: var(--text-primary);
-        box-shadow: inset 0 0 0 1px var(--border-structural);
+        box-shadow: var(--edge-lip);
     }
 
-    .mode-badge.hive { background: var(--status-warning); color: var(--bg-void); }
-    .mode-badge.fusion { background: var(--accent-cyan); color: var(--bg-void); }
-    .mode-badge.swarm { background: var(--status-success); color: var(--bg-void); }
-    .mode-badge.solo { background: var(--status-error); color: var(--bg-void); }
+    .mode-badge.hive { background: var(--status-warning); color: var(--on-accent); }
+    .mode-badge.fusion { background: var(--accent); color: var(--on-accent); }
+    .mode-badge.swarm { background: var(--status-success); color: var(--on-accent); }
+    .mode-badge.solo { background: var(--status-error); color: var(--on-accent); }
 
     .worktree-chip {
         display: inline-flex;
@@ -494,9 +494,9 @@
         max-width: min(240px, 38vw);
         padding: 2px 8px;
         border-radius: var(--radius-sm);
-        box-shadow: inset 0 0 0 1px var(--border-structural);
+        box-shadow: var(--edge-lip);
         /* Worktree metadata is a compact chip, not a structural panel. */
-        background: var(--bg-elevated);
+        background: var(--surface-overlay);
         color: var(--text-muted);
         font-size: 11px;
         font-family: var(--font-mono);
@@ -505,7 +505,7 @@
 
     .worktree-chip :global(svg) {
         flex-shrink: 0;
-        color: var(--accent-cyan);
+        color: var(--accent);
     }
 
     .worktree-label {
@@ -517,7 +517,7 @@
     .objective {
         margin: 0;
         font-size: 12px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         max-width: 800px;
         line-height: 1.4;
     }
@@ -557,17 +557,17 @@
         max-width: min(360px, 42vw);
         height: 24px;
         padding: 0 4px 0 8px;
-        box-shadow: inset 0 0 0 1px var(--border-structural);
+        box-shadow: var(--edge-lip);
         border-radius: var(--radius-sm);
         /* Live preview metadata is a compact control chip, not a structural panel. */
-        background: var(--bg-elevated);
+        background: var(--surface-overlay);
     }
 
     .preview-live-mode {
         flex-shrink: 0;
         font-size: 11px;
         font-weight: 600;
-        color: var(--accent-cyan);
+        color: var(--accent);
     }
 
     .preview-live-url {
@@ -578,7 +578,7 @@
         white-space: nowrap;
         font-family: var(--font-mono);
         font-size: 10px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
     }
 
     .preview-error {
@@ -610,7 +610,7 @@
 
     .stat .label {
         font-size: 11px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         font-weight: 500;
     }
 

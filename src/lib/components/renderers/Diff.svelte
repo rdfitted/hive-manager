@@ -127,9 +127,8 @@
 
 <style>
   .diff-widget {
-    /* Tool results are nested work products, so their body uses the shared sunken tone. */
-    background: var(--bg-sunken);
-    box-shadow: inset 0 0 0 1px var(--border-structural);
+    background: var(--input);
+    box-shadow: var(--edge-lip);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
@@ -152,7 +151,7 @@
     flex-shrink: 0;
     width: 10px;
     text-align: center;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     user-select: none;
   }
 
@@ -180,12 +179,12 @@
   }
 
   .diff-line.ctx .line-text {
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .diff-line.meta {
     /* Diff metadata is an opaque separator row, not a structural panel. */
-    background: var(--bg-surface);
+    background: var(--surface);
   }
 
   .diff-line.meta .line-text {
@@ -198,7 +197,7 @@
     padding: 8px;
     font-family: var(--font-mono);
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     overflow-x: auto;
   }
 </style>

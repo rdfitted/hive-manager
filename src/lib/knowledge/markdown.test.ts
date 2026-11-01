@@ -40,4 +40,95 @@ const answer = 42;
       { type: 'text', text: ')' },
     ]);
   });
+
+  it('parses GFM tables with alignment, escaped pipes, inline code and uneven rows', () => {
+    expect(parseMarkdown('Intro\n\n| Name | Value | Note |\n| :--- | ---: | :---: |\n| **one** | 2 | a\\|b |\n| two | `x|y` |\n\nAfter')).toEqual([
+      { type: 'paragraph', text: 'Intro' },
+      { type: 'table', headers: ['Name', 'Value', 'Note'], align: ['left', 'right', 'center'], rows: [['**one**', '2', 'a|b'], ['two', '`x|y`', '']] },
+      { type: 'paragraph', text: 'After' },
+    ]);
+  });
+
+  it.each([1, 2])('accepts_one_and_two_hyphen_gfm_delimiters_with_alignment: %i', (count) => {
+    const hyphens = '-'.repeat(count);
+    expect(parseMarkdown(`| A | B | C | D |\n| ${hyphens} | :${hyphens} | ${hyphens}: | :${hyphens}: |\n| a | b | c | d |`)).toEqual([
+      { type: 'table', headers: ['A', 'B', 'C', 'D'], align: [null, 'left', 'right', 'center'], rows: [['a', 'b', 'c', 'd']] },
+    ]);
+  });
+
+  it.each(['| - |', '| : | - |', '| :: | - |', '| x- | - |'])('rejects malformed GFM delimiters and mismatched column counts: %s', (delimiter) => {
+    expect(parseMarkdown(`| A | B |\n${delimiter}\n| a | b |`).some((block) => block.type === 'table')).toBe(false);
+  });
+
+  it('keeps_pipe_free_gfm_body_rows_until_blank_or_new_block', () => {
+    const table = '| A | B |\n| --- | --- |\nplain\n| extra | kept | discarded |';
+    const expectedTable = { type: 'table', headers: ['A', 'B'], align: [null, null], rows: [['plain', ''], ['extra', 'kept']] };
+    const interruptions = [
+      { source: '\nAfter', blocks: [{ type: 'paragraph', text: 'After' }] },
+      { source: '# Heading | title', blocks: [{ type: 'heading', level: 1, text: 'Heading | title' }] },
+      { source: '> quote | still quote', blocks: [{ type: 'quote', text: 'quote | still quote' }] },
+      { source: '- item | still item', blocks: [{ type: 'list', ordered: false, items: ['item | still item'] }] },
+      { source: '2. item | still item', blocks: [{ type: 'list', ordered: true, start: 2, items: ['item | still item'] }] },
+      { source: '```txt\ncode | literal\n```', blocks: [{ type: 'code', language: 'txt', text: 'code | literal' }] },
+      { source: '---', blocks: [{ type: 'rule' }] },
+    ];
+    for (const { source, blocks } of interruptions) {
+      expect(parseMarkdown(`${table}\n${source}`), source).toEqual([expectedTable, ...blocks]);
+    }
+  });
+
+  it.each(['[', '[a](', '*', '_', '`'])('bounds character work for long malformed input: %s', (fragment) => {
+    for (const length of [32000, 64000]) {
+      const source = fragment.repeat(Math.ceil(length / fragment.length)).slice(0, length);
+      // Instrument character access rather than asserting machine-dependent time.
+      // String's other methods retain their normal behavior on this boxed input.
+      const measured = new String(source);
+      let reads = 0;
+      measured.charAt = (index) => { reads++; return source.charAt(index); };
+      const tokens = parseInlineMarkdown(measured as unknown as string);
+      expect(tokens.map((token) => token.text).join('')).toBe(source);
+      expect(reads).toBeGreaterThanOrEqual(length);
+      expect(reads).toBeLessThanOrEqual(6 * length);
+    }
+  });
+
+  it('preserves the existing inline subset and delimiter precedence', () => {
+    expect(parseInlineMarkdown('**bold** __also bold__ *italic* _also italic_ `code` [[page]] [docs](https://example.com)')).toEqual([
+      { type: 'strong', text: 'bold' }, { type: 'text', text: ' ' },
+      { type: 'strong', text: 'also bold' }, { type: 'text', text: ' ' },
+      { type: 'emphasis', text: 'italic' }, { type: 'text', text: ' ' },
+      { type: 'emphasis', text: 'also italic' }, { type: 'text', text: ' ' },
+      { type: 'code', text: 'code' }, { type: 'text', text: ' ' },
+      { type: 'wikilink', text: 'page' }, { type: 'text', text: ' ' },
+      { type: 'link', text: 'docs', href: 'https://example.com/' },
+    ]);
+    expect(parseInlineMarkdown('***x*** **\nno cross-line**')).toEqual([
+      { type: 'text', text: '*' }, { type: 'strong', text: 'x' },
+      { type: 'emphasis', text: ' ' }, { type: 'text', text: '*\nno cross-line**' },
+    ]);
+  });
+
+  it('keeps blank-separated bold numbered items together and nests lists under their parent', () => {
+    expect(parseMarkdown('3. **First**\n   - child\n     7. **Nested**\n\n4. **Second**')).toEqual([
+      { type: 'list', ordered: true, start: 3, items: ['**First**', '**Second**'], children: {
+        0: [{ type: 'list', ordered: false, items: ['child'], children: {
+          0: [{ type: 'list', ordered: true, start: 7, items: ['**Nested**'] }],
+        } }],
+      } },
+    ]);
+  });
+
+  it.each([
+    '#\n**unfinished [link](\n| malformed | table\n| -- |\n<script>literal</script>',
+    '```html\n<img src=x onerror=alert(1)>',
+    Array.from({ length: 80 }, (_, level) => `${'  '.repeat(level)}- depth ${level}`).join('\n'),
+    '[data](data:text/html,hello) [relative](/local) [bad](not a url)',
+  ])('keeps malformed or deeply nested output readable without throwing: %s', (source) => {
+    expect(() => parseMarkdown(source)).not.toThrow();
+    expect(() => parseInlineMarkdown(source)).not.toThrow();
+    expect(parseMarkdown(source).length).toBeGreaterThan(0);
+    for (const token of parseInlineMarkdown(source)) {
+      if (token.type === 'link') expect(new URL(token.href).protocol).toMatch(/^https?:$/);
+    }
+  });
 });

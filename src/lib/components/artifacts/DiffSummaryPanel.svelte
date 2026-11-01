@@ -23,11 +23,10 @@
 
 <style>
     .diff-summary-panel {
-        /* Semantic diff content: the mandated sunken tone is not a structural panel surface. */
-        background: var(--bg-sunken);
+        background: var(--input);
         border-radius: var(--radius-lg);
         padding: 12px;
-        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 5%, transparent);
+        box-shadow: var(--depth-1);
         overflow-x: auto;
     }
 
@@ -35,7 +34,7 @@
         margin: 0;
         font-family: var(--font-mono);
         font-size: 11px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         line-height: 1.4;
     }
 
@@ -49,7 +48,7 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
     }
 
     .file-path {

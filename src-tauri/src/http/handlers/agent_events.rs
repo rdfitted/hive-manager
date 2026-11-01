@@ -53,7 +53,12 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
                     agent.id.clone(),
                     agent.config.cli.clone(),
                     agent.transcript_session_id.clone(),
-                    transcript_cwd(&session, agent),
+                    state
+                        .pty_manager
+                        .read()
+                        .spawn_cwd(&agent.id)
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| transcript_cwd(&session, agent)),
                     agent.transcript_spawned_at,
                 )
             })
@@ -67,12 +72,16 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
             .agents
             .iter()
             .map(|agent| {
-                let cwd = if session.no_git
+                let cwd = if let Some(cwd) = agent.transcript_cwd.as_deref() {
+                    PathBuf::from(cwd)
+                } else if matches!(agent.role.as_str(), "Evaluator" | "Prince")
+                    || session.no_git
                     || (session.worktree_path.is_none()
                         && matches!(
                             session.session_type,
                             crate::storage::SessionTypeInfo::Hive { .. }
-                        )) {
+                        ))
+                {
                     PathBuf::from(&session.project_path)
                 } else if session.execution_policy.workspace_strategy
                     == crate::domain::WorkspaceStrategy::SharedCell
@@ -179,7 +188,8 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
 fn transcript_cwd(session: &crate::session::Session, agent: &crate::session::AgentInfo) -> PathBuf {
     use crate::{domain::WorkspaceStrategy, pty::AgentRole};
     // Legacy launch_hive spawns both Queen and workers directly in project_path.
-    if session.no_git
+    if matches!(agent.role, AgentRole::Evaluator | AgentRole::Prince)
+        || session.no_git
         || (session.worktree_path.is_none()
             && matches!(
                 session.session_type,

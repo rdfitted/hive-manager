@@ -166,19 +166,11 @@
     min-width: 120px;
     max-width: 200px;
     cursor: pointer;
-    /* Fix dropdown appearance */
-    appearance: none;
-    -webkit-appearance: none;
-    -moz-appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23565f89' d='M3 4.5L6 7.5L9 4.5'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 8px center;
-    padding-right: 24px;
   }
 
   /* Native option popovers cannot inherit the select control's shared surface. */
   .branch-selector select option {
-    background: var(--bg-surface);
+    background: var(--surface);
     color: var(--text-primary);
     padding: 8px;
   }
@@ -186,18 +178,18 @@
   .branch-selector select option:hover,
   .branch-selector select option:focus,
   .branch-selector select option:checked {
-    background: var(--accent-cyan);
-    color: white;
+    background: var(--accent);
+    color: var(--on-accent);
   }
 
   .branch-state {
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .managed-branch {
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

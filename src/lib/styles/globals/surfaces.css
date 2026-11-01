@@ -3,27 +3,21 @@
    ═══════════════════════════════════════════════════════════════════ */
 
 .lattice-panel {
-  background-color: var(--bg-panel);
+  background-color: var(--surface);
+  padding: var(--space-4);
   border-radius: var(--radius-lg);
-  box-shadow: var(--elev-1), var(--edge-lip);
+  box-shadow: var(--depth-1);
 }
 
-/* Canonical shadow order: state/identity inset, elevation, edge lip. Consumers
-   adding an identity inset must restate the full stack in this order; a
-   box-shadow stack cannot be appended to the component recipe. */
 .lattice-panel--active {
-  background-color: color-mix(in srgb, var(--accent-cyan) 5%, var(--bg-panel));
-  box-shadow:
-    inset 0 0 0 1px var(--accent-cyan),
-    var(--elev-1),
-    var(--edge-lip);
+  background-color: var(--accent-tint);
 }
 
-/* Nested content shares the outer panel's surface. Floating overlays still
+/* Nested content shares the outer panel's surface. Terminal panes retain their tonal depth. Floating overlays still
    need an opaque surface above live content. Keep border ordinary so the
    forced-colours boundaries below remain on their original owners. */
 .lattice-panel .lattice-panel:not(:where(
-  .context-menu, .search-bar, .drop-card,
+  .terminal-item, .context-menu, .search-bar, .drop-card,
   .mention-menu, .slash-menu, .color-picker, .update-banner
 )) {
   border: 0;
@@ -32,11 +26,11 @@
 }
 
 .lattice-modal {
-  background-color: var(--bg-elevated);
-  border: 1px solid var(--accent-chrome);
-  border-top: 2px solid var(--accent-cyan);
+  background-color: var(--surface-overlay);
+  border: 0;
+  padding: var(--space-4);
   border-radius: var(--radius-lg);
-  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.8);
+  box-shadow: var(--depth-2);
 }
 
 .lattice-modal-backdrop {
@@ -45,6 +39,11 @@
 }
 
 @media (forced-colors: active) {
+  .lattice-tab { border-bottom: 2px solid ButtonBorder; }
+  .lattice-tab:is(.lattice-tab--active, [aria-selected="true"], [aria-pressed="true"]) {
+    border-bottom-color: Highlight;
+  }
+
   .lattice-forced-colors-boundary {
     border: 1px solid CanvasText !important;
   }

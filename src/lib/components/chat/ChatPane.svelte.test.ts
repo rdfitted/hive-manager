@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import type { AgentEvent } from '$lib/stores/agentEvents';
 import { CHAT_WINDOW_SIZE, passiveToolResult, protocolAttention, transcriptRows } from './transcript';
@@ -27,6 +27,51 @@ export const event = (cursor: string, kind: AgentEvent['kind'] = 'assistant_mess
 afterEach(() => { cleanup(); fixture.setSource('none'); fixture.setAgents([]); vi.clearAllMocks(); });
 
 describe('agent chat', () => {
+  it('G30 source guard: prohibits raw HTML in every chat component and shared Markdown renderer', () => {
+    const sources = import.meta.glob<string>([
+      './**/*.svelte', '../ui/MarkdownBlocks.svelte', '../knowledge/MarkdownInline.svelte',
+    ], { eager: true, query: '?raw', import: 'default' });
+    expect(Object.keys(sources)).toEqual(expect.arrayContaining([
+      './ChatPane.svelte', '../ui/MarkdownBlocks.svelte', '../knowledge/MarkdownInline.svelte',
+    ]));
+    const rawHtmlFiles = Object.entries(sources)
+      .filter(([, source]) => /\{\s*@html\b/.test(source))
+      .map(([path]) => path);
+    expect(rawHtmlFiles).toEqual([]);
+  });
+
+  it('G30: keeps script, image handlers, iframe HTML and executable links inert and visible', () => {
+    const source = '<script>window.agentPayload = true</script> <img src=x onerror=alert(1)> <iframe srcdoc="unsafe"></iframe> [script](javascript:alert(1)) [data](data:text/html,unsafe)';
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [event('unsafe', 'assistant_message', { text: source })] } });
+    const message = view.getByRole('article', { name: 'Assistant message' });
+    expect(message.querySelector('script, img, iframe, [onerror], [srcdoc]')).toBeNull();
+    expect(message.querySelector('a')).toBeNull();
+    expect(message.querySelector('p')?.textContent).toBe(source);
+  });
+
+  it('formats assistant Markdown, leaves user Markdown plain, and preserves selection and editor focus on feed updates', async () => {
+    const markdown = '# **Result**\n\n- first\n- second\n\n| Name | Value |\n| --- | --- |\n| one | 2 |\n\n```txt\ncopy this exactly\n```';
+    const events = [event('formatted', 'assistant_message', { text: markdown }), event('user', 'user_message', { text: '**User stays plain** [url](https://example.com)' })];
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events } });
+    const assistant = view.getByRole('article', { name: 'Assistant message' });
+    expect(within(assistant).getByRole('heading', { level: 1, name: 'Result' }).querySelector('strong')).toBeTruthy();
+    expect(within(assistant).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(assistant).getByRole('table')).toBeTruthy();
+    const user = view.getByRole('article', { name: 'User message' });
+    expect(user.querySelector('p')?.textContent).toBe('**User stays plain** [url](https://example.com)');
+    expect(user.querySelector('strong, a')).toBeNull();
+    const code = assistant.querySelector('pre code')!;
+    const selection = window.getSelection()!; const range = document.createRange();
+    range.selectNodeContents(code); selection.removeAllRanges(); selection.addRange(range);
+    expect(selection.toString()).toBe('copy this exactly');
+    selection.removeAllRanges();
+    const editor = view.getByRole('textbox'); editor.focus();
+    await view.rerender({ sessionId: 's', agentId: 'a', events: [...events, event('next', 'assistant_message', { text: '**Next**' })] });
+    expect(document.activeElement).toBe(editor);
+    expect(view.container.querySelector('pre code')).toBe(code);
+    expect(code.textContent).toBe('copy this exactly');
+  });
+
   it('T15: shows known toolbar facts and names the target agent in the placeholder', async () => {
     fixture.setAgents([{ ...runningAgent(), config: { cli: 'codex', label: 'Frontend', model: 'fixture-model', flags: ['-c', 'model_reasoning_effort="high"'] } }]);
     fixture.setSource('transcript');

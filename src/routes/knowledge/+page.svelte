@@ -301,7 +301,7 @@
     height: 100%;
     overflow: hidden;
     container: knowledge / inline-size;
-    background: var(--bg-void);
+    background: var(--canvas);
     color: var(--text-primary);
     font-family: var(--font-body);
   }
@@ -309,7 +309,7 @@
   /* One recipe for Atlas chrome and controls. Variants only select tokens; the
      surface declarations stay centralized so graph/table lenses cannot drift. */
   .atlas-surface {
-    --atlas-surface-background: var(--bg-panel);
+    --atlas-surface-background: var(--surface);
     --atlas-surface-elevation: var(--elev-1);
     --atlas-surface-edge: var(--edge-lip);
     --atlas-surface-radius: var(--radius-md);
@@ -320,22 +320,22 @@
   }
 
   .atlas-surface--strip {
-    --atlas-surface-background: var(--bg-chrome);
+    --atlas-surface-background: var(--chrome);
     --atlas-surface-elevation: var(--edge-seam);
     --atlas-surface-radius: var(--radius-none);
   }
 
   .atlas-surface--raised {
-    --atlas-surface-background: var(--bg-raised);
+    --atlas-surface-background: var(--surface-raised);
   }
 
   .atlas-surface--sunken {
-    --atlas-surface-background: var(--bg-void);
+    --atlas-surface-background: var(--canvas);
   }
 
   .atlas-surface--active {
-    --atlas-surface-background: color-mix(in srgb, var(--accent-cyan) 5%, var(--bg-panel));
-    --atlas-surface-elevation: inset 0 0 0 1px var(--accent-cyan), var(--elev-1);
+    --atlas-surface-background: var(--accent-tint);
+    --atlas-surface-elevation: var(--depth-1);
   }
 
   .page-header {
@@ -345,8 +345,8 @@
     min-height: 72px;
     padding: 0 var(--space-5);
     --atlas-surface-background:
-      linear-gradient(90deg, color-mix(in srgb, var(--accent-cyan) 4%, transparent), transparent 34%),
-      var(--bg-chrome);
+      linear-gradient(90deg, color-mix(in srgb, var(--accent) 4%, transparent), transparent 34%),
+      var(--chrome);
   }
 
   /* Full-bleed route chrome and its hover tones cannot adopt bordered panel primitives. */
@@ -362,12 +362,12 @@
     place-items: center;
     width: 38px;
     height: 38px;
-    color: var(--accent-cyan);
+    color: var(--accent);
   }
 
   .eyebrow {
     margin-bottom: 2px;
-    color: var(--text-disabled);
+    color: var(--text-muted);
     font: var(--text-micro) var(--font-body);
   }
 
@@ -390,11 +390,11 @@
     align-items: baseline;
     gap: 5px;
     padding: 6px 11px;
-    background: var(--bg-chrome);
+    background: var(--chrome);
   }
 
-  .corpus-stats strong { color: var(--accent-cyan); font: 14px var(--font-body); }
-  .corpus-stats span { color: var(--text-disabled); font: 9px var(--font-body); }
+  .corpus-stats strong { color: var(--accent); font: 14px var(--font-body); }
+  .corpus-stats span { color: var(--text-muted); font: var(--text-micro) var(--font-body); }
 
   .toolbar {
     display: flex;
@@ -411,13 +411,19 @@
     width: min(430px, 42vw);
     height: 34px;
     padding: 0 var(--space-3);
-    color: var(--text-disabled);
+    color: var(--text-muted);
+    box-shadow: inset 0 0 0 1px var(--border-control);
   }
 
   .search-field:focus-within {
-    --atlas-surface-background: color-mix(in srgb, var(--accent-cyan) 5%, var(--bg-panel));
-    --atlas-surface-elevation: inset 0 0 0 1px var(--accent-cyan), var(--elev-1);
-    color: var(--accent-cyan);
+    --atlas-surface-background: var(--accent-tint);
+    --atlas-surface-elevation: var(--depth-1);
+    color: var(--accent);
+  }
+
+  .search-field:has(input:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
 
   .search-field input {
@@ -430,8 +436,8 @@
     font: var(--text-small) var(--font-body);
   }
 
-  .search-field input::placeholder { color: var(--text-disabled); }
-  .search-field kbd { color: var(--accent-cyan); font: var(--text-micro) var(--font-body); }
+  .search-field input::placeholder { color: var(--text-muted); }
+  .search-field kbd { color: var(--accent); font: var(--text-micro) var(--font-body); }
 
   .folder-field select {
     height: 34px;
@@ -445,7 +451,10 @@
     display: flex;
     gap: var(--space-1);
     margin-left: auto;
-    padding: 1px;
+    padding: var(--space-1);
+    --atlas-surface-background: var(--track);
+    --atlas-surface-radius: var(--radius-full);
+    box-shadow: none;
   }
 
   .refresh {
@@ -463,12 +472,12 @@
 
   .notice {
     padding: 5px var(--space-4);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font: var(--text-micro) var(--font-body);
   }
 
   .error-notice { color: var(--status-warning); }
-  .cap-notice { color: var(--accent-amber); }
+  .cap-notice { color: var(--accent); }
   .cap-notice strong { font-weight: 600; }
   .cap-notice ul {
     display: flex;
@@ -478,8 +487,8 @@
     padding: 0;
     list-style: none;
   }
-  .cap-notice li { color: var(--text-secondary); }
-  .cap-notice li::before { content: '· '; color: var(--accent-amber); }
+  .cap-notice li { color: var(--text-muted); }
+  .cap-notice li::before { content: '· '; color: var(--accent); }
 
   .workspace {
     flex: 1;
@@ -539,8 +548,8 @@
     display: flex;
     justify-content: space-between;
     padding: 5px var(--space-3);
-    color: var(--text-disabled);
-    font: 9px var(--font-body);
+    color: var(--text-muted);
+    font: var(--text-micro) var(--font-body);
   }
 
   .view-body {
@@ -571,13 +580,13 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    color: var(--text-secondary);
-    font: 9px var(--font-body);
+    color: var(--text-muted);
+    font: var(--text-micro) var(--font-body);
   }
 
   .legend-group i { width: 6px; height: 6px; }
   .legend-group i.diamond { transform: rotate(45deg); }
-  .shape-key { background: var(--text-secondary); }
+  .shape-key { background: var(--text-muted); }
   .shape-key.circle { border-radius: 50%; }
   .edge-legend i { width: 13px; height: 1px; }
 
@@ -589,7 +598,7 @@
     width: 100%;
     height: 100%;
     padding: var(--space-5);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     text-align: center;
     background:
       linear-gradient(var(--border-structural) 1px, transparent 1px),
@@ -605,7 +614,7 @@
   }
 
   .error-state > :global(svg) { color: var(--status-error); }
-  .empty-state > :global(svg) { color: var(--text-disabled); }
+  .empty-state > :global(svg) { color: var(--text-muted); }
 
   .sr-only {
     position: absolute;

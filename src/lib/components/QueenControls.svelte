@@ -62,7 +62,7 @@
   }
 
   .no-session {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 12px;
     text-align: center;
     padding: 16px;

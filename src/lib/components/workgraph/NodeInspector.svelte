@@ -226,15 +226,16 @@
     box-sizing: border-box;
     width: min(360px, 100%);
     padding: var(--space-4);
-    border: 1px solid var(--border-structural);
+    border: 0;
+    border-radius: var(--radius-lg);
     color: var(--text-primary);
-    background-color: var(--bg-panel);
-    box-shadow: var(--elev-2), var(--edge-lip);
+    background-color: var(--surface-overlay);
+    box-shadow: var(--depth-2);
   }
 
   .inspector-header {
     padding-bottom: var(--space-3);
-    box-shadow: var(--edge-seam);
+    box-shadow: none;
   }
 
   .badge-row {
@@ -247,18 +248,18 @@
   .kind-badge,
   .status-badge,
   .dependency-kind {
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     font: var(--text-micro) var(--font-body);
   }
 
   .kind-badge {
     padding: var(--space-1) var(--space-2);
-    color: var(--accent-cyan);
-    background-color: color-mix(in srgb, var(--accent-cyan) 8%, var(--bg-raised));
+    color: var(--accent);
+    background-color: color-mix(in srgb, var(--accent) 8%, var(--surface-raised));
   }
 
   .status-badge {
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   h2 {
@@ -289,14 +290,14 @@
   .completion-evidence-grid div {
     min-width: 0;
     padding: var(--space-2);
-    border-radius: var(--radius-sm);
-    background-color: var(--bg-raised);
+    border-radius: var(--radius-md);
+    background-color: var(--surface-raised);
   }
 
   dt,
   h3,
   h4 {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font: var(--text-micro) var(--font-body);
   }
 
@@ -338,7 +339,7 @@
   .completion-evidence-empty,
   .source-reference-empty {
     margin: var(--space-2) 0 0;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font: var(--text-small) var(--font-body);
   }
 
@@ -351,8 +352,8 @@
   .source-reference-list li {
     min-width: 0;
     padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm);
-    background-color: var(--bg-raised);
+    border-radius: var(--radius-md);
+    background-color: var(--surface-raised);
   }
 
   .source-reference-list code {
@@ -371,20 +372,20 @@
   }
 
   li::marker {
-    color: var(--accent-cyan);
+    color: var(--accent);
   }
 
   .contract-empty,
   .progress-empty,
   .dependencies-empty {
     margin: 0;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font: var(--text-small) var(--font-body);
   }
 
   .dependencies {
     padding-top: var(--space-3);
-    box-shadow: var(--edge-seam-top);
+    box-shadow: none;
   }
 
   .progress-grid div:last-child {

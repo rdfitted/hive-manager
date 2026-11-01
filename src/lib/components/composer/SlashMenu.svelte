@@ -33,13 +33,13 @@
 <style>
 
   .cmd {
-    color: var(--accent-cyan);
+    color: var(--accent);
     font-weight: 600;
     flex-shrink: 0;
   }
 
   .desc {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;

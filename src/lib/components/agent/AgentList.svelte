@@ -76,7 +76,7 @@
 
     .empty {
         font-size: 11px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         padding: 4px;
         font-style: italic;
     }

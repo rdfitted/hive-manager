@@ -112,9 +112,8 @@
 
 <style>
   .data-table-widget {
-    /* Tool results are nested work products, so their body uses the shared sunken tone. */
-    background: var(--bg-sunken);
-    box-shadow: inset 0 0 0 1px var(--border-structural);
+    background: var(--surface-raised);
+    box-shadow: var(--edge-lip);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
@@ -122,15 +121,15 @@
   .notice {
     padding: 4px 8px;
     font-size: 10px;
-    color: var(--text-secondary);
-    background: color-mix(in srgb, var(--accent-amber) 8%, transparent);
+    color: var(--text-muted);
+    background: var(--accent-tint);
     box-shadow: var(--edge-seam);
   }
 
   .empty {
     padding: 12px;
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-style: italic;
   }
 
@@ -144,14 +143,14 @@
     position: sticky;
     top: 0;
     /* Sticky renderer headers need an opaque table-chrome backing while content scrolls. */
-    background: var(--bg-surface);
+    background: var(--surface);
     padding: 0;
     z-index: 1;
   }
 
   .sort-arrow {
-    font-size: 9px;
-    color: var(--accent-cyan);
+    font-size: var(--text-micro);
+    color: var(--accent);
   }
 
   td {
@@ -165,6 +164,6 @@
   }
 
   tbody tr:hover td {
-    background: color-mix(in srgb, var(--accent-cyan) 5%, transparent);
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
   }
 </style>

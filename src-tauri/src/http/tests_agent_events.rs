@@ -1207,6 +1207,156 @@ fn codex_fixture(
 }
 
 #[tokio::test]
+async fn g391_fusion_http_uses_captured_project_cwd_live_and_persisted() {
+    for persisted in [false, true] {
+        let (temp, state, app) = setup();
+        let mut session =
+            make_test_session_with_agents("session", "D:/fixture/fusion-project", &["queen"]);
+        session.session_type = crate::session::SessionType::Fusion {
+            variants: vec!["variant".into()],
+        };
+        session.worktree_path = Some("D:/fixture/variant-worktree".into());
+        session.agents[0].role = crate::pty::AgentRole::Queen;
+        session.agents[0].transcript_session_id = Some("fusion-held".into());
+        state
+            .pty_manager
+            .read()
+            .create_session(
+                "queen".into(),
+                crate::pty::AgentRole::Queen,
+                "claude",
+                &[],
+                Some("D:/fixture/fusion-project"),
+                120,
+                30,
+            )
+            .unwrap();
+        write_records(
+            &transcript_path(
+                &temp.path().join("claude-projects"),
+                Path::new("D:/fixture/fusion-project"),
+                "fusion-held",
+            ),
+            &[
+                json!({"type":"assistant","uuid":"own","message":{"role":"assistant",
+                "content":[{"type":"text","text":"fusion-project-reply"}]}}),
+            ],
+        );
+        session.worktree_path = Some("D:/fixture/changed-worktree".into());
+        state.session_controller.read().insert_test_session(session);
+        state
+            .session_controller
+            .read()
+            .persist_test_session("session");
+        assert_eq!(
+            state.storage.load_session("session").unwrap().agents[0]
+                .transcript_cwd
+                .as_deref(),
+            Some("D:/fixture/fusion-project"),
+            "G391 snapshot records captured spawn argument"
+        );
+        if persisted {
+            // Exercise storage-only configure with a truly empty manager/map.
+            let pty = Arc::new(RwLock::new(PtyManager::new()));
+            let mut cold = SessionController::new(pty);
+            cold.set_storage(state.storage.clone());
+            *state.session_controller.write() = cold;
+        }
+        let page = body_json(get(&app, "/api/sessions/session/agents/queen/events").await).await;
+        assert_eq!(
+            page["events"].as_array().unwrap().len(),
+            1,
+            "G391 Fusion HTTP must find the record only under its captured project cwd"
+        );
+        assert_eq!(page["events"][0]["payload"]["text"], "fusion-project-reply");
+    }
+}
+
+#[tokio::test]
+async fn g21_codex_peer_seats_bind_project_cwd_live_and_cold_without_decoys() {
+    for solo in [false, true] {
+        for persisted in [false, true] {
+            let (temp, state, app) = setup();
+            let mut session = make_test_session_with_agents(
+                "session",
+                "D:/fixture/project",
+                &["evaluator", "prince"],
+            );
+            session.worktree_path = Some("D:/fixture/different-worktree".into());
+            if solo {
+                session.session_type = crate::session::SessionType::Solo {
+                    cli: "codex".into(),
+                    model: None,
+                };
+            }
+            session.agents[0].role = crate::pty::AgentRole::Evaluator;
+            session.agents[1].role = crate::pty::AgentRole::Prince;
+            let root = temp.path().join("codex-sessions");
+            for (index, agent) in session.agents.iter_mut().enumerate() {
+                let prompt = codex_prompt(&agent.id);
+                agent.config.cli = "codex".into();
+                agent.transcript_session_id = Some(codex_key(&prompt));
+                agent.transcript_spawned_at = Some(codex_spawn());
+                codex_fixture(
+                    &root,
+                    &session.project_path,
+                    index as u8 + 1,
+                    &prompt,
+                    codex_spawn(),
+                    &[codex_message(
+                        &format!("reply-{index}"),
+                        "assistant",
+                        &format!("own-{index}"),
+                    )],
+                );
+                // Identical cwd/time are insufficient; only the exact prompt belongs here.
+                codex_fixture(
+                    &root,
+                    &session.project_path,
+                    index as u8 + 10,
+                    &codex_prompt(&format!("decoy-{index}")),
+                    codex_spawn(),
+                    &[codex_message("decoy", "assistant", "FOREIGN_SAME_CWD")],
+                );
+                // Even an exact prompt in the wrong cwd must not be accepted.
+                codex_fixture(
+                    &root,
+                    Path::new(session.worktree_path.as_ref().unwrap()),
+                    index as u8 + 20,
+                    &prompt,
+                    codex_spawn(),
+                    &[codex_message("wrong-cwd", "assistant", "FOREIGN_WORKTREE")],
+                );
+            }
+            state.session_controller.read().insert_test_session(session);
+            if persisted {
+                state
+                    .session_controller
+                    .read()
+                    .persist_test_session("session");
+                let mut cold = SessionController::new(state.pty_manager.clone());
+                cold.set_storage(state.storage.clone());
+                *state.session_controller.write() = cold;
+            }
+            for (index, aid) in ["evaluator", "prince"].iter().enumerate() {
+                let page = body_json(
+                    get(&app, &format!("/api/sessions/session/agents/{aid}/events")).await,
+                )
+                .await;
+                assert_eq!(page["events"].as_array().unwrap().len(), 2,
+                    "G21 must find the peer's project-cwd rollout (solo={solo}, persisted={persisted})");
+                assert_eq!(
+                    page["events"][1]["payload"]["text"],
+                    format!("own-{index}"),
+                    "G21 project cwd must win over the session worktree and same-time decoys"
+                );
+                assert!(!page.to_string().contains("FOREIGN"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn g16_codex_live_and_persisted_feeds_keep_same_second_workers_and_queen_separate() {
     for persisted in [false, true] {
         let (temp, state, app) = setup();

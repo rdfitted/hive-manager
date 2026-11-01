@@ -540,7 +540,7 @@
 
   .empty-state p {
     margin: 0;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 13px;
   }
 
@@ -658,15 +658,15 @@
   }
 
   .cli-health-path {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-family: var(--font-mono);
     opacity: 0.75;
   }
 
   .chevron {
     font-size: 8px;
-    color: var(--text-secondary);
-    transition: transform var(--motion-duration-standard) var(--motion-ease-standard);
+    color: var(--text-muted);
+    transition: transform var(--motion-ui);
   }
 
   .chevron.collapsed {
@@ -721,7 +721,7 @@
   .no-alerts {
     margin: 0;
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     text-align: center;
     padding: 8px;
   }
@@ -741,7 +741,7 @@
 
   .info-label {
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .info-value {
@@ -751,7 +751,7 @@
   }
 
   .info-value.state-running {
-    color: var(--accent-cyan);
+    color: var(--accent);
   }
 
   .info-value.state-completed {
@@ -763,13 +763,13 @@
   }
 
   .info-value.state-closed {
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .actions-section {
     margin-top: auto;
     padding-top: 12px;
-    box-shadow: var(--edge-seam-top);
+    box-shadow: none;
   }
 
   .close-session-action {
@@ -791,7 +791,7 @@
   .confirm-dialog p {
     margin: 0 0 16px 0;
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     line-height: 1.4;
   }
 

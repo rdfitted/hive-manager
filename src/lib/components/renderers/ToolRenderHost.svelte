@@ -87,10 +87,10 @@
     padding: 8px;
     font-family: var(--font-mono);
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     /* Raw tool output is a nested code work product, not a structural panel. */
-    background: var(--bg-sunken);
-    box-shadow: inset 0 0 0 1px var(--border-structural);
+    background: var(--input);
+    box-shadow: var(--edge-lip);
     border-radius: var(--radius-sm);
     overflow-x: auto;
     white-space: pre-wrap;

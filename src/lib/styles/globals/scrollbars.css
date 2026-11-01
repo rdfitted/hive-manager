@@ -26,17 +26,17 @@
 
 .lattice-scroll-chrome:hover::-webkit-scrollbar-thumb,
 .lattice-scroll-content::-webkit-scrollbar-thumb {
-  background-color: var(--text-disabled);
+  background-color: var(--border-control);
 }
 
 .lattice-scroll-chrome::-webkit-scrollbar-thumb:hover,
 .lattice-scroll-content::-webkit-scrollbar-thumb:hover {
-  background-color: var(--text-secondary);
+  background-color: var(--text-muted);
 }
 
 .lattice-scroll-chrome::-webkit-scrollbar-thumb:active,
 .lattice-scroll-content::-webkit-scrollbar-thumb:active {
-  background-color: var(--accent-cyan);
+  background-color: var(--accent);
 }
 
 .lattice-scroll-content {

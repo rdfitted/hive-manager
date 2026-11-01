@@ -58,6 +58,6 @@
 
   .resize-handle:hover,
   .resize-handle.dragging {
-    background: color-mix(in srgb, var(--accent-cyan) 35%, transparent);
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
   }
 </style>

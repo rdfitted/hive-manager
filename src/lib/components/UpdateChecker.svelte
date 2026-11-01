@@ -205,9 +205,9 @@
   }
   .update-check-actions.expanded {
     padding: 6px;
-    border-radius: var(--radius-sm);
-    background: var(--bg-panel);
-    box-shadow: var(--elev-2), var(--edge-lip);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    box-shadow: var(--depth-2);
   }
   .check-icon {
     display: inline-flex;
@@ -216,15 +216,19 @@
     width: 28px;
     height: 28px;
     padding: 0;
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    background: var(--bg-panel);
-    color: var(--text-secondary);
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    color: var(--text-muted);
     box-shadow: var(--elev-1);
+  }
+  .check-icon:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
   .check-icon:hover:where(:not(:disabled)) {
     color: var(--text-primary);
-    background: var(--bg-raised);
+    background: var(--surface-raised);
   }
   /* Sits over terminal output when the row is not expanded, so it carries its own surface. */
   .app-version {
@@ -233,12 +237,12 @@
     height: 28px;
     padding: 0 8px;
     border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    background: var(--bg-panel);
+    border-radius: var(--radius-md);
+    background: var(--surface);
     box-shadow: var(--elev-1);
     font-size: 11px;
     font-variant-numeric: tabular-nums;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     white-space: nowrap;
   }
   .update-check-actions.expanded .app-version {
@@ -249,12 +253,12 @@
   }
   .update-status {
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     white-space: nowrap;
   }
   .update-installed {
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
   .update-banner {
     position: fixed;
@@ -265,7 +269,7 @@
     flex-direction: column;
     gap: 8px;
     z-index: 1000;
-    box-shadow: var(--elev-3), var(--edge-lip);
+    box-shadow: var(--depth-2);
     max-width: 300px;
   }
 

@@ -17,9 +17,9 @@
 
     function getSeverityColor(severity: string) {
         switch (severity) {
-            case 'error': return 'var(--color-error)';
-            case 'warning': return 'var(--color-warning)';
-            default: return 'var(--color-accent)';
+            case 'error': return 'var(--status-error)';
+            case 'warning': return 'var(--status-warning)';
+            default: return 'var(--accent)';
         }
     }
 
@@ -34,7 +34,7 @@
     }
 </script>
 
-<button type="button" class="lattice-btn lattice-btn--row" on:click={() => dispatch('select', event)}>
+<button type="button" class="event-row lattice-btn lattice-btn--row" on:click={() => dispatch('select', event)}>
     <div class="event-item lattice-forced-colors-boundary">
         <div class="severity-indicator" style="background-color: {getSeverityColor(event.severity)}"></div>
         
@@ -66,23 +66,27 @@
         gap: 12px;
         align-items: center;
         width: 100%;
-        box-shadow: var(--edge-seam);
+        box-shadow: none;
         font-family: var(--font-body);
         font-size: 0.8rem;
+    }
+
+    .event-row:nth-child(even) {
+        background: var(--surface);
     }
 
     .severity-indicator {
         height: 100%;
         width: 4px;
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-md);
     }
 
     .event-time {
-        color: var(--color-text-muted);
+        color: var(--text-muted);
     }
 
     .event-type {
-        color: var(--color-text);
+        color: var(--text-primary);
         font-weight: 600;
         white-space: nowrap;
         overflow: hidden;
@@ -91,20 +95,20 @@
 
     .badge {
         padding: 2px 6px;
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-md);
         font-size: 0.7rem;
-        background: var(--color-accent-dim);
-        color: var(--color-accent);
-        box-shadow: inset 0 0 0 1px var(--color-accent-dim);
+        background: var(--accent-tint);
+        color: var(--accent);
+        box-shadow: inset 0 0 0 1px var(--accent-tint);
     }
 
     .cell-badge {
-        background: rgba(139, 92, 246, 0.1);
-        color: var(--accent-cyan);
+        background: var(--accent-tint);
+        color: var(--accent);
     }
 
     .event-payload {
-        color: var(--color-text-muted);
+        color: var(--text-muted);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;

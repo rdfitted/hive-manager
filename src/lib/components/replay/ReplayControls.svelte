@@ -91,11 +91,14 @@
         align-items: center;
         gap: 4px;
         margin-left: 16px;
+        padding: var(--space-1);
+        background: var(--track);
+        border-radius: var(--radius-lg);
     }
 
     .label {
         font-size: 0.7rem;
-        color: var(--text-secondary);
+        color: var(--text-muted);
     }
 
     .seek-row {
@@ -106,12 +109,12 @@
 
     .seek-bar {
         flex: 1;
-        accent-color: var(--accent-cyan);
+        accent-color: var(--accent);
     }
 
     .timestamp-display {
         font-size: 0.75rem;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         min-width: 180px;
         text-align: right;
     }
