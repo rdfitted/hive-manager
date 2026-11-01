@@ -328,6 +328,8 @@ struct HeartbeatCredential {
 
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
+    /// Actual spawn arguments, retained after close for transcript attribution.
+    spawn_cwds: RwLock<HashMap<String, String>>,
     transports: RwLock<Option<Arc<crate::transport::TransportRegistry>>>,
     agent_transports: RwLock<HashMap<String, crate::domain::agent_transport::AgentTransports>>,
     starting_transports: RwLock<HashMap<String, Arc<dyn crate::transport::AgentTransport>>>,
@@ -358,6 +360,7 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            spawn_cwds: RwLock::new(HashMap::new()),
             transports: RwLock::new(None),
             agent_transports: RwLock::new(HashMap::new()),
             starting_transports: RwLock::new(HashMap::new()),
@@ -540,6 +543,7 @@ impl PtyManager {
                 }
                 // Keep binding ordered with kill: no late bind may recreate a token.
                 self.bind_heartbeat_token(&id, &session_id, false, &token);
+                self.record_spawn_cwd(&id, cwd);
             }
             if let Some(prompt) = transport.initial_prompt() {
                 transport.send_input(&prompt, true)?;
@@ -617,6 +621,7 @@ impl PtyManager {
                 }
                 // Keep binding ordered with kill: no late bind may recreate a token.
                 self.bind_heartbeat_token(&id, &session_id, false, &token);
+                self.record_spawn_cwd(&id, cwd);
             }
             if let Some(prompt) = transport.initial_prompt() {
                 transport.send_input(&prompt, true)?;
@@ -714,6 +719,25 @@ impl PtyManager {
 
     #[cfg(test)]
     pub(crate) fn has_heartbeat_credential_for_test(&self,id:&str)->bool {self.heartbeat_credentials.read().contains_key(id)}
+
+    pub fn spawn_cwd(&self, id: &str) -> Option<String> {
+        self.spawn_cwds.read().get(id).cloned()
+    }
+
+    /// Restore attribution for a persisted seat that has no live PTY entry.
+    pub fn seed_spawn_cwd(&self, id: &str, cwd: &str) {
+        self.spawn_cwds.write().insert(id.to_string(), cwd.to_string());
+    }
+
+    fn record_spawn_cwd(&self, id: &str, cwd: Option<&str>) {
+        // Keep the exact argument, and publish under the runtime's lifecycle guard
+        // so a rejected duplicate cannot overwrite the existing seat's attribution.
+        if let Some(cwd) = cwd {
+            self.seed_spawn_cwd(id, cwd);
+        } else {
+            self.spawn_cwds.write().remove(id);
+        }
+    }
 
     pub fn create_session(
         &self,
@@ -849,6 +873,7 @@ impl PtyManager {
         {
             let mut sessions = self.sessions.write();
             sessions.insert(id.clone(), Arc::clone(&session));
+            self.record_spawn_cwd(&id, cwd);
         }
 
         // Start the output reader thread.
@@ -1115,6 +1140,120 @@ impl Default for PtyManager {
 #[cfg(test)]
 mod cross_platform_spawn_tests {
     use super::{AgentRole, PtyManager};
+
+    #[test]
+    fn spawn_cwd_can_be_seeded_without_a_live_session_and_survives_kill() {
+        let manager = PtyManager::new();
+        assert_eq!(manager.spawn_cwd("restored"), None);
+        manager.seed_spawn_cwd("restored", "relative/../original cwd");
+        manager.kill("restored").unwrap();
+        assert_eq!(manager.spawn_cwd("restored").as_deref(), Some("relative/../original cwd"));
+    }
+
+    #[test]
+    fn spawn_cwd_is_preserved_when_either_protocol_branch_rejects_startup() {
+        use crate::domain::agent_transport::AgentTransportKind;
+        for (command, kind) in [
+            ("codex", AgentTransportKind::CodexAppServer),
+            ("claude", AgentTransportKind::ClaudeStreamJson),
+        ] {
+            let manager = PtyManager::new();
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let id = format!("{session_id}-worker-1");
+            manager.seed_spawn_cwd(&id, "persisted cwd");
+            manager.configure_transports(&session_id, [kind].into_iter().collect());
+            let error = manager.create_session(
+                id.clone(), AgentRole::Worker { index: 1, parent: None },
+                command, &[], Some("exact/../protocol cwd"), 80, 24,
+            ).unwrap_err();
+            // No registry is installed: prove routing without launching a real CLI.
+            assert!(error.to_string().contains("Transport registry unavailable"));
+            assert_eq!(manager.spawn_cwd(&id).as_deref(), Some("persisted cwd"));
+            manager.kill(&id).unwrap();
+            assert_eq!(manager.spawn_cwd(&id).as_deref(), Some("persisted cwd"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_cwd_matches_both_protocol_arguments_and_survives_kill() {
+        use crate::domain::agent_transport::AgentTransportKind;
+        let script = r#"
+$ErrorActionPreference='Stop'
+function Reply($m,$r){[Console]::Out.WriteLine((@{id=$m.id;result=$r}|ConvertTo-Json -Compress -Depth 12))}
+while($null -ne ($line=[Console]::ReadLine())) {
+ $m=$line|ConvertFrom-Json
+ switch($m.method) {
+  'initialize' {Reply $m @{userAgent='codex-cli/0.166.0'}}
+  'account/read' {Reply $m @{account=@{type='chatgpt'};requiresOpenaiAuth=$true}}
+  'thread/start' {Reply $m @{thread=@{id='cwd-fixture';cwd=$PSScriptRoot};modelProvider='openai'}}
+ }
+ if($m.type -eq 'control_request' -and $m.request.subtype -eq 'initialize') {
+  [Console]::Out.WriteLine((@{type='control_response';response=@{subtype='success';request_id=$m.request_id;response=@{account=@{subscriptionType='Claude Ultra'};claude_code_version='2.1.316'}}}|ConvertTo-Json -Compress -Depth 12))
+ }
+}
+"#;
+        for (command, kind) in [
+            ("codex", AgentTransportKind::CodexAppServer),
+            ("claude", AgentTransportKind::ClaudeStreamJson),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join("server.ps1"), script).unwrap();
+            let shim = temp.path().join(format!("{command}.cmd"));
+            std::fs::write(&shim, "@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0server.ps1\"\r\n").unwrap();
+            let manager = PtyManager::new();
+            manager.attach_transports(std::sync::Arc::new(crate::transport::TransportRegistry::new(temp.path().join("feeds"), None)));
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let id = format!("{session_id}-worker-1");
+            manager.configure_transports(&session_id, [kind].into_iter().collect());
+            // Preserve a valid, deliberately non-canonical cwd spelling.
+            let cwd = format!("{}\\.\\", temp.path().display());
+            let transcript_id = uuid::Uuid::new_v4().to_string();
+            let args = if command == "claude" {
+                vec!["--session-id", transcript_id.as_str(), "--dangerously-skip-permissions"]
+            } else {
+                Vec::new()
+            };
+            manager.create_session(
+                id.clone(), AgentRole::Worker { index: 1, parent: None },
+                shim.to_str().unwrap(), &args, Some(&cwd), 80, 24,
+            ).unwrap();
+            assert!(manager.protocol_agent(&id).is_some());
+            assert_eq!(manager.spawn_cwd(&id).as_deref(), Some(cwd.as_str()));
+            assert!(manager.create_session(
+                id.clone(), AgentRole::Worker { index: 1, parent: None },
+                shim.to_str().unwrap(), &args, temp.path().to_str(), 80, 24,
+            ).is_err());
+            assert_eq!(manager.spawn_cwd(&id).as_deref(), Some(cwd.as_str()));
+            manager.kill(&id).unwrap();
+            assert_eq!(manager.spawn_cwd(&id).as_deref(), Some(cwd.as_str()));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_cwd_matches_pty_argument_survives_kill_and_tracks_respawn() {
+        let manager = PtyManager::new();
+        let spawn = |cwd| manager.create_session(
+            "cwd-fixture".into(), AgentRole::Queen, "cmd.exe", &[], cwd, 80, 24,
+        ).unwrap();
+        spawn(Some("exact/../pty cwd"));
+        assert_eq!(manager.spawn_cwd("cwd-fixture").as_deref(), Some("exact/../pty cwd"));
+        for cwd in [Some("rejected cwd"), None] {
+            assert!(manager.create_session(
+                "cwd-fixture".into(), AgentRole::Queen, "cmd.exe", &[], cwd, 80, 24,
+            ).is_err());
+            assert_eq!(manager.spawn_cwd("cwd-fixture").as_deref(), Some("exact/../pty cwd"));
+        }
+        manager.kill("cwd-fixture").unwrap();
+        assert_eq!(manager.spawn_cwd("cwd-fixture").as_deref(), Some("exact/../pty cwd"));
+        spawn(Some("replacement cwd"));
+        assert_eq!(manager.spawn_cwd("cwd-fixture").as_deref(), Some("replacement cwd"));
+        manager.kill("cwd-fixture").unwrap();
+        spawn(None);
+        assert_eq!(manager.spawn_cwd("cwd-fixture"), None);
+        manager.kill("cwd-fixture").unwrap();
+    }
 
     #[test]
     fn test_session_spawn_does_not_require_installed_cli() {
