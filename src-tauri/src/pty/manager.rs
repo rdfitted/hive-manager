@@ -425,6 +425,42 @@ impl PtyManager {
         result.map_err(PtyError::CreateError)
     }
 
+    fn create_claude_session(&self, id: String, role: AgentRole, command: &str, args: &[&str], cwd: Option<&str>) -> Result<String,PtyError> {
+        use crate::transport::AgentTransport;
+        let registry=self.transport_registry().ok_or_else(||PtyError::CreateError("Transport registry unavailable; select PTY".into()))?;
+        let mut identity=agent_identity_env(&id,&role);
+        let session_id=identity.first().map(|(_,v)|v.clone()).ok_or_else(||PtyError::CreateError("Protocol agent needs a session-qualified ID".into()))?;
+        let token=Self::new_heartbeat_token();identity.push(("HIVE_AGENT_TOKEN".into(),token.clone()));
+        let options=crate::transport::claude::ClaudeOptions::from_pty(command,args,std::path::PathBuf::from(cwd.unwrap_or(".")),identity,session_id.clone(),id.clone()).map_err(PtyError::CreateError)?;
+        let transport=crate::transport::claude::ClaudeTransport::new(options,&registry);
+        {
+            let mut starting=self.starting_transports.write();
+            if starting.contains_key(&id) || registry.get_agent(&id).is_some() || self.sessions.read().contains_key(&id) {
+                return Err(PtyError::CreateError(format!("Agent runtime already exists: {id}")));
+            }
+            starting.insert(id.clone(),transport.clone());
+        }
+        let _lifecycle=self.lifecycle.lock();
+        let mut registered=false;
+        let result=(|| {
+            transport.start_blocking()?;
+            registry.register(&session_id,&id,transport.thread_id(),transport.clone())?;
+            registered=true;
+            transport.activate()?;
+            if !transport.is_alive() {return Err("Claude startup cancelled".into());}
+            self.bind_heartbeat_token(&id,&session_id,false,&token);
+            if let Some(prompt)=transport.initial_prompt() {transport.send_input(&prompt,true)?;}
+            Ok(id.clone())
+        })();
+        if result.is_err() {
+            if let Err(error)=transport.stop_sync() {return Err(PtyError::CreateError(format!("Claude startup failed and cleanup needs retry: {error}")));}
+            if registered {registry.stop_agent_sync(&session_id,&id).map_err(PtyError::CreateError)?;}
+            self.heartbeat_credentials.write().remove(&id);
+        }
+        self.starting_transports.write().remove(&id);
+        result.map_err(PtyError::CreateError)
+    }
+
     pub fn set_app_handle(&mut self, handle: AppHandle) {
         if self.emit_tx.is_none() {
             let (sender, receiver) = mpsc::sync_channel(EMITTER_QUEUE_CAPACITY);
@@ -510,7 +546,7 @@ impl PtyManager {
             let enabled=self.agent_transports.read().get(session_id).cloned().unwrap_or_default();
             match crate::domain::agent_transport::selected_transport(&enabled,command,&role) {
                 Some(crate::domain::agent_transport::AgentTransportKind::CodexAppServer)=>return self.create_codex_session(id,role,command,args,cwd),
-                Some(crate::domain::agent_transport::AgentTransportKind::ClaudeStreamJson)=>return Err(PtyError::CreateError("Claude stream JSON transport is not installed; select PTY".into())),
+                Some(crate::domain::agent_transport::AgentTransportKind::ClaudeStreamJson)=>return self.create_claude_session(id,role,command,args,cwd),
                 None=>{},
             }
         }

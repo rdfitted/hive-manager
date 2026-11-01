@@ -706,7 +706,7 @@ fn measured_response(
         "submit_confirmation_basis": measurement.delivery.basis,
         "submit_confirmation_window_ms": if receipt.protocol_delivery.is_some() {3000} else {TRANSCRIPT_SYNC_WAIT.as_millis() as u64},
         "submit_confirmation_elapsed_ms": measurement.delivery_elapsed_ms,
-        "evidence_scope": if receipt.protocol_delivery.is_some() {"submit_confirmed true means the held thread and expected turn matched a protocol turn/started notification. It confirms runtime acceptance, not successful completion. Pending and staged inputs remain unknown. No terminal keystrokes are written."} else {INJECTION_EVIDENCE_SCOPE},
+        "evidence_scope": if receipt.protocol_delivery.is_some() {"submit_confirmed true means the held session and expected input/turn matched protocol acceptance and turn-start evidence. It confirms runtime acceptance, not successful completion. Pending and staged inputs remain unknown. No terminal keystrokes are written."} else {INJECTION_EVIDENCE_SCOPE},
     })
 }
 

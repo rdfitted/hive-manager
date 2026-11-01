@@ -1,0 +1,8 @@
+[
+  {"type":"user","isReplay":true,"uuid":"input","session_id":"held","parent_tool_use_id":null,"message":{"role":"user","content":"Synthetic user text"}},
+  {"type":"stream_event","session_id":"held","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Synthetic delta"}}},
+  {"type":"assistant","session_id":"held","parent_tool_use_id":null,"message":{"id":"message","content":[{"type":"text","text":"Synthetic answer"},{"type":"tool_use","id":"tool","name":"Read","input":{"file_path":"fixture.txt"}}]}},
+  {"type":"user","session_id":"held","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"tool","content":"Synthetic tool result","is_error":false}]}},
+  {"type":"future_unknown","session_id":"held","message":{"content":"Must not render"}},
+  {"type":"rate_limit_event","session_id":"held"}
+]
