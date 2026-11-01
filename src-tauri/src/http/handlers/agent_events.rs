@@ -61,7 +61,12 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
                 .agents
                 .iter()
                 .map(|agent| {
-                    let cwd = if session.no_git {
+                    let cwd = if session.no_git
+                        || (session.worktree_path.is_none()
+                            && matches!(
+                                session.session_type,
+                                crate::storage::SessionTypeInfo::Hive { .. }
+                            )) {
                         PathBuf::from(&session.project_path)
                     } else if session.execution_policy.workspace_strategy
                         == crate::domain::WorkspaceStrategy::SharedCell
@@ -150,7 +155,14 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
 
 fn transcript_cwd(session: &crate::session::Session, agent: &crate::session::AgentInfo) -> PathBuf {
     use crate::{domain::WorkspaceStrategy, pty::AgentRole};
-    if session.no_git {
+    // Legacy launch_hive spawns both Queen and workers directly in project_path.
+    if session.no_git
+        || (session.worktree_path.is_none()
+            && matches!(
+                session.session_type,
+                crate::session::SessionType::Hive { .. }
+            ))
+    {
         return session.project_path.clone();
     }
     if session.execution_policy.workspace_strategy == WorkspaceStrategy::SharedCell

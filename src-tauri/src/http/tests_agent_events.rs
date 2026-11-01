@@ -604,6 +604,73 @@ async fn cold_http_preserves_saved_protocol_without_registration() {
 }
 
 #[tokio::test]
+async fn legacy_hive_live_and_persisted_feeds_use_project_cwd_and_exact_ids() {
+    for persisted in [false, true] {
+        let (temp, state, app) = setup();
+        // Match launch_hive's actual metadata, rather than a v2 worktree launch.
+        let mut session = make_test_session_with_agents(
+            "session",
+            "D:/fixture/legacy-project",
+            &["queen", "worker-a"],
+        );
+        session.session_type = crate::session::SessionType::Hive { worker_count: 1 };
+        session.no_git = false;
+        session.worktree_path = None;
+        session.execution_policy = crate::domain::HiveExecutionPolicy::default();
+        session.agents[0].role = crate::pty::AgentRole::Queen;
+        session.agents[1].role = crate::pty::AgentRole::Worker {
+            index: 1,
+            parent: Some("queen".into()),
+        };
+        let root = temp.path().join("claude-projects");
+        for (index, agent) in session.agents.iter_mut().enumerate() {
+            let held = format!("held-{index}");
+            agent.transcript_session_id = Some(held.clone());
+            write_records(
+                &transcript_path(&root, &session.project_path, &held),
+                &[
+                    json!({"type":"user","message":{"role":"user","content":format!("legacy-own-{index}")}}),
+                ],
+            );
+            // A plausible-looking worktree transcript must never replace the held cwd.
+            let wrong_cwd = session
+                .project_path
+                .join(".hive-manager/worktrees/session")
+                .join(if index == 0 { "queen" } else { "worker-1" });
+            write_records(
+                &transcript_path(&root, &wrong_cwd, &held),
+                &[json!({"type":"user","message":{"role":"user","content":"wrong-worktree"}})],
+            );
+        }
+        write_records(
+            &transcript_path(&root, &session.project_path, "unheld-transcript"),
+            &[json!({"type":"user","message":{"role":"user","content":"unheld-neighbor"}})],
+        );
+        state.session_controller.read().insert_test_session(session);
+        if persisted {
+            state
+                .session_controller
+                .read()
+                .persist_test_session("session");
+            let mut cold = SessionController::new(state.pty_manager.clone());
+            cold.set_storage(state.storage.clone());
+            *state.session_controller.write() = cold;
+        }
+        for (index, aid) in ["queen", "worker-a"].iter().enumerate() {
+            let page =
+                body_json(get(&app, &format!("/api/sessions/session/agents/{aid}/events")).await)
+                    .await;
+            assert_eq!(page["events"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                page["events"][0]["payload"]["text"],
+                format!("legacy-own-{index}"),
+                "legacy live/persisted feed uses actual spawn cwd and exact held ID"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn persisted_worker_uses_its_own_cwd_and_held_transcript_id() {
     let (temp, state, app) = setup();
     let mut session = make_test_session_with_agents("session", "D:/fixture/project", &["worker-a"]);
