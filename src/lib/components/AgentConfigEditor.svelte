@@ -556,7 +556,7 @@
   label {
     font-size: 12px;
     font-weight: 500;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .lattice-input {
@@ -574,18 +574,18 @@
 
   .cli-description {
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     opacity: 0.7;
   }
 
   .effective-model {
     font-size: 11px;
-    color: var(--accent-cyan);
+    color: var(--accent);
     font-family: var(--font-mono);
   }
 
   input::placeholder {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     opacity: 0.6;
   }
 

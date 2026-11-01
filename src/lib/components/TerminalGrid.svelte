@@ -524,7 +524,7 @@
   }
 
   .toolbar-label {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 10px;
     font-weight: 700;
   }
@@ -597,7 +597,10 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    transition: box-shadow var(--motion-duration-standard) var(--motion-ease-standard);
+    background: var(--surface);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--depth-1);
+    transition: box-shadow var(--motion-ui);
     min-height: 0;
   }
 
@@ -620,9 +623,8 @@
     justify-content: space-between;
     gap: 8px;
     padding: 6px 10px;
-    box-shadow:
-      inset 0 3px 0 var(--session-color),
-      var(--edge-seam);
+    background: var(--toolbar);
+    box-shadow: var(--edge-seam);
     user-select: none;
   }
 
@@ -662,20 +664,20 @@
   }
 
   .cli-badge {
-    font-size: 9px;
+    font-size: var(--text-micro);
     padding: 1px 4px;
-    background: var(--border-structural);
+    background: var(--surface-raised);
     border-radius: var(--radius-sm);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     text-transform: lowercase;
   }
 
   .cwd-label {
     max-width: 180px;
     overflow: hidden;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-family: var(--font-mono);
-    font-size: 9px;
+    font-size: var(--text-micro);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -702,14 +704,14 @@
   /* Keep xterm's initial fit measurable and move its native drop rectangle offscreen. */
   .terminal-layer.chat-hidden { visibility: hidden; pointer-events: none; transform: translateX(-200vw); }
   .chat-layer.pane-hidden { visibility: hidden; pointer-events: none; }
-  .pane-status-text { font-size: var(--text-small); color: var(--text-secondary); }
+  .pane-status-text { font-size: var(--text-small); color: var(--text-muted); }
 
   .empty-state {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 4px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 11px;
     text-align: center;
   }

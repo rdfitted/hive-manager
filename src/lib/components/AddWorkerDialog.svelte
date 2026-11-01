@@ -323,7 +323,7 @@
     font-size: 12px;
     font-weight: 600;
 
-    color: var(--text-secondary);
+    color: var(--text-muted);
     margin-bottom: 8px;
   }
 
@@ -362,7 +362,7 @@
 
   .role-desc {
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .custom-role-input,

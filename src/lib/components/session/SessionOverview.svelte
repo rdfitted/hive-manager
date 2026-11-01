@@ -172,7 +172,7 @@
         display: flex;
         flex-direction: column;
         height: 100%;
-        background: var(--bg-void);
+        background: var(--canvas);
         color: var(--text-primary);
     }
 
@@ -193,7 +193,7 @@
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        background: var(--bg-void);
+        background: var(--canvas);
         color: var(--text-primary);
         text-align: center;
         padding: 2rem;
@@ -205,7 +205,7 @@
     }
 
     .session-not-found p {
-        color: var(--text-secondary);
+        color: var(--text-muted);
         margin-bottom: 0.5rem;
     }
 

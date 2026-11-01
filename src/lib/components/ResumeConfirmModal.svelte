@@ -176,7 +176,7 @@
   }
 
   .warn-row {
-    color: var(--text-warning, #e0af68);
+    color: var(--status-warning);
   }
 
   .resume-status {
@@ -184,13 +184,13 @@
   }
 
   .muted {
-    color: var(--text-secondary, #787c99);
+    color: var(--text-muted);
     font-size: 0.8rem;
     margin: 0.25rem 0;
   }
 
   .error-text {
-    color: var(--status-error, #f7768e);
+    color: var(--status-error);
     font-size: 0.82rem;
     margin: 0.25rem 0;
   }
@@ -205,7 +205,7 @@
 
   .modal-footer {
     padding: 0.85rem 1.25rem;
-    box-shadow: var(--edge-seam-top);
+    background: var(--surface-raised);
     display: flex;
     justify-content: flex-end;
     gap: 0.5rem;

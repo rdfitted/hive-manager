@@ -42,7 +42,7 @@
 <style>
 
   .glyph {
-    color: var(--accent-cyan);
+    color: var(--accent);
     flex-shrink: 0;
     width: 12px;
     text-align: center;
@@ -54,7 +54,7 @@
   }
 
   .detail {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 11px;
     margin-left: auto;
     overflow: hidden;

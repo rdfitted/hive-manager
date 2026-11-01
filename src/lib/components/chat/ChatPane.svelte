@@ -127,18 +127,18 @@
 </section>
 
 <style>
-  .chat-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; color: var(--text-primary); background: var(--bg-surface); }
-  .history-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2); font-size: var(--text-small); color: var(--text-secondary); }
+  .chat-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; color: var(--text-primary); background: var(--surface); }
+  .history-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2); font-size: var(--text-small); color: var(--text-muted); }
   .transcript { flex: 1; min-height: 0; overflow: auto; padding: var(--space-3); overflow-wrap: anywhere; }
   .message { padding: var(--space-2) 0 var(--space-4); }
-  .user-message { margin: var(--space-2) 0 var(--space-4) auto; width: fit-content; max-width: 85%; padding: var(--space-3); border-radius: var(--radius-shell); background: var(--bg-elevated); }
+  .user-message { margin: var(--space-2) 0 var(--space-4) auto; width: fit-content; max-width: 85%; padding: var(--space-3); border-radius: var(--radius-shell); background: var(--surface-overlay); }
   .message p { margin: 0; white-space: pre-wrap; }
   .message .clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }
-  .truncation, .live-activity { color: var(--text-secondary); font-size: var(--text-small); }
+  .truncation, .live-activity { color: var(--text-muted); font-size: var(--text-small); }
   .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-small); }
   .chat-composer { flex: 0 0 auto; padding: var(--space-2); }
   .feed-error { margin: 0; padding: var(--space-2); color: var(--status-error); }
-  .empty-chat { color: var(--text-secondary); }
+  .empty-chat { color: var(--text-muted); }
   @media (forced-colors: active) { .user-message { border: 1px solid CanvasText; } .live-activity { color: CanvasText; } }
 </style>

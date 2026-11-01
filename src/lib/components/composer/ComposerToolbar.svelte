@@ -94,16 +94,16 @@
 
 <style>
   .toolbar { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-  .toolbar-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 32px; height: 32px; padding: 0; border: 1px solid transparent; border-radius: var(--radius-full); background: transparent; color: var(--text-primary); cursor: pointer; }
-  .toolbar-button:hover:enabled { background: var(--bg-elevated); }
-  .toolbar-button:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; }
+  .toolbar-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 32px; height: 32px; padding: 0; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: var(--text-primary); cursor: pointer; }
+  .toolbar-button:hover:enabled { background: var(--surface-overlay); }
+  .toolbar-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .toolbar-button:disabled { opacity: 0.45; cursor: default; }
   .access-label { color: var(--status-warning); font-size: var(--text-small); }
   .model-facts { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: baseline; gap: var(--space-1) var(--space-2); margin-left: auto; min-width: 0; font-family: var(--font-body); font-size: var(--text-small); }
   .model { overflow-wrap: anywhere; color: var(--text-primary); }
-  .effort { color: var(--text-secondary); }
-  .send-button { background: var(--text-primary); color: var(--bg-void); }
-  .send-button:hover:enabled { background: var(--text-secondary); }
+  .effort { color: var(--text-muted); }
+  .send-button { background: var(--accent); color: var(--on-accent); }
+  .send-button:hover:enabled { background: var(--accent); }
   .add-menu { position: fixed; z-index: 200; pointer-events: auto; transform: translateY(-100%); display: flex; flex-direction: column; min-width: 160px; padding: var(--space-1); box-shadow: var(--elev-3); }
   @media (forced-colors: active) {
     .toolbar-button, .add-menu { border: 1px solid ButtonText; }

@@ -62,8 +62,8 @@
 {/if}
 
 <style>
-  .attention { padding: var(--space-3) var(--space-4); background: var(--bg-surface); box-shadow: var(--edge-seam); }
+  .attention { padding: var(--space-3) var(--space-4); background: var(--surface); border-radius: var(--radius-md); box-shadow: var(--depth-1); }
   .reason { margin: 0 0 var(--space-2); color: var(--text-primary); font-size: var(--text-small); }
   .actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
-  .unavailable { color: var(--text-secondary); font-size: var(--text-small); }
+  .unavailable { color: var(--text-muted); font-size: var(--text-small); }
 </style>

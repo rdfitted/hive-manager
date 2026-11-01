@@ -12,7 +12,7 @@
 </div>
 
 <style>
-  .pane-toggle { display: flex; flex-wrap: wrap; gap: var(--space-1); }
-  .pane-toggle button { padding: var(--space-1) var(--space-2); font-size: var(--text-small); }
-  .pane-toggle button[aria-pressed='true'] { color: var(--text-primary); box-shadow: inset 0 0 0 1px var(--border-control); }
+  .pane-toggle { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: var(--space-1); border-radius: var(--radius-full); background: var(--track); }
+  .pane-toggle button { padding: var(--space-1) var(--space-2); font-size: var(--text-small); border-radius: var(--radius-full); }
+  .pane-toggle button[aria-pressed='true'] { color: var(--accent); background: var(--track-active); box-shadow: inset 0 0 0 1px var(--border-control); }
 </style>

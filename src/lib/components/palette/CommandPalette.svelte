@@ -137,12 +137,12 @@
 
 <style>
   .palette { width: 34rem; max-width: 100%; max-height: 75vh; display: flex; flex-direction: column; padding: var(--space-3); gap: var(--space-2); }
-  .search-row { display: flex; align-items: center; justify-content: space-between; color: var(--text-secondary); font-size: var(--text-small); }
+  .search-row { display: flex; align-items: center; justify-content: space-between; color: var(--text-muted); font-size: var(--text-small); }
   .commands { margin: 0; padding: 0; list-style: none; overflow-y: auto; min-height: 0; }
   .command { display: block; width: 100%; padding: var(--space-3); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-primary); text-align: left; font: inherit; font-size: var(--text-small); cursor: pointer; }
-  .command.active, .command:hover { background: var(--bg-elevated); }
-  .command:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: -2px; }
-  .empty, .hint { color: var(--text-secondary); padding: var(--space-2); font-size: var(--text-small); }
+  .command.active, .command:hover { background: var(--accent-tint); color: var(--accent); }
+  .command:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .empty, .hint { color: var(--text-muted); padding: var(--space-2); font-size: var(--text-small); }
   .hint { margin: 0; }
   .selection-announcement { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .result { margin: 0; font-size: var(--text-small); }

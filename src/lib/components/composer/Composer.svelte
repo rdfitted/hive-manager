@@ -441,12 +441,12 @@
     min-width: 0;
     border: 1px solid var(--border-control);
     border-radius: var(--radius-shell);
-    background: var(--bg-void);
+    background: var(--input);
     padding: var(--space-2);
   }
 
   .composer-wrap:focus-within {
-    border-color: var(--accent-cyan);
+    border-color: var(--accent);
   }
 
   .composer-wrap.has-toolbar {
@@ -481,10 +481,10 @@
     max-width: 100%;
     margin: 0 2px;
     padding: 1px 6px;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 45%, var(--border-structural));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, var(--border-structural));
     border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--accent-cyan) 12%, transparent);
-    color: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
     font-family: var(--font-mono);
     font-size: 11px;
     line-height: 1.35;
@@ -493,14 +493,14 @@
   }
 
   .composer :global(.composer-token.command) {
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-amber) 45%, var(--border-structural));
-    background: color-mix(in srgb, var(--accent-amber) 12%, transparent);
-    color: var(--accent-amber);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, var(--border-structural));
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
   }
 
   .composer:empty::before {
     content: attr(data-placeholder);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     pointer-events: none;
   }
 

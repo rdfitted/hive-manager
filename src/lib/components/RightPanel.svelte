@@ -86,14 +86,16 @@
     min-width: 0;
     flex-direction: column;
     background: var(--surface);
-    border-left: 1px solid var(--border);
+    border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+    box-shadow: var(--depth-1);
   }
   .panel-drawer.collapsed { visibility: hidden; pointer-events: none; }
   .panel-drawer :global(.resize-handle) { left: 0; }
-  .panel-header { display: flex; align-items: center; gap: 4px; min-height: var(--toolbar-height); padding: 4px 8px; border-bottom: 1px solid var(--border); }
-  .panel-tabs { display: flex; flex: 1; min-width: 0; gap: 2px; }
-  .panel-tab { min-width: 0; padding-inline: 6px; font-size: var(--text-small); }
+  .panel-header { display: flex; align-items: center; gap: 4px; min-height: var(--toolbar-height); padding: 4px 8px; background: var(--toolbar); border-bottom: 1px solid var(--border); }
+  .panel-tabs { display: flex; flex: 1; min-width: 0; gap: 2px; padding: 2px; border-radius: var(--radius-full); background: var(--track); }
+  .panel-tab { min-width: 0; padding-inline: 6px; font-size: var(--text-small); border-radius: var(--radius-full); }
+  .panel-tab[aria-pressed="true"] { background: var(--track-active); color: var(--accent); }
   .panel-title { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .tab-content { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
-  @media (forced-colors: active) { .panel-drawer, .panel-header { border-color: CanvasText; } }
+  @media (forced-colors: active) { .panel-drawer, .panel-header { border: 1px solid CanvasText; } }
 </style>
