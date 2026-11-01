@@ -20,8 +20,11 @@ pub struct ClaudeTranscriptReader {
     partial: Vec<u8>,
     discard_line: bool,
     users: HashMap<String, (String, SystemTime)>,
+    unresolved_users: HashSet<String>,
     parents: HashMap<String, String>,
     confirmed: HashMap<String, (String, SystemTime)>,
+    #[cfg(test)]
+    ancestor_steps: usize,
 }
 
 impl ClaudeTranscriptReader {
@@ -37,6 +40,9 @@ impl ClaudeTranscriptReader {
             root, direct, filename, fallback_checked: false, fallback: None,
             path: None, offset: 0, partial: Vec::new(), discard_line: false,
             users: HashMap::new(), parents: HashMap::new(), confirmed: HashMap::new(),
+            unresolved_users: HashSet::new(),
+            #[cfg(test)]
+            ancestor_steps: 0,
         }
     }
 
@@ -75,6 +81,7 @@ impl ClaudeTranscriptReader {
             self.partial.clear();
             self.discard_line = false;
             self.users.clear();
+            self.unresolved_users.clear();
             self.parents.clear();
             self.confirmed.clear();
         }
@@ -146,15 +153,22 @@ impl ClaudeTranscriptReader {
                 }
             }
             Some("assistant") if record["message"]["role"] == "assistant" => {
+                // Parent edges above are retained even when no nonce needs resolution.
+                if self.unresolved_users.is_empty() { return; }
                 let Some(parent) = record["parentUuid"].as_str() else { return };
                 let Some(turn_id) = record["message"]["id"].as_str().filter(|id| !id.is_empty()) else { return };
                 let mut ancestor = Some(parent);
+                // An earlier timestamp-skewed assistant must not prevent a later retry.
                 let mut visited = HashSet::new();
                 while let Some(id) = ancestor {
+                    #[cfg(test)]
+                    { self.ancestor_steps += 1; }
                     if !visited.insert(id) { break; }
                     if let Some((nonce, user_time)) = self.users.get(id) {
                         if timestamp >= *user_time {
                             self.confirmed.entry(nonce.clone()).or_insert((turn_id.to_owned(), *user_time));
+                            self.unresolved_users.remove(id);
+                            if self.unresolved_users.is_empty() { break; }
                         }
                     }
                     ancestor = self.parents.get(id).map(String::as_str);
@@ -167,6 +181,7 @@ impl ClaudeTranscriptReader {
     fn record_user(&mut self, id: &str, text: &str, timestamp: SystemTime) {
         for line in text.lines().filter(|line| super::is_nonce_line(line)) {
             self.users.insert(id.into(), (line.into(), timestamp));
+            self.unresolved_users.insert(id.into());
         }
     }
 }
@@ -218,6 +233,98 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let reader = ClaudeTranscriptReader::new(temp.path().to_owned(), Path::new("D:/fixture/worktree"), "session-a");
         (temp, path, reader)
+    }
+
+    fn linked_history(start: usize, end: usize) -> String {
+        (start..end).map(|i| {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            let parent = i.checked_sub(1).map(|id| format!("node-{id}"));
+            serde_json::json!({
+                "type": role, "uuid": format!("node-{i}"), "parentUuid": parent,
+                "timestamp": "2026-10-21T12:00:00Z",
+                "message": {"role": role, "id": format!("msg-{i}"), "content": "ordinary text"}
+            }).to_string() + "\n"
+        }).collect()
+    }
+
+    #[test]
+    fn f8_linked_history_without_unresolved_nonce_skips_ancestor_resolution() {
+        let (_temp, path, mut reader) = setup();
+        let first = linked_history(0, 2000);
+        assert!(first.len() < MAX_PARTIAL_BYTES);
+        fs::write(&path, first).unwrap();
+        assert_eq!(reader.poll(NONCE, UNIX_EPOCH), None);
+        assert_eq!(reader.parents.len(), 1999, "F8 skipped walks still record parent edges");
+        assert_eq!(reader.ancestor_steps, 0, "F8 no unresolved nonce means zero ancestor steps");
+
+        let second = linked_history(2000, 4000);
+        assert!(second.len() < MAX_PARTIAL_BYTES);
+        File::options().append(true).open(path).unwrap().write_all(second.as_bytes()).unwrap();
+        assert_eq!(reader.poll(NONCE, UNIX_EPOCH), None);
+        assert_eq!(reader.parents.len(), 3999, "F8 later window retains accumulated parents");
+        assert_eq!(reader.ancestor_steps, 0, "F8 accumulated history without nonce means zero ancestor steps");
+    }
+
+    #[test]
+    fn f8_timestamp_skew_remains_eligible_for_later_assistant() {
+        let (_temp, path, mut reader) = setup();
+        let pending = format!(
+            "{{\"type\":\"user\",\"uuid\":\"u\",\"timestamp\":\"1970-01-01T00:01:40Z\",\"message\":{{\"role\":\"user\",\"content\":\"{NONCE}\"}}}}\n\
+             {{\"type\":\"assistant\",\"uuid\":\"a\",\"parentUuid\":\"u\",\"timestamp\":\"1970-01-01T00:01:39Z\",\"message\":{{\"role\":\"assistant\",\"id\":\"msg-a\"}}}}\n"
+        );
+        fs::write(&path, pending).unwrap();
+        assert_eq!(reader.poll(NONCE, UNIX_EPOCH), None, "F8 A(99) cannot confirm U(100)");
+        File::options().append(true).open(path).unwrap().write_all(
+            b"{\"type\":\"assistant\",\"uuid\":\"b\",\"parentUuid\":\"a\",\"timestamp\":\"1970-01-01T00:01:41Z\",\"message\":{\"role\":\"assistant\",\"id\":\"msg-b\"}}\n"
+        ).unwrap();
+        assert_eq!(reader.poll(NONCE, UNIX_EPOCH), Some("msg-b".into()),
+            "F8 B(101) must revisit and confirm U(100) through A(99)");
+    }
+
+    #[test]
+    fn f8_confirmation_stops_walk_and_later_users_remain_eligible() {
+        let (_temp, path, mut reader) = setup();
+        let first = FIXTURE.replace("\"parentUuid\":null", "\"parentUuid\":\"node-19\"");
+        fs::write(&path, linked_history(0, 20) + &first).unwrap();
+        assert_eq!(reader.poll(NONCE, UNIX_EPOCH), Some("msg_fixture_turn".into()));
+        assert_eq!(reader.ancestor_steps, 1, "F8 stop once every outstanding nonce user is confirmed");
+        assert!(reader.message_recorded(NONCE), "F8 resolved users retain recorded evidence");
+
+        File::options().append(true).open(&path).unwrap()
+            .write_all(linked_history(20, 40).as_bytes()).unwrap();
+        assert_eq!(reader.poll(NONCE, UNIX_EPOCH), Some("msg_fixture_turn".into()));
+        assert_eq!(reader.ancestor_steps, 1, "F8 already confirmed history skips later walks");
+        assert_eq!(reader.parents.get("node-39").map(String::as_str), Some("node-38"));
+
+        let later_nonce = "[hive-msg:bbbbbbbb]";
+        let later = FIXTURE.replace(NONCE, later_nonce)
+            .replace("user_fixture", "later_user").replace("assistant_fixture", "later_assistant")
+            .replace("msg_fixture_turn", "msg_later_turn")
+            .replace("\"parentUuid\":null", "\"parentUuid\":\"node-39\"");
+        File::options().append(true).open(path).unwrap().write_all(later.as_bytes()).unwrap();
+        assert_eq!(reader.poll(later_nonce, UNIX_EPOCH), Some("msg_later_turn".into()),
+            "F8 a later nonce user reopens ancestor resolution");
+        assert_eq!(reader.ancestor_steps, 2);
+    }
+
+    #[test]
+    fn f8_unresolved_cycles_missing_parents_and_truncation_are_safe() {
+        for parent in ["assistant_fixture", "missing"] {
+            let (_temp, path, mut reader) = setup();
+            let unlinked = FIXTURE.replace("\"parentUuid\":\"user_fixture\"",
+                &format!("\"parentUuid\":\"{parent}\""));
+            fs::write(&path, unlinked).unwrap();
+            assert_eq!(reader.poll(NONCE, UNIX_EPOCH), None);
+            assert!(reader.unresolved_users.contains("user_fixture"));
+
+            fs::write(&path, "").unwrap();
+            assert_eq!(reader.poll(NONCE, UNIX_EPOCH), None);
+            assert!(reader.unresolved_users.is_empty(), "F8 truncation clears unresolved users");
+            assert!(!reader.message_recorded(NONCE));
+            assert!(reader.parents.is_empty());
+            fs::write(path, FIXTURE).unwrap();
+            assert_eq!(reader.poll(NONCE, UNIX_EPOCH), Some("msg_fixture_turn".into()));
+        }
     }
 
     #[test]
