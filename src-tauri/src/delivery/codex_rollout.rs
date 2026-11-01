@@ -10,6 +10,35 @@ use std::time::SystemTime;
 const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PARTIAL_BYTES: usize = 2 * 1024 * 1024;
 
+/// Shared byte reading for receipts and the attributed feed. Each call reads at
+/// most 2 MiB; oversized records are discarded through their next newline.
+pub(crate) fn read_rollout_window(file: &mut File, offset: &mut u64,
+    partial: &mut Vec<u8>, discard_line: &mut bool) -> std::io::Result<Vec<Value>> {
+    file.seek(SeekFrom::Start(*offset))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_READ_BYTES).read_to_end(&mut bytes)?;
+    *offset += bytes.len() as u64;
+    let mut records = Vec::new();
+    for part in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if !*discard_line {
+            if partial.len() + part.len() > MAX_PARTIAL_BYTES {
+                partial.clear();
+                *discard_line = true;
+            } else {
+                partial.extend_from_slice(part);
+            }
+        }
+        if part.last() == Some(&b'\n') {
+            if !*discard_line {
+                if let Ok(record) = serde_json::from_slice(partial) { records.push(record); }
+            }
+            partial.clear();
+            *discard_line = false;
+        }
+    }
+    Ok(records)
+}
+
 #[derive(Default)]
 struct Tail {
     offset: u64,
@@ -84,32 +113,11 @@ impl CodexRolloutReader {
                     let matched_user = tail.matched_user;
                     *tail = Tail { matched_user, ..Tail::default() };
                 }
-                if file.seek(SeekFrom::Start(tail.offset)).is_err() { continue; }
-                let mut bytes = Vec::new();
-                if file.take(MAX_READ_BYTES).read_to_end(&mut bytes).is_err() { continue; }
-                tail.offset += bytes.len() as u64;
-                if tail.discard_line {
-                    if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
-                        bytes.drain(..=newline);
-                        tail.discard_line = false;
-                    } else {
-                        continue;
-                    }
-                }
-                tail.partial.extend(bytes);
-                let mut consumed = 0;
-                for (index, byte) in tail.partial.iter().enumerate() {
-                    if *byte != b'\n' { continue; }
-                    if let Ok(record) = serde_json::from_slice::<Value>(&tail.partial[consumed..index]) {
-                        observe(&record, nonce, since, &mut tail.pending, &mut tail.matched_user,
-                            &mut tail.active_turn, &mut tail.confirmed);
-                    }
-                    consumed = index + 1;
-                }
-                tail.partial.drain(..consumed);
-                if tail.partial.len() > MAX_PARTIAL_BYTES {
-                    tail.partial.clear();
-                    tail.discard_line = true;
+                let Ok(records) = read_rollout_window(&mut file, &mut tail.offset,
+                    &mut tail.partial, &mut tail.discard_line) else { continue };
+                for record in records {
+                    observe(&record, nonce, since, &mut tail.pending, &mut tail.matched_user,
+                        &mut tail.active_turn, &mut tail.confirmed);
                 }
                 if let Some(turn) = &tail.confirmed { return Some(turn.clone()); }
             }

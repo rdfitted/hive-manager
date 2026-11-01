@@ -1536,7 +1536,7 @@ impl SessionController {
 
             agents.push(AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(cmd, &queen_args),
+                transcript_session_id: Self::transcript_key(cmd, &queen_args),
                 id: queen_id,
                 role: AgentRole::Queen,
                 status: AgentStatus::Running,
@@ -1598,7 +1598,7 @@ impl SessionController {
 
                 agents.push(AgentInfo {
                     transcript_spawned_at,
-                    transcript_session_id: Self::claude_transcript_session_id(cmd, &worker_args),
+                    transcript_session_id: Self::transcript_key(cmd, &worker_args),
                     id: worker_id.clone(),
                     role: AgentRole::Worker {
                         index: i,
@@ -3605,12 +3605,20 @@ impl SessionController {
         });
     }
 
-    fn claude_transcript_session_id(command: &str, args: &[String]) -> Option<String> {
-        if command != "claude" {
-            return None;
+    fn transcript_key(command: &str, args: &[String]) -> Option<String> {
+        match command {
+            "claude" => args.windows(2).find(|pair| pair[0] == "--session-id")
+                .map(|pair| pair[1].clone()),
+            "codex" => {
+                let mut prompts = args.iter().filter(|arg| arg.strip_prefix("Read ")
+                    .and_then(|path| path.strip_suffix("-prompt.md and execute."))
+                    .is_some_and(|path| !path.is_empty() && !path.contains(['\n', '\r'])));
+                let prompt = prompts.next()?;
+                if prompts.next().is_some() { return None; }
+                Some(format!("codex-prompt-{}", Uuid::new_v5(&Uuid::NAMESPACE_DNS, prompt.as_bytes())))
+            }
+            _ => None,
         }
-        args.windows(2).find(|pair| pair[0] == "--session-id")
-            .map(|pair| pair[1].clone())
     }
 
     pub(crate) fn build_command(config: &AgentConfig) -> (String, Vec<String>) {
@@ -9382,7 +9390,7 @@ Last updated: {timestamp}
             last_activity_at: Utc::now(),
             agents: vec![AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: solo_id,
                 role: AgentRole::Worker {
                     index: 1,
@@ -9743,7 +9751,7 @@ Last updated: {timestamp}
 
         agents.push(AgentInfo {
             transcript_spawned_at,
-            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+            transcript_session_id: Self::transcript_key(&cmd, &args),
             id: queen_id.clone(),
             role: AgentRole::Queen,
             status: AgentStatus::Running,
@@ -9939,7 +9947,7 @@ Last updated: {timestamp}
 
             agents.push(AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: worker_id,
                 role: AgentRole::Worker {
                     index,
@@ -10426,7 +10434,7 @@ phases and do EXACTLY this, then stop:
 
             let agent_info = AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: variant.agent_id.clone(),
                 role: AgentRole::Fusion {
                     variant: variant.name.clone(),
@@ -10877,7 +10885,7 @@ phases and do EXACTLY this, then stop:
 
             new_agents.push(AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: agent_id,
                 role: AgentRole::Fusion {
                     variant: debater.name.clone(),
@@ -11468,7 +11476,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             agents.push(AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
@@ -11595,7 +11603,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             agents.push(AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
@@ -11733,7 +11741,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             agents.push(AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
@@ -11942,7 +11950,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             new_agents.push(AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id,
                 role: AgentRole::Queen,
                 status: AgentStatus::Running,
@@ -12072,7 +12080,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             new_agents.push(AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: variant.agent_id.clone(),
                 role: AgentRole::Fusion {
                     variant: variant.name.clone(),
@@ -12334,7 +12342,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             agents.push(AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
@@ -12662,7 +12670,7 @@ The backend composed and persisted the following authoritative skeleton before l
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
                     transcript_spawned_at,
-                    transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                    transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: worker_id,
                     role: AgentRole::Worker {
                         index,
@@ -14218,7 +14226,7 @@ The backend composed and persisted the following authoritative skeleton before l
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
                     transcript_spawned_at,
-                    transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                    transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: judge_id,
                     role: AgentRole::Judge {
                         session_id: session_id.to_string(),
@@ -14562,7 +14570,7 @@ The backend composed and persisted the following authoritative skeleton before l
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
                     transcript_spawned_at,
-                    transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                    transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: judge_id,
                     role: AgentRole::Judge {
                         session_id: session_id.to_string(),
@@ -15202,7 +15210,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
         new_agents.push(AgentInfo {
             transcript_spawned_at,
-            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+            transcript_session_id: Self::transcript_key(&cmd, &args),
             id: queen_id.clone(),
             role: AgentRole::Queen,
             status: AgentStatus::Running,
@@ -15973,7 +15981,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             new_agents.push(AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id.clone(),
                 role: AgentRole::Queen,
                 status: AgentStatus::Running,
@@ -16124,7 +16132,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             agents.push(AgentInfo {
                 transcript_spawned_at,
-                transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+                transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id.clone(),
                 role: AgentRole::Queen,
                 status: AgentStatus::Running,
@@ -16861,7 +16869,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
         let agent_info = AgentInfo {
             transcript_spawned_at,
-            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+            transcript_session_id: Self::transcript_key(&cmd, &args),
             id: worker_id.clone(),
             role: worker_role,
             status: AgentStatus::Running,
@@ -17053,7 +17061,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
         let agent_info = AgentInfo {
             transcript_spawned_at,
-            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+            transcript_session_id: Self::transcript_key(&cmd, &args),
             id: evaluator_id,
             role: AgentRole::Evaluator,
             status: AgentStatus::Running,
@@ -17209,7 +17217,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
         let agent_info = AgentInfo {
             transcript_spawned_at,
-            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+            transcript_session_id: Self::transcript_key(&cmd, &args),
             id: prince_id,
             role: AgentRole::Prince,
             status: AgentStatus::Running,
@@ -17336,7 +17344,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
         let agent_info = AgentInfo {
             transcript_spawned_at,
-            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+            transcript_session_id: Self::transcript_key(&cmd, &args),
             id: qa_worker_id,
             role,
             status: AgentStatus::Running,
@@ -17483,7 +17491,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
         let agent_info = AgentInfo {
             transcript_spawned_at,
-            transcript_session_id: Self::claude_transcript_session_id(&cmd, &args),
+            transcript_session_id: Self::transcript_key(&cmd, &args),
             id: planner_id.clone(),
             role: AgentRole::Planner {
                 index: planner_index,
@@ -24198,6 +24206,28 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     }
 
     #[test]
+    fn codex_transcript_key_requires_one_full_prompt_argument_without_changing_argv() {
+        let config = AgentConfig { cli: "codex".into(), flags: vec!["--fixture".into()], ..Default::default() };
+        let (command, mut args) = SessionController::build_command(&config);
+        assert_eq!(SessionController::transcript_key(&command, &args), None);
+        let prompt = "Read C:\\fixture\\queen-prompt.md and execute.";
+        SessionController::add_prompt_to_args("codex", &mut args, "C:\\fixture\\queen-prompt.md");
+        let before = args.clone();
+        let expected = format!("codex-prompt-{}", uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, prompt.as_bytes()));
+        assert_eq!(SessionController::transcript_key(&command, &args), Some(expected.clone()));
+        assert_eq!(args, before, "G11 transcript identity never mutates launch argv");
+        crate::transport::feed::safe_component(&expected).unwrap();
+        for invalid in ["Do an inline task", "prefix Read C:/fixture/worker-prompt.md and execute.",
+            "Read C:/fixture/worker-prompt.md and execute. extra", "Read C:/fixture/task.md and execute.",
+            "Read \nworker-prompt.md and execute."] {
+            assert_eq!(SessionController::transcript_key("codex", &[invalid.into()]), None, "{invalid}");
+        }
+        args.push("Read C:/fixture/worker-prompt.md and execute.".into());
+        assert_eq!(SessionController::transcript_key("codex", &args), None, "ambiguous argv has no key");
+        assert_eq!(SessionController::transcript_key("cursor", &[prompt.into()]), None);
+    }
+
+    #[test]
     fn claude_spawn_identity_is_fresh_and_matches_the_argv() {
         let config = AgentConfig {
             cli: "claude".to_string(),
@@ -24211,7 +24241,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             SessionController::build_solo_command(&config, None)];
         let mut ids = std::collections::HashSet::new();
         for (cmd, args) in builds {
-            let id = SessionController::claude_transcript_session_id(&cmd, &args).unwrap();
+            let id = SessionController::transcript_key(&cmd, &args).unwrap();
             assert_eq!(uuid::Uuid::parse_str(&id).unwrap().get_version_num(), 4);
             assert!(ids.insert(id.clone()), "every spawn must receive a fresh UUID");
             assert_eq!(args.iter().filter(|arg| *arg == "--session-id").count(), 1);
@@ -24222,7 +24252,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let (cmd, args) = SessionController::build_command(&AgentConfig {
             cli: "codex".to_string(), ..AgentConfig::default()
         });
-        assert_eq!(SessionController::claude_transcript_session_id(&cmd, &args), None);
+        assert_eq!(SessionController::transcript_key(&cmd, &args), None);
     }
 
     #[test]
@@ -24233,7 +24263,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let (cmd, args) = SessionController::build_command(&AgentConfig {
             cli: "claude".to_string(), ..AgentConfig::default()
         });
-        let id = SessionController::claude_transcript_session_id(&cmd, &args);
+        let id = SessionController::transcript_key(&cmd, &args);
         let spawned_at = Some(Utc::now() - Duration::seconds(2));
         source.agents[0].transcript_spawned_at = spawned_at;
         source.agents[0].transcript_session_id = id.clone();

@@ -1,13 +1,19 @@
 //! Dedicated per-agent journals. This is deliberately independent of EventBus.
-use super::{claude_transcript_source::ClaudeTranscriptSource, AgentEvent};
+use super::{
+    claude_transcript_source::ClaudeTranscriptSource,
+    codex_rollout_source::{CodexBinder, CodexBinding, CodexRolloutSource},
+    AgentEvent,
+};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File, OpenOptions},
+    hash::{Hash, Hasher},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    time::Instant,
 };
 use tokio::sync::broadcast;
 
@@ -144,16 +150,71 @@ pub struct HistoryPage {
     pub reset: bool,
 }
 
+enum TranscriptSource {
+    Claude(ClaudeTranscriptSource),
+    Codex(CodexRolloutSource),
+}
+impl TranscriptSource {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Claude(source) => source.path(),
+            Self::Codex(source) => source.path(),
+        }
+    }
+    fn offset(&self) -> u64 {
+        match self {
+            Self::Claude(source) => source.offset(),
+            Self::Codex(source) => source.offset(),
+        }
+    }
+    fn snapshot_len(&self) -> Result<u64, String> {
+        match self {
+            Self::Claude(source) => source.snapshot_len(),
+            Self::Codex(source) => source.snapshot_len(),
+        }
+    }
+    fn poll(&mut self) -> Result<(Vec<AgentEvent>, bool, bool), String> {
+        match self {
+            Self::Claude(source) => source.poll(),
+            Self::Codex(source) => source.poll(),
+        }
+    }
+    fn is_codex(&self) -> bool {
+        matches!(self, Self::Codex(_))
+    }
+    fn matches_binding(&self, binding: &CodexBinding) -> bool {
+        matches!(self, Self::Codex(source) if source.matches_binding(binding))
+    }
+}
+
+fn event_fingerprint(event: &AgentEvent) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_vec(&(
+        &event.ts,
+        event.kind,
+        &event.source_id,
+        event.truncated,
+        &event.payload,
+    ))
+    .expect("event fingerprint")
+    .hash(&mut hasher);
+    hasher.finish()
+}
+
 struct Journal {
     path: PathBuf,
     generation: String,
     size: u64,
-    source: Option<ClaudeTranscriptSource>,
+    source: Option<TranscriptSource>,
+    codex_seen: HashSet<u64>,
     protocol: bool,
 }
 pub struct FeedStore {
     sessions_root: PathBuf,
     claude_root: Option<PathBuf>,
+    codex: Mutex<CodexBinder>,
+    #[cfg(test)]
+    discovery_observer: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     journals: Mutex<HashMap<(String, String), Journal>>,
     sender: broadcast::Sender<(String, AgentEvent)>,
 }
@@ -163,12 +224,18 @@ impl FeedStore {
         Self {
             sessions_root,
             claude_root,
+            codex: Mutex::new(CodexBinder::new(None)),
+            #[cfg(test)]
+            discovery_observer: Mutex::new(None),
             journals: Mutex::new(HashMap::new()),
             sender,
         }
     }
     pub fn subscribe(&self) -> broadcast::Receiver<(String, AgentEvent)> {
         self.sender.subscribe()
+    }
+    pub fn set_codex_root(&self, root: Option<PathBuf>) {
+        self.codex.lock().set_root(root);
     }
 
     fn journal(&self, session: &str, agent: &str) -> Result<Journal, String> {
@@ -215,6 +282,7 @@ impl FeedStore {
             generation,
             size,
             source: None,
+            codex_seen: HashSet::new(),
             protocol,
         })
     }
@@ -232,6 +300,7 @@ impl FeedStore {
             File::create(&journal.path).map_err(|e| e.to_string())?;
             journal.size = 0;
             journal.generation = uuid::Uuid::new_v4().to_string();
+            journal.codex_seen.clear();
         }
         journal.source = None;
         journal.protocol = true;
@@ -277,7 +346,7 @@ impl FeedStore {
             journals.insert(key, journal);
             return Ok(());
         }
-        journal.source = Some(source);
+        journal.source = Some(TranscriptSource::Claude(source));
         // Rebuild derived transcript materialization with a fresh generation on app restart.
         File::create(&journal.path).map_err(|e| e.to_string())?;
         journal.size = 0;
@@ -287,16 +356,163 @@ impl FeedStore {
         journals.insert(key, journal);
         Ok(())
     }
+
+    /// Discovery and cold replay preparation happen outside the journals lock.
+    /// A readable, identity-checked first window is required before any write.
+    pub fn use_codex_rollout(
+        &self,
+        session: &str,
+        agent: &str,
+        cwd: &Path,
+        transcript_key: Option<&str>,
+        spawned_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<bool, String> {
+        validate_ids(session, agent)?;
+        if self.is_protocol(session, agent)? {
+            return Ok(false);
+        }
+        let directory = journal_directory(&self.sessions_root, session)?;
+        let sidecar = directory.join(format!("{agent}.binding"));
+        validate_existing_file(&self.sessions_root, &sidecar)?;
+        let (binding, root) = {
+            let mut binder = self.codex.lock();
+            let binding = binder.resolve(
+                session,
+                agent,
+                transcript_key,
+                spawned_at,
+                cwd,
+                &sidecar,
+                Instant::now(),
+                || {
+                    #[cfg(test)]
+                    if let Some(observe) = self.discovery_observer.lock().as_ref() {
+                        observe();
+                    }
+                },
+            );
+            (binding, binder.root().map(Path::to_path_buf))
+        };
+        let key = (session.into(), agent.into());
+        let Some((binding, root)) = binding.zip(root) else {
+            if let Some(journal) = self.journals.lock().get_mut(&key) {
+                if journal
+                    .source
+                    .as_ref()
+                    .is_some_and(TranscriptSource::is_codex)
+                {
+                    journal.source = None;
+                }
+            }
+            return Ok(false);
+        };
+        {
+            let journals = self.journals.lock();
+            if let Some(source) = journals
+                .get(&key)
+                .and_then(|journal| journal.source.as_ref())
+            {
+                if source.matches_binding(&binding) {
+                    return Ok(source.snapshot_len().is_ok());
+                }
+            }
+        }
+        let Ok(mut source) = CodexRolloutSource::bound(root, &binding, cwd, agent) else {
+            return Ok(false);
+        };
+        let Ok((events, _, _)) = source.poll() else {
+            return Ok(false);
+        };
+        let mut journal = self.journal(session, agent)?;
+        let marker = format!(
+            "codex:{}",
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_DNS,
+                &serde_json::to_vec(&binding).map_err(|error| error.to_string())?
+            )
+        );
+        let mode_path = journal.path.with_extension("source");
+        let mut old_marker = Vec::new();
+        if mode_path.is_file() {
+            File::open(&mode_path)
+                .map_err(|error| error.to_string())?
+                .take(128)
+                .read_to_end(&mut old_marker)
+                .map_err(|error| error.to_string())?;
+        }
+        let reuse = old_marker == marker.as_bytes();
+        if reuse {
+            let mut offset = 0;
+            while offset < journal.size {
+                let (events, end) =
+                    read_window(&self.sessions_root, &journal.path, offset, MAX_READ_BYTES)?;
+                journal
+                    .codex_seen
+                    .extend(events.iter().map(event_fingerprint));
+                if end <= offset {
+                    break;
+                }
+                offset = end;
+            }
+        }
+        let mut journals = self.journals.lock();
+        if let Some(held) = journals.get(&key) {
+            if held.protocol {
+                return Ok(false);
+            }
+            if held
+                .source
+                .as_ref()
+                .is_some_and(|source| source.matches_binding(&binding))
+            {
+                return Ok(true);
+            }
+        }
+        if !reuse {
+            validate_existing_file(&self.sessions_root, &journal.path)?;
+            File::create(&journal.path).map_err(|error| error.to_string())?;
+            journal.size = 0;
+            journal.generation = uuid::Uuid::new_v4().to_string();
+        }
+        journal.source = Some(TranscriptSource::Codex(source));
+        fs::write(mode_path, marker).map_err(|error| error.to_string())?;
+        for event in events {
+            self.append_codex(&mut journal, session, agent, event)?;
+        }
+        journals.insert(key, journal);
+        Ok(true)
+    }
+
+    fn append_codex(
+        &self,
+        journal: &mut Journal,
+        session: &str,
+        agent: &str,
+        event: AgentEvent,
+    ) -> Result<(), String> {
+        let fingerprint = event_fingerprint(&event);
+        if !journal.codex_seen.contains(&fingerprint) {
+            self.append(journal, session, agent, event)?;
+            journal.codex_seen.insert(fingerprint);
+        }
+        Ok(())
+    }
     pub fn refresh_transcript(&self, session: &str, agent: &str) -> Result<(), String> {
         let key = (session.into(), agent.into());
-        let target = self
-            .journals
-            .lock()
-            .get(&key)
-            .and_then(|j| j.source.as_ref())
-            .map(|source| source.snapshot_len())
-            .transpose()?
-            .unwrap_or(0);
+        let target = {
+            let journals = self.journals.lock();
+            match journals
+                .get(&key)
+                .and_then(|journal| journal.source.as_ref())
+            {
+                Some(source) => match source.snapshot_len() {
+                    Ok(size) => size,
+                    Err(_) if source.is_codex() => return Ok(()),
+                    Err(error) => return Err(error),
+                },
+                None => 0,
+            }
+        };
         // Import only the finite snapshot present at entry. Release the mutex after
         // every 2 MiB window so another agent/protocol append can make progress.
         loop {
@@ -307,9 +523,14 @@ impl FeedStore {
             let Some(source) = journal.source.as_mut() else {
                 break;
             };
-            let (events, more, reset) = source.poll()?;
+            let codex = source.is_codex();
+            let (events, more, reset) = match source.poll() {
+                Ok(window) => window,
+                Err(_) if codex => break, // Keep every durable byte on source failure.
+                Err(error) => return Err(error),
+            };
             let reached_snapshot = source.offset() >= target;
-            if reset {
+            if reset && !codex {
                 journal_directory(&self.sessions_root, session)?;
                 validate_existing_file(&self.sessions_root, &journal.path)?;
                 File::create(&journal.path).map_err(|e| e.to_string())?;
@@ -317,7 +538,11 @@ impl FeedStore {
                 journal.generation = uuid::Uuid::new_v4().to_string();
             }
             for event in events {
-                self.append(journal, session, agent, event)?;
+                if codex {
+                    self.append_codex(journal, session, agent, event)?;
+                } else {
+                    self.append(journal, session, agent, event)?;
+                }
             }
             drop(journals);
             if !more || reached_snapshot {
@@ -451,6 +676,47 @@ impl FeedStore {
             has_more,
             reset,
         })
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    #[test]
+    fn g16b_directory_discovery_runs_outside_the_journals_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("codex-sessions");
+        fs::create_dir_all(root.join("2026/11/01")).unwrap();
+        let feeds = Arc::new(FeedStore::new(temp.path().join("sessions"), None));
+        feeds.set_codex_root(Some(root));
+        let observed = Arc::new(AtomicBool::new(false));
+        let signal = observed.clone();
+        let weak = Arc::downgrade(&feeds);
+        *feeds.discovery_observer.lock() = Some(Box::new(move || {
+            assert!(
+                weak.upgrade().unwrap().journals.try_lock().is_some(),
+                "G16b directory scans must not hold the journals lock"
+            );
+            signal.store(true, Ordering::SeqCst);
+        }));
+        assert!(!feeds
+            .use_codex_rollout(
+                "session",
+                "worker-a",
+                Path::new("fixture"),
+                Some("codex-prompt-fixture"),
+                Some("2026-11-01T12:00:00Z".parse().unwrap())
+            )
+            .unwrap());
+        assert!(
+            observed.load(Ordering::SeqCst),
+            "G16b exercised a discovery scan"
+        );
     }
 }
 

@@ -16,7 +16,7 @@ const fixture = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('phosphor-svelte', () => ({
-  ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {},
+  ArrowUp: () => {}, ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {},
   Hourglass: () => {}, Plus: () => {}, X: () => {}, Minus: () => {}, Square: () => {},
   SidebarSimple: () => {}, MagnifyingGlass: () => {},
 }));
@@ -168,7 +168,7 @@ describe('Focus/Grid session terminals', () => {
     layout.setSessionViewMode(mode); chatFeed(undefined, hasTerminal);
     const view = render(SessionOverview); await tick();
     const pane = view.container.querySelector<HTMLElement>('.terminal-item')!;
-    const editor = within(pane).getByRole('textbox', { name: 'Message this agent…' }); editor.focus();
+    const editor = within(pane).getByRole('textbox', { name: 'Message Agent 0' }); editor.focus();
     chatFeed([{ agent_id: 'session-a-agent-0', cursor: 'approval', kind: 'status', ts: '2026-01-01T00:00:00Z', source_id: 'approval', truncated: false, payload: { status, message: 'Fixture prompt' } }], hasTerminal);
     await tick();
     const attention = within(pane).getByRole('region', { name: 'Agent needs attention' });
@@ -189,7 +189,7 @@ describe('Focus/Grid session terminals', () => {
     layout.setSessionViewMode(mode); chatFeed();
     const view = render(SessionOverview); await tick();
     const pane = view.container.querySelector<HTMLElement>('.terminal-item')!;
-    const editor = within(pane).getByRole('textbox', { name: 'Message this agent…' }); editor.focus();
+    const editor = within(pane).getByRole('textbox', { name: 'Message Agent 0' }); editor.focus();
     const active = session(); active.agents[0].status = { WaitingForInput: 'trust_prompt' }; publish(active); await tick();
     expect(within(pane).getByText('Agent needs input. A prompt may only be visible in the terminal.')).toBeTruthy();
     expect(document.activeElement).toBe(editor);

@@ -38,84 +38,91 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
     validate_session(session_id)?;
     let controller = state.session_controller.read();
     let registry = state.transports();
-    let agents: Vec<(String, String, Option<String>, PathBuf)> =
-        if let Some(session) = controller.get_session(session_id) {
-            session
-                .agents
-                .iter()
-                .map(|agent| {
-                    (
-                        agent.id.clone(),
-                        agent.config.cli.clone(),
-                        agent.transcript_session_id.clone(),
-                        transcript_cwd(&session, agent),
-                    )
-                })
-                .collect()
-        } else {
-            let session = state
-                .storage
-                .load_session(session_id)
-                .map_err(|_| ApiError::not_found("Session not found"))?;
-            session
-                .agents
-                .iter()
-                .map(|agent| {
-                    let cwd = if session.no_git
-                        || (session.worktree_path.is_none()
-                            && matches!(
-                                session.session_type,
-                                crate::storage::SessionTypeInfo::Hive { .. }
-                            )) {
-                        PathBuf::from(&session.project_path)
-                    } else if session.execution_policy.workspace_strategy
-                        == crate::domain::WorkspaceStrategy::SharedCell
-                        && (agent.role == "Queen" || agent.role.starts_with("Worker("))
-                    {
-                        session
-                            .worktree_path
-                            .as_ref()
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| PathBuf::from(&session.project_path))
-                    } else if let Some(index) = agent
-                        .role
-                        .strip_prefix("Worker(")
-                        .and_then(|s| s.split([',', ')']).next())
-                        .and_then(|s| s.parse::<u8>().ok())
-                    {
-                        PathBuf::from(&session.project_path)
-                            .join(".hive-manager/worktrees")
-                            .join(session_id)
-                            .join(format!("worker-{index}"))
-                    } else if agent.role == "Queen"
+    let agents: Vec<(
+        String,
+        String,
+        Option<String>,
+        PathBuf,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = if let Some(session) = controller.get_session(session_id) {
+        session
+            .agents
+            .iter()
+            .map(|agent| {
+                (
+                    agent.id.clone(),
+                    agent.config.cli.clone(),
+                    agent.transcript_session_id.clone(),
+                    transcript_cwd(&session, agent),
+                    agent.transcript_spawned_at,
+                )
+            })
+            .collect()
+    } else {
+        let session = state
+            .storage
+            .load_session(session_id)
+            .map_err(|_| ApiError::not_found("Session not found"))?;
+        session
+            .agents
+            .iter()
+            .map(|agent| {
+                let cwd = if session.no_git
+                    || (session.worktree_path.is_none()
                         && matches!(
                             session.session_type,
                             crate::storage::SessionTypeInfo::Hive { .. }
-                        )
-                    {
-                        PathBuf::from(&session.project_path)
-                            .join(".hive-manager/worktrees")
-                            .join(session_id)
-                            .join("queen")
-                    } else {
-                        session
-                            .worktree_path
-                            .as_ref()
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| PathBuf::from(&session.project_path))
-                    };
-                    (
-                        agent.id.clone(),
-                        agent.config.cli.clone(),
-                        agent.transcript_session_id.clone(),
-                        cwd,
+                        )) {
+                    PathBuf::from(&session.project_path)
+                } else if session.execution_policy.workspace_strategy
+                    == crate::domain::WorkspaceStrategy::SharedCell
+                    && (agent.role == "Queen" || agent.role.starts_with("Worker("))
+                {
+                    session
+                        .worktree_path
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from(&session.project_path))
+                } else if let Some(index) = agent
+                    .role
+                    .strip_prefix("Worker(")
+                    .and_then(|s| s.split([',', ')']).next())
+                    .and_then(|s| s.parse::<u8>().ok())
+                {
+                    PathBuf::from(&session.project_path)
+                        .join(".hive-manager/worktrees")
+                        .join(session_id)
+                        .join(format!("worker-{index}"))
+                } else if agent.role == "Queen"
+                    && matches!(
+                        session.session_type,
+                        crate::storage::SessionTypeInfo::Hive { .. }
                     )
-                })
-                .collect()
-        };
+                {
+                    PathBuf::from(&session.project_path)
+                        .join(".hive-manager/worktrees")
+                        .join(session_id)
+                        .join("queen")
+                } else {
+                    session
+                        .worktree_path
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from(&session.project_path))
+                };
+                (
+                    agent.id.clone(),
+                    agent.config.cli.clone(),
+                    agent.transcript_session_id.clone(),
+                    cwd,
+                    agent.transcript_spawned_at,
+                )
+            })
+            .collect()
+    };
     drop(controller);
     let mut output = Vec::new();
-    for (agent_id, cli, transcript_session_id, cwd) in agents {
+    for (agent_id, cli, transcript_session_id, cwd, spawned_at) in agents {
         validate_agent_id(&agent_id)?;
         let capabilities = if let Some(entry) = registry.get(session_id, &agent_id) {
             entry.transport.capabilities()
@@ -132,7 +139,7 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
                 event_source: EventSource::Protocol,
             }
         } else {
-            let has_transcript = cli == "claude"
+            let mut has_transcript = cli == "claude"
                 && transcript_session_id
                     .as_ref()
                     .is_some_and(|id| feed::safe_component(id).is_ok());
@@ -144,6 +151,17 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
                         &agent_id,
                         &cwd,
                         transcript_session_id.as_deref().unwrap(),
+                    )
+                    .map_err(ApiError::internal)?;
+            } else if cli == "codex" {
+                has_transcript = registry
+                    .feeds
+                    .use_codex_rollout(
+                        session_id,
+                        &agent_id,
+                        &cwd,
+                        transcript_session_id.as_deref(),
+                        spawned_at,
                     )
                     .map_err(ApiError::internal)?;
             }

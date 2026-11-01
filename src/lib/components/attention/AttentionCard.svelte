@@ -5,6 +5,7 @@
   import { layout } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
   import { flushEnter } from './flush';
+  import FlushReceipt from './FlushReceipt.svelte';
 
   let { sessionId, agent, hasTerminal = true, chatAvailable = false, eventAttention = null, feedError = null, onOpen }: {
     sessionId: string; agent: AgentInfo; hasTerminal?: boolean; chatAvailable?: boolean;
@@ -55,7 +56,7 @@
         <span class="unavailable">original message unavailable</span>
       {/if}
     </div>
-    {#if currentResult?.receipt !== undefined}<pre class="receipt" role="status" aria-label="Inject receipt">{currentResult.receipt}</pre>{/if}
+    {#if currentResult?.receipt !== undefined}<FlushReceipt body={currentResult.receipt} ondismiss={() => { result = null; }} />{/if}
     {#if currentResult?.error}<p role="alert">{currentResult.error}</p>{/if}
   </section>
 {/if}
@@ -65,5 +66,4 @@
   .reason { margin: 0 0 var(--space-2); color: var(--text-primary); font-size: var(--text-small); }
   .actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
   .unavailable { color: var(--text-secondary); font-size: var(--text-small); }
-  .receipt { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 10rem; overflow: auto; font-size: var(--text-small); }
 </style>

@@ -20,6 +20,7 @@ pub struct ClaudeTranscriptSource {
     discard: bool,
     messages: HashMap<String, String>,
     records: HashSet<u64>,
+    deliveries: HashSet<String>,
     created: Option<SystemTime>,
     prefix: Vec<u8>,
 }
@@ -47,6 +48,7 @@ impl ClaudeTranscriptSource {
             discard: false,
             messages: HashMap::new(),
             records: HashSet::new(),
+            deliveries: HashSet::new(),
             created: None,
             prefix: Vec::new(),
         })
@@ -97,6 +99,7 @@ impl ClaudeTranscriptSource {
             self.discard = false;
             self.messages.clear();
             self.records.clear();
+            self.deliveries.clear();
         }
         self.created = created;
         self.prefix = prefix;
@@ -158,11 +161,15 @@ impl ClaudeTranscriptSource {
         let record_id = record["uuid"].as_str().map(str::to_owned);
         let mut output = Vec::new();
         let typ = record["type"].as_str().unwrap_or("");
+        if record["isCompactSummary"] == true {
+            return output;
+        }
         if typ == "system" && record["subtype"] == "turn_duration" {
             output.push(self.event(record, Kind::TurnEnd, record_id, json!({})));
             return output;
         }
-        if typ != "user" && typ != "assistant" {
+        let queued = crate::delivery::queued_prompt(record);
+        if typ != "user" && typ != "assistant" && queued.is_none() {
             return output;
         }
         // Dedupe a replayed record, never legitimate equal text in distinct records.
@@ -176,6 +183,14 @@ impl ClaudeTranscriptSource {
             self.records.clear();
         }
         self.records.insert(fingerprint);
+        if let Some((delivery_id, text)) = queued {
+            if !self.deliveries.insert(delivery_id.into()) {
+                return output;
+            }
+            output.push(self.event(record, Kind::UserMessage, Some(delivery_id.into()),
+                crate::delivery::user_message_payload(text)));
+            return output;
+        }
         let message = &record["message"];
         if message["role"].as_str() != Some(typ) {
             return output;
@@ -250,7 +265,7 @@ impl ClaudeTranscriptSource {
                     record,
                     Kind::UserMessage,
                     message_id.clone(),
-                    json!({"text": text}),
+                    crate::delivery::user_message_payload(&text),
                 ));
             }
         }

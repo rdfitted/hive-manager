@@ -48,3 +48,141 @@ describe('failure and decision transcript attention', () => {
     expect(protocolAttention([error, event('status', { status: 'resolved' })])).toBeNull();
   });
 });
+
+// Scrubbed fixtures exercise only normalized public event shapes.
+import { liveActivity } from './transcript';
+import { activityLabel } from './activityLabel';
+const activity = (id: string, kind: AgentEvent['kind'], payload: Record<string, unknown> = {}, seconds = 0): AgentEvent => ({
+  agent_id: 'fixture-agent', cursor: id, source_id: id, ts: new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString(), kind, payload, truncated: false,
+});
+
+describe('G19 activity model', () => {
+  it.each([
+    [1000, 'Thinking'],
+    [91000, 'Waiting for 91s without an event · Check the terminal'],
+  ])('keeps a Codex turn live after its initial user item at %ims', (elapsed, expected) => {
+    const events = [activity('start', 'turn_start'), activity('user', 'user_message', { text: 'Fixture request' })];
+    expect(liveActivity(events, 'Running', Date.parse(events[0].ts) + elapsed),
+      'Codex turn_start followed by user_message must retain its live activity').toBe(expected);
+  });
+
+  it('keeps the in-flight Codex tool label across a mid-turn steer', () => {
+    const events = [activity('start', 'turn_start'), activity('user', 'user_message', { text: 'Fixture request' }),
+      activity('tool', 'tool_start', { tool_id: 'tool', name: 'Read' }, 1),
+      activity('steer', 'user_message', { text: 'Fixture steer' }, 2)];
+    const now = Date.parse(events[0].ts) + 3000;
+    expect(liveActivity(events, 'Running', now), 'steering must not discard the running tool').toBe('Reading a file');
+    expect(liveActivity([...events, activity('result', 'tool_result', { tool_id: 'tool' }, 4)], 'Running', now + 1000)).toBe('Thinking');
+    expect(liveActivity([...events, activity('end', 'turn_end')], 'Running', now)).toBeNull();
+  });
+
+  it.each(['needs_input', 'needs_approval'])('clears Codex %s on a user answer while retaining its running tool', (status) => {
+    const events = [activity('start', 'turn_start'), activity('tool', 'tool_start', { tool_id: 'tool', name: 'Read' }, 1),
+      activity('question', 'status', { status }, 2), activity('answer', 'user_message', { text: 'Fixture answer' }, 3)];
+    const now = Date.parse(events[0].ts) + 4000;
+    expect(liveActivity(events, 'Running', now), 'a user answer must clear pending attention without discarding its running tool').toBe('Reading a file');
+    expect(liveActivity([...events, activity('result', 'tool_result', { tool_id: 'tool' }, 5)], 'Running', now + 1000),
+      'answered input must not persist after the running tool completes').toBe('Thinking');
+  });
+
+  it('retires stale Claude work without a turn_end before inferring the next activity', () => {
+    const oldWork = [activity('old', 'tool_start', { tool_id: 'old', name: 'Read' })];
+    const nextUser = [...oldWork, activity('user', 'user_message', { text: 'Fixture next request' }, 10)];
+    const now = Date.parse(oldWork[0].ts) + 11000;
+    expect(liveActivity(nextUser, 'Running', now)).toBeNull();
+    expect(liveActivity([...nextUser, activity('next', 'assistant_message', { text: 'Fixture reply' }, 11)], 'Running', now),
+      'the next inferred Claude turn must not inherit the stale tool').toBe('Thinking');
+  });
+
+  it('retires stale Codex tools and pending input at the next explicit turn_start', () => {
+    const events = [activity('old-start', 'turn_start'), activity('old-tool', 'tool_start', { tool_id: 'old', name: 'Read' }),
+      activity('question', 'status', { status: 'needs_input' }), activity('start', 'turn_start', {}, 10),
+      activity('user', 'user_message', { text: 'Fixture next request' }, 10)];
+    expect(liveActivity(events, 'Running', Date.parse(events[0].ts) + 11000),
+      'a fresh explicit turn must not inherit stale tools or pending input').toBe('Thinking');
+  });
+
+  it('keeps a failure when a partial history begins just before its result', () => {
+    expect(transcriptRows([activity('f', 'status', { status: 'tool_failed' }),
+      activity('r', 'tool_result', { tool_id: 'a', result: 'fixture' })])[0].failedCount).toBe(1);
+  });
+
+  it('clears resolved pending questions before showing subsequent activity', () => {
+    const events = [activity('a', 'tool_start', { tool_id: 'a', name: 'Read' }),
+      activity('q', 'status', { status: 'needs_input' })];
+    const now = Date.parse(events[0].ts);
+    expect(liveActivity(events, 'Running', now)).toContain('Waiting for your answer');
+    for (const status of ['resolved', 'approval_resolved']) {
+      expect(liveActivity([...events, activity('r', 'status', { status })], 'Running', now)).toBe('Reading a file');
+    }
+  });
+
+  it('groups consecutive tools before windowing, keeps the first identity and counts Codex failure status', () => {
+    const events = [activity('a', 'tool_start', { tool_id: 'a', name: 'exec' }),
+      activity('ar', 'tool_result', { tool_id: 'a', result: 'fixture' }, 10),
+      activity('b', 'tool_start', { tool_id: 'b' }, 12), activity('bf', 'status', { status: 'tool_failed', exit_code: 1 }, 20),
+      activity('br', 'tool_result', { tool_id: 'b', result: 'fixture' }, 27)];
+    const rows = transcriptRows(events);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ type: 'activity', durationMs: 27000, failedCount: 1 });
+    expect(rows[0].tools).toHaveLength(2);
+    expect(transcriptRows(events.slice(0, 2))[0].id).toBe(rows[0].id);
+    const many = Array.from({ length: 100 }, (_, i) => activity(String(i), 'tool_start', { tool_id: String(i) }));
+    expect(transcriptRows(many)).toHaveLength(1);
+    expect(transcriptRows(many)[0].tools).toHaveLength(100);
+  });
+
+  it('keeps errors, decisions and attention outside groups, and aborted ends are not failures', () => {
+    const aborted = activity('aborted', 'turn_end', { status: 'aborted', is_error: true });
+    expect(transcriptRows([aborted])).toEqual([]);
+    expect(protocolAttention([aborted])).toBeNull();
+    const rows = transcriptRows([activity('a', 'tool_start', { tool_id: 'a' }),
+      activity('e', 'error', { message: 'Fixture error' }), activity('b', 'tool_start', { tool_id: 'b' }),
+      activity('d', 'status', { status: 'needs_approval', decision: 'decline' }),
+      activity('c', 'tool_start', { tool_id: 'c' }), activity('q', 'status', { status: 'needs_input' }),
+      activity('f', 'tool_start', { tool_id: 'f' }), activity('end', 'turn_end', { status: 'aborted' })]);
+    expect(rows.map(row => row.type)).toEqual(['activity', 'error', 'activity', 'decision', 'activity', 'activity']);
+    expect(rows.filter(row => row.type === 'activity').every(row => row.failedCount === 0)).toBe(true);
+  });
+
+  it('infers Claude turns, retires an old turn at user input and closes on end, abort or exit', () => {
+    const events = [activity('a', 'assistant_message', { text: 'Fixture' })];
+    const now = Date.parse(events[0].ts);
+    expect(liveActivity(events, 'Running', now)).toBe('Thinking');
+    expect(liveActivity(events, undefined, now)).toBeNull();
+    expect(liveActivity(events, 'Completed', now)).toBeNull();
+    expect(liveActivity(events, { Error: 'stopped' }, now)).toBeNull();
+    for (const status of ['completed', 'aborted']) expect(liveActivity([...events, activity('end', 'turn_end', { status })], 'Running', now)).toBeNull();
+    const user = [...events, activity('u', 'user_message', { text: 'Continue' }, 2)];
+    expect(liveActivity(user, 'Running', now)).toBeNull();
+    expect(liveActivity([...user, activity('b', 'tool_start', { tool_id: 'b', name: 'Read' }, 3)], 'Running', now + 3000)).toBe('Reading a file');
+  });
+
+  it('switches running tools to Thinking after their result, and directs quiet turns to the terminal', () => {
+    const start = activity('a', 'tool_start', { tool_id: 'a', name: 'exec', input: 'await tools.exec_command({})' });
+    const now = Date.parse(start.ts);
+    expect(liveActivity([start], 'Running', now)).toBe('Running bash');
+    expect(liveActivity([start, activity('r', 'tool_result', { tool_id: 'a' }, 2)], 'Running', now + 2000)).toBe('Thinking');
+    expect(liveActivity([start], 'Running', now + 90000)).toBe('Waiting for 90s without an event · Check the terminal');
+  });
+});
+
+describe('T10 activity labels', () => {
+  it.each([
+    ...['Bash', 'shell_command'].map(name => [name, undefined, 'Running bash']),
+    ['Read', undefined, 'Reading a file'],
+    ...['Edit', 'Write', 'apply_patch'].map(name => [name, undefined, 'Editing a file']),
+    ...['Grep', 'Glob'].map(name => [name, undefined, 'Searching']),
+    ...['Task', 'spawn_agent', 'followup_task', 'wait_agent', 'send_message', 'interrupt_agent', 'list_agents'].map(name => [name, undefined, 'Running a sub-agent']),
+    ...['sleep', 'wait'].map(name => [name, undefined, 'Waiting']),
+    ['request_user_input_async', undefined, 'Waiting for your answer'], ['unknown', undefined, 'Running unknown'],
+    ['exec', 'await tools.exec_command({})', 'Running bash'], ['exec', 'tools.write_stdin({})', 'Running bash'],
+    ['exec', 'tools.apply_patch("fixture")', 'Editing a file'], ['exec', 'tools.web__run({})', 'Searching the web'],
+    ['exec', 'tools.view_image({})', 'Viewing an image'], ['exec', 'text(1)', 'Running code'],
+    ['exec', {}, 'Running code'], ['exec', undefined, 'Running code'],
+    ['exec', 'tools.exec_command({}); tools.web__run({})', 'Running bash'],
+    ['exec', 'tools.unknown({})', 'Running unknown'], ['toString', undefined, 'Running toString'],
+  ] as [string, unknown, string][])('%s with %s gives %s', (name, input, expected) => {
+    expect(activityLabel(name as string, input)).toBe(expected);
+  });
+});

@@ -79,7 +79,7 @@ impl AppState {
             #[cfg(not(test))]
             let claude_root = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
                 .map(|home| std::path::PathBuf::from(home).join(".claude").join("projects"));
-            Arc::new(crate::transport::TransportRegistry::new(self.storage.sessions_dir(), claude_root))
+            Arc::new(crate::transport::TransportRegistry::new(self.storage.sessions_dir(), claude_root.clone()).with_codex_root(claude_root.and_then(|root| root.parent()?.parent().map(|home| home.join(".codex").join("sessions")))))
         })
     }
 

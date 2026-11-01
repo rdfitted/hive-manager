@@ -168,14 +168,93 @@ describe('command action wiring and navigation', () => {
       expect(get(ui).focusedAgentId).toBe('worker-5');
     } finally { window.removeEventListener('keydown', navigate); }
   });
-  it('flushes the focused agent through HTTP and keeps its receipt visible', async () => {
+  it('flushes the focused agent through HTTP and shows a sentence with its exact receipt in closed Details', async () => {
     const receipt = '{"submit_confirmed":true}';
     const fetcher = vi.fn().mockResolvedValue({ ok: true, text: async () => receipt }); vi.stubGlobal('fetch', fetcher);
     const view = render(CommandPalette); await openPalette();
     await fireEvent.click(view.getByRole('button', { name: 'Flush Enter: Frontend' }));
-    await waitFor(() => expect(view.getByRole('status').textContent).toBe(receipt));
+    await waitFor(() => expect(view.getByRole('status').textContent).toBe('Enter delivered.'));
+    const details = view.getByRole('dialog').querySelector('details')!;
+    expect(details.open).toBe(false);
+    expect(details.querySelector('pre')?.textContent).toBe(receipt);
     expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({ target_agent_id: 'worker-5', message: '', submit: true });
     expect(view.getByRole('dialog')).toBeTruthy();
+  });
+  it.each([
+    ['{"submit_confirmed":null}', "Enter sent. Delivery isn't confirmed yet."],
+    ['{"submit_confirmed":false}', 'Enter may not have landed. Check the terminal.'],
+    ['legacy receipt', 'Enter sent.'],
+    ['', 'Enter sent.'],
+  ])('G21: summarizes %s without moving focus and dismisses the raw Details too', async (receipt, sentence) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => receipt }));
+    const view = render(CommandPalette); await openPalette();
+    const flush = view.getByRole('button', { name: 'Flush Enter: Frontend' }); flush.focus();
+    await fireEvent.click(flush);
+    await waitFor(() => expect(view.getByRole('status').textContent, 'receipt status must be a plain sentence').toBe(sentence));
+    expect(document.activeElement).toBe(flush);
+    const details = view.getByRole('dialog').querySelector('details')!;
+    expect(details.open).toBe(false);
+    expect(details.querySelector('pre')?.textContent).toBe(receipt);
+    await fireEvent.click(view.getByRole('button', { name: 'Dismiss Enter receipt' }));
+    expect(view.queryByRole('status')).toBeNull();
+    expect(view.getByRole('dialog').querySelector('details')).toBeNull();
+  });
+  it('G21: keeps receipt Details in the palette keyboard loop', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '{"submit_confirmed":true}' }));
+    const view = render(CommandPalette); await openPalette();
+    await fireEvent.click(view.getByRole('button', { name: 'Flush Enter: Frontend' }));
+    await waitFor(() => expect(view.getByRole('status').textContent).toBe('Enter delivered.'));
+    const close = view.getByRole('button', { name: 'Close command palette' });
+    const summary = view.getByRole('dialog').querySelector('summary')!;
+    close.focus(); await fireEvent.keyDown(close, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(summary);
+    await fireEvent.keyDown(summary, { key: 'Tab' });
+    expect(document.activeElement).toBe(close);
+    const dismiss = view.getByRole('button', { name: 'Dismiss Enter receipt' });
+    dismiss.focus();
+    expect(await fireEvent.keyDown(dismiss, { key: 'Tab' }), 'Tab from Dismiss must reach the following Details control').toBe(true);
+  });
+  it('G21: keeps palette flush errors visible instead of auto-clearing them', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline fixture')));
+    const view = render(CommandPalette); await openPalette();
+    await fireEvent.click(view.getByRole('button', { name: 'Flush Enter: Frontend' }));
+    await waitFor(() => expect(view.getByRole('alert').textContent).toContain('offline fixture'));
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(view.getByRole('alert').textContent).toContain('offline fixture');
+      expect(view.queryByRole('button', { name: 'Dismiss Enter receipt' })).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+  it.each([true, null, false])('F2: palette receipt timer preserves inspection and confirmation semantics (%s)', async (confirmed) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ submit_confirmed: confirmed }) }));
+    const view = render(CommandPalette); await openPalette();
+    vi.useFakeTimers();
+    try {
+      const search = view.getByRole('textbox', { name: 'Find command' }); search.focus();
+      await fireEvent.click(view.getByRole('button', { name: 'Flush Enter: Frontend' }));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(7900);
+      const details = view.getByText('Details').closest('details')!;
+      details.open = true; await fireEvent(details, new Event('toggle'));
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(view.getByRole('status'), 'palette open receipt survives its clear interval').toBeTruthy();
+      expect(details.isConnected).toBe(true);
+      expect(details.querySelector('pre')?.textContent).toBe(JSON.stringify({ submit_confirmed: confirmed }));
+      expect(document.activeElement).toBe(search);
+      details.open = false; await fireEvent(details, new Event('toggle'));
+      await vi.advanceTimersByTimeAsync(99);
+      expect(view.getByRole('status')).toBeTruthy();
+      await vi.advanceTimersByTimeAsync(1);
+      if (confirmed === false) {
+        await vi.advanceTimersByTimeAsync(60000);
+        expect(view.getByRole('status').textContent).toContain('Enter may not have landed.');
+        await fireEvent.click(view.getByRole('button', { name: 'Dismiss Enter receipt' }));
+      }
+      expect(view.queryByRole('status')).toBeNull();
+      expect(view.queryByText('Details')).toBeNull();
+      expect(document.activeElement).toBe(search);
+    } finally { vi.useRealTimers(); }
   });
   it('hides session-specific actions without an active session or focused agent', async () => {
     setSessions({ sessions: [], activeSessionId: null });

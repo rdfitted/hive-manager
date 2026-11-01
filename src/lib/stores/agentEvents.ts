@@ -56,7 +56,7 @@ function unique(events: AgentEvent[]): AgentEvent[] {
   return events.filter((event) => !seen.has(event.cursor) && !!seen.add(event.cursor));
 }
 
-/** A reset's SSE replay may begin before the HTTP tail and continue after it. */
+/** SSE replay may begin before an overlapping HTTP tail and continue after it. */
 function mergeTail(incoming: AgentEvent[], live: AgentEvent[]): AgentEvent[] {
   const cursors = new Set(incoming.map((event) => event.cursor));
   const overlap = live.findIndex((event) => cursors.has(event.cursor));
@@ -108,7 +108,8 @@ export function createAgentEventsStore() {
       if (page.agent_id !== agentId) throw new Error('Agent history identity mismatch');
       const incoming = page.events.filter((event) => event.agent_id === agentId);
       changeHistory(agentId, (h) => ({
-        events: afterReset ? mergeTail(incoming, h.events) : page.reset ? incoming : unique([...incoming, ...h.events]),
+        events: afterReset ? mergeTail(incoming, h.events) : page.reset ? incoming
+          : older ? unique([...incoming, ...h.events]) : mergeTail(incoming, h.events),
         before: page.next_before, hasMore: page.has_more, loading: false, error: null,
       }));
     } catch (cause) {

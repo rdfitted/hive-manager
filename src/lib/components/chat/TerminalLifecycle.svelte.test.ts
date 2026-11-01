@@ -13,7 +13,7 @@ const fixture = vi.hoisted(() => ({
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('phosphor-svelte', () => ({
-  ArrowDown: () => {}, Broom: () => {}, CaretDown: () => {}, CaretUp: () => {}, CheckSquare: () => {},
+  ArrowDown: () => {}, ArrowUp: () => {}, Broom: () => {}, CaretDown: () => {}, CaretUp: () => {}, CheckSquare: () => {},
   ClipboardText: () => {}, FileText: () => {}, MagnifyingGlass: () => {}, X: () => {},
   ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {}, Hourglass: () => {}, Plus: () => {},
 }));
@@ -97,6 +97,30 @@ const session: Session = {
 };
 
 describe('real Terminal component behind chat (renderer doubles)', () => {
+  it.each(['focus', 'grid'] as const)('T15: %s Codex transcript keeps its terminal until the first record without remount or focus', async (mode) => {
+    layout.setSessionViewMode(mode);
+    const publishCodex = (withRecord: boolean) => fixture.setAgentEvents!({
+      sessionId: 's', feeds: { codex: { agent_id: 'codex', capabilities: { can_interrupt: true, supports_approvals: false, has_terminal: true, event_source: 'transcript' } } },
+      histories: { codex: { events: withRecord ? [{ agent_id: 'codex', cursor: 'codex-first', source_id: 'codex-first', kind: 'assistant_message', ts: '2026-01-01T00:00:00Z', truncated: false, payload: { text: 'Fixture Codex transcript' } }] : [], before: null, hasMore: false, loading: false, error: null } },
+      connected: true, error: null,
+    });
+    publishCodex(false);
+    const view = render(TerminalGrid, { session, focusedAgentId: 'codex', onSelect: vi.fn() });
+    await waitFor(() => expect(fixture.terminals).toHaveLength(2));
+    const original = [...fixture.terminals];
+    const toggle = view.getByRole('button', { name: 'Terminal' });
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    const terminal = fixture.terminals[1];
+    expect(terminal.textarea.closest<HTMLElement>('.terminal-layer')!.inert).toBe(false);
+    expect(fixture.focuses).toBe(0);
+    publishCodex(true); await tick();
+    expect(terminal.textarea.closest<HTMLElement>('.terminal-layer')!.inert).toBe(true);
+    expect(view.getByRole('button', { name: 'Chat' }).getAttribute('aria-pressed')).toBe('true');
+    expect(fixture.terminals).toEqual(original);
+    expect(original.every((term) => !term.disposed)).toBe(true);
+    expect(fixture.focuses).toBe(0);
+  });
+
   it.each(['focus', 'grid'] as const)('F3: %s empty PTY feed reveals startup prompts until the first record without focus or remount', async (mode) => {
     layout.setSessionViewMode(mode); publishFeed(false);
     const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });

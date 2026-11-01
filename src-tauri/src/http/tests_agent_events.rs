@@ -54,10 +54,13 @@ pub(super) fn setup() -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
         queue_manager: queue,
         app_handle: None,
         registry: std::sync::OnceLock::new(),
-        transports: std::sync::OnceLock::from(Arc::new(TransportRegistry::new(
-            storage.sessions_dir(),
-            Some(temp.path().join("claude-projects")),
-        ))),
+        transports: std::sync::OnceLock::from(Arc::new(
+            TransportRegistry::new(
+                storage.sessions_dir(),
+                Some(temp.path().join("claude-projects")),
+            )
+            .with_codex_root(Some(temp.path().join("codex-sessions"))),
+        )),
     });
     state
         .pty_manager
@@ -1039,4 +1042,548 @@ async fn multiplexed_sse_reconnect_replays_both_agents_without_duplicate_or_skip
     );
     let mut stream = response.into_body().into_data_stream();
     assert_eq!(next_sse(&mut stream).await.1["source_id"], "a4");
+}
+
+#[tokio::test]
+async fn g17_claude_busy_prompt_once_in_order_after_reconnect() {
+    let (temp, state, app) = setup();
+    let mut session = make_test_session_with_agents("session", "fixture", &["worker-a"]);
+    session.no_git = true;
+    session.agents[0].transcript_session_id = Some("queued-transcript".into());
+    let path = transcript_path(
+        &temp.path().join("claude-projects"),
+        &session.project_path,
+        "queued-transcript",
+    );
+    let fixture = include_str!("../delivery/fixtures/claude-queued.jsonl");
+    let records: Vec<Value> = fixture
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    write_records(&path, &records[..2]);
+    state.session_controller.read().insert_test_session(session);
+    let first = body_json(get(&app, "/api/sessions/session/agents/worker-a/events").await).await;
+    let cursor = first["latest_cursor"].as_str().unwrap().to_owned();
+    use std::io::Write;
+    let tail: String = records[2..]
+        .iter()
+        .map(|record| format!("{record}\n"))
+        .collect();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(tail.as_bytes())
+        .unwrap();
+    let page = body_json(
+        get(
+            &app,
+            &format!("/api/sessions/session/agents/worker-a/events?after={cursor}"),
+        )
+        .await,
+    )
+    .await;
+    let events = page["events"].as_array().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event["source_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["delivery-a", "delivery-b", "msg-after"],
+        "G17 queued human prompts appear once in transcript order"
+    );
+    assert_eq!(
+        events[0]["payload"],
+        json!({"text":"Busy request","nonce":"[hive-msg:1234abcd]"})
+    );
+    assert!(!page.to_string().contains("MUST_NOT_APPEAR"));
+    assert!(!page.to_string().contains("Compact summary"));
+    let checkpoint = crate::transport::feed::encode_checkpoint(
+        &[("worker-a".into(), cursor)].into_iter().collect(),
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/session/agent-events/stream")
+                .header("last-event-id", checkpoint)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut stream = response.into_body().into_data_stream();
+    for id in ["delivery-a", "delivery-b", "msg-after"] {
+        assert_eq!(next_sse(&mut stream).await.1["source_id"], id);
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(400), next_sse(&mut stream))
+            .await
+            .is_err(),
+        "G17 reconnect must not duplicate a queued message"
+    );
+    drop(stream);
+    let fresh = TransportRegistry::new(
+        temp.path().join("cold-sessions"),
+        Some(temp.path().join("claude-projects")),
+    );
+    fresh
+        .feeds
+        .use_transcript(
+            "session",
+            "worker-a",
+            Path::new("fixture"),
+            "queued-transcript",
+        )
+        .unwrap();
+    fresh
+        .feeds
+        .refresh_transcript("session", "worker-a")
+        .unwrap();
+    assert_eq!(
+        fresh
+            .feeds
+            .history("session", "worker-a", None, None, 100)
+            .unwrap()
+            .events
+            .len(),
+        5
+    );
+}
+
+#[test]
+fn user_nonce_stripping_keeps_non_exact_lines_and_normal_user_text() {
+    let payload = crate::delivery::user_message_payload("hello\n[hive-msg:1234abcd]\ninline [hive-msg:1234abcd]\n [hive-msg:1234abcd]\n[hive-msg:bad]");
+    assert_eq!(payload["nonce"], "[hive-msg:1234abcd]");
+    assert_eq!(
+        payload["text"],
+        "hello\ninline [hive-msg:1234abcd]\n [hive-msg:1234abcd]\n[hive-msg:bad]"
+    );
+    assert_eq!(
+        crate::delivery::user_message_payload("unchanged\n")["text"],
+        "unchanged\n"
+    );
+}
+
+fn codex_prompt(seat: &str) -> String {
+    format!("Read D:/fixture/{seat}-prompt.md and execute.")
+}
+fn codex_key(prompt: &str) -> String {
+    format!(
+        "codex-prompt-{}",
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, prompt.as_bytes())
+    )
+}
+fn codex_id(number: u8) -> String {
+    format!("10000000-0000-4000-8000-{number:012}")
+}
+fn codex_spawn() -> chrono::DateTime<chrono::Utc> {
+    "2026-11-01T12:00:00Z".parse().unwrap()
+}
+fn codex_message(id: &str, role: &str, text: &str) -> Value {
+    json!({"timestamp":"2026-11-01T12:00:01Z","type":"response_item","payload":{"type":"message","id":id,"role":role,
+        "content":[{"type":if role == "user" {"input_text"} else {"output_text"},"text":text}]}})
+}
+fn codex_fixture(
+    root: &Path,
+    cwd: &Path,
+    number: u8,
+    prompt: &str,
+    spawned: chrono::DateTime<chrono::Utc>,
+    tail: &[Value],
+) -> PathBuf {
+    let path = root.join(format!(
+        "2026/11/01/rollout-2026-11-01T12-00-00-{}.jsonl",
+        codex_id(number)
+    ));
+    let mut records = vec![
+        json!({"type":"session_meta","payload":{"id":codex_id(number),"source":"cli",
+        "cwd":cwd.to_string_lossy(),"timestamp":spawned.to_rfc3339()}}),
+        codex_message(&format!("prompt-{number}"), "user", prompt),
+    ];
+    records.extend_from_slice(tail);
+    write_records(&path, &records);
+    path
+}
+
+#[tokio::test]
+async fn g16_codex_live_and_persisted_feeds_keep_same_second_workers_and_queen_separate() {
+    for persisted in [false, true] {
+        let (temp, state, app) = setup();
+        let mut session = make_test_session_with_agents(
+            "session",
+            "D:/fixture/shared",
+            &["worker-a", "worker-b", "queen"],
+        );
+        session.no_git = true;
+        for (index, agent) in session.agents.iter_mut().enumerate() {
+            agent.config.cli = "codex".into();
+            agent.transcript_spawned_at = Some(codex_spawn());
+            let prompt = codex_prompt(&agent.id);
+            agent.transcript_session_id = Some(codex_key(&prompt));
+            codex_fixture(
+                &temp.path().join("codex-sessions"),
+                &session.project_path,
+                index as u8 + 1,
+                &prompt,
+                codex_spawn(),
+                &[codex_message(
+                    &format!("reply-{index}"),
+                    "assistant",
+                    &format!("own-answer-{index}"),
+                )],
+            );
+        }
+        session.agents[2].role = crate::pty::AgentRole::Queen;
+        state.session_controller.read().insert_test_session(session);
+        if persisted {
+            state
+                .session_controller
+                .read()
+                .persist_test_session("session");
+            let mut cold = SessionController::new(state.pty_manager.clone());
+            cold.set_storage(state.storage.clone());
+            *state.session_controller.write() = cold;
+        }
+        let feeds = body_json(get(&app, "/api/sessions/session/agent-feeds").await).await;
+        assert!(feeds["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|agent| agent["capabilities"]["event_source"] == "transcript"));
+        for (index, aid) in ["worker-a", "worker-b", "queen"].iter().enumerate() {
+            let page =
+                body_json(get(&app, &format!("/api/sessions/session/agents/{aid}/events")).await)
+                    .await;
+            assert_eq!(page["events"].as_array().unwrap().len(), 2);
+            assert_eq!(
+                page["events"][1]["payload"]["text"],
+                format!("own-answer-{index}"),
+                "G16 HTTP reads only the held rollout"
+            );
+        }
+        state
+            .transports()
+            .register("session", "worker-a", None, FakeTransport::new())
+            .unwrap();
+        state
+            .transports()
+            .append_event("session", "worker-a", event("worker-a", "protocol-wins"))
+            .unwrap();
+        let feeds = body_json(get(&app, "/api/sessions/session/agent-feeds").await).await;
+        assert_eq!(
+            feeds["agents"][0]["capabilities"]["event_source"],
+            "protocol"
+        );
+        let page = body_json(get(&app, "/api/sessions/session/agents/worker-a/events").await).await;
+        assert_eq!(page["events"].as_array().unwrap().len(), 1);
+        assert_eq!(page["events"][0]["payload"]["text"], "protocol-wins");
+    }
+}
+
+#[tokio::test]
+async fn g17_codex_turn_head_and_mid_turn_once_in_order_after_sse_reconnect() {
+    let (temp, state, app) = setup();
+    let root = temp.path().join("codex-sessions");
+    let mut session = make_test_session_with_agents("session", "D:/fixture/shared", &["worker-a"]);
+    session.no_git = true;
+    let prompt = codex_prompt("worker-a");
+    session.agents[0].config.cli = "codex".into();
+    session.agents[0].transcript_session_id = Some(codex_key(&prompt));
+    session.agents[0].transcript_spawned_at = Some(codex_spawn());
+    let records: Vec<Value> = include_str!("../delivery/fixtures/codex-feed.jsonl")
+        .lines()
+        .skip(1)
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let split = records
+        .iter()
+        .position(|record| record["payload"]["id"] == "mid-turn")
+        .unwrap();
+    let path = codex_fixture(
+        &root,
+        &session.project_path,
+        1,
+        &prompt,
+        codex_spawn(),
+        &records[..split],
+    );
+    state.session_controller.read().insert_test_session(session);
+    let first = body_json(get(&app, "/api/sessions/session/agents/worker-a/events").await).await;
+    assert_eq!(
+        first["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["payload"]["nonce"] == "[hive-msg:1234abcd]")
+            .count(),
+        1
+    );
+    let cursor = first["latest_cursor"].as_str().unwrap();
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(
+            records[split..]
+                .iter()
+                .map(|record| format!("{record}\n"))
+                .collect::<String>()
+                .as_bytes(),
+        )
+        .unwrap();
+    let page = body_json(
+        get(
+            &app,
+            &format!("/api/sessions/session/agents/worker-a/events?after={cursor}"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        page["events"][0]["payload"],
+        json!({"text":"Steered request","nonce":"[hive-msg:bbbbbbbb]"})
+    );
+    let all = body_json(get(&app, "/api/sessions/session/agents/worker-a/events").await).await;
+    let users: Vec<_> = all["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "user_message")
+        .collect();
+    assert_eq!(
+        users
+            .iter()
+            .filter(|event| event["payload"]["nonce"] == "[hive-msg:1234abcd]")
+            .count(),
+        1
+    );
+    assert_eq!(
+        users
+            .iter()
+            .filter(|event| event["payload"]["nonce"] == "[hive-msg:bbbbbbbb]")
+            .count(),
+        1
+    );
+    let checkpoint = crate::transport::feed::encode_checkpoint(
+        &[("worker-a".into(), cursor.into())].into_iter().collect(),
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/session/agent-events/stream")
+                .header("last-event-id", checkpoint)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut stream = response.into_body().into_data_stream();
+    for expected in page["events"].as_array().unwrap() {
+        let actual = next_sse(&mut stream).await.1;
+        assert_eq!(actual["kind"], expected["kind"]);
+        assert_eq!(actual["payload"], expected["payload"]);
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(400), next_sse(&mut stream))
+            .await
+            .is_err(),
+        "G17 Codex reconnect has no duplicate frames"
+    );
+    drop(stream);
+    let mut reader = crate::delivery::codex_rollout::CodexRolloutReader::new(
+        root,
+        std::time::SystemTime::from(codex_spawn()),
+    );
+    for nonce in ["[hive-msg:1234abcd]", "[hive-msg:bbbbbbbb]"] {
+        assert_eq!(
+            reader.poll(nonce, std::time::UNIX_EPOCH),
+            Some("turn-one".into()),
+            "G17 head and mid-turn nonce confirm their open turn"
+        );
+    }
+    assert_eq!(
+        reader.poll("[hive-msg:ffffffff]", std::time::UNIX_EPOCH),
+        None,
+        "G17 another nonce never confirms"
+    );
+}
+
+#[test]
+fn g16b_codex_cold_read_preserves_journal_cursors_unreadable_source_and_respawn() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let root = temp.path().join("codex-sessions");
+    let cwd = Path::new("D:/fixture/shared");
+    let prompt = codex_prompt("worker-a");
+    let key = codex_key(&prompt);
+    let path = codex_fixture(
+        &root,
+        cwd,
+        1,
+        &prompt,
+        codex_spawn(),
+        &[codex_message("old-reply", "assistant", "old-own-answer")],
+    );
+    let registry =
+        || TransportRegistry::new(sessions.clone(), None).with_codex_root(Some(root.clone()));
+    let first = registry();
+    assert!(first
+        .feeds
+        .use_codex_rollout("session", "worker-a", cwd, Some(&key), Some(codex_spawn()))
+        .unwrap());
+    first
+        .feeds
+        .refresh_transcript("session", "worker-a")
+        .unwrap();
+    let before = first
+        .feeds
+        .history("session", "worker-a", None, None, 100)
+        .unwrap();
+    let journal = sessions.join("session/agent-feeds/worker-a.jsonl");
+    let bytes = std::fs::read(&journal).unwrap();
+    drop(first);
+    let cold = registry();
+    assert!(cold
+        .feeds
+        .use_codex_rollout("session", "worker-a", cwd, Some(&key), Some(codex_spawn()))
+        .unwrap());
+    cold.feeds
+        .refresh_transcript("session", "worker-a")
+        .unwrap();
+    let restored = cold
+        .feeds
+        .history("session", "worker-a", None, None, 100)
+        .unwrap();
+    assert_eq!(
+        restored.latest_cursor, before.latest_cursor,
+        "G16b cold replay preserves cursor generation"
+    );
+    assert_eq!(
+        std::fs::read(&journal).unwrap(),
+        bytes,
+        "G16b cold replay neither truncates nor duplicates history"
+    );
+    let archive = path.with_extension("jsonl.zst");
+    std::fs::rename(&path, &archive).unwrap();
+    assert!(!cold
+        .feeds
+        .use_codex_rollout("session", "worker-a", cwd, Some(&key), Some(codex_spawn()))
+        .unwrap());
+    cold.feeds
+        .refresh_transcript("session", "worker-a")
+        .unwrap();
+    assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+    drop(cold);
+    let offline = registry();
+    assert!(!offline
+        .feeds
+        .use_codex_rollout("session", "worker-a", cwd, Some(&key), Some(codex_spawn()))
+        .unwrap());
+    offline
+        .feeds
+        .refresh_transcript("session", "worker-a")
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&journal).unwrap(),
+        bytes,
+        "G16b unreadable cold rollout leaves every journal byte untouched"
+    );
+    assert_eq!(
+        offline
+            .feeds
+            .history("session", "worker-a", None, None, 100)
+            .unwrap()
+            .latest_cursor,
+        before.latest_cursor
+    );
+    let next_spawn = codex_spawn() + chrono::Duration::seconds(1);
+    assert!(!offline
+        .feeds
+        .use_codex_rollout("session", "worker-a", cwd, Some(&key), Some(next_spawn))
+        .unwrap());
+    assert!(
+        !journal.with_extension("binding").exists(),
+        "G16b respawn discards stale sidecar"
+    );
+    drop(offline);
+    std::fs::rename(archive, path).unwrap();
+    codex_fixture(
+        &root,
+        cwd,
+        2,
+        &prompt,
+        next_spawn,
+        &[codex_message("new-reply", "assistant", "new-own-answer")],
+    );
+    let respawn = registry();
+    assert!(respawn
+        .feeds
+        .use_codex_rollout("session", "worker-a", cwd, Some(&key), Some(next_spawn))
+        .unwrap());
+    respawn
+        .feeds
+        .refresh_transcript("session", "worker-a")
+        .unwrap();
+    let page = respawn
+        .feeds
+        .history("session", "worker-a", None, None, 100)
+        .unwrap();
+    assert_eq!(page.events.len(), 2);
+    assert_eq!(page.events[1].payload["text"], "new-own-answer");
+    assert_ne!(page.latest_cursor, before.latest_cursor);
+}
+
+#[test]
+fn g16b_codex_foreign_replacement_leaves_durable_history_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("codex-sessions");
+    let sessions = temp.path().join("sessions");
+    let cwd = Path::new("D:/fixture/shared");
+    let prompt = codex_prompt("worker-a");
+    let key = codex_key(&prompt);
+    let path = codex_fixture(
+        &root,
+        cwd,
+        1,
+        &prompt,
+        codex_spawn(),
+        &[codex_message("own", "assistant", "own-answer")],
+    );
+    let registry =
+        TransportRegistry::new(sessions.clone(), None).with_codex_root(Some(root.clone()));
+    assert!(registry
+        .feeds
+        .use_codex_rollout("session", "worker-a", cwd, Some(&key), Some(codex_spawn()))
+        .unwrap());
+    registry
+        .feeds
+        .refresh_transcript("session", "worker-a")
+        .unwrap();
+    let journal = sessions.join("session/agent-feeds/worker-a.jsonl");
+    let before = std::fs::read(&journal).unwrap();
+    let foreign = codex_fixture(
+        &root,
+        cwd,
+        2,
+        &codex_prompt("worker-b"),
+        codex_spawn(),
+        &[codex_message(
+            "foreign",
+            "assistant",
+            "FOREIGN_MUST_NOT_APPEAR",
+        )],
+    );
+    std::fs::write(path, std::fs::read(foreign).unwrap()).unwrap();
+    registry
+        .feeds
+        .refresh_transcript("session", "worker-a")
+        .unwrap();
+    assert_eq!(
+        std::fs::read(journal).unwrap(),
+        before,
+        "G16b rejected replacement cannot truncate or contaminate durable history"
+    );
 }
