@@ -13,11 +13,11 @@
   background-color: var(--accent-tint);
 }
 
-/* Nested content shares the outer panel's surface. Floating overlays still
+/* Nested content shares the outer panel's surface. Terminal panes retain their tonal depth. Floating overlays still
    need an opaque surface above live content. Keep border ordinary so the
    forced-colours boundaries below remain on their original owners. */
 .lattice-panel .lattice-panel:not(:where(
-  .context-menu, .search-bar, .drop-card,
+  .terminal-item, .context-menu, .search-bar, .drop-card,
   .mention-menu, .slash-menu, .color-picker, .update-banner
 )) {
   border: 0;

@@ -67,6 +67,22 @@ describe('nested Lattice surfaces', () => {
     expect(getComputedStyle(document.getElementById('outer')!).boxShadow).toContain('0 1px 2px');
   });
 
+  it.each([false, true])('preserves nested terminal pane tone and depth (forced colors: %s)', (forcedColors) => {
+    installStyles(forcedColors);
+    document.body.innerHTML = `<section class="terminal-section lattice-panel">
+      <div class="terminal-item lattice-panel" id="terminal-pane"></div>
+    </section>`;
+    const style = getComputedStyle(document.getElementById('terminal-pane')!);
+    expect(style.backgroundColor).toBe('rgb(18, 45, 82)');
+    expect(style.boxShadow).toContain('0 1px 2px');
+    if (forcedColors) {
+      expect(style.borderTopWidth).toBe('1px');
+      expect(style.borderTopColor).toBe('canvastext');
+    } else {
+      expect(style.borderTopWidth).toBe('');
+    }
+  });
+
   it('keeps the reset authoritative over component-local elevation recipes', () => {
     const source = installStyles();
     const nested = Array.from(source.sheet!.cssRules).find(

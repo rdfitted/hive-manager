@@ -11,7 +11,7 @@
     margin: 0 0 var(--space-5);
     font-family: var(--font-body);
     font-size: var(--text-h3);
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 .dialog-content.lattice-modal.launch-dialog[data-launch-owned] {
     border-radius: var(--control-radius);
@@ -110,7 +110,7 @@
     margin: 0;
     font-size: 12px;
     font-weight: 500;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 .parameter-editor[data-launch-owned] {
     display: flex;
@@ -126,7 +126,7 @@
 .section-description[data-launch-owned] {
     margin: 0 0 12px 0;
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     line-height: 1.4;
   }
 .section-heading-copy[data-launch-owned] {
@@ -141,15 +141,15 @@
     margin: 0;
     font-size: 11px;
     line-height: 1.45;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 .queen-section[data-launch-owned] {
     border: 1px solid var(--border);
   }
 .hive-policy-section[data-launch-owned] {
     /* Semantic policy emphasis, not a reusable structural surface. */
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 26%, var(--border));
-    background: color-mix(in srgb, var(--accent-cyan) 4%, var(--canvas));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 26%, var(--border));
+    background: color-mix(in srgb, var(--accent) 4%, var(--canvas));
   }
 .policy-fieldset[data-launch-owned] {
     margin: 0 0 16px;
@@ -160,7 +160,7 @@
     margin-bottom: 8px;
     font-size: 11px;
     font-weight: 700;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 .choice-grid[data-launch-owned],
 .delegation-grid[data-launch-owned],
@@ -181,7 +181,7 @@
     position: absolute;
     top: 13px;
     left: 12px;
-    accent-color: var(--accent-cyan);
+    accent-color: var(--accent);
   }
 .choice-title[data-launch-owned] {
     font-size: 12px;
@@ -191,7 +191,7 @@
 .choice-description[data-launch-owned] {
     font-size: 10px;
     line-height: 1.4;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 .delegation-grid[data-launch-owned] {
     margin-bottom: 18px;
@@ -234,7 +234,7 @@
 .tier-ladder-row[data-launch-owned] dt:where([data-launch-owned]) {
     font-size: 10px;
     font-weight: 650;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 .tier-ladder-row[data-launch-owned] dd:where([data-launch-owned]) {
     display: flex;
@@ -247,7 +247,7 @@
   }
 .tier-ladder-row[data-launch-owned] code:where([data-launch-owned]) {
     overflow-wrap: anywhere;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 .tier-ladder-error[data-launch-owned] {
     margin: 0;
@@ -258,7 +258,7 @@
     margin-top: 10px;
     font-size: 10px;
     line-height: 1.45;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 .tier-ladder-omissions[data-launch-owned] ul:where([data-launch-owned]) {
     margin: 4px 0 0;
@@ -285,7 +285,7 @@
     display: grid;
     gap: 5px;
     font-size: 10px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 .advanced-grid[data-launch-owned] input:where([data-launch-owned]) {
     width: 100%;
@@ -359,7 +359,7 @@
 .field[data-launch-owned] label:where([data-launch-owned]) {
     font-size: 12px;
     font-weight: 500;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 .dialog-actions[data-launch-owned] {
     display: flex;
@@ -387,7 +387,7 @@
 .role-selector[data-launch-owned] label:where([data-launch-owned]) {
     font-size: 12px;
     font-weight: 500;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 .role-selector.small[data-launch-owned] {
     margin-bottom: 8px;
@@ -419,7 +419,7 @@
     width: 18px;
     height: 18px;
     margin-top: 2px;
-    accent-color: var(--accent-cyan);
+    accent-color: var(--accent);
     cursor: pointer;
   }
 .checkbox-text[data-launch-owned] {
@@ -434,7 +434,7 @@
   }
 .checkbox-description[data-launch-owned] {
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     line-height: 1.4;
   }
 .launch-preview-section[data-launch-owned] {
@@ -467,8 +467,8 @@
   }
 .node.queen[data-launch-owned] {
     /* Topology role tones are semantic node states, not structural surfaces. */
-    --node-role: var(--accent-amber);
-    background: color-mix(in srgb, var(--accent-amber) 10%, transparent);
+    --node-role: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
 .node-icon[data-launch-owned] {
     font-size: 16px;
@@ -481,7 +481,7 @@
   }
 .node-cli[data-launch-owned] {
     font-size: 9px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-family: var(--font-mono);
   }
 .connector[data-launch-owned] {
@@ -496,20 +496,20 @@
     gap: 8px;
   }
 .node.worker[data-launch-owned] {
-    --node-role: var(--accent-cyan);
-    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+    --node-role: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
 .node.fusion[data-launch-owned] {
-    --node-role: var(--accent-cyan);
-    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+    --node-role: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
 .node.debate[data-launch-owned] {
-    --node-role: var(--accent-cyan);
-    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+    --node-role: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
 .node.solo[data-launch-owned] {
-    --node-role: var(--accent-cyan);
-    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+    --node-role: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
 .topology-contract[data-launch-owned] {
     width: 100%;
@@ -525,7 +525,7 @@
     padding: 10px;
     box-shadow: var(--edge-lip);
     border-radius: var(--radius-sm);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 10px;
     line-height: 1.4;
   }
