@@ -37,7 +37,7 @@ export const LEFT_WIDTH_MIN = 200;
 export const LEFT_WIDTH_MAX = 420;
 export const RIGHT_WIDTH_MIN = 260;
 export const RIGHT_WIDTH_MAX = 560;
-export const RAIL_WIDTH = 52;
+export const COLLAPSED_PANEL_WIDTH = 0;
 
 const defaultLayout: LayoutState = {
   leftCollapsed: false,

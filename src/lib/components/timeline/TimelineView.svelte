@@ -68,11 +68,10 @@
         padding: 8px 12px;
         background: var(--color-surface-hover);
         box-shadow: var(--edge-seam);
-        font-family: var(--font-mono);
+        font-family: var(--font-body);
         font-size: 0.7rem;
         font-weight: bold;
         color: var(--color-text-muted);
-        text-transform: uppercase;
     }
 
     .header-item {

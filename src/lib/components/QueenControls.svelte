@@ -43,7 +43,7 @@
 <style>
   .queen-controls {
     padding: 12px;
-    background: var(--bg-void);
+    background: var(--surface);
     border-radius: var(--radius-lg);
   }
 

@@ -68,7 +68,7 @@
         height: 100%;
         background: var(--color-bg);
         overflow: hidden;
-        font-family: var(--font-mono);
+        font-family: var(--font-body);
     }
 
     .browser-header {
@@ -96,7 +96,6 @@
     .label {
         font-size: 0.7rem;
         color: var(--color-text-muted);
-        text-transform: uppercase;
         font-weight: bold;
     }
 

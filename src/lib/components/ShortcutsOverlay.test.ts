@@ -25,14 +25,14 @@ describe('ShortcutsOverlay', () => {
   it('shows ⌘ for the layout toggles on macOS', () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
     const view = render(ShortcutsOverlay, { open: true, onClose: () => {} });
-    expect(layoutKeys(view.container)).toEqual(['⌘', 'B']);
+    expect(layoutKeys(view.baseElement)).toEqual(['⌘', 'B']);
     expect(view.getByText('Toggle left sidebar')).toBeTruthy();
   });
 
   it('shows Ctrl and says a focused terminal keeps it, elsewhere', () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32');
     const view = render(ShortcutsOverlay, { open: true, onClose: () => {} });
-    expect(layoutKeys(view.container)).toEqual(['Ctrl', 'B']);
+    expect(layoutKeys(view.baseElement)).toEqual(['Ctrl', 'B']);
     expect(view.getByText('Toggle left sidebar (not while a terminal has focus)')).toBeTruthy();
   });
 });

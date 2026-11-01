@@ -114,8 +114,6 @@
 
     .label {
         font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
         color: var(--accent-cyan);
         font-weight: 700;
     }
@@ -132,8 +130,6 @@
     .section h4 {
         margin: 0 0 8px 0;
         font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
         color: var(--text-disabled);
     }
 
@@ -179,7 +175,6 @@
 
     .rec-label {
         font-size: 10px;
-        text-transform: uppercase;
         font-weight: 800;
         margin-bottom: 4px;
         opacity: 0.8;
@@ -218,8 +213,6 @@
     .icon {
         font-size: 24px;
         font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
         opacity: 0.3;
     }
 

@@ -1,0 +1,542 @@
+/* Match only DOM authored by the launch views. Component descendants keep their own styles.
+   One specific ownership attribute per selector mirrors Svelte's scoped-style specificity. */
+.launch-inline[data-launch-owned] {
+    width: min(100%, calc(var(--space-7) * 10));
+    min-width: 0;
+  }
+.launch-content[data-launch-owned] {
+    min-width: 0;
+  }
+.launch-title[data-launch-owned] {
+    margin: 0 0 var(--space-5);
+    font-family: var(--font-body);
+    font-size: var(--text-h3);
+    color: var(--text-secondary);
+  }
+.dialog-content.lattice-modal.launch-dialog[data-launch-owned] {
+    border-radius: var(--control-radius);
+    padding: 24px;
+    width: 600px;
+    max-width: 90vw;
+    max-height: 85vh;
+    overflow-y: auto;
+  }
+.launch-dialog[data-launch-owned] h2:where([data-launch-owned]) {
+    margin: 0 0 16px 0;
+    font-size: 18px;
+    color: var(--text-primary);
+  }
+.mode-tabs[data-launch-owned] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 20px;
+    background: var(--canvas);
+    padding: 4px;
+    border-radius: var(--control-radius);
+  }
+.launch-mode-tab[data-launch-owned] {
+    flex: 1;
+  }
+.form-group[data-launch-owned] {
+    margin-bottom: 16px;
+  }
+.form-group[data-launch-owned] label:where([data-launch-owned]),
+.form-group[data-launch-owned] .group-label:where([data-launch-owned]),
+.composer-label[data-launch-owned] {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+.composer-host[data-launch-owned] {
+    display: flex;
+  }
+.form-row[data-launch-owned] {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+.flex-1[data-launch-owned] { flex: 1; }
+.flex-2[data-launch-owned] { flex: 2; }
+.color-picker-inline[data-launch-owned] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px;
+    background: var(--canvas);
+    box-shadow: var(--edge-lip);
+    border-radius: var(--control-radius);
+  }
+.color-circle[data-launch-owned] {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    transition: transform var(--motion-duration-fast) var(--motion-ease-standard);
+    padding: 0;
+  }
+.color-circle[data-launch-owned]:hover {
+    transform: scale(1.2);
+  }
+.color-circle.clear[data-launch-owned] {
+    font-size: 14px;
+  }
+.form-group[data-launch-owned] > .lattice-input:where([data-launch-owned]) {
+    width: 100%;
+    font-family: inherit;
+  }
+.path-picker[data-launch-owned] {
+    display: flex;
+    gap: 8px;
+  }
+.path-picker[data-launch-owned] .lattice-input:where([data-launch-owned]) {
+    flex: 1;
+    cursor: pointer;
+  }
+.form-section[data-launch-owned] {
+    margin-bottom: 20px;
+    padding: 16px;
+    background: var(--canvas);
+    border-radius: var(--control-radius);
+  }
+.form-section[data-launch-owned] h3:where([data-launch-owned]) {
+    margin: 0 0 12px 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+.form-section[data-launch-owned] h4:where([data-launch-owned]) {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+.parameter-editor[data-launch-owned] {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+.parameter-row[data-launch-owned] {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+  }
+.section-description[data-launch-owned] {
+    margin: 0 0 12px 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+.section-heading-copy[data-launch-owned] {
+    margin-bottom: 14px;
+  }
+.section-heading-copy[data-launch-owned] h3:where([data-launch-owned]) {
+    margin-bottom: 4px;
+  }
+.section-heading-copy[data-launch-owned] p:where([data-launch-owned]),
+.policy-note[data-launch-owned],
+.field-hint[data-launch-owned] {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+  }
+.queen-section[data-launch-owned] {
+    border: 1px solid var(--border);
+  }
+.hive-policy-section[data-launch-owned] {
+    /* Semantic policy emphasis, not a reusable structural surface. */
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 26%, var(--border));
+    background: color-mix(in srgb, var(--accent-cyan) 4%, var(--canvas));
+  }
+.policy-fieldset[data-launch-owned] {
+    margin: 0 0 16px;
+    padding: 0;
+    border: 0;
+  }
+.policy-fieldset[data-launch-owned] legend:where([data-launch-owned]) {
+    margin-bottom: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-secondary);
+  }
+.choice-grid[data-launch-owned],
+.delegation-grid[data-launch-owned],
+.tier-policy-controls[data-launch-owned],
+.tier-ladder-grid[data-launch-owned],
+.advanced-grid[data-launch-owned] {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+.choice-card[data-launch-owned] {
+    position: relative;
+    display: grid;
+    gap: 4px;
+    padding: 11px 12px 11px 34px;
+  }
+.choice-card[data-launch-owned] input:where([data-launch-owned]) {
+    position: absolute;
+    top: 13px;
+    left: 12px;
+    accent-color: var(--accent-cyan);
+  }
+.choice-title[data-launch-owned] {
+    font-size: 12px;
+    font-weight: 650;
+    color: var(--text-primary);
+  }
+.choice-description[data-launch-owned] {
+    font-size: 10px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+  }
+.delegation-grid[data-launch-owned] {
+    margin-bottom: 18px;
+  }
+.tier-routing-toggle[data-launch-owned] {
+    margin-bottom: 12px;
+  }
+.tier-policy-controls[data-launch-owned] .field:where([data-launch-owned]) {
+    margin-bottom: 4px;
+  }
+.tier-ladder-preview[data-launch-owned] {
+    margin-top: 12px;
+    padding-top: 12px;
+    box-shadow: var(--edge-seam-top);
+  }
+.tier-ladder-heading[data-launch-owned] {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+.tier-ladder-heading[data-launch-owned] h4:where([data-launch-owned]),
+.tier-ladder-card[data-launch-owned] h4:where([data-launch-owned]) {
+    margin: 0 0 4px;
+  }
+.tier-ladder-card[data-launch-owned] {
+    padding: 10px 12px;
+  }
+.tier-ladder-card[data-launch-owned] dl:where([data-launch-owned]) {
+    display: grid;
+    gap: 6px;
+    margin: 8px 0 0;
+  }
+.tier-ladder-row[data-launch-owned] {
+    display: grid;
+    grid-template-columns: 58px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+  }
+.tier-ladder-row[data-launch-owned] dt:where([data-launch-owned]) {
+    font-size: 10px;
+    font-weight: 650;
+    color: var(--text-secondary);
+  }
+.tier-ladder-row[data-launch-owned] dd:where([data-launch-owned]) {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    margin: 0;
+    font-size: 10px;
+    color: var(--text-primary);
+  }
+.tier-ladder-row[data-launch-owned] code:where([data-launch-owned]) {
+    overflow-wrap: anywhere;
+    color: var(--text-secondary);
+  }
+.tier-ladder-error[data-launch-owned] {
+    margin: 0;
+    font-size: 11px;
+    color: var(--status-error);
+  }
+.tier-ladder-omissions[data-launch-owned] {
+    margin-top: 10px;
+    font-size: 10px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+  }
+.tier-ladder-omissions[data-launch-owned] ul:where([data-launch-owned]) {
+    margin: 4px 0 0;
+    padding-left: 18px;
+  }
+.principals-heading[data-launch-owned] {
+    align-items: flex-start;
+  }
+.principals-heading[data-launch-owned] .section-description:where([data-launch-owned]) {
+    margin: 4px 12px 0 0;
+  }
+.principal-card[data-launch-owned] {
+    border: 1px solid var(--border);
+  }
+.advanced-disclosure[data-launch-owned] {
+    margin-top: 12px;
+  }
+.advanced-grid[data-launch-owned] {
+    margin-top: 12px;
+    padding-top: 12px;
+    box-shadow: var(--edge-seam-top);
+  }
+.advanced-grid[data-launch-owned] label:where([data-launch-owned]) {
+    display: grid;
+    gap: 5px;
+    font-size: 10px;
+    color: var(--text-secondary);
+  }
+.advanced-grid[data-launch-owned] input:where([data-launch-owned]) {
+    width: 100%;
+  }
+.advanced-grid[data-launch-owned] .policy-note:where([data-launch-owned]) {
+    grid-column: 1 / -1;
+  }
+
+  @media (max-width: 560px) {
+.choice-grid[data-launch-owned],
+.delegation-grid[data-launch-owned],
+.tier-policy-controls[data-launch-owned],
+.tier-ladder-grid[data-launch-owned],
+.advanced-grid[data-launch-owned] {
+      grid-template-columns: 1fr;
+    }
+  }
+.subsection[data-launch-owned] {
+    margin-top: 16px;
+    padding-top: 12px;
+    box-shadow: var(--edge-seam-top);
+  }
+.subsection[data-launch-owned] h4:where([data-launch-owned]) {
+    margin-bottom: 10px;
+  }
+.section-header[data-launch-owned] {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+.section-header[data-launch-owned] h3:where([data-launch-owned]),
+.section-header[data-launch-owned] h4:where([data-launch-owned]) {
+    margin: 0;
+  }
+.workers-list[data-launch-owned] {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+.worker-card[data-launch-owned] {
+    padding: 12px;
+    border-radius: var(--control-radius);
+  }
+.qa-worker-card[data-launch-owned] {
+    border: 1px solid var(--border);
+  }
+.card-header[data-launch-owned] {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+.card-title[data-launch-owned] {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+.card-title-input[data-launch-owned] {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    width: 150px;
+  }
+.field[data-launch-owned] {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+  }
+.field[data-launch-owned] label:where([data-launch-owned]) {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+.dialog-actions[data-launch-owned] {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 24px;
+  }
+.error-message[data-launch-owned] {
+    /* Semantic validation alert, not a reusable structural surface. */
+    padding: 12px;
+    margin-bottom: 16px;
+    background: color-mix(in srgb, var(--status-error) 15%, transparent);
+    box-shadow: inset 0 0 0 1px var(--status-error);
+    border-radius: var(--radius-sm);
+    color: var(--status-error);
+    font-size: 13px;
+    word-break: break-word;
+  }
+.role-selector[data-launch-owned] {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+  }
+.role-selector[data-launch-owned] label:where([data-launch-owned]) {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+.role-selector.small[data-launch-owned] {
+    margin-bottom: 8px;
+  }
+.role-selector.small[data-launch-owned] label:where([data-launch-owned]) {
+    font-size: 11px;
+  }
+.role-select[data-launch-owned] {
+    width: 100%;
+    font-size: 13px;
+    cursor: pointer;
+  }
+.role-selector.small[data-launch-owned] .role-select:where([data-launch-owned]) {
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+.checkbox-group[data-launch-owned] {
+    margin-top: 8px;
+  }
+.checkbox-label[data-launch-owned] {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    cursor: pointer;
+    padding: 12px;
+    background: var(--canvas);
+  }
+.checkbox-label[data-launch-owned] input[type="checkbox"]:where([data-launch-owned]) {
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    accent-color: var(--accent-cyan);
+    cursor: pointer;
+  }
+.checkbox-text[data-launch-owned] {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+.checkbox-title[data-launch-owned] {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+.checkbox-description[data-launch-owned] {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+.launch-preview-section[data-launch-owned] {
+    margin-top: 20px;
+    box-shadow: var(--edge-seam-top);
+    padding-top: 16px;
+  }
+.preview-content[data-launch-owned] {
+    margin-top: 16px;
+    /* Preview tint distinguishes generated topology from editable controls. */
+    background: color-mix(in srgb, var(--canvas) 20%, transparent);
+    border-radius: var(--control-radius);
+    padding: 16px;
+  }
+.topology-viz[data-launch-owned] {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+.node[data-launch-owned] {
+    --node-role: transparent;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    box-shadow: inset 0 0 0 1px var(--node-role), var(--elev-1), var(--edge-lip);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 100px;
+  }
+.node.queen[data-launch-owned] {
+    /* Topology role tones are semantic node states, not structural surfaces. */
+    --node-role: var(--accent-amber);
+    background: color-mix(in srgb, var(--accent-amber) 10%, transparent);
+  }
+.node-icon[data-launch-owned] {
+    font-size: 16px;
+    margin-bottom: 2px;
+  }
+.node-label[data-launch-owned] {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+.node-cli[data-launch-owned] {
+    font-size: 9px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+  }
+.connector[data-launch-owned] {
+    width: 2px;
+    height: 16px;
+    background: var(--border);
+  }
+.worker-nodes[data-launch-owned] {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+  }
+.node.worker[data-launch-owned] {
+    --node-role: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+  }
+.node.fusion[data-launch-owned] {
+    --node-role: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+  }
+.node.debate[data-launch-owned] {
+    --node-role: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+  }
+.node.solo[data-launch-owned] {
+    --node-role: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+  }
+.topology-contract[data-launch-owned] {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    padding-top: 12px;
+    box-shadow: var(--edge-seam-top);
+  }
+.topology-layer[data-launch-owned] {
+    display: grid;
+    gap: 4px;
+    padding: 10px;
+    box-shadow: var(--edge-lip);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1.4;
+  }
+.topology-layer-title[data-launch-owned] {
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  @media (max-width: 560px) {
+.topology-contract[data-launch-owned] {
+      grid-template-columns: 1fr;
+    }
+  }

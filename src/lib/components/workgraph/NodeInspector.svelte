@@ -248,9 +248,7 @@
   .status-badge,
   .dependency-kind {
     border-radius: var(--radius-sm);
-    font: var(--text-micro) var(--font-mono);
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    font: var(--text-micro) var(--font-body);
   }
 
   .kind-badge {
@@ -266,7 +264,7 @@
   h2 {
     margin: var(--space-3) 0 var(--space-1);
     overflow-wrap: anywhere;
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-size: var(--text-h2);
     line-height: 1.15;
   }
@@ -299,9 +297,7 @@
   h3,
   h4 {
     color: var(--text-secondary);
-    font: var(--text-micro) var(--font-mono);
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    font: var(--text-micro) var(--font-body);
   }
 
   dd {

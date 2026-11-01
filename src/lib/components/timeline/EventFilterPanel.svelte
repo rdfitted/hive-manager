@@ -106,7 +106,7 @@
         flex-direction: column;
         gap: 8px;
         padding: 12px;
-        font-family: var(--font-mono);
+        font-family: var(--font-body);
         font-size: 0.8rem;
     }
 
@@ -130,7 +130,6 @@
         color: var(--color-text-muted);
         font-weight: bold;
         font-size: 0.7rem;
-        text-transform: uppercase;
     }
 
     .search-input {

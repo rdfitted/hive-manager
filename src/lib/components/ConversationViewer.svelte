@@ -312,7 +312,7 @@
     flex: 1;
     overflow-y: auto;
     padding: 8px 12px;
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: 12px;
     line-height: 1.6;
   }

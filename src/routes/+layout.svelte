@@ -5,6 +5,7 @@
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
   import CommandPalette from '$lib/components/palette/CommandPalette.svelte';
+  import TitleBar from '$lib/components/shell/TitleBar.svelte';
   import {
     sessions,
     type DebateLaunchConfig,
@@ -44,6 +45,8 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="app">
+  <TitleBar />
+  <div class="app-body">
   <SessionSidebar
     onLaunchHiveV2={handleLaunchHiveV2}
     onLaunchFusion={handleLaunchFusion}
@@ -52,6 +55,7 @@
     startAction={$shell.startAction}
   />
   {@render children?.()}
+  </div>
 </div>
 
 <AddWorkerDialog bind:open={showAddWorkerDialog} on:close={() => shell.closeAddWorker()} />

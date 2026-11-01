@@ -5,7 +5,7 @@
 .lattice-table {
   width: 100%;
   border-collapse: collapse;
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--text-small);
 }
 
@@ -22,8 +22,8 @@ table.lattice-table th {
   text-align: left;
   font-weight: 500;
   color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  text-transform: none;
+  letter-spacing: normal;
   font-size: var(--text-micro);
   padding: var(--space-2) var(--space-3);
 }

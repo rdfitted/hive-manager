@@ -12,11 +12,10 @@ const testMocks = vi.hoisted(() => ({
   sessionSidebar: vi.fn(),
 }));
 
-vi.mock('$lib/stores/layout', () => ({
-  layout: {
-    toggleLeft: testMocks.toggleLeft,
-  },
-}));
+vi.mock('$lib/stores/layout', async () => {
+  const actual = await vi.importActual<typeof import('$lib/stores/layout')>('$lib/stores/layout');
+  return { ...actual, layout: { ...actual.layout, toggleLeft: testMocks.toggleLeft } };
+});
 
 vi.mock('$lib/stores/sessions', async () => {
   const { writable } = await import('svelte/store');
@@ -28,6 +27,7 @@ vi.mock('$lib/stores/sessions', async () => {
     },
     activeSession: writable({
       id: 'session-a',
+      agents: [],
       state: 'Running',
       session_type: { Hive: {} },
       project_path: 'D:/project',
@@ -119,6 +119,9 @@ describe('persistent app layout', () => {
 
   it('toggles the left sidebar exactly once for Ctrl+B', async () => {
     render(Layout);
+    const terminal = document.createElement('textarea');
+    document.body.append(terminal);
+    terminal.focus();
     const event = new KeyboardEvent('keydown', {
       key: 'b',
       ctrlKey: true,
@@ -126,11 +129,12 @@ describe('persistent app layout', () => {
       cancelable: true,
     });
 
-    window.dispatchEvent(event);
+    terminal.dispatchEvent(event);
     await tick();
 
     expect(event.defaultPrevented).toBe(true);
     expect(testMocks.toggleLeft).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(terminal);
   });
 
   it('ignores repeated Ctrl+B keydown events', async () => {

@@ -1,19 +1,23 @@
+@import "./fonts.css";
+
 :root {
   /* ── Core Surfaces ─────────────────────────────────────────────── */
   --bg-void: #060606;
 
   /* ── Surface ladder (#198) — tonal steps, not hairlines ───────── */
-  --bg-chrome: #0E0E0E;   /* app chrome: rails, toolbars, headers, tab strips */
-  --bg-panel:  #161616;   /* panels, cards, modals — the .lattice-panel tone   */
-  --bg-raised: #1B1B1B;   /* hover / raised card state                          */
+  --bg-chrome: #0A0A0A;   /* app chrome: rails, toolbars, headers, tab strips */
+  --bg-panel:  #111111;   /* panels, cards, modals — the .lattice-panel tone   */
+  --bg-raised: #181818;   /* hover / raised card state                          */
 
   /* D3: --bg-surface stays a value-preserving chrome alias. The large lit
      .main-content card deliberately consumes --bg-panel in shell.css. */
   --bg-surface: var(--bg-chrome);
-  --bg-elevated: #171717;
+  --bg-elevated: #161616;
   --bg-sunken: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
 
-  --border-structural: #282828;
+  --border-structural: #191919;
+  /* Meaningful control boundaries need 3:1 against the neutral surface ladder. */
+  --border-control: #666666;
 
   /* ── Text ──────────────────────────────────────────────────────── */
   --text-primary: #E8E8E8;
@@ -48,8 +52,8 @@
   --rgb-blocked: 237, 166, 140;
 
   /* ── Typography ────────────────────────────────────────────────── */
-  --font-display: 'Rajdhani', sans-serif;
-  --font-body: 'Titillium Web', sans-serif;
+  --font-display: 'IBM Plex Sans', sans-serif;
+  --font-body: 'IBM Plex Sans', sans-serif;
   --font-mono: 'IBM Plex Mono', monospace;
 
   /* ── Font Sizes ────────────────────────────────────────────────── */
@@ -79,7 +83,28 @@
   --radius-full:  999px;                          /* pills */
 
   /* ── Motion ────────────────────────────────────────────────────── */
-  --transition-fast: 200ms ease-out;
+  --transition-fast: 120ms ease-out;
+
+  /* UI roles alias the literal palette; terminal readers keep their hex inputs. */
+  --canvas: var(--bg-void);
+  --chrome: var(--bg-chrome);
+  --toolbar: var(--bg-chrome);
+  --toolbar-control: var(--bg-raised);
+  --surface: var(--bg-panel);
+  --surface-raised: var(--bg-raised);
+  --surface-overlay: var(--bg-elevated);
+  --text-muted: var(--text-secondary);
+  --border: var(--border-structural);
+  --input: var(--bg-void);
+  --focus: var(--accent-cyan);
+  --accent: var(--accent-cyan);
+
+  /* Shared geometry for primitives, title bar and sidebar. */
+  --control-radius: 8px;
+  --control-height: 32px;
+  --control-height-sm: 28px;
+  --toolbar-height: 44px;
+  --sidebar-inset: 8px;
 
   --color-bg: var(--bg-void);
   --color-surface: var(--bg-surface);

@@ -160,7 +160,7 @@
     border-radius: var(--radius-sm);
     background: var(--border-structural);
     color: var(--accent-cyan);
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: 11px;
   }
 
@@ -176,8 +176,6 @@
     font-size: 12px;
     font-weight: 600;
     color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
   }
 
 </style>

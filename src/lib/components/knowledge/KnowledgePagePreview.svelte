@@ -167,10 +167,8 @@
 
   .preview-kicker,
   .folder-label {
-    font: var(--text-micro) var(--font-mono);
+    font: var(--text-micro) var(--font-body);
     color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
   }
 
   .page-head {
@@ -192,10 +190,9 @@
 
   .page-head h2 {
     margin: var(--space-3) 0;
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     font-size: var(--text-h1);
     line-height: 1.15;
-    letter-spacing: 0.015em;
   }
 
   .page-meta {
@@ -203,7 +200,7 @@
     flex-direction: column;
     gap: var(--space-1);
     color: var(--text-disabled);
-    font: var(--text-micro) var(--font-mono);
+    font: var(--text-micro) var(--font-body);
   }
 
   .page-meta code {
@@ -215,8 +212,6 @@
 
   .page-meta .truncated {
     color: var(--accent-amber);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
 
   .preview :global(.preview-skeleton) {
@@ -265,7 +260,7 @@
   .markdown h4 {
     margin: 1.55em 0 0.55em;
     color: var(--text-primary);
-    font-family: var(--font-display);
+    font-family: var(--font-body);
     line-height: 1.2;
   }
 
@@ -329,7 +324,6 @@
     right: 7px;
     color: var(--text-disabled);
     font: 9px var(--font-mono);
-    text-transform: uppercase;
   }
 
   .code-block pre {
@@ -354,12 +348,12 @@
 
   .preview-state strong {
     color: var(--text-primary);
-    font-family: var(--font-display);
+    font-family: var(--font-body);
   }
 
   .preview-state span {
     max-width: 280px;
-    font: var(--text-micro) var(--font-mono);
+    font: var(--text-micro) var(--font-body);
     overflow-wrap: anywhere;
   }
 

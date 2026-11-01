@@ -5,11 +5,14 @@
   import { heartbeatStore } from '$lib/stores/conversations';
   import { attentionReason, needsAttention } from '$lib/stores/agentActivity';
   import AgentActivityLine from './agent/AgentActivityLine.svelte';
+  import type { AgentDependencies } from '$lib/stores/agentDependencies';
 
   export let agent: AgentInfo;
   export let childrenMap: Map<string | null, AgentInfo[]>;
+  export let sessionAgentIds: ReadonlySet<string>;
   export let depth: number = 0;
   export let selectedId: string | null = null;
+  export let byAgent: Map<string, AgentDependencies> = new Map();
 
   let expanded = true;
   const dispatch = createEventDispatcher<{ select: string }>();
@@ -51,6 +54,17 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    if (e.target !== e.currentTarget || e.isComposing || e.altKey || e.ctrlKey || e.metaKey) return;
+    const row = e.currentTarget as HTMLElement;
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (hasChildren && !expanded) expanded = true;
+      else row.parentElement?.querySelector<HTMLElement>('[role="group"] [role="treeitem"]')?.focus();
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (hasChildren && expanded) expanded = false;
+      else row.parentElement?.parentElement?.closest('.tree-item')?.querySelector<HTMLElement>('[role="treeitem"]')?.focus();
+    }
     if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
       e.preventDefault();
       handleClick();
@@ -72,6 +86,8 @@
   $: attention = needsAttention(agent, $heartbeatStore.staleAgents);
   $: reason = attentionReason(agent, $heartbeatStore.staleAgents);
   $: reasonLabel = reason === 'delivery_failed' ? 'Delivery failed' : reason === 'error' ? 'Agent error' : 'Stale heartbeat';
+  $: dependencies = byAgent.get(agent.id);
+  $: statusLabel = serdeEnumVariantName(agent.status) || 'Unknown status';
 </script>
 
 <div class="tree-item">
@@ -80,6 +96,8 @@
     class:selected={isSelected}
     role="treeitem"
     tabindex="0"
+    data-agent-id={agent.id}
+    aria-level={depth + 1}
     aria-selected={isSelected}
     aria-expanded={hasChildren ? expanded : undefined}
     on:click={handleClick}
@@ -109,8 +127,26 @@
       style="color: {getStatusColor(agent.status, agent.role)}"
     ></span>
     <span class="agent-copy">
-      <span class="label">{displayLabel}</span>
+      <span class="identity"><span class="label">{displayLabel}</span><span class="status-label">{statusLabel}</span></span>
       <AgentActivityLine agentId={agent.id} compact />
+      {#each ['waitingOn', 'blocks'] as kind}
+        {@const refs = kind === 'waitingOn' ? dependencies?.waitingOn : dependencies?.blocks}
+        {#if refs?.length}
+          <span class="dependencies">
+            <span class="dependency-label">{kind === 'waitingOn' ? 'Waiting on' : 'Blocks'}{refs.length > 1 ? ` (${refs.length})` : ''}:</span>
+            {#each refs as ref (ref.nodeId)}
+              {#if ref.agentId && sessionAgentIds.has(ref.agentId)}
+                <button type="button" class="dependency-ref" title={ref.title}
+                  aria-label={`Focus agent for ${ref.title}`}
+                  on:click={(event) => { event.stopPropagation(); dispatch('select', ref.agentId!); }}
+                >{ref.title}</button>
+              {:else}
+                <span class="dependency-text" title={ref.title}>{ref.title}</span>
+              {/if}
+            {/each}
+          </span>
+        {/if}
+      {/each}
     </span>
     {#if attention}
       <button type="button" class="attention-badge lattice-btn lattice-btn--secondary"
@@ -126,8 +162,10 @@
         <svelte:self
           agent={child}
           {childrenMap}
+          {sessionAgentIds}
           depth={depth + 1}
           {selectedId}
+          {byAgent}
           on:select
         />
       {/each}
@@ -174,6 +212,14 @@
   }
 
   .agent-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+  .identity { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+  .status-label { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+  .dependencies { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 5px; margin-top: 3px; font-size: 11px; }
+  .dependency-label { color: var(--text-muted); }
+  .dependency-ref, .dependency-text { max-width: 100%; overflow-wrap: anywhere; }
+  .dependency-ref { font: inherit; color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--control-radius); padding: 1px 5px; background: var(--surface); cursor: pointer; text-align: left; }
+  .dependency-ref:hover { text-decoration: underline; }
+  .dependency-ref:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 
   .label {
     font-size: 13px;
@@ -190,6 +236,9 @@
   @media (forced-colors: active) {
     .status-dot { background: CanvasText; border-color: CanvasText; }
     .attention-badge { border: 1px solid ButtonText; }
+    .dependency-ref { color: ButtonText; border-color: ButtonText; background: ButtonFace; }
+    .tree-row:focus-visible, .dependency-ref:focus-visible { outline: 2px solid Highlight; box-shadow: none; }
+    .tree-row.selected { outline: 1px solid Highlight; outline-offset: -1px; }
   }
 
   .children {

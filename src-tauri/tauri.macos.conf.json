@@ -1,0 +1,33 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Hive Manager",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 800,
+        "minHeight": 600,
+        "decorations": true,
+        "resizable": true,
+        "dragDropEnabled": false,
+        "devtools": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      },
+      {
+        "label": "operator-preview",
+        "create": false,
+        "title": "Hive Manager Preview",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 640,
+        "minHeight": 480,
+        "decorations": true,
+        "resizable": true,
+        "dragDropEnabled": false,
+        "devtools": true
+      }
+    ]
+  }
+}

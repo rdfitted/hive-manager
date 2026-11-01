@@ -18,6 +18,8 @@ vi.mock('$lib/stores/ui', async () => {
 });
 vi.mock('$lib/stores/layout', () => ({ layout: { toggleRight: vi.fn(), setRightTab: vi.fn(), toggleSessionViewMode: vi.fn() } }));
 vi.mock('$lib/stores/shell', () => ({ shell: { openAddWorker: vi.fn(), requestStartAction: vi.fn() } }));
+vi.mock('$app/navigation', () => ({ goto: vi.fn().mockResolvedValue(undefined) }));
+import { goto } from '$app/navigation';
 import { sessions } from '$lib/stores/sessions';
 import { ui } from '$lib/stores/ui';
 import { layout } from '$lib/stores/layout';
@@ -92,6 +94,14 @@ describe('G-palette-key', () => {
 });
 
 describe('command action wiring and navigation', () => {
+  it.each([
+    ['Sessions', '/'], ['Dashboard', '/dashboard'], ['Knowledge', '/knowledge'],
+  ])('keeps %s reachable from the palette with the sidebar collapsed', async (destination, path) => {
+    const view = render(CommandPalette); await openPalette();
+    await fireEvent.click(view.getByRole('button', { name: `Go to ${destination}` }));
+    expect(goto).toHaveBeenCalledWith(path);
+    expect(view.queryByRole('dialog')).toBeNull();
+  });
   it.each([
     ['New session', () => expect(shell.requestStartAction).toHaveBeenCalledWith('hive')],
     ['Add worker', () => expect(shell.openAddWorker).toHaveBeenCalledOnce()],

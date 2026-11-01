@@ -76,7 +76,7 @@
         display: flex;
         flex-direction: column;
         gap: 8px;
-        font-family: var(--font-mono);
+        font-family: var(--font-body);
     }
 
     .main-row {
@@ -96,7 +96,6 @@
     .label {
         font-size: 0.7rem;
         color: var(--text-secondary);
-        text-transform: uppercase;
     }
 
     .seek-row {

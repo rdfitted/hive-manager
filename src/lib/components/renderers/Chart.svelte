@@ -315,7 +315,7 @@
 
   .tick-label {
     fill: var(--text-secondary);
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: 10px;
     text-anchor: end;
   }
@@ -347,7 +347,7 @@
     gap: 6px;
     margin-left: 42px;
     color: var(--text-secondary);
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: 10px;
   }
 

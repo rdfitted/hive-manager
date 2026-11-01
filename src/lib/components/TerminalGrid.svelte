@@ -499,8 +499,6 @@
     color: var(--text-secondary);
     font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
   }
 
   .scratch-controls {
@@ -609,8 +607,6 @@
     font-size: 11px;
     font-weight: 600;
     color: var(--text-primary);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
   }
 
   .terminal-meta {

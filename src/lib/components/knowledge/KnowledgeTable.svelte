@@ -153,10 +153,6 @@
     box-shadow: 0 0 6px currentColor;
   }
 
-  .folder-name {
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
 
   .degree strong {
     color: var(--text-primary);

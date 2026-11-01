@@ -45,3 +45,33 @@ describe('canceled status text contrast', () => {
     expect(luminance('--status-canceled')).toBeLessThan(luminance('--status-queued'));
   });
 });
+
+describe('UI role text contrast', () => {
+  it.each(['--canvas', '--chrome', '--toolbar', '--toolbar-control', '--surface', '--surface-raised', '--surface-overlay', '--input'])
+    ('keeps primary and muted text readable on %s', (surface) => {
+      expect(contrast('--text-primary', surface)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast('--text-muted', surface)).toBeGreaterThanOrEqual(4.5);
+    });
+});
+
+describe('shared control boundary contrast', () => {
+  // Inputs use void inside; outlined buttons/choices can sit on any neutral
+  // shell or overlay surface, and card controls use the chrome surface inside.
+  it.each(['void', 'chrome', 'panel', 'raised', 'elevated'])
+    ('has at least 3:1 contrast against the adjacent %s surface', (surface) => {
+      expect(contrast('--border-control', `--bg-${surface}`)).toBeGreaterThanOrEqual(3);
+    });
+
+  it.each([
+    ['.lattice-input', 'border'],
+    ['.lattice-selectable', 'border'],
+    ['.lattice-btn--secondary', '--lattice-btn-ring'],
+    ['.lattice-btn--card', '--lattice-btn-ring'],
+    ['.lattice-btn--chip', '--lattice-btn-ring'],
+  ])('uses the control role for the unfocused %s boundary', (selector, property) => {
+    const controls = readFileSync('src/lib/styles/globals/controls.css', 'utf8');
+    const rule = controls.split('}').filter((block) => block.includes(`${selector} {`))
+      .map((block) => block.slice(block.indexOf(`${selector} {`))).join('\n');
+    expect(rule).toContain(`${property}: ${property === 'border' ? '1px solid ' : ''}var(--border-control);`);
+  });
+});

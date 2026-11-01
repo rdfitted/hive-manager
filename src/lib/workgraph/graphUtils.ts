@@ -1,4 +1,4 @@
-import type { CompletionProvenance } from './types';
+import type { CompletionProvenance, WorkGraphEdge } from './types';
 
 export const DEFAULT_LABEL_MAX_CHARACTERS = 9;
 export const DEFAULT_HEARTBEAT_STALE_AFTER_MS = 3 * 60 * 1000;
@@ -142,6 +142,11 @@ export function getNodeAdjacency(
     dependencies: [...dependencies],
     dependents: [...dependents],
   };
+}
+
+/** Dependency rows must never interpret informational edges as prerequisites. */
+export function getDependencyEdges(edges: readonly WorkGraphEdge[]): WorkGraphEdge[] {
+  return edges.filter((edge) => edge.kind === 'depends_on');
 }
 
 function timestampMilliseconds(value: TimestampLike): number | null {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { Dialog } from '$lib/components/ui';
   import { CaretDown, CaretRight, Warning } from 'phosphor-svelte';
   import { activeSession, activeAgents, sessions, serdeEnumVariantName, type AgentInfo, type Session } from '$lib/stores/sessions';
   import { ui } from '$lib/stores/ui';
@@ -163,15 +164,6 @@
     }
   }
 
-  function handleCloseDialogKeydown(event: KeyboardEvent) {
-    event.stopPropagation();
-    if (event.key === 'Escape') dismissCloseConfirm();
-  }
-
-  function handleForceFailDialogKeydown(event: KeyboardEvent) {
-    event.stopPropagation();
-    if (event.key === 'Escape') dismissForceFailConfirm();
-  }
 
   // Operator controls — use HTTP API (Tauri commands not yet registered)
   // #176: force-pass / force-fail now require an explicit `{"confirm": true}`
@@ -275,6 +267,38 @@
     if (!('Hive' in session.session_type || 'Solo' in session.session_type)) return false;
     return !session.agents.some((agent) => serdeEnumVariantName(agent.role) === 'Evaluator');
   }
+
+  // One shared confirmation surface; action handlers retain their existing guards.
+  const confirmation = $derived.by(() => {
+    if (!$activeSession) return null;
+    if (showCloseConfirm) return {
+      title: 'Close Session?',
+      description: 'This will terminate all agents and mark the session as closed. This action cannot be undone.',
+      action: closing ? 'Closing...' : 'Close Session',
+      tone: 'danger', busy: closing,
+      dismiss: dismissCloseConfirm, confirm: handleCloseSession,
+    };
+    if (showForceFailConfirm) return {
+      title: 'Force Fail Milestone?',
+      description: 'This will immediately fail the current milestone and trigger a retry or termination. Are you sure?',
+      action: forceFailing ? 'Failing...' : 'Force Fail',
+      tone: 'danger', busy: forceFailing,
+      dismiss: dismissForceFailConfirm, confirm: handleForceFail,
+    };
+    if (showForcePassConfirm) return {
+      title: 'Force Pass Milestone?',
+      description: 'This bypasses the Evaluator and marks QA as passed without review. Are you sure?',
+      action: 'Force Pass', tone: 'success', busy: false,
+      dismiss: () => { showForcePassConfirm = false; }, confirm: handleForcePass,
+    };
+    if (showSkipQaConfirm) return {
+      title: 'Skip QA?',
+      description: 'This force-passes the current milestone without an Evaluator review. Are you sure?',
+      action: 'Skip QA', tone: 'warning', busy: false,
+      dismiss: () => { showSkipQaConfirm = false; }, confirm: handleSkipQa,
+    };
+    return null;
+  });
 </script>
 
 <div class="status-content">
@@ -466,115 +490,26 @@
         {/if}
       </div>
 
-      {#if $activeSession}
-      <!-- Close confirmation dialog -->
-      {#if showCloseConfirm}
-        <div
-          class="confirm-overlay lattice-modal-backdrop"
-          onclick={dismissCloseConfirm}
-          onkeydown={(event) => event.key === 'Escape' && dismissCloseConfirm()}
-          role="presentation"
-        >
-          <div
-            class="confirm-dialog lattice-modal"
-            onclick={(e) => e.stopPropagation()}
-            onkeydown={handleCloseDialogKeydown}
-            role="dialog"
-            aria-modal="true"
-            tabindex="-1"
-          >
-            <h3>Close Session?</h3>
-            <p>This will terminate all agents and mark the session as closed. This action cannot be undone.</p>
+      <Dialog
+        open={confirmation !== null}
+        onOpenChange={(open) => { if (!open) confirmation?.dismiss(); }}
+        dismissible={!confirmation?.busy}
+        label={confirmation?.title}
+        class="status-confirmation"
+      >
+        {#if confirmation}
+          <div class="confirm-dialog">
+            <h3>{confirmation.title}</h3>
+            <p>{confirmation.description}</p>
             <div class="confirm-actions">
-              <button class="lattice-btn lattice-btn--secondary" onclick={dismissCloseConfirm} disabled={closing}>Cancel</button>
-              <button class="lattice-btn lattice-btn--danger" onclick={handleCloseSession} disabled={closing}>
-                {closing ? 'Closing...' : 'Close Session'}
+              <button class="lattice-btn lattice-btn--secondary" onclick={confirmation.dismiss} disabled={confirmation.busy}>Cancel</button>
+              <button class="lattice-btn lattice-btn--{confirmation.tone}" onclick={confirmation.confirm} disabled={confirmation.busy}>
+                {confirmation.action}
               </button>
             </div>
           </div>
-        </div>
-      {/if}
-
-      <!-- Force Fail confirmation dialog -->
-      {#if showForceFailConfirm}
-        <div
-          class="confirm-overlay lattice-modal-backdrop"
-          onclick={dismissForceFailConfirm}
-          onkeydown={(event) => event.key === 'Escape' && dismissForceFailConfirm()}
-          role="presentation"
-        >
-          <div
-            class="confirm-dialog lattice-modal"
-            onclick={(e) => e.stopPropagation()}
-            onkeydown={handleForceFailDialogKeydown}
-            role="dialog"
-            aria-modal="true"
-            tabindex="-1"
-          >
-            <h3>Force Fail Milestone?</h3>
-            <p>This will immediately fail the current milestone and trigger a retry or termination. Are you sure?</p>
-            <div class="confirm-actions">
-              <button class="lattice-btn lattice-btn--secondary" onclick={dismissForceFailConfirm} disabled={forceFailing}>Cancel</button>
-              <button class="lattice-btn lattice-btn--danger" onclick={handleForceFail} disabled={forceFailing}>
-                {forceFailing ? 'Failing...' : 'Force Fail'}
-              </button>
-            </div>
-          </div>
-        </div>
-      {/if}
-
-      <!-- #176: Force Pass confirmation dialog. Previously a single unguarded click. -->
-      {#if showForcePassConfirm}
-        <div
-          class="confirm-overlay lattice-modal-backdrop"
-          onclick={() => (showForcePassConfirm = false)}
-          onkeydown={(event) => event.key === 'Escape' && (showForcePassConfirm = false)}
-          role="presentation"
-        >
-          <div
-            class="confirm-dialog lattice-modal"
-            onclick={(e) => e.stopPropagation()}
-            onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') showForcePassConfirm = false; }}
-            role="dialog"
-            aria-modal="true"
-            tabindex="-1"
-          >
-            <h3>Force Pass Milestone?</h3>
-            <p>This bypasses the Evaluator and marks QA as passed without review. Are you sure?</p>
-            <div class="confirm-actions">
-              <button class="lattice-btn lattice-btn--secondary" onclick={() => (showForcePassConfirm = false)}>Cancel</button>
-              <button class="lattice-btn lattice-btn--success" onclick={handleForcePass}>Force Pass</button>
-            </div>
-          </div>
-        </div>
-      {/if}
-
-      <!-- #176: Skip QA confirmation dialog (same destructive force-pass endpoint). -->
-      {#if showSkipQaConfirm}
-        <div
-          class="confirm-overlay lattice-modal-backdrop"
-          onclick={() => (showSkipQaConfirm = false)}
-          onkeydown={(event) => event.key === 'Escape' && (showSkipQaConfirm = false)}
-          role="presentation"
-        >
-          <div
-            class="confirm-dialog lattice-modal"
-            onclick={(e) => e.stopPropagation()}
-            onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') showSkipQaConfirm = false; }}
-            role="dialog"
-            aria-modal="true"
-            tabindex="-1"
-          >
-            <h3>Skip QA?</h3>
-            <p>This force-passes the current milestone without an Evaluator review. Are you sure?</p>
-            <div class="confirm-actions">
-              <button class="lattice-btn lattice-btn--secondary" onclick={() => (showSkipQaConfirm = false)}>Cancel</button>
-              <button class="lattice-btn lattice-btn--warning" onclick={handleSkipQa}>Skip QA</button>
-            </div>
-          </div>
-        </div>
-      {/if}
-    {/if}
+        {/if}
+      </Dialog>
 </div>
 
 <style>
@@ -624,8 +559,6 @@
     font-size: 11px;
     font-weight: 600;
     color: inherit;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
   }
 
   .cli-health-heading {
@@ -841,15 +774,6 @@
 
   .close-session-action {
     display: grid;
-  }
-
-  .confirm-overlay {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10;
   }
 
   .confirm-dialog {

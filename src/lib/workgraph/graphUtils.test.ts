@@ -5,11 +5,18 @@ import {
   classifyHeartbeatStaleness,
   formatElapsedTime,
   getNodeAdjacency,
+  getDependencyEdges,
   selectActiveWave,
   truncateLabel,
 } from './graphUtils';
 
 describe('workgraph graphUtils', () => {
+  it('filters informs and touches without changing the generic adjacency API', () => {
+    const edges = (['depends_on', 'informs', 'touches', 'produces', 'consumes', 'reviews'] as const)
+      .map((kind) => ({ source: kind, target: 'worker', kind, provenance: 'planner' as const }));
+    expect(getNodeAdjacency('worker', getDependencyEdges(edges)).dependencies).toEqual(['depends_on']);
+    expect(getNodeAdjacency('worker', edges).dependencies).toHaveLength(6);
+  });
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-16T18:00:00.000Z'));
