@@ -107,6 +107,8 @@ async fn get(app: &axum::Router, uri: &str) -> axum::response::Response {
 
 #[tokio::test]
 async fn g8_identical_cwd_and_start_time_use_only_held_transcript_ids() {
+    // Mutation witness: cwd-directory discovery fails the own-transcript assertion.
+    // Keep fixture path construction independent of the production locator.
     let (temp, state, app) = setup();
     let mut session =
         make_test_session_with_agents("session", "D:/fixture/shared", &["worker-a", "worker-b"]);
