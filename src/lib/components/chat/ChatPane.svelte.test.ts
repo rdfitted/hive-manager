@@ -4,7 +4,7 @@ import { tick } from 'svelte';
 import type { AgentEvent } from '$lib/stores/agentEvents';
 import { CHAT_WINDOW_SIZE, passiveToolResult, protocolAttention, transcriptRows } from './transcript';
 
-const fixture = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue(undefined), loadOlder: vi.fn() }));
+const fixture = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue(undefined), loadOlder: vi.fn(), setAgents: (_agents: import('$lib/stores/sessions').AgentInfo[]) => {} }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('$lib/stores/agentEvents', async () => {
   const { writable } = await import('svelte/store');
@@ -12,7 +12,9 @@ vi.mock('$lib/stores/agentEvents', async () => {
 });
 vi.mock('$lib/stores/sessions', async () => {
   const { writable } = await import('svelte/store');
-  return { sessions: writable({ sessions: [] }), activeAgents: writable([]) };
+  const agents = writable<import('$lib/stores/sessions').AgentInfo[]>([]);
+  fixture.setAgents = agents.set;
+  return { sessions: writable({ sessions: [] }), activeAgents: agents };
 });
 import ChatPane from './ChatPane.svelte';
 import PaneToggle from './PaneToggle.svelte';
@@ -43,7 +45,7 @@ describe('agent chat', () => {
     const details = view.container.querySelector('details')!;
     expect(details.open).toBe(false);
     expect(details.querySelector('[aria-label="Tool input"]')).toBeNull();
-    expect(details.querySelector('summary')?.textContent).toBe('Fixture tool · Complete');
+    expect(details.querySelector('summary')?.textContent).toBe('Worked for 0s');
     details.open = true;
     await fireEvent(details, new Event('toggle'));
     expect(details.querySelector('[aria-label="Tool input"]')?.textContent).toContain('fixture.txt');
@@ -121,5 +123,99 @@ describe('agent chat', () => {
     expect(view.getByRole('article', { name: 'Approval decision' }).textContent).toContain('Hive declined it; use PTY.');
     expect(view.getByRole('article', { name: 'Agent error' }).textContent).toContain('Fixture failure');
     expect(view.queryByRole('button', { name: /approve|reject/i })).toBeNull();
+  });
+});
+
+// G19 component proof: collapsing keeps trouble visible and never steals focus.
+import type { AgentInfo } from '$lib/stores/sessions';
+function runningAgent(status: AgentInfo['status'] = 'Running'): AgentInfo {
+  return { id: 'a', role: 'Queen', status, config: { cli: 'codex', flags: [] }, parent_id: null };
+}
+
+describe('G19 collapsed activity and message layout', () => {
+  afterEach(() => { fixture.setAgents([]); vi.useRealTimers(); });
+
+  it('G19: failed count remains visible while all tool details are collapsed', () => {
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [
+      event('1', 'tool_start', { tool_id: 'a', name: 'exec', input: 'tools.exec_command({})' }),
+      event('2', 'tool_result', { tool_id: 'a', result: 'fixture' }),
+      event('3', 'tool_start', { tool_id: 'b', name: 'exec' }),
+      event('4', 'status', { status: 'tool_failed', exit_code: 1 }),
+      event('5', 'tool_result', { tool_id: 'b', result: 'fixture' }),
+    ] } });
+    expect(view.container.querySelectorAll('details')).toHaveLength(1);
+    expect(view.container.querySelector('details')?.open).toBe(false);
+    expect(view.container.querySelector('summary')?.textContent, 'collapsed activity must expose the failed count').toContain('1 failed');
+    expect(view.queryByLabelText('Tool result')).toBeNull();
+  });
+
+  it('preserves expansion when another tool is appended, without moving editor focus', async () => {
+    const events = [event('1', 'tool_start', { tool_id: 'a', name: 'Read', input: { path: 'fixture.txt' } })];
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events } });
+    const editor = view.getByRole('textbox'); editor.focus();
+    const details = view.container.querySelector('details')!;
+    details.open = true; await fireEvent(details, new Event('toggle'));
+    await view.rerender({ sessionId: 's', agentId: 'a', events: [...events, event('2', 'tool_start', { tool_id: 'b', name: 'Read' })] });
+    expect(view.container.querySelector('details')).toBe(details);
+    expect(details.open).toBe(true);
+    expect(view.getByLabelText('Tool input').textContent).toContain('fixture.txt');
+    expect(document.activeElement).toBe(editor);
+  });
+
+  it('shows live labels, quiet terminal guidance, and closes on turn end or agent exit', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    fixture.setAgents([runningAgent()]);
+    const events = [event('1', 'tool_start', { tool_id: 'a', name: 'exec', input: 'tools.exec_command({})' })];
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events } });
+    expect(view.getByRole('status').textContent).toBe('Running bash');
+    await vi.advanceTimersByTimeAsync(90000); await tick();
+    expect(view.getByRole('status').textContent).toContain('Waiting for 90s without an event · Check the terminal');
+    fixture.setAgents([runningAgent('Completed')]); await tick();
+    expect(view.queryByRole('status')).toBeNull();
+    fixture.setAgents([runningAgent()]);
+    await view.rerender({ sessionId: 's', agentId: 'a', events: [...events, event('end', 'turn_end', { status: 'aborted' })] });
+    expect(view.queryByRole('status')).toBeNull();
+  });
+
+  it('clamps a long user bubble with Show more and gives plain assistant text a hover timestamp', async () => {
+    const text = Array.from({ length: 9 }, (_, i) => `Fixture line ${i}`).join('\n');
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [event('u', 'user_message', { text }), event('a')] } });
+    const user = view.getByRole('article', { name: 'User message' });
+    expect(user.classList.contains('user-message')).toBe(true);
+    expect(user.querySelector('p')?.classList.contains('clamped')).toBe(true);
+    await fireEvent.click(view.getByRole('button', { name: 'Show more' }));
+    expect(user.querySelector('p')?.classList.contains('clamped')).toBe(false);
+    const assistant = view.getByRole('article', { name: 'Assistant message' });
+    expect(assistant.querySelector('header')).toBeNull();
+    expect(assistant.getAttribute('title')).toBeTruthy();
+    expect(view.queryByRole('navigation', { name: 'Transcript history' })).toBeNull();
+  });
+
+  it('offers Show more for short prose that overflows six lines in a narrow pane', async () => {
+    let measure: (() => void) | undefined;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: () => void) { measure = callback; }
+      observe() {} disconnect() {}
+    });
+    try {
+      const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [event('u', 'user_message', { text: 'Fixture prose '.repeat(20) })] } });
+      const p = view.getByRole('article', { name: 'User message' }).querySelector('p')!;
+      Object.defineProperties(p, { scrollHeight: { value: 240 }, clientHeight: { value: 120 } });
+      measure?.(); await tick();
+      expect(view.getByRole('button', { name: 'Show more' })).toBeTruthy();
+      await fireEvent.click(view.getByRole('button', { name: 'Show more' }));
+      expect(p.classList.contains('clamped')).toBe(false);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('keeps a full group before windowing and isolates attention, error and decision boundaries', () => {
+    const events = [...Array.from({ length: 120 }, (_, i) => event(`tool-${i}`, 'tool_start', { tool_id: String(i), name: 'Read' })),
+      event('error', 'error', { message: 'Visible fixture error' }),
+      event('approval', 'status', { status: 'needs_approval', decision: 'decline', message: 'Visible fixture decision' })];
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events } });
+    expect(view.container.querySelectorAll('details')).toHaveLength(1);
+    expect(view.getByRole('article', { name: 'Agent error' }).closest('details')).toBeNull();
+    expect(view.getByRole('article', { name: 'Approval decision' }).closest('details')).toBeNull();
+    expect(view.queryByRole('navigation', { name: 'Transcript history' })).toBeNull();
   });
 });

@@ -1,14 +1,17 @@
 import type { AgentEvent } from '$lib/stores/agentEvents';
+import type { AgentStatus } from '$lib/stores/sessions';
+import { activityLabel } from './activityLabel';
 
 export type TranscriptRow = {
-  id: string; type: 'user' | 'assistant' | 'tool' | 'error' | 'decision'; ts: string; text: string;
+  id: string; type: 'user' | 'assistant' | 'tool' | 'activity' | 'error' | 'decision'; ts: string; text: string;
   name?: string; input?: unknown; result?: unknown; complete?: boolean; failed?: boolean; truncated: boolean;
+  tools?: TranscriptRow[]; durationMs?: number; failedCount?: number;
 };
 
 export const CHAT_WINDOW_SIZE = 80;
 
 function failedTurn(event: AgentEvent): boolean {
-  return event.kind === 'turn_end' && (event.payload.is_error === true || event.payload.status === 'failed'
+  return event.kind === 'turn_end' && event.payload.status !== 'aborted' && (event.payload.is_error === true || event.payload.status === 'failed'
     || event.payload.error != null);
 }
 
@@ -33,25 +36,47 @@ export function transcriptRows(events: AgentEvent[]): TranscriptRow[] {
   const messages = new Map<string, TranscriptRow>();
   const tools = new Map<string, TranscriptRow>();
   let turn = 0;
+  let segment = 0;
+  let latestTool: TranscriptRow | undefined;
+  let pendingFailures = 0;
+  const segments = new Map<string, number>();
+  const failureSignals = new Map<string, number>();
+  const endedAt = new Map<string, string>();
   for (const event of events) {
     const p = event.payload;
     const failure = failedTurn(event);
     const decision = declinedDecision(event);
-    if (event.kind === 'turn_start' || event.kind === 'turn_end') { turn++; if (!failure) continue; }
+    if (event.kind === 'turn_start' || event.kind === 'turn_end') { turn++; segment++; latestTool = undefined; pendingFailures = 0; if (!failure) continue; }
+    if (event.kind === 'status' && p.status === 'tool_failed') {
+      if (latestTool) {
+        failureSignals.set(latestTool.id, (failureSignals.get(latestTool.id) ?? 0) + 1);
+        latestTool.failed = true; endedAt.set(latestTool.id, event.ts);
+      }
+      else pendingFailures++;
+      continue;
+    }
     if (event.kind === 'tool_start' || event.kind === 'tool_result') {
       const key = `${event.agent_id}:tool:${String(p.tool_id ?? event.source_id ?? event.cursor)}`;
       let row = tools.get(key);
       if (!row) {
         row = { id: key, type: 'tool', ts: event.ts, text: '', name: 'Tool', truncated: false };
         rows.push(row); tools.set(key, row);
+        segments.set(key, segment);
       }
+      latestTool = row;
+      if (pendingFailures) { failureSignals.set(key, pendingFailures); row.failed = true; pendingFailures = 0; }
+      endedAt.set(key, event.ts);
       if (typeof p.name === 'string') row.name = p.name;
       if (event.kind === 'tool_start') row.input = p.input;
-      else { row.result = p.result; row.complete = true; row.failed = p.is_error === true; }
+      else { row.result = p.result; row.complete = true; row.failed ||= p.is_error === true; }
       row.truncated ||= event.truncated;
       continue;
     }
-    if (event.kind === 'status' && !decision) continue;
+    if (event.kind === 'status' && !decision) {
+      if (p.status === 'needs_input' || p.status === 'needs_approval') { segment++; latestTool = undefined; pendingFailures = 0; }
+      continue;
+    }
+    segment++; latestTool = undefined; pendingFailures = 0;
     const type = event.kind === 'user_message' ? 'user' : event.kind === 'error' || failure ? 'error' : decision ? 'decision' : 'assistant';
     const key = `${event.agent_id}:${type}:${event.source_id ?? (event.kind === 'assistant_delta' ? `stream-${turn}` : event.cursor)}`;
     const text = decision ?? (type === 'error' ? failureText(p, event.kind === 'error' ? 'Agent reported an error.' : undefined)
@@ -66,7 +91,54 @@ export function transcriptRows(events: AgentEvent[]): TranscriptRow[] {
     row.text = event.kind === 'assistant_delta' ? row.text + text : text;
     row.truncated ||= event.truncated;
   }
-  return rows;
+  // Collapse the full history before the UI applies its bounded row window.
+  const grouped: TranscriptRow[] = [];
+  let groupSegment: number | undefined;
+  for (const row of rows) {
+    if (row.type !== 'tool') { grouped.push(row); groupSegment = undefined; continue; }
+    const previous = grouped.at(-1);
+    const sameGroup = previous?.type === 'activity' && groupSegment === segments.get(row.id);
+    const group: TranscriptRow = sameGroup ? previous : {
+      id: row.id, type: 'activity', ts: row.ts, text: '', truncated: false, tools: [], durationMs: 0, failedCount: 0,
+    };
+    if (!sameGroup) grouped.push(group);
+    groupSegment = segments.get(row.id);
+    group.tools!.push(row);
+    group.truncated ||= row.truncated;
+    group.failedCount! += Math.max(row.failed ? 1 : 0, failureSignals.get(row.id) ?? 0);
+    group.durationMs = Math.max(group.durationMs!, Date.parse(endedAt.get(row.id) ?? row.ts) - Date.parse(group.ts), 0);
+  }
+  return grouped;
+}
+
+/** Missing Claude start markers are inferred; a new user item retires old work. */
+export function liveActivity(events: AgentEvent[], status: AgentStatus | undefined, now = Date.now()): string | null {
+  if (status !== 'Running') return null;
+  let open = false;
+  let last: AgentEvent | undefined;
+  const running = new Map<string, AgentEvent>();
+  let pending: string | null = null;
+  for (const event of events) {
+    const p = event.payload;
+    if (event.kind === 'turn_end' || event.kind === 'user_message') {
+      open = false; last = undefined; running.clear(); pending = null; continue;
+    }
+    if (event.kind === 'turn_start' || event.kind === 'assistant_message' || event.kind === 'assistant_delta'
+      || event.kind === 'tool_start' || event.kind === 'tool_result') { open = true; last = event; }
+    if (event.kind === 'tool_start') running.set(String(p.tool_id ?? event.source_id ?? event.cursor), event);
+    if (event.kind === 'tool_result') running.delete(String(p.tool_id ?? event.source_id ?? event.cursor));
+    if (event.kind === 'status' && (p.status === 'needs_input' || p.status === 'needs_approval')) {
+      pending = p.status === 'needs_input' ? 'Waiting for your answer · Check the terminal' : 'Approval required · Check the terminal'; last = event;
+    }
+    if (event.kind === 'status' && (p.status === 'resolved' || p.status === 'approval_resolved')) pending = null;
+    if (open) last = event;
+  }
+  if (!open || !last) return null;
+  const quietSeconds = Math.floor(Math.max(0, now - Date.parse(last.ts)) / 1000);
+  if (quietSeconds >= 90) return `Waiting for ${quietSeconds}s without an event · Check the terminal`;
+  if (pending) return pending;
+  const tool = [...running.values()].at(-1);
+  return tool ? activityLabel(typeof tool.payload.name === 'string' ? tool.payload.name : 'Tool', tool.payload.input) : 'Thinking';
 }
 
 export function protocolAttention(events: AgentEvent[]): string | null {
