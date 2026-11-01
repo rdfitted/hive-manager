@@ -665,8 +665,6 @@ D:/Code Projects/hive-manager/
 │   │   │   ├── mod.rs
 │   │   │   ├── claude.rs
 │   │   │   ├── cursor.rs
-│   │   │   ├── gemini.rs
-│   │   │   ├── antigravity.rs
 │   │   │   └── codex.rs
 │   │   ├── watcher/
 │   │   │   ├── mod.rs
