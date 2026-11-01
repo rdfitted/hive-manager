@@ -339,6 +339,8 @@ pub struct PtyManager {
     /// Serialize create/kill so a same-id kill cannot pass between process spawn and
     /// insertion, and a duplicate create cannot replace a still-live process handle.
     lifecycle: Mutex<()>,
+    #[cfg(test)]
+    before_protocol_publish: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// When the most recent codex spawn happened. Held on its own mutex so a spawn
     /// waiting out the stagger gap does not block kill/status/list.
     last_codex_spawn: Mutex<Option<std::time::Instant>>,
@@ -368,6 +370,8 @@ impl PtyManager {
             heartbeat_credentials: RwLock::new(HashMap::new()),
             heartbeat_verify_when_present: RwLock::new(HashMap::new()),
             lifecycle: Mutex::new(()),
+            #[cfg(test)]
+            before_protocol_publish: Mutex::new(None),
             last_codex_spawn: Mutex::new(None),
             app_handle: None,
             emit_tx: None,
@@ -438,11 +442,57 @@ impl PtyManager {
             transport.stop_sync()?;
             return Err("Transport startup cancelled by shutdown".into());
         }
-        if !transport.is_alive() {
+        if !transport.is_alive()
+            || !starting.get(id).is_some_and(|held| Arc::ptr_eq(held, &transport))
+        {
             return Err("Transport startup cancelled".into());
         }
         // The source fence and registration are ordered by the starting map lock.
         registry.register(session_id, id, thread_id, transport)
+    }
+
+    /// Final startup decision shares kill's guard, but never holds it during input.
+    fn finish_transport_start(
+        &self,
+        registry: &crate::transport::TransportRegistry,
+        id: &str,
+        transport: Arc<dyn crate::transport::AgentTransport>,
+        cwd: Option<&str>,
+    ) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock();
+        let mut starting = self.starting_transports.write();
+        if self.transport_shutdown.load(Ordering::Acquire)
+            || !starting.get(id).is_some_and(|held| Arc::ptr_eq(held, &transport))
+            || !registry.get_agent(id).is_some_and(|(_, entry)| Arc::ptr_eq(&entry.transport, &transport))
+            || !transport.is_alive()
+        {
+            return Err("Transport startup cancelled".into());
+        }
+        self.record_spawn_cwd(id, cwd);
+        starting.remove(id);
+        Ok(())
+    }
+
+    /// Failed cleanup retains its handle for retry; late cleanup owns no replacement.
+    fn cleanup_transport_start(
+        &self,
+        registry: &crate::transport::TransportRegistry,
+        session_id: &str,
+        id: &str,
+        transport: Arc<dyn crate::transport::AgentTransport>,
+    ) -> Result<(), String> {
+        transport.stop_sync()?;
+        let _lifecycle = self.lifecycle.lock();
+        if registry.get_agent(id).is_some_and(|(_, entry)| Arc::ptr_eq(&entry.transport, &transport)) {
+            registry.stop_agent_sync(session_id, id)?;
+            self.heartbeat_credentials.write().remove(id);
+        }
+        let mut starting = self.starting_transports.write();
+        if starting.get(id).is_some_and(|held| Arc::ptr_eq(held, &transport)) {
+            starting.remove(id);
+            self.heartbeat_credentials.write().remove(id);
+        }
+        Ok(())
     }
 
     /// Desktop Exit fences new transport admission/publication and stops pending as
@@ -523,7 +573,6 @@ impl PtyManager {
         let transport = crate::transport::codex::CodexTransport::new(options, &registry);
         self.begin_transport_start(&id, transport.clone(), &registry)
             .map_err(PtyError::CreateError)?;
-        let mut registered = false;
         let result = (|| {
             // Protocol initialize and initial input never hold the global PTY guard.
             transport.start_blocking()?;
@@ -536,38 +585,30 @@ impl PtyManager {
                     transport.thread_id(),
                     transport.clone(),
                 )?;
-                registered = true;
                 transport.activate()?;
                 if !transport.is_alive() {
                     return Err("Codex startup cancelled".into());
                 }
                 // Keep binding ordered with kill: no late bind may recreate a token.
                 self.bind_heartbeat_token(&id, &session_id, false, &token);
-                self.record_spawn_cwd(&id, cwd);
             }
             if let Some(prompt) = transport.initial_prompt() {
                 transport.send_input(&prompt, true)?;
             }
-            if !transport.is_alive() {
-                return Err("Codex startup cancelled".into());
+            #[cfg(test)]
+            {
+                let before_publish = self.before_protocol_publish.lock().take();
+                if let Some(before_publish) = before_publish { before_publish(); }
             }
+            self.finish_transport_start(&registry, &id, transport.clone(), cwd)?;
             Ok(id.clone())
         })();
         if result.is_err() {
-            if let Err(error) = transport.stop_sync() {
-                return Err(PtyError::CreateError(format!(
+            self.cleanup_transport_start(&registry, &session_id, &id, transport)
+                .map_err(|error| PtyError::CreateError(format!(
                     "Codex startup failed and cleanup needs retry: {error}"
-                )));
-            }
-            let _lifecycle = self.lifecycle.lock();
-            if registered {
-                registry
-                    .stop_agent_sync(&session_id, &id)
-                    .map_err(PtyError::CreateError)?;
-            }
-            self.heartbeat_credentials.write().remove(&id);
+                )))?;
         }
-        self.starting_transports.write().remove(&id);
         result.map_err(PtyError::CreateError)
     }
 
@@ -601,7 +642,6 @@ impl PtyManager {
         let transport = crate::transport::claude::ClaudeTransport::new(options, &registry);
         self.begin_transport_start(&id, transport.clone(), &registry)
             .map_err(PtyError::CreateError)?;
-        let mut registered = false;
         let result = (|| {
             // Protocol initialize and initial input never hold the global PTY guard.
             transport.start_blocking()?;
@@ -614,38 +654,30 @@ impl PtyManager {
                     transport.thread_id(),
                     transport.clone(),
                 )?;
-                registered = true;
                 transport.activate()?;
                 if !transport.is_alive() {
                     return Err("Claude startup cancelled".into());
                 }
                 // Keep binding ordered with kill: no late bind may recreate a token.
                 self.bind_heartbeat_token(&id, &session_id, false, &token);
-                self.record_spawn_cwd(&id, cwd);
             }
             if let Some(prompt) = transport.initial_prompt() {
                 transport.send_input(&prompt, true)?;
             }
-            if !transport.is_alive() {
-                return Err("Claude startup cancelled".into());
+            #[cfg(test)]
+            {
+                let before_publish = self.before_protocol_publish.lock().take();
+                if let Some(before_publish) = before_publish { before_publish(); }
             }
+            self.finish_transport_start(&registry, &id, transport.clone(), cwd)?;
             Ok(id.clone())
         })();
         if result.is_err() {
-            if let Err(error) = transport.stop_sync() {
-                return Err(PtyError::CreateError(format!(
+            self.cleanup_transport_start(&registry, &session_id, &id, transport)
+                .map_err(|error| PtyError::CreateError(format!(
                     "Claude startup failed and cleanup needs retry: {error}"
-                )));
-            }
-            let _lifecycle = self.lifecycle.lock();
-            if registered {
-                registry
-                    .stop_agent_sync(&session_id, &id)
-                    .map_err(PtyError::CreateError)?;
-            }
-            self.heartbeat_credentials.write().remove(&id);
+                )))?;
         }
-        self.starting_transports.write().remove(&id);
         result.map_err(PtyError::CreateError)
     }
 
@@ -1005,7 +1037,7 @@ impl PtyManager {
         // Cancellation reaches a starting server without waiting for startup's
         // publication guard. The same guard then orders token cleanup.
         let starting=self.starting_transports.read().get(id).cloned();
-        if let Some(starting)=starting {starting.stop_sync().map_err(PtyError::CreateError)?;}
+        if let Some(starting) = &starting { starting.stop_sync().map_err(PtyError::CreateError)?; }
         let _lifecycle_guard = self.lifecycle.lock();
         if let Some(registry)=self.transport_registry() {
             if let Some((session_id,_))=registry.get_agent(id) {
@@ -1031,6 +1063,14 @@ impl PtyManager {
             }
         }
         self.heartbeat_credentials.write().remove(id);
+        // A successful cancellation releases only the reservation it stopped.
+        // The old startup's final decision and cleanup both check this identity.
+        if let Some(stopped) = starting {
+            let mut pending = self.starting_transports.write();
+            if pending.get(id).is_some_and(|held| Arc::ptr_eq(held, &stopped)) {
+                pending.remove(id);
+            }
+        }
         Ok(())
     }
 
@@ -1140,6 +1180,8 @@ impl Default for PtyManager {
 #[cfg(test)]
 mod cross_platform_spawn_tests {
     use super::{AgentRole, PtyManager};
+    #[cfg(windows)]
+    use std::{sync::{mpsc, Arc}, thread, time::Duration};
 
     #[test]
     fn restore_seed_cannot_clobber_actual_spawn_and_respawn_overwrites() {
@@ -1217,6 +1259,128 @@ mod cross_platform_spawn_tests {
             assert_eq!(manager.spawn_cwd(&id).as_deref(), Some("persisted cwd"));
             manager.kill(&id).unwrap();
             assert_eq!(manager.spawn_cwd(&id).as_deref(), Some("persisted cwd"));
+        }
+    }
+
+    #[cfg(windows)]
+    fn cwd_protocol_shim(temp: &std::path::Path, command: &str) -> std::path::PathBuf {
+        let script = r#"
+$ErrorActionPreference='Stop'
+function Reply($m,$r){[Console]::Out.WriteLine((@{id=$m.id;result=$r}|ConvertTo-Json -Compress -Depth 12))}
+while($null -ne ($line=[Console]::ReadLine())) {
+ $m=$line|ConvertFrom-Json
+ switch($m.method) {
+  'initialize' {Reply $m @{userAgent='codex-cli/0.166.0'}}
+  'account/read' {Reply $m @{account=@{type='chatgpt'};requiresOpenaiAuth=$true}}
+  'thread/start' {Reply $m @{thread=@{id='cwd-fixture';cwd=$PSScriptRoot};modelProvider='openai'}}
+ }
+ if($m.type -eq 'control_request' -and $m.request.subtype -eq 'initialize') {
+  [Console]::Out.WriteLine((@{type='control_response';response=@{subtype='success';request_id=$m.request_id;response=@{account=@{subscriptionType='Claude Ultra'};claude_code_version='2.1.316'}}}|ConvertTo-Json -Compress -Depth 12))
+ }
+}
+"#;
+
+        std::fs::write(temp.join("server.ps1"), script).unwrap();
+        let shim = temp.join(format!("{command}.cmd"));
+        std::fs::write(&shim, "@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0server.ps1\"\r\n").unwrap();
+        shim
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protocol_initial_input_failure_preserves_previous_spawn_cwd() {
+        use crate::domain::agent_transport::AgentTransportKind;
+        let mut observed = Vec::new();
+        for (command, kind) in [
+            ("codex", AgentTransportKind::CodexAppServer),
+            ("claude", AgentTransportKind::ClaudeStreamJson),
+        ] {
+            for previous in [Some("previous successful cwd"), None] {
+                let temp = tempfile::tempdir().unwrap();
+                let shim = cwd_protocol_shim(temp.path(), command);
+                let manager = PtyManager::new();
+                manager.attach_transports(Arc::new(crate::transport::TransportRegistry::new(temp.path().join("feeds"), None)));
+                let session_id = uuid::Uuid::new_v4().to_string();
+                let id = format!("{session_id}-worker-1");
+                manager.configure_transports(&session_id, [kind].into_iter().collect());
+                if let Some(cwd) = previous { manager.seed_spawn_cwd(&id, cwd); }
+                let transcript_id = uuid::Uuid::new_v4().to_string();
+                let prompt = "x".repeat(512 * 1024 + 1);
+                let args = if command == "claude" {
+                    vec!["--session-id", transcript_id.as_str(), "--dangerously-skip-permissions", &prompt]
+                } else { vec![prompt.as_str()] };
+                let error = manager.create_session(
+                    id.clone(), AgentRole::Worker { index: 1, parent: None },
+                    shim.to_str().unwrap(), &args, temp.path().to_str(), 80, 24,
+                ).unwrap_err();
+                assert!(error.to_string().contains("staged input exceeds 512 KiB"), "must fail after initialize: {error}");
+                assert!(manager.protocol_agent(&id).is_none());
+                assert!(!manager.has_heartbeat_credential_for_test(&id));
+                observed.push((manager.spawn_cwd(&id), previous.map(str::to_owned)));
+                manager.kill(&id).unwrap();
+                observed.push((manager.spawn_cwd(&id), previous.map(str::to_owned)));
+            }
+        }
+        for (actual, expected) in observed {
+            assert_eq!(actual, expected, "failed initial input must preserve prior cwd, including absence");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancelled_protocol_start_cannot_publish_cwd_after_respawn() {
+        use crate::domain::agent_transport::AgentTransportKind;
+        for (command, kind) in [
+            ("codex", AgentTransportKind::CodexAppServer),
+            ("claude", AgentTransportKind::ClaudeStreamJson),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let shim = cwd_protocol_shim(temp.path(), command);
+            let manager = Arc::new(PtyManager::new());
+            manager.attach_transports(Arc::new(crate::transport::TransportRegistry::new(temp.path().join("feeds"), None)));
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let id = format!("{session_id}-worker-1");
+            manager.configure_transports(&session_id, [kind].into_iter().collect());
+            manager.seed_spawn_cwd(&id, "previous successful cwd");
+            let transcript_id = uuid::Uuid::new_v4().to_string();
+            let args: Vec<String> = if command == "claude" {
+                vec!["--session-id".into(), transcript_id, "--dangerously-skip-permissions".into()]
+            } else { Vec::new() };
+            let (entered, ready) = mpsc::channel();
+            let (finish, release) = mpsc::channel();
+            *manager.before_protocol_publish.lock() = Some(Box::new(move || {
+                entered.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(15)).unwrap();
+            }));
+            let owner = manager.clone();
+            let old_id = id.clone();
+            let old_shim = shim.clone();
+            let old_args = args.clone();
+            let old_cwd = format!("{}\\.\\", temp.path().display());
+            let startup = thread::spawn(move || owner.create_session(
+                old_id, AgentRole::Worker { index: 1, parent: None }, old_shim.to_str().unwrap(),
+                &old_args.iter().map(String::as_str).collect::<Vec<_>>(), Some(&old_cwd), 80, 24,
+            ));
+            ready.recv_timeout(Duration::from_secs(15)).unwrap();
+            assert!(manager.lifecycle.try_lock().is_some(), "startup barrier must not hold lifecycle");
+            manager.kill(&id).unwrap();
+            let after_cancel = manager.spawn_cwd(&id);
+            let replacement = manager.create_session(
+                id.clone(), AgentRole::Worker { index: 1, parent: None }, shim.to_str().unwrap(),
+                &args.iter().map(String::as_str).collect::<Vec<_>>(), temp.path().to_str(), 80, 24,
+            );
+            let replacement_transport = manager.protocol_agent(&id);
+            finish.send(()).unwrap();
+            let cancelled = startup.join().unwrap();
+            assert!(replacement.is_ok(), "successful kill must release cancelled startup reservation: {replacement:?}");
+            assert!(cancelled.is_err());
+            assert_eq!(after_cancel.as_deref(), Some("previous successful cwd"));
+            let current = manager.protocol_agent(&id).expect("late cleanup must retain replacement");
+            assert!(Arc::ptr_eq(&current.transport, &replacement_transport.unwrap().transport));
+            assert!(current.transport.is_alive());
+            assert!(manager.has_heartbeat_credential_for_test(&id));
+            assert_eq!(manager.spawn_cwd(&id).as_deref(), temp.path().to_str(), "cancelled startup cannot overwrite replacement cwd");
+            manager.kill(&id).unwrap();
         }
     }
 
