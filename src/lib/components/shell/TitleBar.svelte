@@ -122,9 +122,9 @@
     height: var(--toolbar-height);
     min-width: 0;
     padding-left: var(--sidebar-inset);
-    background: var(--chrome);
+    background: var(--toolbar);
     border-bottom: 1px solid var(--border);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     user-select: none;
   }
 
@@ -155,7 +155,9 @@
   .window-controls { display: flex; height: 100%; }
   .window-control { display: grid; place-items: center; width: 44px; padding: 0; border: 0; background: transparent; color: var(--text-primary); }
   .window-control:hover { background: var(--toolbar-control); }
-  .close-window:hover { background: var(--status-error); color: var(--bg-void); }
+  .close-window:hover { background: var(--danger-tint); color: var(--status-error); }
+  .window-control { transition: background-color var(--motion-ui), color var(--motion-ui); }
+  .window-control:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
   .window-error { position: fixed; top: var(--toolbar-height); right: 8px; z-index: 113; margin: 0; padding: 8px; background: var(--surface-overlay); color: var(--text-primary); }
 
   @media (max-width: 900px) { .agent-name, .separator { display: none; } }

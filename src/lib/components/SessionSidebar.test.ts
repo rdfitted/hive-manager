@@ -267,6 +267,7 @@ describe('sidebar project grouping and header navigation', () => {
     expect(get(layout).leftCollapsed).toBe(true);
     expect(view.container.querySelector('aside')?.style.width).toBe('0px');
     expect(view.container.querySelector('.sidebar-drawer')?.getAttribute('aria-hidden')).toBe('true');
+    expect((view.container.querySelector('.sidebar-drawer') as HTMLElement).inert).toBe(true);
   });
 
   it.each([

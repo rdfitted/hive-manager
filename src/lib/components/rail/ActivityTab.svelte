@@ -9,9 +9,9 @@
 </script>
 
 <div class="activity-tab">
-  <div class="sections" role="group" aria-label="Activity sections">
+  <div class="sections lattice-track" role="group" aria-label="Activity sections">
     {#each ['Chat', 'Logs', 'Timeline'] as label}
-      <button type="button" class={`lattice-btn lattice-btn--compact ${section === label ? 'lattice-btn--primary' : 'lattice-btn--ghost'}`}
+      <button type="button" class="lattice-tab"
         aria-pressed={section === label} onclick={() => section = label as typeof section}>{label}</button>
     {/each}
   </div>
@@ -29,7 +29,7 @@
 
 <style>
   .activity-tab { display: flex; flex: 1; min-height: 0; flex-direction: column; }
-  .sections { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px; }
+  .sections { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px; padding: 4px; }
   .section-content { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow: auto; }
   .replay-section { flex: none; max-height: 45%; overflow: auto; }
   summary { padding: 8px 12px; cursor: pointer; font-size: var(--text-small); }

@@ -3,11 +3,11 @@
   const modes = ['focus', 'grid'] as const;
 </script>
 
-<div class="view-mode-switch" role="group" aria-label="Terminal view">
+<div class="view-mode-switch lattice-track" role="group" aria-label="Terminal view">
   {#each modes as mode}
     <button
       type="button"
-      class={`lattice-btn lattice-btn--compact ${$layout.sessionViewMode === mode ? 'lattice-btn--secondary' : 'lattice-btn--ghost'}`}
+      class="lattice-tab"
       aria-pressed={$layout.sessionViewMode === mode}
       onclick={() => layout.setSessionViewMode(mode)}
     >{mode === 'focus' ? 'Focus' : 'Grid'}</button>
