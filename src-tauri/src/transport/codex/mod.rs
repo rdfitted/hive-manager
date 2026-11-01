@@ -2,7 +2,6 @@
 pub mod client;
 mod correlate;
 mod events;
-mod process;
 #[cfg(test)]
 mod tests;
 

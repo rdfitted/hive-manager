@@ -1,7 +1,9 @@
 //! Provider-neutral transport and attributed event contract. PTYs remain the default.
+pub mod claude;
 pub mod claude_transcript_source;
 pub mod codex;
 pub mod feed;
+pub(crate) mod process;
 
 #[cfg(test)]
 mod tests_option_off;

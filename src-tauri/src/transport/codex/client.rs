@@ -72,7 +72,7 @@ pub(crate) fn resolve_executable(command: &str) -> PathBuf {
 
 pub(crate) struct RpcClient {
     child: Mutex<Option<Child>>,
-    tree: Mutex<Option<super::process::ProcessTree>>,
+    tree: Mutex<Option<crate::transport::process::ProcessTree>>,
     stdin: Mutex<Option<mpsc::SyncSender<Vec<u8>>>>,
     pending: Mutex<HashMap<u64, mpsc::SyncSender<Reply>>>,
     next: AtomicU64,
@@ -140,7 +140,7 @@ impl RpcClient {
         let mut child = cmd.spawn().map_err(|e| {
             format!("Cannot start Codex app-server: {e}. Select PTY in launch settings.")
         })?;
-        match super::process::ProcessTree::attach(&child) {
+        match crate::transport::process::ProcessTree::attach(&child) {
             Ok(tree) => *self.tree.lock() = Some(tree),
             Err(error) => {
                 // Root is still suspended, so no descendant exists. Reap it

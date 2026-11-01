@@ -79,7 +79,7 @@ mod windows {
                 && unsafe { AssignProcessToJobObject(raw, child.as_raw_handle()) } != 0;
             if !assigned {
                 return Err(format!(
-                    "Cannot own Codex process tree: {}. Select PTY.",
+                    "Cannot own transport process tree: {}. Select PTY.",
                     std::io::Error::last_os_error()
                 ));
             }
@@ -114,7 +114,7 @@ mod windows {
                 CloseHandle(snapshot);
             }
             if !resumed {
-                return Err("Cannot resume owned Codex process; select PTY".into());
+                return Err("Cannot resume owned transport process; select PTY".into());
             }
             Ok(job)
         }
