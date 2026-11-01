@@ -596,6 +596,7 @@
   .terminal-item {
     display: flex;
     flex-direction: column;
+    padding: 0;
     overflow: hidden;
     background: var(--surface);
     border-radius: var(--radius-lg);
