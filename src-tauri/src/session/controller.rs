@@ -17617,11 +17617,28 @@ The backend composed and persisted the following authoritative skeleton before l
         pty_manager: &RwLock<PtyManager>,
         storage: Option<&SessionStorage>,
     ) -> crate::storage::PersistedSession {
+        Self::session_to_persisted_with_cwd_loader(session, pty_manager, || {
+            storage.and_then(|storage| storage.load_session(&session.id).ok())
+        })
+    }
+
+    fn session_to_persisted_with_cwd_loader(
+        session: &Session,
+        pty_manager: &RwLock<PtyManager>,
+        load_previous: impl FnOnce() -> Option<crate::storage::PersistedSession>,
+    ) -> crate::storage::PersistedSession {
         let mut snapshot = Self::session_to_persisted_snapshot(session);
-        let previous = storage.and_then(|storage| storage.load_session(&session.id).ok());
-        let manager = pty_manager.read();
-        for agent in &mut snapshot.agents {
-            agent.transcript_cwd = manager.spawn_cwd(&agent.id).or_else(|| {
+        let live_cwds: Vec<_> = {
+            let manager = pty_manager.read();
+            snapshot.agents.iter().map(|agent| manager.spawn_cwd(&agent.id)).collect()
+        };
+        let previous = if live_cwds.iter().any(Option::is_none) {
+            load_previous()
+        } else {
+            None
+        };
+        for (agent, live_cwd) in snapshot.agents.iter_mut().zip(live_cwds) {
+            agent.transcript_cwd = live_cwd.or_else(|| {
                 // A snapshot after restart can have no live PTY entry. Preserve
                 // the saved fact only for the same transcript incarnation.
                 previous
@@ -24568,6 +24585,48 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
                 check(&rows);
             }
         }
+    }
+
+    #[test]
+    fn snapshot_loads_previous_cwds_only_for_missing_live_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = RwLock::new(PtyManager::new());
+        let mut session = waiting_worker_session("cwd-loader", temp.path(), 1);
+        let template = session.agents[0].clone();
+        session.agents = (0..4).map(|index| {
+            let mut agent = template.clone();
+            agent.id = format!("cwd-loader-worker-{index}");
+            agent.transcript_session_id = Some(format!("transcript-{index}"));
+            agent.transcript_spawned_at = Some(Utc::now());
+            agent
+        }).collect();
+        let mut previous = SessionController::session_to_persisted_snapshot(&session);
+        for agent in &mut previous.agents {
+            agent.transcript_cwd = Some("saved cwd".into());
+        }
+        previous.agents[2].transcript_session_id = Some("old transcript".into());
+        previous.agents[3].transcript_spawned_at = Some(Utc::now() - Duration::days(1));
+        manager.read().seed_spawn_cwd(&session.agents[0].id, "live cwd");
+        let calls = std::cell::Cell::new(0);
+        let load = || {
+            calls.set(calls.get() + 1);
+            assert!(manager.try_write().is_some(), "disk loader must run outside PTY read lock");
+            Some(previous.clone())
+        };
+        let mut all_live = session.clone();
+        all_live.agents.truncate(1);
+        let snapshot = SessionController::session_to_persisted_with_cwd_loader(&all_live, &manager, load);
+        assert_eq!(calls.get(), 0, "all-live snapshot must skip prior storage");
+        assert_eq!(snapshot.agents[0].transcript_cwd.as_deref(), Some("live cwd"));
+        all_live.agents.clear();
+        SessionController::session_to_persisted_with_cwd_loader(&all_live, &manager, load);
+        assert_eq!(calls.get(), 0, "empty snapshot must skip prior storage");
+        let snapshot = SessionController::session_to_persisted_with_cwd_loader(&session, &manager, load);
+        assert_eq!(calls.get(), 1, "mixed snapshot must load prior storage exactly once");
+        assert_eq!(snapshot.agents[0].transcript_cwd.as_deref(), Some("live cwd"));
+        assert_eq!(snapshot.agents[1].transcript_cwd.as_deref(), Some("saved cwd"));
+        assert_eq!(snapshot.agents[2].transcript_cwd, None, "changed transcript ID rejects fallback");
+        assert_eq!(snapshot.agents[3].transcript_cwd, None, "changed spawn time rejects fallback");
     }
 
     #[test]
