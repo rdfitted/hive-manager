@@ -1,6 +1,39 @@
 use crate::transport::{AgentEvent, AgentEventKind};
 use serde_json::{json, Value};
 
+pub(crate) fn result_error(agent: &str, value: &Value, turn: &str) -> Option<AgentEvent> {
+    if value["is_error"] != true {
+        return None;
+    }
+    let errors = value["errors"]
+        .as_array()
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let message = if !errors.is_empty() {
+        errors.as_str()
+    } else {
+        value["result"]
+            .as_str()
+            .or_else(|| value["error"]["message"].as_str())
+            .or_else(|| value["error"].as_str())
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or("Claude turn failed. Inspect the raw event log for details.")
+    };
+    Some(event(
+        agent,
+        AgentEventKind::Error,
+        Some(format!("{turn}:error")),
+        json!({"message":message,"text":message}),
+    ))
+}
+
 pub(crate) fn event(
     agent: &str,
     kind: AgentEventKind,

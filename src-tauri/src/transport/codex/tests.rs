@@ -1,6 +1,79 @@
 use super::*;
 
 #[test]
+fn failed_completion_envelopes_emit_visible_error_and_keep_turn_end() {
+    for (status, error, expected) in [
+        (
+            "failed",
+            json!({"message":"synthetic Codex failure","codexErrorInfo":"other","additionalDetails":null}),
+            Some("synthetic Codex failure"),
+        ),
+        (
+            "failed",
+            Value::Null,
+            Some("Codex turn failed. Inspect the raw event log for details."),
+        ),
+        ("completed", Value::Null, None),
+        ("interrupted", Value::Null, None),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TransportRegistry::new(temp.path().join("feeds"), None));
+        // No process/home access: exercise the real notification -> persisted feed path.
+        let transport = CodexTransport::new(
+            CodexOptions {
+                command: "unused-fixture".into(),
+                server_args: vec![],
+                cwd: temp.path().into(),
+                env: vec![],
+                model: None,
+                effort: None,
+                initial_prompt: None,
+                session_id: "session".into(),
+                agent_id: "worker".into(),
+            },
+            &registry,
+        );
+        registry
+            .register("session", "worker", Some("held".into()), transport.clone())
+            .unwrap();
+        {
+            let mut state = transport.core.state.lock();
+            state.thread = Some("held".into());
+            state.ready = true;
+        }
+        let mut envelope = json!({"method":"turn/completed","params":{"threadId":"foreign","turn":{"id":"turn","items":[],"status":status,"error":error}}});
+        transport.core.notification(envelope.clone());
+        assert!(registry
+            .feeds
+            .history("session", "worker", None, None, 100)
+            .unwrap()
+            .events
+            .is_empty());
+        envelope["params"]["threadId"] = json!("held");
+        transport.core.notification(envelope);
+        let events = registry
+            .feeds
+            .history("session", "worker", None, None, 100)
+            .unwrap()
+            .events;
+        assert_eq!(events[0].kind, AgentEventKind::TurnEnd);
+        assert_eq!(events[0].payload["status"], status);
+        if let Some(message) = expected {
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[1].kind, AgentEventKind::Error);
+            assert_eq!(events[1].payload["message"], message);
+            assert_eq!(events[1].payload["text"], message);
+        } else {
+            assert_eq!(
+                events.len(),
+                1,
+                "successful/interrupted completion does not invent an error"
+            );
+        }
+    }
+}
+
+#[test]
 fn g12_workers_and_native_child_never_cross_confirm() {
     let mut a = correlate::TurnCorrelation::new("held-a".into());
     let mut b = correlate::TurnCorrelation::new("held-b".into());

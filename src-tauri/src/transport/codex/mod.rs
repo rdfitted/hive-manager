@@ -338,6 +338,11 @@ impl Core {
                 {
                     self.emit(event);
                 }
+                if let Some(error) =
+                    events::completion_error(&self.options.agent_id, &held, method, params, child)
+                {
+                    self.emit(error);
+                }
             }
         }
     }

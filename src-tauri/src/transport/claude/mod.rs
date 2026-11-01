@@ -350,6 +350,9 @@ impl Core {
                 Some(id.clone()),
                 json!({"turn_id":id,"is_error":value["is_error"].as_bool().unwrap_or(false)}),
             ));
+            if let Some(error) = events::result_error(&self.options.agent_id, &value, &id) {
+                emitted.push(error);
+            }
         }
         drop(state);
         for event in emitted {

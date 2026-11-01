@@ -1,6 +1,35 @@
 use crate::transport::{AgentEvent, AgentEventKind};
 use serde_json::{json, Value};
 
+pub(crate) fn completion_error(
+    agent: &str,
+    held_thread: &str,
+    method: &str,
+    params: &Value,
+    child: bool,
+) -> Option<AgentEvent> {
+    if child || method != "turn/completed" || params["threadId"] != held_thread {
+        return None;
+    }
+    let turn = &params["turn"];
+    if turn["status"] != "failed" && turn["error"].is_null() {
+        return None;
+    }
+    let message = turn["error"]["message"]
+        .as_str()
+        .or_else(|| turn["error"].as_str())
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or("Codex turn failed. Inspect the raw event log for details.");
+    Some(event(
+        agent,
+        AgentEventKind::Error,
+        turn["id"]
+            .as_str()
+            .map(|id| format!("{held_thread}:{id}:error")),
+        json!({"message":message,"text":message}),
+    ))
+}
+
 pub(crate) fn event(
     agent: &str,
     kind: AgentEventKind,

@@ -1,5 +1,94 @@
 use super::*;
 
+#[test]
+fn failed_completion_envelopes_emit_visible_error_and_keep_turn_end() {
+    for (failed, details, expected) in [
+        (
+            true,
+            json!({"subtype":"error_during_execution","errors":["synthetic Claude failure","second detail"]}),
+            Some("synthetic Claude failure\nsecond detail"),
+        ),
+        (
+            true,
+            json!({"subtype":"success","result":"failure result text"}),
+            Some("failure result text"),
+        ),
+        (
+            true,
+            json!({"subtype":"error_max_turns"}),
+            Some("Claude turn failed. Inspect the raw event log for details."),
+        ),
+        (false, json!({"subtype":"success","result":"done"}), None),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TransportRegistry::new(temp.path().join("feeds"), None));
+        let transport = ClaudeTransport::new(
+            ClaudeOptions {
+                command: "unused-fixture".into(),
+                args: vec![],
+                cwd: temp.path().into(),
+                env: vec![],
+                transcript_id: "held".into(),
+                initial_prompt: None,
+                session_id: "session".into(),
+                agent_id: "worker".into(),
+            },
+            &registry,
+        );
+        registry
+            .register("session", "worker", Some("held".into()), transport.clone())
+            .unwrap();
+        {
+            let mut state = transport.core.state.lock();
+            state.ready = true;
+            state.init_checked = true;
+            state.current = Some(correlate::TurnCorrelation::new(
+                "held".into(),
+                "input".into(),
+            ));
+        }
+        let mut envelope = json!({"type":"result","session_id":"foreign","uuid":"result-uuid","parent_tool_use_id":null,"is_error":failed,"user_message_uuids":["input"],"duration_ms":1,"duration_api_ms":1,"num_turns":1,"total_cost_usd":0,"usage":{}});
+        envelope
+            .as_object_mut()
+            .unwrap()
+            .extend(details.as_object().unwrap().clone());
+        transport.core.notification(envelope.clone());
+        envelope["session_id"] = json!("held");
+        envelope["parent_tool_use_id"] = json!("child-tool");
+        transport.core.notification(envelope.clone());
+        envelope["parent_tool_use_id"] = Value::Null;
+        envelope["user_message_uuids"] = json!(["wrong-input"]);
+        transport.core.notification(envelope.clone());
+        assert!(registry
+            .feeds
+            .history("session", "worker", None, None, 100)
+            .unwrap()
+            .events
+            .is_empty());
+        envelope["user_message_uuids"] = json!(["input"]);
+        transport.core.notification(envelope);
+        let events = registry
+            .feeds
+            .history("session", "worker", None, None, 100)
+            .unwrap()
+            .events;
+        assert_eq!(events[0].kind, AgentEventKind::TurnEnd);
+        assert_eq!(events[0].payload["is_error"], failed);
+        if let Some(message) = expected {
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[1].kind, AgentEventKind::Error);
+            assert_eq!(events[1].payload["message"], message);
+            assert_eq!(events[1].payload["text"], message);
+        } else {
+            assert_eq!(
+                events.len(),
+                1,
+                "successful completion does not invent an error"
+            );
+        }
+    }
+}
+
 fn replay(session: &str, uuid: &str) -> Value {
     json!({"type":"user","session_id":session,"uuid":uuid,"isReplay":true,"parent_tool_use_id":null,
         "message":{"role":"user","content":"synthetic"}})
