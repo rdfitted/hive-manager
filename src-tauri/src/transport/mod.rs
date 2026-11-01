@@ -2,6 +2,7 @@
 pub mod claude;
 pub mod claude_transcript_source;
 pub mod codex;
+pub mod codex_rollout_source;
 pub mod feed;
 pub(crate) mod process;
 

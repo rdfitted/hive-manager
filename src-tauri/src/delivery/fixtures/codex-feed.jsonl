@@ -1,0 +1,31 @@
+{"type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000001","source":"cli","cwd":"C:/fixture"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\nNOISE_AGENTS"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>NOISE_ENV</environment_context>"}]}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"NOISE_DEVELOPER"}]}}
+{"type":"response_item","payload":{"type":"reasoning","encrypted_content":"NOISE_REASONING"}}
+{"type":"response_item","payload":{"type":"additional_tools","text":"NOISE_TOOLS"}}
+{"type":"world_state","payload":{"text":"NOISE_WORLD"}}
+{"type":"turn_context","payload":{"text":"NOISE_CONTEXT"}}
+{"type":"token_usage_record","payload":{"text":"NOISE_USAGE"}}
+{"type":"event_msg","payload":{"type":"token_count","text":"NOISE_TOKEN"}}
+{"type":"event_msg","payload":{"type":"thread_settings_applied","text":"NOISE_SETTINGS"}}
+{"type":"response_item","payload":{"type":"agent_message","text":"NOISE_AGENT"}}
+{"type":"inter_agent_communication_metadata","payload":{"text":"NOISE_INTER_AGENT"}}
+{"type":"compacted","payload":{"replacement_history":"NOISE_COMPACTED"}}
+{"type":"future_record","payload":{"text":"NOISE_UNKNOWN"}}
+{"timestamp":"2026-11-01T12:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_attribution":{"turn_id":"turn-one"}}}
+{"timestamp":"2026-11-01T12:00:01Z","type":"response_item","payload":{"id":"user-one","type":"message","role":"user","content":[{"type":"input_text","text":"# Keep operator markdown\n[hive-msg:1234abcd]"}]}}
+{"timestamp":"2026-11-01T12:00:02Z","type":"response_item","payload":{"id":"assistant-one","type":"message","role":"assistant","content":[{"type":"output_text","text":"Fixture reply"}]}}
+{"timestamp":"2026-11-01T12:00:03Z","type":"response_item","payload":{"id":"exec-one","type":"custom_tool_call","call_id":"call-one","name":"exec","input":"await tools.exec_command({cmd: 'fixture'})"}}
+{"timestamp":"2026-11-01T12:00:04Z","type":"response_item","payload":{"id":"output-one","type":"custom_tool_call_output","call_id":"call-one","output":"Fixture result"}}
+{"timestamp":"2026-11-01T12:00:05Z","type":"response_item","payload":{"id":"question-one","type":"function_call","call_id":"call-two","name":"request_user_input_async","arguments":"{\"questions\":[{\"title\":\"Fixture question\"}]}"}}
+{"timestamp":"2026-11-01T12:00:06Z","type":"response_item","payload":{"id":"output-two","type":"function_call_output","call_id":"call-two","output":"Fixture answer"}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","text":"NOISE_OVERLAP_USER"}}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","text":"NOISE_OVERLAP_ASSISTANT"}}}
+{"timestamp":"2026-11-01T12:00:07Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","status":"failed","exit_code":7,"command":"PRIVATE_COMMAND","output":"PRIVATE_OUTPUT"}}}
+{"timestamp":"2026-11-01T12:00:08Z","type":"response_item","payload":{"id":"mid-turn","type":"message","role":"user","content":[{"type":"input_text","text":"Steered request\n[hive-msg:bbbbbbbb]"}]}}
+{"timestamp":"2026-11-01T12:00:09Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-one"}}
+{"timestamp":"2026-11-01T12:00:10Z","type":"event_msg","payload":{"type":"task_started","turn_attribution":{"turn_id":"turn-two"}}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>NOISE_LATER_ENV</environment_context>"}]}}
+{"timestamp":"2026-11-01T12:00:11Z","type":"response_item","payload":{"id":"xml-user","type":"message","role":"user","content":[{"type":"input_text","text":"<request>Keep operator XML</request>"}]}}
+{"timestamp":"2026-11-01T12:00:12Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-two"}}
