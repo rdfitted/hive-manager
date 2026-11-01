@@ -56,6 +56,14 @@ function unique(events: AgentEvent[]): AgentEvent[] {
   return events.filter((event) => !seen.has(event.cursor) && !!seen.add(event.cursor));
 }
 
+/** A reset's SSE replay may begin before the HTTP tail and continue after it. */
+function mergeTail(incoming: AgentEvent[], live: AgentEvent[]): AgentEvent[] {
+  const cursors = new Set(incoming.map((event) => event.cursor));
+  const overlap = live.findIndex((event) => cursors.has(event.cursor));
+  return overlap < 0 ? unique([...incoming, ...live])
+    : unique([...live.slice(0, overlap), ...incoming, ...live.slice(overlap)]);
+}
+
 function checkpoint(cursors: Record<string, string>): string {
   const bytes = new TextEncoder().encode(JSON.stringify(cursors));
   return btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(''))
@@ -83,7 +91,7 @@ export function createAgentEventsStore() {
     return response.json();
   }
 
-  async function history(agentId: string, older = false) {
+  async function history(agentId: string, older = false, afterReset = false) {
     const snapshot = get(state);
     const sid = snapshot.sessionId;
     const controller = abort;
@@ -100,7 +108,7 @@ export function createAgentEventsStore() {
       if (page.agent_id !== agentId) throw new Error('Agent history identity mismatch');
       const incoming = page.events.filter((event) => event.agent_id === agentId);
       changeHistory(agentId, (h) => ({
-        events: page.reset ? incoming : unique([...incoming, ...h.events]),
+        events: afterReset ? mergeTail(incoming, h.events) : page.reset ? incoming : unique([...incoming, ...h.events]),
         before: page.next_before, hasMore: page.has_more, loading: false, error: null,
       }));
     } catch (cause) {
@@ -141,6 +149,7 @@ export function createAgentEventsStore() {
         if (!get(state).feeds[agent_id]) return;
         revisions.set(agent_id, (revisions.get(agent_id) ?? 0) + 1);
         changeHistory(agent_id, emptyHistory);
+        void history(agent_id, false, true);
       } catch { state.update((s) => ({ ...s, error: 'An agent feed reset could not be read.' })); }
     });
     stream.addEventListener('feed_error', () => {

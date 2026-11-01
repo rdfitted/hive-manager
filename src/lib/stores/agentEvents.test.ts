@@ -86,23 +86,52 @@ describe('session agent event feed', () => {
     expect(get(store).histories.a.events.map((e) => e.cursor)).toEqual(['old', 'tail', 'live']);
   });
 
-  it('clears a reset generation and discards an in-flight page from the old generation', async () => {
-    store.setSessionId('s'); await flush();
-    let resolve!: (value: unknown) => void;
-    fetcher.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
-    // Seed a pageable history through a fresh roster source change.
-    store.disconnect();
+  it('F5: refetches a replacement generation longer than one page and retains paging, SSE order/dedup and revision guards', async () => {
     fetcher.mockReset().mockImplementation(async (url: string) => url.includes('agent-feeds')
       ? ok({ session_id: 's', agents: [feed('a')] })
       : ok(page([event('tail')], { has_more: true, next_before: 'tail' })));
     store.setSessionId('s'); await flush();
-    fetcher.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    let resolveOld!: (value: unknown) => void;
+    let resolveTail!: (value: unknown) => void;
+    fetcher.mockImplementationOnce(() => new Promise((done) => { resolveOld = done; }));
     const pending = store.loadOlder('a');
-    Stream.instances.at(-1)!.emit('feed_reset', { agent_id: 'a' });
-    Stream.instances.at(-1)!.emit('agent_event', event('new-generation'));
-    resolve(ok(page([event('old-generation')]))); await pending;
-    expect(get(store).histories.a.events.map((e) => e.cursor)).toEqual(['new-generation']);
+    fetcher.mockImplementationOnce(() => new Promise((done) => { resolveTail = done; }));
+    const stream = Stream.instances[0];
+    stream.emit('feed_reset', { agent_id: 'a' });
+    expect(fetcher.mock.calls.at(-1)?.[0], 'feed_reset must refetch a tail page').not.toContain('before=');
+    expect(get(store).histories.a.loading, 'feed_reset must refetch history metadata').toBe(true);
+    const replacement = Array.from({ length: 250 }, (_, i) => event(`b-${i + 1}`));
+    // SSE replays 200 records while HTTP returns a 100-record tail; one later record arrives too.
+    for (const record of replacement.slice(50)) stream.emit('agent_event', record);
+    stream.emit('agent_event', event('b-251'));
+    resolveOld(ok(page([event('old-generation')]))); await pending;
+    expect(get(store).histories.a.loading).toBe(true);
+    resolveTail(ok(page(replacement.slice(150), { has_more: true, next_before: 'b-151' }))); await flush();
+    expect(get(store).histories.a.hasMore, 'replacement tail must restore Load older').toBe(true);
+    expect(get(store).histories.a.events.map((e) => e.cursor)).toEqual([...replacement.slice(50).map((e) => e.cursor), 'b-251']);
+    fetcher.mockResolvedValueOnce(ok(page(replacement.slice(0, 150))));
+    await store.loadOlder('a');
+    expect(fetcher.mock.calls.at(-1)?.[0]).toContain('before=b-151');
+    expect(get(store).histories.a.events.map((e) => e.cursor)).toEqual([...replacement.map((e) => e.cursor), 'b-251']);
     expect(get(store).histories.a.loading).toBe(false);
+  });
+
+  it('F5: a second reset or session change rejects an in-flight reset tail', async () => {
+    store.setSessionId('s'); await flush();
+    const stream = Stream.instances[0];
+    let resolveFirst!: (value: unknown) => void;
+    let resolveSecond!: (value: unknown) => void;
+    fetcher.mockImplementationOnce(() => new Promise((done) => { resolveFirst = done; }));
+    stream.emit('feed_reset', { agent_id: 'a' });
+    fetcher.mockImplementationOnce(() => new Promise((done) => { resolveSecond = done; }));
+    stream.emit('feed_reset', { agent_id: 'a' });
+    stream.emit('agent_event', event('latest-generation'));
+    resolveFirst(ok(page([event('superseded-generation')], { has_more: true, next_before: 'stale' }))); await flush();
+    expect(get(store).histories.a.events.map((e) => e.cursor)).toEqual(['latest-generation']);
+    expect(get(store).histories.a.loading).toBe(true);
+    store.disconnect();
+    resolveSecond(ok(page([event('late-tail')]))); await flush();
+    expect(get(store).histories).toEqual({});
   });
 
   it('session changes close the old stream, clear data and reject late callbacks/responses', async () => {
