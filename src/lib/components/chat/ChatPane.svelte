@@ -7,7 +7,7 @@
   import ComposerToolbar from '../composer/ComposerToolbar.svelte';
   import { toolbarFacts } from '../composer/toolbarFacts';
   import ActivityGroup from './ActivityGroup.svelte';
-  import { CHAT_WINDOW_SIZE, formatRaw, liveActivity, transcriptRows } from './transcript';
+  import { CHAT_WINDOW_SIZE, formatRaw, liveActivityState, transcriptRows } from './transcript';
 
   let { sessionId, agentId, events, raw = false, visible = true }: {
     sessionId: string; agentId: string; events: AgentEvent[]; raw?: boolean; visible?: boolean;
@@ -17,7 +17,7 @@
   const agent = $derived($activeAgents.find((candidate) => candidate.id === agentId));
   const facts = $derived(toolbarFacts(agent, $agentEvents.sessionId === sessionId ? $agentEvents.feeds?.[agentId]?.capabilities.event_source : undefined));
   let now = $state(Date.now());
-  const activity = $derived(liveActivity(events, agent?.status, now));
+  const activity = $derived(liveActivityState(events, agent?.status, now));
   const count = $derived(raw ? events.length : rows.length);
   let end = $state<number | null>(null);
   const stop = $derived(Math.min(end ?? count, count));
@@ -112,7 +112,12 @@
         {/if}
       {/each}
       {#if count === 0}<p class="empty-chat">Waiting for this agent’s messages.</p>{/if}
-      {#if activity && end === null}<p class="live-activity" role="status">{activity}</p>{/if}
+      {#if activity && end === null}
+        <div class="live-activity">
+          <p role="status" class:visually-hidden={activity.label !== activity.status}>{activity.status}</p>
+          {#if activity.label !== activity.status}<p aria-hidden="true">{activity.label}</p>{/if}
+        </div>
+      {/if}
     {/if}
   </div>
   {#if error}<p class="feed-error" role="alert">Message could not be sent: {error}</p>{/if}
@@ -130,6 +135,7 @@
   .message p { margin: 0; white-space: pre-wrap; }
   .message .clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }
   .truncation, .live-activity { color: var(--text-secondary); font-size: var(--text-small); }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-small); }
   .chat-composer { flex: 0 0 auto; padding: var(--space-2); }
   .feed-error { margin: 0; padding: var(--space-2); color: var(--status-error); }

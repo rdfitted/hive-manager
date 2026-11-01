@@ -60,12 +60,13 @@
   let triggerStart = -1;
   let triggerNode: Node | null = null;
   let mentionRequest = 0;
+  let submitting = $state(false);
 
   let mentionItems: MentionItem[] = $state([]);
   let commandItems: SlashCommand[] = $state([]);
   const controls: ComposerControls = {
-    get canSend() { return !disabled && !!onsubmit && !!value.trim(); },
-    submit: () => { void submit(); },
+    get canSend() { return !disabled && !submitting && !!onsubmit && (!!value.trim() || (!!sessionId && $pendingContext.current?.sessionId === sessionId)); },
+    submit,
     openMenu,
   };
 
@@ -308,23 +309,28 @@
   async function submit() {
     // No submit handler (dialog usage with bind:value): never submit, clear, or consume
     // the one-shot context — that would wipe the field and silently eat pending context.
-    if (disabled || !onsubmit) return;
-    let text = currentText().trim();
-    // Prepend one-shot operator context exactly once.
-    if (sessionId) {
-      const ctx = await pendingContext.consume(sessionId);
-      if (ctx) {
-        const block = pendingContext.render(ctx);
-        text = text ? `${block}\n\n${text}` : block;
+    if (disabled || !onsubmit || submitting) return;
+    submitting = true;
+    try {
+      let text = currentText().trim();
+      // Prepend one-shot operator context exactly once.
+      if (sessionId) {
+        const ctx = await pendingContext.consume(sessionId);
+        if (ctx) {
+          const block = pendingContext.render(ctx);
+          text = text ? `${block}\n\n${text}` : block;
+        }
       }
+      if (!text) return;
+      onsubmit?.(text);
+      // Clear editor + draft.
+      editor.textContent = '';
+      value = '';
+      if (persistDraft && sessionId) composerDraft.clear();
+      closeMenu();
+    } finally {
+      submitting = false;
     }
-    if (!text) return;
-    onsubmit?.(text);
-    // Clear editor + draft.
-    editor.textContent = '';
-    value = '';
-    if (persistDraft && sessionId) composerDraft.clear();
-    closeMenu();
   }
 
   function moveActive(delta: number) {

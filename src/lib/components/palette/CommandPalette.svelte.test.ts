@@ -226,6 +226,36 @@ describe('command action wiring and navigation', () => {
       expect(view.queryByRole('button', { name: 'Dismiss Enter receipt' })).toBeNull();
     } finally { vi.useRealTimers(); }
   });
+  it.each([true, null, false])('F2: palette receipt timer preserves inspection and confirmation semantics (%s)', async (confirmed) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ submit_confirmed: confirmed }) }));
+    const view = render(CommandPalette); await openPalette();
+    vi.useFakeTimers();
+    try {
+      const search = view.getByRole('textbox', { name: 'Find command' }); search.focus();
+      await fireEvent.click(view.getByRole('button', { name: 'Flush Enter: Frontend' }));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(7900);
+      const details = view.getByText('Details').closest('details')!;
+      details.open = true; await fireEvent(details, new Event('toggle'));
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(view.getByRole('status'), 'palette open receipt survives its clear interval').toBeTruthy();
+      expect(details.isConnected).toBe(true);
+      expect(details.querySelector('pre')?.textContent).toBe(JSON.stringify({ submit_confirmed: confirmed }));
+      expect(document.activeElement).toBe(search);
+      details.open = false; await fireEvent(details, new Event('toggle'));
+      await vi.advanceTimersByTimeAsync(99);
+      expect(view.getByRole('status')).toBeTruthy();
+      await vi.advanceTimersByTimeAsync(1);
+      if (confirmed === false) {
+        await vi.advanceTimersByTimeAsync(60000);
+        expect(view.getByRole('status').textContent).toContain('Enter may not have landed.');
+        await fireEvent.click(view.getByRole('button', { name: 'Dismiss Enter receipt' }));
+      }
+      expect(view.queryByRole('status')).toBeNull();
+      expect(view.queryByText('Details')).toBeNull();
+      expect(document.activeElement).toBe(search);
+    } finally { vi.useRealTimers(); }
+  });
   it('hides session-specific actions without an active session or focused agent', async () => {
     setSessions({ sessions: [], activeSessionId: null });
     const view = render(CommandPalette); await openPalette();

@@ -207,7 +207,18 @@ describe('G19 collapsed activity and message layout', () => {
     const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events } });
     expect(view.getByRole('status').textContent).toBe('Running bash');
     await vi.advanceTimersByTimeAsync(90000); await tick();
-    expect(view.getByRole('status').textContent).toContain('Waiting for 90s without an event · Check the terminal');
+    const quietStatus = 'Waiting without an event · Check the terminal';
+    expect(view.getByRole('status').textContent, 'quiet live region has a stable sentence').toBe(quietStatus);
+    for (const seconds of [90, 91, 92]) {
+      if (seconds > 90) { await vi.advanceTimersByTimeAsync(1000); await tick(); }
+      expect(view.getByRole('status').textContent, 'elapsed ticks do not change accessible status').toBe(quietStatus);
+      const elapsed = view.getByText(`Waiting for ${seconds}s without an event · Check the terminal`);
+      expect(elapsed.getAttribute('aria-hidden')).toBe('true');
+      expect(elapsed.closest('[role="status"]'), 'elapsed counter is outside the live region').toBeNull();
+    }
+    const resumed = { ...event('resumed', 'tool_result', { tool_id: 'a' }), ts: new Date().toISOString() };
+    await view.rerender({ sessionId: 's', agentId: 'a', events: [...events, resumed] });
+    expect(view.getByRole('status').textContent).toBe('Thinking');
     fixture.setAgents([runningAgent('Completed')]); await tick();
     expect(view.queryByRole('status')).toBeNull();
     fixture.setAgents([runningAgent()]);

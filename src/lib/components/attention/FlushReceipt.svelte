@@ -12,10 +12,22 @@
 <script lang="ts">
   let { body, ondismiss }: { body: string; ondismiss(): void } = $props();
   const summary = $derived(receiptSummary(body));
+  let detailsOpen = $state(false);
+  let receiptBody: string | undefined;
+  let remaining = 8000;
   $effect(() => {
-    if (summary.persistent) return;
-    const timer = setTimeout(ondismiss, 8000);
-    return () => clearTimeout(timer);
+    if (receiptBody !== body) {
+      receiptBody = body;
+      remaining = 8000;
+      if (detailsOpen) { detailsOpen = false; return; }
+    }
+    if (summary.persistent || detailsOpen) return;
+    const started = Date.now();
+    const timer = setTimeout(ondismiss, remaining);
+    return () => {
+      clearTimeout(timer);
+      remaining = Math.max(0, remaining - (Date.now() - started));
+    };
   });
 </script>
 
@@ -24,7 +36,7 @@
     <p role="status">{summary.sentence}</p>
     <button type="button" class="lattice-btn lattice-btn--ghost" aria-label="Dismiss Enter receipt" onpointerdown={(event) => event.preventDefault()} onclick={ondismiss}>Dismiss</button>
   </div>
-  {#key body}<details>
+  {#key body}<details bind:open={detailsOpen}>
     <summary>Details</summary>
     <pre aria-label="Inject receipt">{body}</pre>
   </details>{/key}

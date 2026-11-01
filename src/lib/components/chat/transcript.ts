@@ -111,8 +111,10 @@ export function transcriptRows(events: AgentEvent[]): TranscriptRow[] {
   return grouped;
 }
 
+export type LiveActivity = { label: string; status: string };
+
 /** Explicit Codex turns survive steering; user items retire inferred Claude work. */
-export function liveActivity(events: AgentEvent[], status: AgentStatus | undefined, now = Date.now()): string | null {
+export function liveActivityState(events: AgentEvent[], status: AgentStatus | undefined, now = Date.now()): LiveActivity | null {
   if (status !== 'Running') return null;
   let open = false;
   let explicit = false;
@@ -138,10 +140,18 @@ export function liveActivity(events: AgentEvent[], status: AgentStatus | undefin
   }
   if (!open || !last) return null;
   const quietSeconds = Math.floor(Math.max(0, now - Date.parse(last.ts)) / 1000);
-  if (quietSeconds >= 90) return `Waiting for ${quietSeconds}s without an event · Check the terminal`;
-  if (pending) return pending;
+  if (quietSeconds >= 90) return {
+    label: `Waiting for ${quietSeconds}s without an event · Check the terminal`,
+    status: 'Waiting without an event · Check the terminal',
+  };
+  if (pending) return { label: pending, status: pending };
   const tool = [...running.values()].at(-1);
-  return tool ? activityLabel(typeof tool.payload.name === 'string' ? tool.payload.name : 'Tool', tool.payload.input) : 'Thinking';
+  const label = tool ? activityLabel(typeof tool.payload.name === 'string' ? tool.payload.name : 'Tool', tool.payload.input) : 'Thinking';
+  return { label, status: label };
+}
+
+export function liveActivity(events: AgentEvent[], status: AgentStatus | undefined, now = Date.now()): string | null {
+  return liveActivityState(events, status, now)?.label ?? null;
 }
 
 export function protocolAttention(events: AgentEvent[]): string | null {

@@ -13,10 +13,11 @@ vi.mock('$lib/composer/sources', async (original) => ({
   listSessionFiles: vi.fn().mockResolvedValue([]),
 }));
 
-import Composer from './Composer.svelte';
+import Composer, { type ComposerControls } from './Composer.svelte';
 import Toolbar from './ComposerToolbar.svelte';
 import Harness from './Composer.test.svelte';
 import { composerDraft } from '$lib/stores/composerDraft';
+import { pendingContext, type PendingContext } from '$lib/stores/pendingContext';
 
 const originalRects = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects');
 beforeEach(() => {
@@ -27,6 +28,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   composerDraft.flush();
+  pendingContext.clear();
+  vi.restoreAllMocks();
   if (originalRects) Object.defineProperty(Range.prototype, 'getClientRects', originalRects);
   else Reflect.deleteProperty(Range.prototype, 'getClientRects');
 });
@@ -43,6 +46,84 @@ async function write(editor: HTMLElement, text: string) {
 }
 
 describe('composer card contract (G20)', () => {
+  it('F5: serializes consume before any rerender and releases the guard after submission', async () => {
+    let resolve!: (context: PendingContext | null) => void;
+    const consume = vi.spyOn(pendingContext, 'consume').mockImplementationOnce(() => new Promise((done) => { resolve = done; })).mockResolvedValue(null);
+    const onsubmit = vi.fn();
+    const view = render(Harness, { sessionId: 's', onsubmit });
+    const editor = view.getByRole('textbox');
+    await write(editor, 'original text');
+    editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(consume, 'one consume before rerender').toHaveBeenCalledOnce();
+    await waitFor(() => expect((view.getByRole('button', { name: 'Send message' }) as HTMLButtonElement).disabled, 'toolbar disabled during consume').toBe(true));
+    resolve({ sessionId: 's', agentId: null, kind: 'selection', text: 'selected evidence', capturedAt: 0 });
+    await waitFor(() => expect(onsubmit).toHaveBeenCalledOnce());
+    expect(onsubmit).toHaveBeenCalledWith('[Operator context]\nselected evidence\n[/Operator context]\n\noriginal text');
+    await write(editor, 'later text');
+    await fireEvent.keyDown(editor, { key: 'Enter' });
+    await waitFor(() => expect(onsubmit).toHaveBeenCalledTimes(2));
+    expect(onsubmit).toHaveBeenLastCalledWith('later text');
+  });
+
+  it('F5: releases the guard after a rejected consume and an empty submission', async () => {
+    const consume = vi.spyOn(pendingContext, 'consume').mockRejectedValueOnce(new Error('consume fixture')).mockResolvedValue(null);
+    let controls!: ComposerControls;
+    const onsubmit = vi.fn();
+    const view = render(Harness, { sessionId: 's', onsubmit, observeControls: (current) => (controls = current) });
+    const editor = view.getByRole('textbox');
+    await write(editor, 'preserved draft');
+    await expect(controls.submit()).rejects.toThrow('consume fixture');
+    expect(editor.textContent).toBe('preserved draft');
+    await waitFor(() => expect((view.getByRole('button', { name: 'Send message' }) as HTMLButtonElement).disabled, 'rejected consume releases toolbar').toBe(false));
+    await write(editor, '');
+    await controls.submit();
+    expect(onsubmit).not.toHaveBeenCalled();
+    await write(editor, 'retry after empty');
+    await controls.submit();
+    expect(consume).toHaveBeenCalledTimes(3);
+    expect(onsubmit).toHaveBeenCalledOnce();
+    expect(onsubmit).toHaveBeenCalledWith('retry after empty');
+  });
+
+  it('F4: reacts to same-session context and sends a context-only message by pointer', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response());
+    const context: PendingContext = { sessionId: 's', agentId: null, kind: 'selection', text: 'selection only', capturedAt: 0 };
+    const consume = vi.spyOn(pendingContext, 'consume').mockImplementation(async () => { pendingContext.clear(); return context; });
+    const onsubmit = vi.fn();
+    const view = render(Harness, { sessionId: 's', onsubmit });
+    const send = view.getByRole('button', { name: 'Send message' }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    await pendingContext.capture({ ...context, sessionId: 'other' });
+    await waitFor(() => expect(send.disabled).toBe(true));
+    await pendingContext.capture(context);
+    await waitFor(() => expect(send.disabled, 'same-session context enables pointer send').toBe(false));
+    await fireEvent.click(send);
+    await waitFor(() => expect(onsubmit).toHaveBeenCalledOnce());
+    expect(onsubmit).toHaveBeenCalledWith(pendingContext.render(context));
+    expect(consume).toHaveBeenCalledOnce();
+    expect(consume).toHaveBeenCalledWith('s');
+    await waitFor(() => expect(send.disabled).toBe(true));
+    await pendingContext.capture(context);
+    await waitFor(() => expect(send.disabled).toBe(false));
+    await view.rerender({ disabled: true });
+    expect(send.disabled).toBe(true);
+    await view.rerender({ disabled: false, onsubmit: undefined });
+    expect(send.disabled).toBe(true);
+  });
+
+  it('F4: Enter submits the same context-only payload', async () => {
+    const context: PendingContext = { sessionId: 's', agentId: null, kind: 'selection', text: 'selection only', capturedAt: 0 };
+    const consume = vi.spyOn(pendingContext, 'consume').mockResolvedValue(context);
+    const onsubmit = vi.fn();
+    const view = render(Harness, { sessionId: 's', onsubmit });
+    await fireEvent.keyDown(view.getByRole('textbox'), { key: 'Enter' });
+    await waitFor(() => expect(onsubmit).toHaveBeenCalledOnce());
+    expect(onsubmit).toHaveBeenCalledWith(pendingContext.render(context));
+    expect(consume).toHaveBeenCalledOnce();
+    expect(consume).toHaveBeenCalledWith('s');
+  });
+
   it('T15: closes the portalled add menu when sending begins without moving editor focus', async () => {
     const view = render(Harness, { onsubmit: vi.fn(), sending: false });
     const editor = view.getByRole('textbox'); editor.focus();

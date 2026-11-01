@@ -20,6 +20,7 @@ import { heartbeatStore } from '$lib/stores/conversations';
 import { layout } from '$lib/stores/layout';
 import { ui } from '$lib/stores/ui';
 import AttentionCard from './AttentionCard.svelte';
+import FlushReceipt from './FlushReceipt.svelte';
 
 const agent = (status: AgentInfo['status']): AgentInfo => ({ id: 'worker-5', role: 'Queen', config: { cli: 'codex', flags: [] }, parent_id: null, status });
 beforeEach(() => {
@@ -109,6 +110,67 @@ describe('AttentionCard', () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(view.queryByRole('status')).toBeNull();
       expect(view.container.querySelector('details')).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+  it.each([true, null])('F2: pauses the remaining receipt lifetime while Details is open (%s)', async (confirmed) => {
+    vi.useFakeTimers();
+    try {
+      const receipt = JSON.stringify({ submit_confirmed: confirmed });
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => receipt }));
+      const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+      const flush = view.getByRole('button', { name: 'Flush Enter' }); flush.focus();
+      await fireEvent.click(flush);
+      await vi.advanceTimersByTimeAsync(0);
+      const sentence = view.getByRole('status').textContent;
+      await vi.advanceTimersByTimeAsync(7900);
+      const details = view.container.querySelector('details')!;
+      details.open = true; await fireEvent(details, new Event('toggle'));
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(view.getByRole('status').textContent, 'open receipt survives its clear interval').toBe(sentence);
+      expect(details.isConnected).toBe(true);
+      expect(details.open).toBe(true);
+      expect(details.querySelector('pre')?.textContent).toBe(receipt);
+      expect(document.activeElement).toBe(flush);
+      details.open = false; await fireEvent(details, new Event('toggle'));
+      await vi.advanceTimersByTimeAsync(99);
+      expect(view.getByRole('status')).toBeTruthy();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(view.queryByRole('status'), 'closing resumes only the remaining 100ms').toBeNull();
+      expect(view.container.querySelector('details')).toBeNull();
+      expect(document.activeElement).toBe(flush);
+    } finally { vi.useRealTimers(); }
+  });
+  it('F2: false confirmation persists with Details closed or open', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '{"submit_confirmed":false}' }));
+      const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+      await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(view.getByRole('status').textContent).toContain('Enter may not have landed.');
+      const details = view.container.querySelector('details')!;
+      details.open = true; await fireEvent(details, new Event('toggle'));
+      await vi.advanceTimersByTimeAsync(60000);
+      await fireEvent.click(view.getByRole('button', { name: 'Dismiss Enter receipt' }));
+      expect(view.queryByRole('status')).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+  it('F2: a replacement receipt closes Details and starts a fresh eight seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      const ondismiss = vi.fn();
+      const view = render(FlushReceipt, { body: '{"submit_confirmed":true,"id":1}', ondismiss });
+      await vi.advanceTimersByTimeAsync(7900);
+      const details = view.container.querySelector('details')!;
+      details.open = true; await fireEvent(details, new Event('toggle'));
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(ondismiss).not.toHaveBeenCalled();
+      await view.rerender({ body: '{"submit_confirmed":null,"id":2}' });
+      expect(view.container.querySelector('details')?.open).toBe(false);
+      await vi.advanceTimersByTimeAsync(7999);
+      expect(ondismiss).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ondismiss).toHaveBeenCalledOnce();
     } finally { vi.useRealTimers(); }
   });
   it('opens Focus mode and focuses the same agent', async () => {

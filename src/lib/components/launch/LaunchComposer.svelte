@@ -146,7 +146,8 @@
   .composer-input { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; padding: var(--space-3); border: 1px solid var(--border-control); border-radius: var(--radius-shell); background: var(--bg-void); }
   .composer-input:focus-within { border-color: var(--accent-cyan); }
   textarea { display: block; box-sizing: border-box; width: 100%; min-height: 12rem; resize: vertical; line-height: 1.6; padding: 0; border: 0; border-radius: 0; background: transparent; }
-  textarea:focus, textarea:focus-visible { border: 0; outline: none; box-shadow: none; }
+  textarea:focus { border: 0; outline: none; box-shadow: none; }
+  textarea:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; }
   .composer-send { flex-shrink: 0; min-height: 32px; border: 1px solid transparent; border-radius: var(--radius-full); background: var(--text-primary); color: var(--bg-void); }
   .composer-send:hover:enabled { background: var(--text-secondary); }
   .launch-chips { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; min-width: 0; }
