@@ -165,7 +165,11 @@ impl CodexTransport {
         self.core.options.initial_prompt.clone()
     }
     pub fn start_blocking(&self) -> Result<(), String> {
-        tracing::debug!(version=client::PINNED_VERSION,schema=client::PINNED_SCHEMA_SHA256,"Pinned Codex protocol contract");
+        tracing::debug!(
+            version = client::PINNED_VERSION,
+            schema = client::PINNED_SCHEMA_SHA256,
+            "Pinned Codex protocol contract"
+        );
         let _startup = self.core.startup.lock();
         if self.thread_id().is_some() {
             return if self.is_alive() {
@@ -211,6 +215,9 @@ impl CodexTransport {
                 .as_str()
                 .filter(|id| !id.is_empty())
                 .ok_or("Codex thread/start omitted thread.id; select PTY")?;
+            if thread["modelProvider"].as_str() != Some("openai") {
+                return Err("Codex app-server requires the OpenAI ChatGPT provider; custom providers are refused to prevent accidental API billing. Select PTY for this configuration.".into());
+            }
             self.core.state.lock().thread = Some(held.into());
             Ok(())
         })();
@@ -238,7 +245,7 @@ impl CodexTransport {
 }
 
 pub(crate) fn require_chatgpt(response: &Value) -> Result<(), String> {
-    if response["account"]["type"] == "chatgpt" {
+    if response["account"]["type"] == "chatgpt" && response["requiresOpenaiAuth"] == true {
         Ok(())
     } else {
         Err("Codex app-server requires the existing ChatGPT login. API-key/provider auth is refused to prevent accidental billing. Run codex login, or select PTY.".into())

@@ -54,7 +54,12 @@ fn g13_auth_and_environment_guard_before_any_turn() {
         assert!(require_chatgpt(&json!({"account":{"type":kind}})).is_err());
     }
     assert!(require_chatgpt(&json!({"account":null})).is_err());
-    assert!(require_chatgpt(&json!({"account":{"type":"chatgpt"}})).is_ok());
+    assert!(
+        require_chatgpt(&json!({"account":{"type":"chatgpt"},"requiresOpenaiAuth":true})).is_ok()
+    );
+    assert!(
+        require_chatgpt(&json!({"account":{"type":"chatgpt"},"requiresOpenaiAuth":false})).is_err()
+    );
     let mut cmd = std::process::Command::new("fixture");
     for key in [
         "OPENAI_API_KEY",
@@ -111,10 +116,12 @@ fn g13_auth_and_environment_guard_before_any_turn() {
     );
     assert!(client::STARTUP_TIMEOUT >= Duration::from_secs(120));
     assert_eq!(client::PINNED_SCHEMA_SHA256.len(), 64);
-    let schema:Value=serde_json::from_str(include_str!("schema-contract.json")).unwrap();
-    assert_eq!(schema["version"],client::PINNED_VERSION);
-    assert_eq!(schema["schema_sha256"],client::PINNED_SCHEMA_SHA256);
-    let required=schema["surface"]["v2/TurnStartedNotification.json"]["required"].as_array().unwrap();
+    let schema: Value = serde_json::from_str(include_str!("schema-contract.json")).unwrap();
+    assert_eq!(schema["version"], client::PINNED_VERSION);
+    assert_eq!(schema["schema_sha256"], client::PINNED_SCHEMA_SHA256);
+    let required = schema["surface"]["v2/TurnStartedNotification.json"]["required"]
+        .as_array()
+        .unwrap();
     assert!(required.contains(&json!("threadId")) && required.contains(&json!("turn")));
 }
 
@@ -233,6 +240,7 @@ fn fake_server(
 $ErrorActionPreference='Stop'
 $child=Start-Process -FilePath "$PSHOME\powershell.exe" -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 300' -WindowStyle Hidden -PassThru
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'child.pid'),[string]$child.Id)
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'environment.json'),(@{billing_present=[bool]($env:OPENAI_API_KEY -or $env:CODEX_API_KEY);parent_marker_present=[bool]$env:CLAUDECODE;agent=$env:HIVE_AGENT_ID;token_present=[bool]$env:HIVE_AGENT_TOKEN}|ConvertTo-Json -Compress))
 function Reply($m,$r){[Console]::Out.WriteLine((@{id=$m.id;result=$r}|ConvertTo-Json -Compress -Depth 16))}
 function Notify($method,$params){[Console]::Out.WriteLine((@{method=$method;params=$params}|ConvertTo-Json -Compress -Depth 16))}
 $seq=0;$turn=$null
@@ -242,7 +250,7 @@ while($null -ne ($line=[Console]::ReadLine())) {
  switch($m.method) {
   'initialize' {if(!(Test-Path (Join-Path $PSScriptRoot 'hang'))){Reply $m @{userAgent='codex-cli/0.166.0'}}}
   'account/read' {$kind='chatgpt';if(Test-Path (Join-Path $PSScriptRoot 'api-account')){$kind='apiKey'};Reply $m @{account=@{type=$kind};requiresOpenaiAuth=$true}}
-  'thread/start' {Reply $m @{thread=@{id='held-fixture';cwd=$PSScriptRoot}}}
+  'thread/start' {Reply $m @{thread=@{id='held-fixture';cwd=$PSScriptRoot};modelProvider='openai'};if(Test-Path (Join-Path $PSScriptRoot 'close-input')){Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class PipeClose{[DllImport("kernel32.dll")]public static extern IntPtr GetStdHandle(int n);[DllImport("kernel32.dll")]public static extern bool CloseHandle(IntPtr h);}';[PipeClose]::CloseHandle([PipeClose]::GetStdHandle(-10))|Out-Null;[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'input-closed'),'yes');Start-Sleep -Seconds 300}}
   'turn/start' {$seq++;$turn="turn-$seq";Notify 'turn/started' @{threadId='held-fixture';turn=@{id=$turn;status='inProgress'}};Reply $m @{turn=@{id=$turn;status='inProgress'}}}
   'turn/interrupt' {if($m.params.turnId -ne $turn){[Console]::Out.WriteLine((@{id=$m.id;error=@{code=-32602;message='wrong turn'}}|ConvertTo-Json -Compress -Depth 8));break};if(Test-Path (Join-Path $PSScriptRoot 'natural-exit')){exit 0};Notify 'turn/completed' @{threadId='held-fixture';turn=@{id=$turn;status='interrupted'}};Reply $m @{}}
   'fixture/exit' {exit 0}
@@ -300,8 +308,66 @@ fn child_alive(pid: u32) -> bool {
 #[cfg(windows)]
 #[test]
 fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
-    for mode in ["cancel", "stop", "exit", "app-exit"] {
+    for mode in ["cancel", "stop", "exit", "app-exit", "closed-stdin"] {
         let (temp, manager, registry, session, agent) = fake_server(mode == "cancel");
+        if mode == "closed-stdin" {
+            std::fs::write(temp.path().join("close-input"), "").unwrap();
+            // A cmd shim retains its own stdin read handle. Use a direct fake
+            // server here so closing stdin genuinely breaks the writer pipe.
+            let options = CodexOptions {
+                command: "powershell.exe".into(),
+                server_args: vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-ExecutionPolicy".into(),
+                    "Bypass".into(),
+                    "-File".into(),
+                    temp.path()
+                        .join("server.ps1")
+                        .to_string_lossy()
+                        .into_owned(),
+                ],
+                cwd: temp.path().into(),
+                env: vec![
+                    ("OPENAI_API_KEY".into(), "synthetic".into()),
+                    ("CODEX_API_KEY".into(), "synthetic".into()),
+                    ("CLAUDECODE".into(), "synthetic".into()),
+                    ("HIVE_AGENT_ID".into(), agent.clone()),
+                ],
+                model: None,
+                effort: None,
+                initial_prompt: None,
+                session_id: session.clone(),
+                agent_id: agent.clone(),
+            };
+            let transport = CodexTransport::new(options, &registry);
+            transport.start_blocking().unwrap();
+            registry
+                .register(&session, &agent, transport.thread_id(), transport.clone())
+                .unwrap();
+            transport.activate().unwrap();
+            wait_until(|| temp.path().join("input-closed").exists());
+            let environment: Value = serde_json::from_slice(
+                &std::fs::read(temp.path().join("environment.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(environment["billing_present"], false);
+            assert_eq!(environment["parent_marker_present"], false);
+            assert_eq!(environment["agent"], agent);
+            assert_eq!(environment["token_present"], false);
+            let pid = std::fs::read_to_string(temp.path().join("child.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(
+                transport.send_input("synthetic", true).is_err(),
+                "closed server stdin must fail the writer"
+            );
+            wait_until(|| !child_alive(pid)); // Writer owns cleanup before explicit stop.
+            registry.stop_agent_sync(&session, &agent).unwrap();
+            continue;
+        }
         let cmd = temp.path().join("codex.cmd").to_string_lossy().to_string();
         let cwd = temp.path().to_string_lossy().to_string();
         let owner = manager.clone();
@@ -367,7 +433,10 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
             registry.get(&session, &agent).is_none(),
             "G15 cleanup removes registration"
         );
-        assert!(!manager.has_heartbeat_credential_for_test(&agent),"G15 cleanup revokes credential after stop_all removed registration");
+        assert!(
+            !manager.has_heartbeat_credential_for_test(&agent),
+            "G15 cleanup revokes credential after stop_all removed registration"
+        );
         manager.kill(&agent).unwrap();
     }
 }

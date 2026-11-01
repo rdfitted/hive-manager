@@ -109,7 +109,17 @@ impl RpcClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        remove_parent_and_billing_env(&mut cmd, std::env::vars_os());
+        let inherited: Vec<_> = std::env::vars_os().collect();
+        for (name, _) in &inherited {
+            if name
+                .to_string_lossy()
+                .to_ascii_uppercase()
+                .starts_with("HIVE_")
+            {
+                cmd.env_remove(name);
+            }
+        }
+        remove_parent_and_billing_env(&mut cmd, inherited);
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
         remove_parent_and_billing_env(&mut cmd, env.iter().map(|(k, v)| (k.into(), v.into())));
         #[cfg(windows)]
