@@ -14863,12 +14863,12 @@ The backend composed and persisted the following authoritative skeleton before l
         } else {
             config.default_cli.trim()
         })?;
-        Self::validate_launch_cli(&config.judge_config.cli)?;
+        Self::validate_optional_launch_cli(&config.judge_config.cli)?;
         if let Some(queen) = &config.queen_config {
             Self::validate_launch_cli(&queen.cli)?;
         }
         for variant in &config.variants {
-            Self::validate_launch_cli(&variant.cli)?;
+            Self::validate_optional_launch_cli(&variant.cli)?;
         }
         Ok(())
     }
@@ -14879,14 +14879,23 @@ The backend composed and persisted the following authoritative skeleton before l
         } else {
             config.default_cli.trim()
         })?;
-        Self::validate_launch_cli(&config.judge_config.cli)?;
+        Self::validate_optional_launch_cli(&config.judge_config.cli)?;
         if let Some(queen) = &config.queen_config {
             Self::validate_launch_cli(&queen.cli)?;
         }
         for debater in &config.debaters {
-            Self::validate_launch_cli(&debater.cli)?;
+            Self::validate_optional_launch_cli(&debater.cli)?;
         }
         Ok(())
+    }
+
+    fn validate_optional_launch_cli(cli: &str) -> Result<(), String> {
+        let cli = cli.trim();
+        if cli.is_empty() {
+            Ok(())
+        } else {
+            Self::validate_launch_cli(cli)
+        }
     }
 
     /// Reject stale launch selections before Planning becomes PlanReady. Missing pending
@@ -19259,6 +19268,42 @@ mod tests {
                 error.contains(expected_dispatch_error),
                 "unexpected continuation error: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn optional_continuation_clis_accept_blank_defaults_and_trimmed_selections() {
+        for kind in ["fusion", "debate"] {
+            for default in ["", " codex "] {
+                for optional in ["", " \t ", " claude "] {
+                    let temp = tempfile::tempdir().unwrap();
+                    let mut session = waiting_worker_session("optional-continuation", temp.path(), 1);
+                    session.state = SessionState::Planning;
+                    let (session_type, filename) = if kind == "fusion" {
+                        (SessionType::Fusion { variants: vec![] }, "pending-fusion-config.json")
+                    } else {
+                        (SessionType::Debate { variants: vec![] }, "pending-debate-config.json")
+                    };
+                    session.session_type = session_type;
+                    let mut config = serde_json::json!({
+                        "project_path":temp.path(), "default_cli":default,
+                        "queen_config":{"cli":"claude"}, "judge_config":{"cli":optional},
+                        "task_description":"Compare candidates", "variants":[{"name":"candidate","cli":optional}],
+                        "topic":"Compare approaches", "rounds":2,
+                        "debaters":[{"name":"candidate","cli":optional,"stance":"Test it"}]
+                    });
+                    let directory = temp.path().join(".hive-manager").join(&session.id);
+                    std::fs::create_dir_all(&directory).unwrap();
+                    let pending = directory.join(filename);
+                    std::fs::write(&pending, config.to_string()).unwrap();
+                    assert!(SessionController::preflight_pending_continuation_clis(&session).is_ok(),
+                        "{kind}: default={default:?}, optional={optional:?} must reach existing fallback");
+                    // Queen selection is required and must still pass the normal allowlist.
+                    config["queen_config"]["cli"] = serde_json::json!("");
+                    std::fs::write(&pending, config.to_string()).unwrap();
+                    assert!(SessionController::preflight_pending_continuation_clis(&session).is_err());
+                }
+            }
         }
     }
 
