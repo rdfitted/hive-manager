@@ -67,7 +67,8 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
             .agents
             .iter()
             .map(|agent| {
-                let cwd = if session.no_git
+                let cwd = if matches!(agent.role.as_str(), "Evaluator" | "Prince")
+                    || session.no_git
                     || (session.worktree_path.is_none()
                         && matches!(
                             session.session_type,
@@ -179,7 +180,8 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
 fn transcript_cwd(session: &crate::session::Session, agent: &crate::session::AgentInfo) -> PathBuf {
     use crate::{domain::WorkspaceStrategy, pty::AgentRole};
     // Legacy launch_hive spawns both Queen and workers directly in project_path.
-    if session.no_git
+    if matches!(agent.role, AgentRole::Evaluator | AgentRole::Prince)
+        || session.no_git
         || (session.worktree_path.is_none()
             && matches!(
                 session.session_type,
