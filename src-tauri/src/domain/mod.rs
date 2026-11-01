@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_transport;
 pub mod artifact;
 pub mod cell;
 pub mod event;

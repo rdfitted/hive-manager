@@ -328,6 +328,8 @@ struct HeartbeatCredential {
 
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
+    transports: RwLock<Option<Arc<crate::transport::TransportRegistry>>>,
+    agent_transports: RwLock<HashMap<String, crate::domain::agent_transport::AgentTransports>>,
     heartbeat_credentials: RwLock<HashMap<String, HeartbeatCredential>>,
     heartbeat_verify_when_present: RwLock<HashMap<String, bool>>,
     /// Serialize create/kill so a same-id kill cannot pass between process spawn and
@@ -354,6 +356,8 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            transports: RwLock::new(None),
+            agent_transports: RwLock::new(HashMap::new()),
             heartbeat_credentials: RwLock::new(HashMap::new()),
             heartbeat_verify_when_present: RwLock::new(HashMap::new()),
             lifecycle: Mutex::new(()),
@@ -363,6 +367,20 @@ impl PtyManager {
             emitter_stats: Arc::new(EmitterStats::default()),
             replay_capacity: DEFAULT_REPLAY_CAPACITY,
         }
+    }
+
+    /// One shared registry serves HTTP, synchronous launch/inject, and cleanup.
+    pub fn attach_transports(&self, registry: Arc<crate::transport::TransportRegistry>) {
+        let mut attached = self.transports.write();
+        if attached.is_none() { *attached = Some(registry); }
+    }
+
+    pub fn transport_registry(&self) -> Option<Arc<crate::transport::TransportRegistry>> {
+        self.transports.read().clone()
+    }
+
+    pub fn configure_transports(&self, session_id: &str, enabled: crate::domain::agent_transport::AgentTransports) {
+        self.agent_transports.write().insert(session_id.into(), enabled);
     }
 
     pub fn set_app_handle(&mut self, handle: AppHandle) {
