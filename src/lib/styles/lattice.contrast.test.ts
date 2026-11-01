@@ -17,7 +17,18 @@ function resolveToken(name: string, seen = new Set<string>()): string {
   const value = tokens[name];
   if (!value) throw new Error(`Missing token: ${name}`);
   const alias = /^var\((--[\w-]+)\)$/.exec(value);
-  return alias ? resolveToken(alias[1], seen) : value;
+  if (alias) return resolveToken(alias[1], seen);
+  const mix = /^color-mix\(in srgb, var\((--[\w-]+)\) (\d+)%, var\((--[\w-]+)\)\)$/.exec(value);
+  if (mix) {
+    const foreground = resolveToken(mix[1], new Set(seen));
+    const background = resolveToken(mix[3], new Set(seen));
+    const weight = Number(mix[2]) / 100;
+    return '#' + [1, 3, 5].map((offset) => Math.round(
+      parseInt(foreground.slice(offset, offset + 2), 16) * weight
+      + parseInt(background.slice(offset, offset + 2), 16) * (1 - weight),
+    ).toString(16).padStart(2, '0')).join('');
+  }
+  return value;
 }
 
 function luminance(name: string): number {
@@ -36,30 +47,53 @@ function contrast(foreground: string, background: string): number {
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 }
 
+// These are the actual UI surfaces, including field, track and compatibility roles.
+const surfaces = [
+  '--canvas', '--chrome', '--toolbar', '--toolbar-control', '--surface',
+  '--surface-raised', '--surface-overlay', '--input', '--track', '--track-active',
+  '--accent-tint', '--danger-tint', '--bg-surface', '--bg-sunken', '--color-bg', '--color-surface', '--color-surface-hover',
+];
+
 describe('canceled status text contrast', () => {
-  it.each(['void', 'chrome', 'panel', 'raised', 'elevated'])('has at least 4.5:1 contrast on %s', (surface) => {
-    expect(contrast('--status-canceled', `--bg-${surface}`)).toBeGreaterThanOrEqual(4.5);
+  // UI status roles deliberately replace terminal literals; D1 stays unchanged.
+  it.each(surfaces)('has at least 4.5:1 contrast on %s', (surface) => {
+    expect(contrast('--state-canceled', surface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast('--state-queued', surface)).toBeGreaterThanOrEqual(4.5);
   });
 
   it('remains dimmer than queued status text', () => {
-    expect(luminance('--status-canceled')).toBeLessThan(luminance('--status-queued'));
+    expect(luminance('--state-canceled')).toBeLessThan(luminance('--state-queued'));
   });
 });
 
 describe('UI role text contrast', () => {
-  it.each(['--canvas', '--chrome', '--toolbar', '--toolbar-control', '--surface', '--surface-raised', '--surface-overlay', '--input'])
-    ('keeps primary and muted text readable on %s', (surface) => {
-      expect(contrast('--text-primary', surface)).toBeGreaterThanOrEqual(4.5);
-      expect(contrast('--text-muted', surface)).toBeGreaterThanOrEqual(4.5);
-    });
+  it.each(surfaces)('keeps primary, muted, accent and status text readable on %s', (surface) => {
+    for (const foreground of [
+      '--text-primary', '--text-muted', '--accent',
+      '--status-success', '--status-running', '--status-warning', '--status-error', '--status-blocked',
+    ]) expect(contrast(foreground, surface), foreground).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('keeps filled accent labels at 4.5:1', () => {
+    expect(contrast('--on-accent', '--accent')).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it.each(surfaces)('keeps the focus outline at 3:1 on %s', (surface) => {
+    expect(contrast('--focus', surface)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('reserves the main accent for shapes and checks its white-label regression', () => {
+    expect(contrast('--fitted-whitesmoke', '--fitted-stroke')).toBeGreaterThanOrEqual(4.5);
+    expect(contrast('--accent-shape', '--canvas')).toBeGreaterThanOrEqual(3);
+  });
 });
 
 describe('shared control boundary contrast', () => {
-  // Inputs use void inside; outlined buttons/choices can sit on any neutral
+  // Inputs use the canvas inside; outlined buttons/choices can sit on any neutral
   // shell or overlay surface, and card controls use the chrome surface inside.
-  it.each(['void', 'chrome', 'panel', 'raised', 'elevated'])
+  it.each(surfaces)
     ('has at least 3:1 contrast against the adjacent %s surface', (surface) => {
-      expect(contrast('--border-control', `--bg-${surface}`)).toBeGreaterThanOrEqual(3);
+      expect(contrast('--border-control', surface)).toBeGreaterThanOrEqual(3);
     });
 
   it.each([
