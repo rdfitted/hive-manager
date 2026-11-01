@@ -20,6 +20,7 @@ export interface AgentFeed {
     supports_approvals: boolean;
     event_source: 'none' | 'transcript' | 'protocol';
   };
+  binding_pending?: boolean;
 }
 
 interface HistoryPage {
@@ -76,7 +77,7 @@ export function createAgentEventsStore() {
   let source: EventSource | null = null;
   let abort: AbortController | null = null;
   let generation = 0;
-  let rosterTimer: ReturnType<typeof setInterval> | undefined;
+  let rosterTimer: ReturnType<typeof setTimeout> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   const revisions = new Map<string, number>();
   let rosterLoading = false;
@@ -189,22 +190,28 @@ export function createAgentEventsStore() {
     } finally { if (run === generation) rosterLoading = false; }
   }
 
+  /** Sooner only while a seat is due its first transcript, so a bound session stays at 10s. */
+  function pollRoster(run: number) {
+    void refresh().finally(() => {
+      if (run !== generation) return;
+      const pending = Object.values(get(state).feeds).some((feed) => feed.binding_pending);
+      rosterTimer = setTimeout(() => pollRoster(run), pending ? 2_500 : 10_000);
+    });
+  }
+
   function setSessionId(sessionId: string | null) {
     if (get(state).sessionId === sessionId) return;
     generation++;
     abort?.abort();
     source?.close();
     source = null;
-    clearInterval(rosterTimer);
+    clearTimeout(rosterTimer);
     clearTimeout(retryTimer);
     revisions.clear();
     rosterLoading = false;
     abort = sessionId ? new AbortController() : null;
     state.set(emptyState(sessionId));
-    if (sessionId) {
-      void refresh();
-      rosterTimer = setInterval(() => void refresh(), 10_000);
-    }
+    if (sessionId) pollRoster(generation);
   }
 
   return { subscribe: state.subscribe, setSessionId, refresh, loadOlder: (agentId: string) => history(agentId, true), disconnect: () => setSessionId(null) };

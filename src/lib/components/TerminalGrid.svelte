@@ -23,6 +23,7 @@
   import { TERMINAL_SESSION_STATES } from '$lib/stores/terminalPool';
   import AgentActivityLine from './agent/AgentActivityLine.svelte';
   import AttentionCard from './attention/AttentionCard.svelte';
+  import { startupExitCode } from '$lib/stores/agentActivity';
   import Terminal from './Terminal.svelte';
   import ChatPane from './chat/ChatPane.svelte';
   import PaneToggle from './chat/PaneToggle.svelte';
@@ -464,7 +465,7 @@
             {/if}
           </div>
         </div>
-        {#if visible && pane.kind === 'agent' && ((focusMode && pane.id === localMaximizedId) || chatEligible)}
+        {#if visible && pane.kind === 'agent' && ((focusMode && pane.id === localMaximizedId) || chatEligible || startupExitCode(pane.agent) !== null)}
           <div class={focusMode ? 'focused-agent-info' : 'agent-info'}>
             <AgentActivityLine agentId={pane.id} />
             <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} chatAvailable={chatEligible}

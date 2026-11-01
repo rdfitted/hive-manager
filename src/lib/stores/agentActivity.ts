@@ -32,6 +32,13 @@ export function attentionReason(agent: AgentInfo, stale: Set<string>): Attention
   return stale.has(agent.id) ? 'stale' : 'none';
 }
 
+/** Exit code of a seat the backend flagged as dead during startup, else null. */
+export function startupExitCode(agent: AgentInfo): string | null {
+  const status = agent.status;
+  if (typeof status !== 'object' || status === null || !('Error' in status)) return null;
+  return /^exited_during_startup:(\d+)$/.exec(status.Error)?.[1] ?? null;
+}
+
 export function needsAttention(agent: AgentInfo, stale: Set<string>): boolean {
   return attentionReason(agent, stale) !== 'none';
 }

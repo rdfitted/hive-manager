@@ -1737,3 +1737,217 @@ fn g16b_codex_foreign_replacement_leaves_durable_history_untouched() {
         "G16b rejected replacement cannot truncate or contaminate durable history"
     );
 }
+
+mod dead_startup_seats {
+    use super::*;
+    use crate::pty::{AgentRole, AgentStatus};
+    use std::time::Duration;
+
+    const QUEEN: &str = "session-queen";
+    const EVALUATOR: &str = "session-evaluator";
+
+    fn fixture(seats: &[&str]) -> (tempfile::TempDir, Arc<AppState>) {
+        let (temp, state, _app) = setup();
+        state
+            .session_controller
+            .write()
+            .set_event_bus(state.event_bus.clone());
+        let mut ids = vec![QUEEN, EVALUATOR];
+        ids.extend_from_slice(seats);
+        let mut session = make_test_session_with_agents("session", "fixture", &ids);
+        session.agents[0].role = AgentRole::Queen;
+        session.agents[1].role = AgentRole::Evaluator;
+        state.session_controller.read().insert_test_session(session);
+        std::fs::create_dir_all(state.storage.session_dir("session")).unwrap();
+        (temp, state)
+    }
+
+    fn spawn(state: &AppState, id: &str, flags: &[&str], age_secs: u64) {
+        let pty = state.pty_manager.read();
+        pty.create_session(
+            id.to_string(),
+            AgentRole::QaWorker { index: 1, parent: None },
+            "claude",
+            flags,
+            None,
+            80,
+            24,
+        )
+        .unwrap();
+        pty.set_session_age_for_test(id, Duration::from_secs(age_secs));
+    }
+
+    fn status(state: &AppState, id: &str) -> AgentStatus {
+        let controller = state.session_controller.read();
+        let session = controller.get_session("session").unwrap();
+        let agent = session.agents.iter().find(|agent| agent.id == id).unwrap();
+        agent.status.clone()
+    }
+
+    fn sweep(state: &AppState) -> Vec<String> {
+        state
+            .session_controller
+            .read()
+            .sweep_dead_startup_seats("session")
+    }
+
+    fn inbox(state: &AppState, id: &str) -> String {
+        let path = state
+            .storage
+            .session_dir("session")
+            .join("conversations")
+            .join(format!("{id}.md"));
+        std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    fn failures(state: &AppState) -> usize {
+        std::fs::read_to_string(state.storage.base_dir().join("session/events.jsonl"))
+            .unwrap_or_default()
+            .matches("agent_failed")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn crash_during_startup_flags_the_seat_and_tells_queen_and_evaluator_once() {
+        let (_temp, state) = fixture(&["qa-1"]);
+        spawn(&state, "qa-1", &["--stub-die-on-start"], 10);
+        assert_eq!(sweep(&state), ["qa-1"]);
+        assert_eq!(
+            status(&state, "qa-1"),
+            AgentStatus::Error("exited_during_startup:101".into())
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while inbox(&state, EVALUATOR).is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(failures(&state), 1, "the event path carries the death");
+        for watcher in [QUEEN, EVALUATOR] {
+            let text = inbox(&state, watcher);
+            assert!(text.contains("qa-1 process exited during startup with code 101"), "{text}");
+        }
+        assert!(sweep(&state).is_empty(), "a flagged seat is reported once");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(failures(&state), 1);
+        assert!(
+            state.pty_manager.read().get_status("qa-1").is_some(),
+            "the dead seat stays inspectable and is not respawned"
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_exit_and_a_seat_still_running_raise_no_alarm() {
+        let (_temp, state) = fixture(&["clean", "live"]);
+        spawn(&state, "clean", &["--stub-clean-exit"], 10);
+        spawn(&state, "live", &[], 10);
+        assert!(sweep(&state).is_empty());
+        assert_eq!(status(&state, "clean"), AgentStatus::Running);
+        assert_eq!(status(&state, "live"), AgentStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn outside_the_startup_window_is_not_a_startup_death() {
+        let (_temp, state) = fixture(&["young", "old"]);
+        spawn(&state, "young", &["--stub-die-on-start"], 1);
+        spawn(&state, "old", &["--stub-die-on-start"], 301);
+        assert!(
+            sweep(&state).is_empty(),
+            "add_worker owns the first seconds, the stall sweep owns the rest"
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_completed_and_deleted_seats_raise_no_alarm() {
+        let (_temp, state) = fixture(&["retired", "reported", "deleted", "kill-failed"]);
+        for seat in ["retired", "reported", "deleted"] {
+            spawn(&state, seat, &["--stub-die-on-start"], 10);
+        }
+        spawn(
+            &state,
+            "kill-failed",
+            &["--stub-die-on-start", "--stub-tree-kill-fails-once"],
+            10,
+        );
+        {
+            let controller = state.session_controller.read();
+            let mut session = controller.get_session("session").unwrap();
+            session
+                .agents
+                .iter_mut()
+                .find(|agent| agent.id == "retired")
+                .unwrap()
+                .status = AgentStatus::Completed;
+            controller.insert_test_session(session);
+            controller
+                .update_heartbeat("session", "reported", "completed", None)
+                .unwrap();
+        }
+        state.pty_manager.read().kill("deleted").unwrap();
+        // A kill that failed was still deliberate, and its session stays retained.
+        assert!(state.pty_manager.read().kill("kill-failed").is_err());
+        assert!(state.pty_manager.read().get_status("kill-failed").is_some());
+        assert!(sweep(&state).is_empty());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(failures(&state), 0);
+    }
+
+    #[tokio::test]
+    async fn a_completed_heartbeat_from_before_a_respawn_does_not_hide_a_new_death() {
+        let (_temp, state) = fixture(&["evaluator-respawn"]);
+        spawn(&state, "evaluator-respawn", &["--stub-die-on-start"], 10);
+        {
+            let controller = state.session_controller.read();
+            controller
+                .update_heartbeat("session", "evaluator-respawn", "completed", None)
+                .unwrap();
+            controller.set_heartbeat_last_activity_for_test(
+                "session",
+                "evaluator-respawn",
+                chrono::Utc::now() - chrono::Duration::seconds(60),
+            );
+        }
+        assert_eq!(sweep(&state), ["evaluator-respawn"]);
+    }
+
+    #[tokio::test]
+    async fn a_same_id_respawn_after_the_probe_keeps_the_healthy_replacement_unflagged() {
+        let (_temp, state) = fixture(&["qa-1"]);
+        spawn(&state, "qa-1", &["--stub-die-on-start"], 10);
+        let flagged = state
+            .session_controller
+            .read()
+            .flag_after_respawn_for_test("session", || spawn(&state, "qa-1", &[], 10));
+        assert!(flagged.is_empty());
+        assert_eq!(status(&state, "qa-1"), AgentStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn roster_marks_only_a_live_new_unbound_codex_seat_as_binding_pending() {
+        let (_temp, state, app) = setup();
+        let now = chrono::Utc::now();
+        let seats = ["fresh", "old", "dead", "no-key", "claude"];
+        let mut session = make_test_session_with_agents("session", "fixture", &seats);
+        for agent in &mut session.agents {
+            agent.config.cli = "codex".into();
+            agent.transcript_spawned_at = Some(now);
+            agent.transcript_session_id = Some(crate::transport::codex_rollout_source::prompt_key("p"));
+        }
+        session.agents[1].transcript_spawned_at = Some(now - chrono::Duration::seconds(121));
+        session.agents[3].transcript_session_id = None;
+        session.agents[4].config.cli = "claude".into();
+        session.agents[4].transcript_session_id = None;
+        state.session_controller.read().insert_test_session(session);
+        for seat in seats {
+            let flags: &[&str] = if seat == "dead" { &["--stub-die-on-start"] } else { &[] };
+            spawn(&state, seat, flags, 10);
+        }
+        let feeds = body_json(get(&app, "/api/sessions/session/agent-feeds").await).await;
+        let pending: Vec<&str> = feeds["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|agent| agent["binding_pending"] == true)
+            .map(|agent| agent["agent_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(pending, ["fresh"]);
+    }
+}

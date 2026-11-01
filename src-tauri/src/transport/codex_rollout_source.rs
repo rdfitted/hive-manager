@@ -21,11 +21,22 @@ pub struct CodexBinding {
     pub rollout_path: PathBuf,
 }
 
+/// A rollout normally appears 6-16 seconds after spawn, so look often while it is due.
+pub(crate) const EAGER_SCAN_WINDOW: Duration = Duration::from_secs(120);
+const EAGER_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How much of the eager window is left. A cold reopen of an old seat gets none of it.
+pub(crate) fn eager_scan_remaining(spawned_at: DateTime<Utc>, wall_now: DateTime<Utc>) -> Duration {
+    let age = (wall_now - spawned_at).to_std().unwrap_or(Duration::ZERO);
+    EAGER_SCAN_WINDOW.saturating_sub(age)
+}
+
 struct Discovery {
     key: String,
     spawned_at: DateTime<Utc>,
     cwd: String,
     next_scan: Instant,
+    eager_until: Instant,
     backoff: u64,
     rejected: HashSet<PathBuf>,
     matches: HashMap<PathBuf, String>,
@@ -240,6 +251,7 @@ impl CodexBinder {
         cwd: &Path,
         sidecar: &Path,
         now: Instant,
+        wall_now: DateTime<Utc>,
         before_scan: impl FnOnce(),
     ) -> Option<CodexBinding> {
         let identity = (session.to_owned(), agent.to_owned());
@@ -288,6 +300,7 @@ impl CodexBinder {
                     spawned_at,
                     cwd: cwd.clone(),
                     next_scan: now,
+                    eager_until: now + eager_scan_remaining(spawned_at, wall_now),
                     backoff: 5,
                     rejected,
                     matches: HashMap::new(),
@@ -307,8 +320,12 @@ impl CodexBinder {
         {
             self.scans += 1;
         }
-        state.next_scan = now + Duration::from_secs(state.backoff);
-        state.backoff = (state.backoff * 2).min(60);
+        if now < state.eager_until {
+            state.next_scan = now + EAGER_SCAN_INTERVAL;
+        } else {
+            state.next_scan = now + Duration::from_secs(state.backoff);
+            state.backoff = (state.backoff * 2).min(60);
+        }
         for path in rollout_files(root, spawned_at) {
             if state.rejected.contains(&path) || state.matches.contains_key(&path) {
                 continue;
@@ -421,6 +438,29 @@ mod binding_tests {
             Path::new("c:\\fixture\\"),
             &temp.join(format!("{seat}.binding")),
             now,
+            cold_wall(),
+            || {},
+        )
+    }
+    /// Long after spawn: the eager window is over and only the 5-60s backoff applies.
+    fn cold_wall() -> DateTime<Utc> {
+        spawn() + chrono::Duration::hours(1)
+    }
+    fn resolve_new_seat(
+        binder: &mut CodexBinder,
+        temp: &Path,
+        seat: &str,
+        now: Instant,
+    ) -> Option<CodexBinding> {
+        binder.resolve(
+            "session",
+            seat,
+            Some(&prompt_key(&prompt(seat))),
+            Some(spawn()),
+            Path::new("c:\\fixture\\"),
+            &temp.join(format!("{seat}.binding")),
+            now,
+            spawn(),
             || {},
         )
     }
@@ -478,6 +518,7 @@ mod binding_tests {
                     Path::new("C:/fixture"),
                     &sidecar,
                     Instant::now(),
+                    cold_wall(),
                     || {},
                 )
                 .unwrap();
@@ -625,6 +666,7 @@ mod binding_tests {
                 Path::new("C:/fixture"),
                 &sidecar,
                 now,
+                cold_wall(),
                 || {}
             )
             .is_none());
@@ -637,6 +679,7 @@ mod binding_tests {
                 Path::new("C:/fixture"),
                 &sidecar,
                 now,
+                cold_wall(),
                 || {}
             )
             .is_none());
@@ -771,6 +814,161 @@ mod binding_tests {
     }
 
     #[test]
+    fn g16c_new_seat_scans_every_two_seconds_then_falls_back_to_the_capped_backoff() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("rollouts");
+        fs::create_dir_all(&root).unwrap();
+        let mut binder = CodexBinder::new(Some(root));
+        let now = Instant::now();
+        let scan_at = |binder: &mut CodexBinder, millis: u64| {
+            resolve_new_seat(binder, temp.path(), "worker-a", now + Duration::from_millis(millis))
+        };
+        assert!(scan_at(&mut binder, 0).is_none());
+        for millis in [1, 250, 1999] {
+            assert!(scan_at(&mut binder, millis).is_none());
+        }
+        assert_eq!(binder.scans, 1, "G16c 250ms configure must not rescan");
+        for seconds in (2..120).step_by(2) {
+            assert!(scan_at(&mut binder, seconds * 1000).is_none());
+        }
+        assert_eq!(binder.scans, 60, "G16c one scan per 2s through the first two minutes");
+        // The window closes, then the existing doubling resumes and still caps at sixty.
+        for seconds in [120, 125, 135, 155, 195, 255, 315] {
+            assert!(scan_at(&mut binder, seconds * 1000).is_none());
+        }
+        assert_eq!(binder.scans, 67);
+        assert_eq!(binder.agents[&("session".into(), "worker-a".into())].backoff, 60);
+        assert!(scan_at(&mut binder, 374_999).is_none());
+        assert_eq!(binder.scans, 67, "G16c backoff still spaces scans at sixty seconds");
+    }
+
+    #[test]
+    fn g16c_eager_scans_keep_every_binding_check_and_never_reopen_rejected_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("rollouts");
+        let same_second_seat = |index: u8, seat: &str| {
+            write(
+                &root,
+                index,
+                &[
+                    meta(index, json!("cli"), "2026-11-01T12:00:00Z", "C:/fixture"),
+                    user(&prompt(seat)),
+                ],
+            )
+        };
+        let other_seat = same_second_seat(1, "worker-b");
+        let before_spawn = write(
+            &root,
+            2,
+            &[
+                meta(2, json!("cli"), "2026-11-01T11:59:59Z", "C:/fixture"),
+                user(&prompt("worker-a")),
+            ],
+        );
+        let wrong_cwd = write(
+            &root,
+            3,
+            &[
+                meta(3, json!("cli"), "2026-11-01T12:00:00Z", "C:/other"),
+                user(&prompt("worker-a")),
+            ],
+        );
+        let wrong_source = write(
+            &root,
+            4,
+            &[
+                meta(4, json!("vscode"), "2026-11-01T12:00:00Z", "C:/fixture"),
+                user(&prompt("worker-a")),
+            ],
+        );
+        // Line 0 only so far: pending, not rejected, so it is reread and can still match.
+        let own = write(
+            &root,
+            5,
+            &[meta(5, json!("cli"), "2026-11-01T12:00:00Z", "C:/fixture")],
+        );
+        let mut binder = CodexBinder::new(Some(root.clone()));
+        let now = Instant::now();
+        assert!(resolve_new_seat(&mut binder, temp.path(), "worker-a", now).is_none());
+        assert!(resolve_new_seat(&mut binder, temp.path(), "worker-a", now + Duration::from_secs(2)).is_none());
+        assert_eq!(binder.opened[&own], 2, "G16c a pending rollout is read again");
+        // A rejected path stays rejected even when rewritten into a qualifying file.
+        same_second_seat(1, "worker-a");
+        write(
+            &root,
+            5,
+            &[
+                meta(5, json!("cli"), "2026-11-01T12:00:00Z", "C:/fixture"),
+                user(&prompt("worker-a")),
+            ],
+        );
+        let binding = resolve_new_seat(&mut binder, temp.path(), "worker-a", now + Duration::from_secs(4))
+            .expect("G16c the seat's own rollout binds on the next eager scan");
+        assert_eq!(binding.thread_id, id(5));
+        for rejected in [&other_seat, &before_spawn, &wrong_cwd, &wrong_source] {
+            assert_eq!(binder.opened[rejected], 1, "G16c rejected file never reopened");
+        }
+
+        // Two exact matches stay ambiguous at the faster cadence too.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("rollouts");
+        for index in [1, 2] {
+            write(
+                &root,
+                index,
+                &[
+                    meta(index, json!("cli"), "2026-11-01T12:00:00Z", "C:/fixture"),
+                    user(&prompt("worker-a")),
+                ],
+            );
+        }
+        let mut binder = CodexBinder::new(Some(root));
+        for seconds in [0, 2, 4] {
+            assert!(
+                resolve_new_seat(&mut binder, temp.path(), "worker-a", now + Duration::from_secs(seconds)).is_none(),
+                "G16c ambiguity stays terminal-only"
+            );
+        }
+    }
+
+    /// Prints what one seat's eager rescan costs. Run with --nocapture to read it.
+    #[test]
+    fn g16c_eager_rescans_open_only_files_still_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("rollouts");
+        let padding = "x".repeat(32 * 1024);
+        for index in 1..=200u8 {
+            write(
+                &root,
+                index,
+                &[
+                    meta(index, json!("cli"), "2026-11-01T11:00:00Z", "C:/fixture"),
+                    user(&padding),
+                ],
+            );
+        }
+        let mut binder = CodexBinder::new(Some(root));
+        let now = Instant::now();
+        let first = Instant::now();
+        assert!(resolve_new_seat(&mut binder, temp.path(), "worker-a", now).is_none());
+        let first = first.elapsed();
+        let opened: usize = binder.opened.values().sum();
+        assert_eq!(opened, 200);
+        let rescan = Instant::now();
+        for scan in 1..=10u64 {
+            assert!(resolve_new_seat(&mut binder, temp.path(), "worker-a", now + Duration::from_secs(scan * 2)).is_none());
+        }
+        let rescan = rescan.elapsed() / 10;
+        assert_eq!(binder.scans, 11);
+        assert_eq!(
+            binder.opened.values().sum::<usize>(),
+            opened,
+            "G16c a rescan lists directories but opens no rejected file"
+        );
+        println!("G16c 200-file bucket: first scan {first:?}, each rescan {rescan:?}");
+    }
+
+    #[test]
     fn g16b_cold_sidecar_restores_exact_identity_and_respawn_discards_it() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("rollouts");
@@ -804,6 +1002,7 @@ mod binding_tests {
                 Path::new("C:/fixture"),
                 &sidecar,
                 now,
+                cold_wall(),
                 || {}
             )
             .is_none());

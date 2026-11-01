@@ -179,6 +179,16 @@ describe('real Terminal component behind chat (renderer doubles)', () => {
     expect(fixture.webglDisposed).toBe(allocations);
   });
 
+  it('flags a dead seat in a grid pane that has no chat feed, and keeps its terminal mounted', async () => {
+    layout.setSessionViewMode('grid'); publishFeed(false);
+    const dead = { ...session, agents: session.agents.map((agent) => agent.id === 'codex' ? { ...agent, status: { Error: 'exited_during_startup:101' } } : agent) };
+    const view = render(TerminalGrid, { session: dead, focusedAgentId: 'claude', onSelect: vi.fn() });
+    await waitFor(() => expect(fixture.terminals).toHaveLength(2));
+    const notice = view.getByRole('region', { name: 'Agent needs attention' });
+    expect(notice.textContent).toContain('exited during startup with code 101');
+    expect(fixture.terminals.every((term) => !term.disposed)).toBe(true);
+  });
+
   it('preserves role, status and controls under the production forced-colours CSS fixture', async () => {
     layout.setSessionViewMode('grid');
     const sheet = document.createElement('style'); sheet.dataset.chatTest = 'forced-colours';

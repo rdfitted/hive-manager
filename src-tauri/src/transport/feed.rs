@@ -384,6 +384,7 @@ impl FeedStore {
                 cwd,
                 &sidecar,
                 Instant::now(),
+                chrono::Utc::now(),
                 || {
                     #[cfg(test)]
                     if let Some(observe) = self.discovery_observer.lock().as_ref() {

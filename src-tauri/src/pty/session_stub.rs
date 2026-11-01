@@ -324,6 +324,9 @@ pub struct PtySession {
     env_removed: Vec<String>,
     output_ring: Arc<Mutex<OutputRing>>,
     kill_error_once: AtomicBool,
+    spawned_at: Mutex<Instant>,
+    kill_requested: AtomicBool,
+    exit_code: Option<u32>,
 }
 
 unsafe impl Send for PtySession {}
@@ -377,6 +380,15 @@ impl PtySession {
             kill_error_once: AtomicBool::new(
                 args.iter().any(|arg| *arg == "--stub-tree-kill-fails-once"),
             ),
+            spawned_at: Mutex::new(Instant::now()),
+            kill_requested: AtomicBool::new(false),
+            exit_code: if args.iter().any(|arg| *arg == "--stub-die-on-start") {
+                Some(101)
+            } else if args.iter().any(|arg| *arg == "--stub-clean-exit") {
+                Some(0)
+            } else {
+                None
+            },
         };
 
         // #207 test fixture: a flag-borne sentinel is the only way an integration test
@@ -390,6 +402,9 @@ impl PtySession {
                 b"failed to initialize state runtime: failed to open log DB: \
                   (code: 5) database is locked (stub)",
             );
+        }
+        if session.args.iter().any(|arg| arg == "--stub-clean-exit") {
+            *session.status.write() = AgentStatus::Completed;
         }
 
         Ok(session)
@@ -543,12 +558,28 @@ impl PtySession {
     }
 
     pub fn kill(&self) -> Result<(), PtyError> {
+        self.kill_requested.store(true, Ordering::SeqCst);
         if self.kill_error_once.swap(false, Ordering::SeqCst) {
             return Err(PtyError::IoError(std::io::Error::other(
                 "synthetic partial tree-kill failure",
             )));
         }
         Ok(())
+    }
+
+    pub fn age(&self) -> Duration {
+        self.spawned_at.lock().elapsed()
+    }
+
+    pub fn set_age_for_test(&self, age: Duration) {
+        *self.spawned_at.lock() = Instant::now() - age;
+    }
+
+    pub fn unexpected_exit(&self) -> Option<u32> {
+        if self.kill_requested.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.exit_code.filter(|code| *code != 0)
     }
 
     /// Mirror the real session's liveness semantics instead of hardcoding
