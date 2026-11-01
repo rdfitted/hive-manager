@@ -158,6 +158,10 @@ pub struct TransportRegistry {
     pub feeds: feed::FeedStore,
 }
 impl TransportRegistry {
+    pub fn with_codex_root(self, root: Option<PathBuf>) -> Self {
+        self.feeds.set_codex_root(root);
+        self
+    }
     pub fn new(sessions_root: PathBuf, claude_projects_root: Option<PathBuf>) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),

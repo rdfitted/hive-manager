@@ -211,6 +211,9 @@ fn real_directory(entry: &fs::DirEntry, digits: usize) -> bool {
 }
 
 impl CodexBinder {
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
     pub fn new(root: Option<PathBuf>) -> Self {
         Self {
             root,
@@ -875,7 +878,10 @@ fn message_text(payload: &Value) -> String {
 }
 
 impl CodexRolloutSource {
-    pub fn new(root: PathBuf, path: PathBuf, agent_id: &str) -> Result<Self, String> {
+    pub fn matches_binding(&self, binding: &CodexBinding) -> bool {
+        self.held.as_ref().is_some_and(|(held, _)| held == binding)
+    }
+    fn new(root: PathBuf, path: PathBuf, agent_id: &str) -> Result<Self, String> {
         feed::contained_file(&root, &path)?;
         File::open(&path).map_err(|error| error.to_string())?;
         Ok(Self {
