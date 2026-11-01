@@ -68,10 +68,7 @@ pub const FIRST_HEARTBEAT_GRACE_MS: i64 = 15 * 60_000;
 pub const FIRST_HEARTBEAT_LATENCY_MS_BY_CLI: &[(&str, Option<i64>)] = &[
     ("claude", None),
     ("codex", None),
-    ("opencode", None),
     ("cursor", None),
-    ("droid", None),
-    ("qwen", None),
 ];
 
 /// `STUCK_CUTOFF_MS` in whole seconds, for prompt prose.

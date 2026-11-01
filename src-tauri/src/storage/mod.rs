@@ -852,20 +852,6 @@ impl SessionStorage {
             },
         );
 
-        clis.insert(
-            "opencode".to_string(),
-            CliConfig {
-                command: "opencode".to_string(),
-                auto_approve_flag: None,
-                model_flag: Some("-m".to_string()),
-                default_model: "opencode/big-pickle".to_string(),
-                env: Some({
-                    let mut env = HashMap::new();
-                    env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
-                    env
-                }),
-            },
-        );
 
         clis.insert(
             "codex".to_string(),
@@ -889,27 +875,7 @@ impl SessionStorage {
             },
         );
 
-        clis.insert(
-            "droid".to_string(),
-            CliConfig {
-                command: "droid".to_string(),
-                auto_approve_flag: None, // Interactive mode - no auto-approve flag
-                model_flag: None,        // Model selected via /model command in TUI
-                default_model: "glm-5.1".to_string(),
-                env: None,
-            },
-        );
 
-        clis.insert(
-            "qwen".to_string(),
-            CliConfig {
-                command: "qwen".to_string(),
-                auto_approve_flag: Some("-y".to_string()),
-                model_flag: Some("-m".to_string()),
-                default_model: "qwen3-coder".to_string(),
-                env: None,
-            },
-        );
 
         let mut default_roles = HashMap::new();
         default_roles.insert(
@@ -2023,13 +1989,19 @@ mod tests {
     }
 
     #[test]
-    fn test_default_config_excludes_removed_gemini_and_antigravity() {
+    fn test_default_config_excludes_removed_clis() {
         // gemini and antigravity were removed as spawnable CLIs; GPT-6 work
         // (astra/sol/luna) now routes through the codex entry.
         let config = SessionStorage::default_config();
 
-        assert!(config.clis.get("gemini").is_none());
-        assert!(config.clis.get("antigravity").is_none());
+        assert_eq!(crate::adapters::VALID_CLIS, crate::http::handlers::VALID_CLIS);
+        assert_eq!(config.clis.len(), crate::adapters::VALID_CLIS.len());
+        for cli in crate::adapters::VALID_CLIS {
+            assert!(config.clis.contains_key(*cli));
+        }
+        for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+            assert!(!config.clis.contains_key(cli));
+        }
 
         let codex = config.clis.get("codex").expect("codex entry present");
         assert_eq!(codex.command, "codex");

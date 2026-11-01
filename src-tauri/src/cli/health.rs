@@ -1211,8 +1211,8 @@ mod tests {
         assert!(stale.stale_hint);
 
         let auth_unknown = resolved_cli_health(
-            "droid",
-            PathBuf::from("droid"),
+            "cursor",
+            PathBuf::from("cursor"),
             LoginStatus::Unknown,
             "this CLI does not expose a supported login-status probe".to_string(),
         );
@@ -1519,13 +1519,13 @@ mod tests {
     fn windows_resolution_accepts_cmd_shims_but_not_powershell_only_shims() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("codex.cmd"), "@echo off\r\n").unwrap();
-        std::fs::write(directory.path().join("qwen.ps1"), "exit 0\r\n").unwrap();
+        std::fs::write(directory.path().join("cursor.ps1"), "exit 0\r\n").unwrap();
         let path = directory.path().as_os_str();
         let pathext = OsStr::new(".COM;.EXE;.BAT;.CMD;.PS1");
 
         let codex = resolve_executable_in_path("codex", path, Some(pathext)).unwrap();
         assert_eq!(codex.file_name().unwrap().to_string_lossy(), "codex.CMD");
-        assert!(resolve_executable_in_path("qwen", path, Some(pathext)).is_none());
+        assert!(resolve_executable_in_path("cursor", path, Some(pathext)).is_none());
     }
 
     #[cfg(windows)]
@@ -1565,6 +1565,6 @@ mod tests {
             executable_candidates(Path::new("codex.cmd"), Some(OsStr::new(".CMD"))),
             vec![PathBuf::from("codex.cmd")]
         );
-        assert!(executable_candidates(Path::new("qwen.ps1"), Some(OsStr::new(".PS1"))).is_empty());
+        assert!(executable_candidates(Path::new("cursor.ps1"), Some(OsStr::new(".PS1"))).is_empty());
     }
 }

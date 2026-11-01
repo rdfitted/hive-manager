@@ -760,18 +760,7 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
         "gemini-4-argon-high",
         2
     ),
-    preset!("droid", "glm-5.1", "GLM 5.1", "glm-5.1", 0),
-    preset!("droid", "glm-4.7", "GLM 4.7", "glm-4.7", 0),
-    preset!(
-        "opencode",
-        "opencode/big-pickle",
-        "BigPickle",
-        "opencode/big-pickle",
-        0
-    ),
-    preset!("opencode", "opencode/grok", "Grok", "opencode/grok", 0),
-    preset!("qwen", "qwen3-coder", "Qwen3 Coder", "qwen3-coder", 0),
-    preset!("qwen", "qwen2.5-coder", "Qwen2.5 Coder", "qwen2.5-coder", 0),
+
 ];
 
 pub(crate) fn preset_catalogue() -> &'static [PresetDefinition] {
@@ -1294,16 +1283,13 @@ mod tests {
             assert_eq!(expansion.resolved.flags, preset.flags.to_vec());
         }
 
-        assert_eq!(preset_catalogue().len(), 77);
+        assert_eq!(preset_catalogue().len(), 71);
         assert_eq!(
             provider_counts,
             std::collections::BTreeMap::from([
                 ("claude", 12),
                 ("codex", 54),
                 ("cursor", 5),
-                ("droid", 2),
-                ("opencode", 2),
-                ("qwen", 2),
             ])
         );
         assert!(ids.contains("codex-gpt-5-5-xhigh"));

@@ -6,9 +6,6 @@
 mod claude_code;
 mod codex;
 mod cursor;
-mod droid;
-mod opencode;
-mod qwen;
 pub mod wsl;
 
 use std::collections::HashMap;
@@ -20,19 +17,9 @@ use serde::{Deserialize, Serialize};
 pub use claude_code::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;
 pub use cursor::CursorAdapter;
-pub use droid::DroidAdapter;
-pub use opencode::OpenCodeAdapter;
-pub use qwen::QwenAdapter;
 
 /// Valid CLI names allowed in the system.
-pub const VALID_CLIS: &[&str] = &[
-    "claude",
-    "codex",
-    "opencode",
-    "cursor",
-    "droid",
-    "qwen",
-];
+pub const VALID_CLIS: &[&str] = &["claude", "codex", "cursor"];
 
 /// Unvalidated default spacing between a PTY payload and its discrete Enter write.
 ///
@@ -260,9 +247,6 @@ pub fn get_adapter(cli: &str) -> Result<Box<dyn CliAdapter>, String> {
         "claude" => Ok(Box::new(ClaudeCodeAdapter)),
         "codex" => Ok(Box::new(CodexAdapter)),
         "cursor" => Ok(Box::new(CursorAdapter)),
-        "droid" => Ok(Box::new(DroidAdapter)),
-        "opencode" => Ok(Box::new(OpenCodeAdapter)),
-        "qwen" => Ok(Box::new(QwenAdapter)),
         _ => Err(format!("Unknown CLI adapter: {}", cli)),
     }
 }
@@ -275,10 +259,10 @@ mod tests {
     fn test_valid_clis() {
         assert!(is_valid_cli("claude"));
         assert!(is_valid_cli("codex"));
-        assert!(is_valid_cli("opencode"));
+        assert!(!is_valid_cli("opencode"));
         assert!(is_valid_cli("cursor"));
-        assert!(is_valid_cli("droid"));
-        assert!(is_valid_cli("qwen"));
+        assert!(!is_valid_cli("droid"));
+        assert!(!is_valid_cli("qwen"));
         assert!(!is_valid_cli("gemini"));
         assert!(!is_valid_cli("antigravity"));
         assert!(!is_valid_cli("unknown"));
@@ -311,8 +295,6 @@ mod tests {
         let cursor = get_adapter("cursor").unwrap();
         assert_eq!(cursor.cli_name(), "cursor");
 
-        let qwen = get_adapter("qwen").unwrap();
-        assert_eq!(qwen.cli_name(), "qwen");
     }
 
     #[test]
@@ -324,11 +306,13 @@ mod tests {
     }
 
     #[test]
-    fn test_get_adapter_rejects_removed_gemini_and_antigravity() {
+    fn test_get_adapter_rejects_removed_clis() {
         // gemini and antigravity were removed as spawnable CLIs; workflows now
         // run GPT-6 tiers (astra/sol/luna) through the codex adapter.
-        assert!(get_adapter("gemini").is_err());
-        assert!(get_adapter("antigravity").is_err());
+        for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+            assert!(!is_valid_cli(cli));
+            assert!(get_adapter(cli).is_err(), "{cli} must have no adapter");
+        }
     }
 
     #[test]
