@@ -231,18 +231,10 @@ describe('StatusPanel CLI health', () => {
           staleHint: false,
         },
         {
-          cli: 'droid',
+          cli: 'codex',
           resolved: true,
-          binPath: '/usr/bin/droid',
+          binPath: '/usr/bin/codex',
           loggedIn: 'unknown',
-          detail: '',
-          staleHint: false,
-        },
-        {
-          cli: 'opencode',
-          resolved: true,
-          binPath: '/usr/bin/opencode',
-          loggedIn: 'yes',
           detail: '',
           staleHint: false,
         },
@@ -263,13 +255,21 @@ describe('StatusPanel CLI health', () => {
         'error',
       );
       expectCliState(
-        cliItem(container, 'Droid'),
+        cliItem(container, 'Codex'),
         'Auth unknown',
         'The CLI is installed, but authentication cannot be verified automatically.',
         'warning',
       );
+
+    });
+
+    tauriMocks.invoke.mockResolvedValueOnce({ clis: [
+      { cli: 'claude', resolved: true, binPath: '/usr/bin/claude', loggedIn: 'yes', detail: '', staleHint: false },
+    ] });
+    await fireEvent.click(getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => {
       expectCliState(
-        cliItem(container, 'OpenCode'),
+        cliItem(container, 'Claude Code'),
         'Ready',
         'The CLI is installed and authenticated.',
         'healthy',
@@ -281,6 +281,8 @@ describe('StatusPanel CLI health', () => {
         'pending',
       );
     });
+    expect(container.querySelectorAll('.cli-health-item')).toHaveLength(3);
+    expect(container.textContent).not.toMatch(/Droid|OpenCode|Qwen/);
 
     await fireEvent.click(disclosure);
     expect(disclosure.getAttribute('aria-expanded')).toBe('false');

@@ -13,10 +13,10 @@ export const builtinFixtures: SessionTemplate[] = [
   },
   {
     id: 'feature-build-hive', name: 'Feature-build Hive',
-    description: 'Opus Queen plus GPT-6 backend/frontend coding principals and a Droid coherence specialist.',
+    description: 'Opus Queen plus GPT-6 backend/frontend coding principals and a Codex coherence specialist.',
     mode: 'hive', workspace_strategy: 'shared_cell', is_builtin: true,
     work_graph_archetype: null, work_graph_parameters: {},
-    cells: [cell('queen', 'claude', 'opus', 'queen-hive'), cell('backend', 'codex', 'gpt-6.1-sol', 'roles/backend'), cell('frontend', 'codex', 'gpt-6.1-sol', 'roles/frontend'), cell('coherence', 'droid', 'glm-5.1', 'roles/coherence')],
+    cells: [cell('queen', 'claude', 'opus', 'queen-hive'), cell('backend', 'codex', 'gpt-6.1-sol', 'roles/backend'), cell('frontend', 'codex', 'gpt-6.1-sol', 'roles/frontend'), cell('coherence', 'codex', 'gpt-6.1-sol', 'roles/coherence')],
   },
   {
     id: 'fusion-compare', name: 'Fusion Compare',

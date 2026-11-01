@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import { fetchCliHealth, fetchPresetCatalogue } from './AgentConfigEditor.svelte';
+import { fetchCliHealth, fetchPresetCatalogue, normalizePresetCatalogue } from './AgentConfigEditor.svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -103,10 +103,10 @@ describe('fetchCliHealth', () => {
       .mockReturnValueOnce(firstRequest.promise)
       .mockResolvedValueOnce(jsonResponse({
         clis: {
-          droid: {
-            name: 'droid',
+          cursor: {
+            name: 'cursor',
             resolved: true,
-            binPath: '/usr/bin/droid',
+            binPath: '/usr/bin/cursor',
             loggedIn: 'yes',
             detail: 'Refreshed',
             staleHint: false,
@@ -123,10 +123,10 @@ describe('fetchCliHealth', () => {
 
     firstRequest.resolve(jsonResponse({
       clis: {
-        droid: {
-          name: 'droid',
+        cursor: {
+          name: 'cursor',
           resolved: true,
-          binPath: '/usr/bin/droid',
+          binPath: '/usr/bin/cursor',
           loggedIn: 'yes',
           detail: 'Ready',
           staleHint: false,
@@ -136,10 +136,10 @@ describe('fetchCliHealth', () => {
 
     const [firstHealth, concurrentHealth] = await Promise.all([first, concurrent]);
     expect(firstHealth).toEqual(concurrentHealth);
-    expect(firstHealth.droid).toEqual({
-      cli: 'droid',
+    expect(firstHealth.cursor).toEqual({
+      cli: 'cursor',
       resolved: true,
-      binPath: '/usr/bin/droid',
+      binPath: '/usr/bin/cursor',
       loggedIn: 'yes',
       detail: 'Ready',
       staleHint: false,
@@ -150,7 +150,7 @@ describe('fetchCliHealth', () => {
 
     const refreshed = await fetchCliHealth(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(refreshed.droid.detail).toBe('Refreshed');
+    expect(refreshed.cursor.detail).toBe('Refreshed');
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
@@ -200,10 +200,10 @@ describe('fetchPresetCatalogue', () => {
       .mockReturnValueOnce(firstRequest.promise)
       .mockResolvedValueOnce(jsonResponse({
         presets: [{
-          provider: 'qwen',
-          id: 'qwen3-coder',
-          label: 'Qwen3 Coder',
-          model: 'qwen3-coder',
+          provider: 'codex',
+          id: 'codex-gpt-6-1-sol',
+          label: 'GPT-6.1 Sol',
+          model: 'gpt-6.1-sol',
           flags: [],
         }],
       }));
@@ -224,7 +224,7 @@ describe('fetchPresetCatalogue', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     const refreshed = await fetchPresetCatalogue(true);
-    expect(refreshed[0]?.provider).toBe('qwen');
+    expect(refreshed[0]?.provider).toBe('codex');
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(invokeMock).not.toHaveBeenCalled();
   });
@@ -239,5 +239,14 @@ describe('fetchPresetCatalogue', () => {
     await expect(fetchPresetCatalogue(true)).rejects.toThrow(
       'Preset catalogue response was empty',
     );
+  });
+});
+
+describe('retired provider catalogue compatibility', () => {
+  it.each(['droid', 'opencode', 'qwen', 'agy', 'gemini', 'antigravity'])('ignores stale %s presets without dropping supported entries', (provider) => {
+    const preset = { id: 'sample', label: 'Sample', model: 'sample', flags: [] };
+    expect(normalizePresetCatalogue({ presets: [
+      { ...preset, provider }, { ...preset, provider: 'cursor' },
+    ] })).toEqual([{ ...preset, provider: 'cursor' }]);
   });
 });

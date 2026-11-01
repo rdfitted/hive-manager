@@ -77,6 +77,9 @@ describe('G-launch-parity: emitted composer and retained legacy-form payloads', 
   });
 
   it.each(builtinFixtures)('$id preserves the complete canonical template payload', async (template) => {
+    if (template.id === 'feature-build-hive') {
+      expect(template.cells.find((cell) => cell.role === 'coherence')).toMatchObject({ cli: 'codex', model: 'gpt-6.1-sol' });
+    }
     const mode = template.mode as Mode;
     const oldForm = await capture(mode, true, template);
     const composer = await capture(mode, false, template);
