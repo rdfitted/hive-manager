@@ -17,6 +17,7 @@
   let menuY = $state(0);
   let addButton: HTMLButtonElement;
   let menu: HTMLDivElement | undefined = $state();
+  $effect(() => { if (sending) menuOpen = false; });
 
   function toggleMenu() {
     if (sending) return;

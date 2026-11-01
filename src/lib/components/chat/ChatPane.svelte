@@ -4,6 +4,8 @@
   import { agentEvents, type AgentEvent } from '$lib/stores/agentEvents';
   import { activeAgents } from '$lib/stores/sessions';
   import Composer from '../composer/Composer.svelte';
+  import ComposerToolbar from '../composer/ComposerToolbar.svelte';
+  import { toolbarFacts } from '../composer/toolbarFacts';
   import ActivityGroup from './ActivityGroup.svelte';
   import { CHAT_WINDOW_SIZE, formatRaw, liveActivity, transcriptRows } from './transcript';
 
@@ -13,6 +15,7 @@
   const history = $derived($agentEvents.sessionId === sessionId ? $agentEvents.histories[agentId] : undefined);
   const rows = $derived(transcriptRows(events));
   const agent = $derived($activeAgents.find((candidate) => candidate.id === agentId));
+  const facts = $derived(toolbarFacts(agent, $agentEvents.sessionId === sessionId ? $agentEvents.feeds?.[agentId]?.capabilities.event_source : undefined));
   let now = $state(Date.now());
   const activity = $derived(liveActivity(events, agent?.status, now));
   const count = $derived(raw ? events.length : rows.length);
@@ -113,7 +116,9 @@
     {/if}
   </div>
   {#if error}<p class="feed-error" role="alert">Message could not be sent: {error}</p>{/if}
-  <div class="chat-composer"><Composer {sessionId} {agentId} persistDraft={false} disabled={sending || !visible} onsubmit={send} placeholder="Message this agent…" /></div>
+  <div class="chat-composer"><Composer {sessionId} {agentId} persistDraft={false} disabled={sending || !visible} onsubmit={send} placeholder={facts.placeholder}>
+    {#snippet toolbar(controls)}{#if visible}<ComposerToolbar {controls} accessLabel={facts.accessLabel} model={facts.model} effort={facts.effort} {sending} />{/if}{/snippet}
+  </Composer></div>
 </section>
 
 <style>

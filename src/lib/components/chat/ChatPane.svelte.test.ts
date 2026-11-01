@@ -4,11 +4,13 @@ import { tick } from 'svelte';
 import type { AgentEvent } from '$lib/stores/agentEvents';
 import { CHAT_WINDOW_SIZE, passiveToolResult, protocolAttention, transcriptRows } from './transcript';
 
-const fixture = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue(undefined), loadOlder: vi.fn(), setAgents: (_agents: import('$lib/stores/sessions').AgentInfo[]) => {} }));
+const fixture = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue(undefined), loadOlder: vi.fn(), setAgents: (_agents: import('$lib/stores/sessions').AgentInfo[]) => {}, setSource: (_source: import('$lib/stores/agentEvents').AgentFeed['capabilities']['event_source']) => {} }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('$lib/stores/agentEvents', async () => {
   const { writable } = await import('svelte/store');
-  return { agentEvents: { subscribe: writable({ sessionId: 's', histories: {} }).subscribe, loadOlder: fixture.loadOlder } };
+  const state = writable({ sessionId: 's', histories: {}, feeds: {} });
+  fixture.setSource = (event_source) => state.set({ sessionId: 's', histories: {}, feeds: { a: { capabilities: { event_source } } } });
+  return { agentEvents: { subscribe: state.subscribe, loadOlder: fixture.loadOlder } };
 });
 vi.mock('$lib/stores/sessions', async () => {
   const { writable } = await import('svelte/store');
@@ -22,9 +24,45 @@ import PaneToggle from './PaneToggle.svelte';
 export const event = (cursor: string, kind: AgentEvent['kind'] = 'assistant_message', payload: Record<string, unknown> = { text: cursor }, source_id: string | null = cursor): AgentEvent => ({
   agent_id: 'a', cursor, kind, payload, source_id, ts: '2026-01-01T00:00:00Z', truncated: false,
 });
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); fixture.setSource('none'); fixture.setAgents([]); vi.clearAllMocks(); });
 
 describe('agent chat', () => {
+  it('T15: shows known toolbar facts and names the target agent in the placeholder', async () => {
+    fixture.setAgents([{ ...runningAgent(), config: { cli: 'codex', label: 'Frontend', model: 'fixture-model', flags: ['-c', 'model_reasoning_effort="high"'] } }]);
+    fixture.setSource('transcript');
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [] } });
+    const editor = view.getByRole('textbox', { name: 'Message Frontend' });
+    editor.focus();
+    expect(view.getByText('Full access')).toBeTruthy();
+    expect(view.getByText('fixture-model')).toBeTruthy();
+    expect(view.getByText('high')).toBeTruthy();
+    editor.textContent = 'Fixture toolbar send'; await fireEvent.input(editor);
+    await fireEvent.click(view.getByRole('button', { name: 'Send message' }));
+    await waitFor(() => expect(fixture.invoke).toHaveBeenCalledWith('operator_inject', {
+      request: { session_id: 's', target_agent_id: 'a', message: 'Fixture toolbar send' },
+    }));
+    expect(document.activeElement).toBe(editor);
+    fixture.setAgents([]);
+  });
+
+  it('T15: omits unknown and protocol access facts', async () => {
+    fixture.setAgents([runningAgent()]); fixture.setSource('protocol');
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [] } });
+    expect(view.queryByText('Full access')).toBeNull();
+    expect(view.container.querySelector('.model')).toBeNull();
+    expect(view.container.querySelector('.effort')).toBeNull();
+    fixture.setAgents([]); await tick();
+    expect(view.getByRole('textbox', { name: 'Message this agent…' })).toBeTruthy();
+  });
+  it('T15: removes a portalled toolbar menu when chat is hidden without taking focus', async () => {
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [] } });
+    const editor = view.getByRole('textbox'); editor.focus();
+    await fireEvent.click(view.getByRole('button', { name: 'Add mention or command' }));
+    expect(view.getByRole('menu', { name: 'Add to message' })).toBeTruthy();
+    await view.rerender({ sessionId: 's', agentId: 'a', events: [], visible: false });
+    expect(view.queryByRole('menu', { name: 'Add to message' })).toBeNull();
+    expect(document.activeElement).toBe(editor);
+  });
   it('renders replacement assistant snapshots, deltas and distinct user source identities', () => {
     const rows = transcriptRows([
       event('1', 'assistant_delta', { text: 'Hel' }, 'message'), event('2', 'assistant_delta', { text: 'lo' }, 'message'),

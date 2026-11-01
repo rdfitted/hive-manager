@@ -43,6 +43,16 @@ async function write(editor: HTMLElement, text: string) {
 }
 
 describe('composer card contract (G20)', () => {
+  it('T15: closes the portalled add menu when sending begins without moving editor focus', async () => {
+    const view = render(Harness, { onsubmit: vi.fn(), sending: false });
+    const editor = view.getByRole('textbox'); editor.focus();
+    await fireEvent.click(view.getByRole('button', { name: 'Add mention or command' }));
+    expect(view.getByRole('menu', { name: 'Add to message' })).toBeTruthy();
+    await view.rerender({ sending: true });
+    expect(view.queryByRole('menu', { name: 'Add to message' }), 'sending must close the portalled toolbar menu').toBeNull();
+    expect(document.activeElement).toBe(editor);
+  });
+
   it('Enter submits once, Shift+Enter stays a newline, and no submit handler never clears text', async () => {
     const onsubmit = vi.fn();
     const view = render(Composer, { sessionId: null, persistDraft: false, onsubmit });
