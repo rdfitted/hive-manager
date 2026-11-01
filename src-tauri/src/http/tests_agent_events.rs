@@ -525,6 +525,44 @@ fn restart_source_mode_prevents_double_feed_and_preserves_protocol_history() {
 }
 
 #[tokio::test]
+async fn initial_sse_configuration_does_not_block_the_async_executor() {
+    use std::{sync::mpsc, time::Duration};
+    let (_temp, state, app) = setup();
+    state
+        .session_controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session",
+            "D:/fixture/project",
+            &["worker-a"],
+        ));
+    let controller = state.session_controller.clone();
+    let (held, ready) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = controller.write();
+        held.send(()).unwrap();
+        // Bound the old blocking handler's failure path without hanging the test.
+        released.recv_timeout(Duration::from_secs(3)).is_ok()
+    });
+    ready.recv_timeout(Duration::from_secs(3)).unwrap();
+    let (started, request_started) = tokio::sync::oneshot::channel();
+    let request = tokio::spawn(async move {
+        started.send(()).unwrap();
+        get(&app, "/api/sessions/session/agent-events/stream").await
+    });
+    request_started.await.unwrap();
+    let executor_responsive = release.send(()).is_ok();
+    let released_by_executor = holder.join().unwrap();
+    let response = request.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        executor_responsive && released_by_executor,
+        "async executor must remain free to release the controller during initial SSE configure"
+    );
+}
+
+#[tokio::test]
 async fn cold_http_preserves_saved_protocol_without_registration() {
     let (temp, state, app) = setup();
     let mut session = make_test_session_with_agents("session", "D:/fixture/project", &["worker-a"]);

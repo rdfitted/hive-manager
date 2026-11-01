@@ -280,7 +280,11 @@ pub async fn stream_agent_events(
         .transpose()
         .map_err(ApiError::bad_request)?
         .unwrap_or_default();
-    let agents = configure(&state, &id)?;
+    let initial_state = state.clone();
+    let initial_id = id.clone();
+    let agents = tokio::task::spawn_blocking(move || configure(&initial_state, &initial_id))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))??;
     // Removed roster members cannot be read, but must not poison browser reconnects.
     checkpoint.retain(|key, _| agents.iter().any(|agent| &agent.agent_id == key));
     // Subscribe BEFORE replay. Broadcasts only wake the durable reader; lag cannot
