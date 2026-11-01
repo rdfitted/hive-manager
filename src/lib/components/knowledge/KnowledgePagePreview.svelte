@@ -3,8 +3,7 @@
   import { X } from 'phosphor-svelte';
   import Skeleton from '$lib/components/Skeleton.svelte';
   import SkelBar from '$lib/components/SkelBar.svelte';
-  import MarkdownInline from './MarkdownInline.svelte';
-  import { parseMarkdown } from '$lib/knowledge/markdown';
+  import MarkdownBlocks from '../ui/MarkdownBlocks.svelte';
   import { describeOmission, folderColor, formatLastUpdated } from '$lib/knowledge/graphUtils';
   import type { KnowledgePage } from '$lib/knowledge/types';
 
@@ -33,7 +32,6 @@
     returnFocus = null,
   }: Props = $props();
   let closeButton: HTMLButtonElement;
-  let blocks = $derived(page ? parseMarkdown(page.content) : []);
 
   onMount(() => {
     closeButton.focus({ preventScroll: true });
@@ -118,31 +116,7 @@
       </div>
 
       <article class="markdown lattice-scroll-content">
-        {#each blocks as block, index (index)}
-          {#if block.type === 'heading'}
-            {#if block.level === 1}<h1><MarkdownInline text={block.text} /></h1>
-            {:else if block.level === 2}<h2><MarkdownInline text={block.text} /></h2>
-            {:else if block.level === 3}<h3><MarkdownInline text={block.text} /></h3>
-            {:else}<h4><MarkdownInline text={block.text} /></h4>{/if}
-          {:else if block.type === 'paragraph'}
-            <p><MarkdownInline text={block.text} /></p>
-          {:else if block.type === 'quote'}
-            <blockquote><MarkdownInline text={block.text} /></blockquote>
-          {:else if block.type === 'code'}
-            <div class="code-block">
-              {#if block.language}<span>{block.language}</span>{/if}
-              <pre class="lattice-scroll-content"><code>{block.text}</code></pre>
-            </div>
-          {:else if block.type === 'list'}
-            {#if block.ordered}
-              <ol>{#each block.items as item}<li><MarkdownInline text={item} /></li>{/each}</ol>
-            {:else}
-              <ul>{#each block.items as item}<li><MarkdownInline text={item} /></li>{/each}</ul>
-            {/if}
-          {:else}
-            <hr />
-          {/if}
-        {/each}
+        <MarkdownBlocks source={page.content} />
       </article>
     {/if}
   </Skeleton>
@@ -168,12 +142,12 @@
   .preview-kicker,
   .folder-label {
     font: var(--text-micro) var(--font-body);
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .page-head {
     padding: var(--space-5) var(--space-5) var(--space-4);
-    background: linear-gradient(150deg, color-mix(in srgb, var(--accent-cyan) 4%, transparent), transparent 52%);
+    background: linear-gradient(150deg, color-mix(in srgb, var(--accent) 4%, transparent), transparent 52%);
     box-shadow: var(--edge-seam);
   }
 
@@ -205,13 +179,13 @@
 
   .page-meta code {
     overflow: hidden;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .page-meta .truncated {
-    color: var(--accent-amber);
+    color: var(--accent);
   }
 
   .preview :global(.preview-skeleton) {
@@ -254,86 +228,6 @@
     line-height: 1.65;
   }
 
-  .markdown h1,
-  .markdown h2,
-  .markdown h3,
-  .markdown h4 {
-    margin: 1.55em 0 0.55em;
-    color: var(--text-primary);
-    font-family: var(--font-body);
-    line-height: 1.2;
-  }
-
-  .markdown h1:first-child,
-  .markdown h2:first-child,
-  .markdown h3:first-child {
-    margin-top: 0;
-  }
-
-  .markdown h1 { font-size: 22px; }
-  .markdown h2 { font-size: 19px; }
-  .markdown h3 { font-size: 16px; }
-  .markdown h4 { font-size: 14px; color: var(--accent-chrome); }
-
-  .markdown p {
-    margin: 0 0 1em;
-    white-space: pre-wrap;
-  }
-
-  .markdown ul,
-  .markdown ol {
-    margin: 0 0 1em;
-    padding-left: 1.5em;
-  }
-
-  .markdown li {
-    margin-bottom: 0.3em;
-  }
-
-  .markdown li::marker {
-    color: var(--accent-cyan);
-  }
-
-  .markdown blockquote {
-    margin: 1em 0;
-    padding: var(--space-2) var(--space-3);
-    border-left: 2px solid var(--accent-amber);
-    background: color-mix(in srgb, var(--accent-amber) 5%, transparent);
-    color: var(--text-secondary);
-    white-space: pre-wrap;
-  }
-
-  .markdown hr {
-    margin: var(--space-5) 0;
-    border: 0;
-    height: 1px;
-    box-shadow: var(--edge-seam), var(--edge-lip);
-  }
-
-  .code-block {
-    position: relative;
-    margin: 1em 0;
-    padding: 1px;
-    background: var(--bg-void);
-    box-shadow: var(--edge-seam), var(--edge-lip);
-  }
-
-  .code-block > span {
-    position: absolute;
-    top: 5px;
-    right: 7px;
-    color: var(--text-disabled);
-    font: 9px var(--font-mono);
-  }
-
-  .code-block pre {
-    margin: 0;
-    padding: var(--space-3);
-    overflow: auto;
-    color: var(--accent-chrome);
-    font: 11px/1.55 var(--font-mono);
-  }
-
   .preview-state {
     flex: 1;
     display: flex;
@@ -342,7 +236,7 @@
     justify-content: center;
     gap: var(--space-2);
     padding: var(--space-5);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     text-align: center;
   }
 

@@ -3,7 +3,8 @@ export type MarkdownBlock =
   | { type: 'paragraph'; text: string }
   | { type: 'quote'; text: string }
   | { type: 'code'; language: string; text: string }
-  | { type: 'list'; ordered: boolean; items: string[] }
+  | { type: 'list'; ordered: boolean; items: string[]; start?: number; children?: Record<number, MarkdownBlock[]> }
+  | { type: 'table'; headers: string[]; align: ('left' | 'center' | 'right' | null)[]; rows: string[][] }
   | { type: 'rule' };
 
 export type MarkdownInline =
@@ -58,19 +59,57 @@ export function parseInlineMarkdown(source: string): MarkdownInline[] {
   return tokens.length > 0 ? tokens : [{ type: 'text', text: source }];
 }
 
-function isBlockStart(line: string): boolean {
+function tableCells(line: string): string[] {
+  const row = line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '');
+  const cells: string[] = [];
+  let cell = '';
+  let code = false;
+  for (let index = 0; index < row.length; index++) {
+    const character = row[index];
+    if (character === '\\' && row[index + 1] === '|') { cell += '|'; index++; }
+    else if (character === '`') { code = !code; cell += character; }
+    else if (character === '|' && !code) { cells.push(cell.trim()); cell = ''; }
+    else cell += character;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function isTableStart(line: string, next = ''): boolean {
+  if (!line.includes('|')) return false;
+  const headers = tableCells(line);
+  const separator = tableCells(next);
+  return headers.length === separator.length && separator.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function listItem(line: string) {
+  const match = line.match(/^(\s*)(?:([-*+])|(\d+)[.)])\s+(.*)$/);
+  if (!match) return null;
+  return {
+    indent: match[1].replace(/\t/g, '    ').length,
+    contentIndent: match[0].slice(0, match[0].length - match[4].length).replace(/\t/g, '    ').length,
+    ordered: match[3] !== undefined,
+    number: match[3] ? Number(match[3]) : 1,
+    text: match[4],
+  };
+}
+
+function isBlockStart(line: string, next = ''): boolean {
   return (
     /^#{1,6}\s+/.test(line) ||
     /^```/.test(line) ||
     /^>\s?/.test(line) ||
     /^\s*[-*+]\s+/.test(line) ||
     /^\s*\d+[.)]\s+/.test(line) ||
-    /^\s*(?:---+|___+|\*\*\*+)\s*$/.test(line)
+    /^\s*(?:---+|___+|\*\*\*+)\s*$/.test(line) ||
+    isTableStart(line, next)
   );
 }
 
 /** A small, safe block-level markdown parser. Svelte escapes every text field. */
-export function parseMarkdown(source: string): MarkdownBlock[] {
+export function parseMarkdown(source: string, depth = 0): MarkdownBlock[] {
+  // Bound recursion for deeply indented, untrusted output; retain it as readable text.
+  if (depth >= 32) return [{ type: 'paragraph', text: source }];
   const lines = source.replace(/\r\n?/g, '\n').split('\n');
   const blocks: MarkdownBlock[] = [];
   let index = 0;
@@ -119,25 +158,56 @@ export function parseMarkdown(source: string): MarkdownBlock[] {
       continue;
     }
 
-    const unordered = line.match(/^\s*[-*+]\s+(.+)/);
-    const ordered = line.match(/^\s*\d+[.)]\s+(.+)/);
-    if (unordered || ordered) {
-      const isOrdered = Boolean(ordered);
-      const pattern = isOrdered ? /^\s*\d+[.)]\s+(.+)/ : /^\s*[-*+]\s+(.+)/;
-      const items: string[] = [];
-      while (index < lines.length) {
-        const item = lines[index].match(pattern);
-        if (!item) break;
-        items.push(item[1]);
-        index += 1;
+    if (isTableStart(line, lines[index + 1])) {
+      const headers = tableCells(line);
+      const align = tableCells(lines[index + 1]).map((cell): 'left' | 'center' | 'right' | null =>
+        cell.startsWith(':') && cell.endsWith(':') ? 'center' : cell.endsWith(':') ? 'right' : cell.startsWith(':') ? 'left' : null);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && lines[index].trim() && lines[index].includes('|')) {
+        const cells = tableCells(lines[index++]);
+        rows.push(headers.map((_, column) => cells[column] ?? ''));
       }
-      blocks.push({ type: 'list', ordered: isOrdered, items });
+      blocks.push({ type: 'table', headers, align, rows });
+      continue;
+    }
+
+    const first = listItem(line);
+    if (first) {
+      const items: string[] = [];
+      const children: Record<number, MarkdownBlock[]> = {};
+      while (index < lines.length) {
+        const item = listItem(lines[index]);
+        if (!item || item.indent !== first.indent || item.ordered !== first.ordered) break;
+        items.push(item.text);
+        index += 1;
+        const continuation: string[] = [];
+        while (index < lines.length) {
+          if (!lines[index].trim()) {
+            let next = index + 1;
+            while (next < lines.length && !lines[next].trim()) next++;
+            const sibling = next < lines.length ? listItem(lines[next]) : null;
+            if (sibling && sibling.indent === first.indent && sibling.ordered === first.ordered) { index = next; break; }
+            if (next >= lines.length || (lines[next].match(/^\s*/)?.[0].replace(/\t/g, '    ').length ?? 0) <= first.indent) break;
+          } else {
+            const indent = lines[index].match(/^\s*/)?.[0].replace(/\t/g, '    ').length ?? 0;
+            if (indent <= first.indent) break;
+          }
+          const expanded = lines[index++].replace(/^\t+/, (tabs) => '    '.repeat(tabs.length));
+          continuation.push(expanded.slice(Math.min(item.contentIndent, expanded.match(/^ */)?.[0].length ?? 0)));
+        }
+        if (continuation.some((entry) => entry.trim())) children[items.length - 1] = parseMarkdown(continuation.join('\n'), depth + 1);
+      }
+      blocks.push({ type: 'list', ordered: first.ordered, items,
+        ...(first.ordered && first.number !== 1 ? { start: first.number } : {}),
+        ...(Object.keys(children).length ? { children } : {}),
+      });
       continue;
     }
 
     const paragraph = [line.trim()];
     index += 1;
-    while (index < lines.length && lines[index].trim() && !isBlockStart(lines[index])) {
+    while (index < lines.length && lines[index].trim() && !isBlockStart(lines[index], lines[index + 1])) {
       paragraph.push(lines[index].trim());
       index += 1;
     }

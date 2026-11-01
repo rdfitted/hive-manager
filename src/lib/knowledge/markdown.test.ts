@@ -40,4 +40,36 @@ const answer = 42;
       { type: 'text', text: ')' },
     ]);
   });
+
+  it('parses GFM tables with alignment, escaped pipes, inline code and uneven rows', () => {
+    expect(parseMarkdown('Intro\n\n| Name | Value | Note |\n| :--- | ---: | :---: |\n| **one** | 2 | a\\|b |\n| two | `x|y` |\n\nAfter')).toEqual([
+      { type: 'paragraph', text: 'Intro' },
+      { type: 'table', headers: ['Name', 'Value', 'Note'], align: ['left', 'right', 'center'], rows: [['**one**', '2', 'a|b'], ['two', '`x|y`', '']] },
+      { type: 'paragraph', text: 'After' },
+    ]);
+  });
+
+  it('keeps blank-separated bold numbered items together and nests lists under their parent', () => {
+    expect(parseMarkdown('3. **First**\n   - child\n     7. **Nested**\n\n4. **Second**')).toEqual([
+      { type: 'list', ordered: true, start: 3, items: ['**First**', '**Second**'], children: {
+        0: [{ type: 'list', ordered: false, items: ['child'], children: {
+          0: [{ type: 'list', ordered: true, start: 7, items: ['**Nested**'] }],
+        } }],
+      } },
+    ]);
+  });
+
+  it.each([
+    '#\n**unfinished [link](\n| malformed | table\n| -- |\n<script>literal</script>',
+    '```html\n<img src=x onerror=alert(1)>',
+    Array.from({ length: 80 }, (_, level) => `${'  '.repeat(level)}- depth ${level}`).join('\n'),
+    '[data](data:text/html,hello) [relative](/local) [bad](not a url)',
+  ])('keeps malformed or deeply nested output readable without throwing: %s', (source) => {
+    expect(() => parseMarkdown(source)).not.toThrow();
+    expect(() => parseInlineMarkdown(source)).not.toThrow();
+    expect(parseMarkdown(source).length).toBeGreaterThan(0);
+    for (const token of parseInlineMarkdown(source)) {
+      if (token.type === 'link') expect(new URL(token.href).protocol).toMatch(/^https?:$/);
+    }
+  });
 });
