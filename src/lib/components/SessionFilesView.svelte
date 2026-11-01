@@ -338,7 +338,7 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
-    background: var(--bg-void);
+    background: var(--canvas);
     color: var(--text-primary);
   }
 
@@ -349,7 +349,7 @@
     gap: 8px;
     padding: 9px 10px;
     /* Dense section header, not a standalone panel surface. */
-    background: var(--bg-surface);
+    background: var(--surface);
     box-shadow: var(--edge-seam);
   }
 
@@ -368,10 +368,10 @@
 
   .read-only-badge {
     padding: 2px 5px;
-    box-shadow: inset 0 0 0 1px var(--border-structural);
+    box-shadow: var(--edge-lip);
     border-radius: var(--radius-sm);
     color: var(--text-muted);
-    font-size: 9px;
+    font-size: var(--text-micro);
     font-weight: 600;
   }
 
@@ -383,7 +383,7 @@
     padding: 7px 10px;
     color: var(--status-error);
     /* Semantic inline error strip, not a structural panel. */
-    background: var(--bg-surface);
+    background: var(--surface);
     box-shadow: inset 0 -1px 0 var(--status-error);
     font-size: 11px;
   }
@@ -461,7 +461,7 @@
     padding: 6px 8px;
     gap: 8px;
     /* Sticky pagination controls remain a control strip, not a panel. */
-    background: var(--bg-surface);
+    background: var(--surface);
     box-shadow: var(--edge-seam-top);
   }
 
@@ -486,7 +486,7 @@
   }
 
   .folder-icon {
-    color: var(--accent-amber);
+    color: var(--accent);
   }
 
   .entry-name {
@@ -517,7 +517,7 @@
     gap: 8px;
     padding: 8px 10px;
     /* File metadata header, not a standalone panel surface. */
-    background: var(--bg-surface);
+    background: var(--surface);
     box-shadow: var(--edge-seam);
     font-family: var(--font-body);
     font-size: 10px;
@@ -549,7 +549,7 @@
     padding: 12px;
     overflow: auto;
     color: var(--text-primary);
-    background: var(--bg-void);
+    background: var(--canvas);
     font-family: var(--font-mono);
     font-size: 11px;
     line-height: 1.5;
@@ -568,7 +568,7 @@
     min-height: 100%;
     padding: 24px 16px;
     box-sizing: border-box;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 12px;
     text-align: center;
   }
@@ -593,7 +593,7 @@
 
   .empty-state p {
     margin: 4px 0 0;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-size: 13px;
   }
 

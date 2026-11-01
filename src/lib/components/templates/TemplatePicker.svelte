@@ -128,7 +128,7 @@
     .search-box :global(.search-icon) {
         position: absolute;
         left: 12px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         opacity: 0.7;
         pointer-events: none;
     }
@@ -151,7 +151,7 @@
         padding: 12px;
         display: flex;
         gap: 12px;
-        box-shadow: inset 0 0 0 1px var(--border-structural);
+        box-shadow: var(--edge-lip);
         border-radius: var(--radius-md);
     }
 
@@ -177,12 +177,12 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        background: color-mix(in srgb, var(--bg-void) 80%, transparent);
+        background: var(--accent-tint);
         border-radius: var(--radius-sm);
     }
 
     .card-icon.builtin {
-        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 30%, transparent);
+        color: var(--accent);
     }
 
     .card-info {
@@ -210,9 +210,9 @@
     }
 
     .badge {
-        font-size: 9px;
-        background: color-mix(in srgb, var(--accent-cyan) 20%, transparent);
-        color: var(--accent-cyan);
+        font-size: var(--text-micro);
+        background: var(--accent-tint);
+        color: var(--accent);
         padding: 1px 4px;
         border-radius: var(--radius-sm);
         font-weight: 700;
@@ -220,7 +220,7 @@
 
     .description {
         font-size: 11px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         display: -webkit-box;
         -webkit-line-clamp: 2;
         line-clamp: 2;
@@ -236,8 +236,8 @@
     }
 
     .mode-tag, .cells-tag {
-        font-size: 9px;
-        color: var(--text-disabled);
+        font-size: var(--text-micro);
+        color: var(--text-muted);
         font-weight: 700;
         font-family: var(--font-body);
     }
@@ -245,7 +245,7 @@
     .empty-state {
         padding: 40px;
         text-align: center;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         font-style: italic;
     }
 </style>

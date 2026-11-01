@@ -194,10 +194,9 @@
 
   .view-tabs {
     display: flex;
-    background: var(--bg-void);
+    background: var(--track);
     padding: 4px;
-    border-radius: var(--radius-md);
-    box-shadow: var(--edge-seam), var(--edge-lip);
+    border-radius: var(--radius-full);
     gap: 4px;
   }
 
@@ -219,7 +218,7 @@
     align-items: center;
     gap: 10px;
     padding: 10px 14px;
-    background: var(--bg-void);
+    background: var(--toolbar);
     box-shadow: var(--edge-seam);
   }
 
@@ -232,15 +231,15 @@
 
   .orchestrator-terminal {
     height: 300px;
-    background: var(--bg-void);
+    background: var(--canvas);
   }
 
   .cli-badge {
     font-size: 11px;
     padding: 2px 8px;
     border-radius: var(--radius-sm);
-    background: var(--accent-cyan);
-    color: var(--bg-void);
+    background: var(--accent);
+    color: var(--on-accent);
     font-weight: 500;
   }
 
@@ -266,7 +265,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 10px 14px;
-    background: var(--bg-void);
+    background: var(--toolbar);
     box-shadow: var(--edge-seam);
   }
 
@@ -279,12 +278,12 @@
   .terminal-container {
     flex: 1;
     min-height: 250px;
-    background: var(--bg-void);
+    background: var(--canvas);
   }
 
   .variant-actions {
     padding: 12px;
-    background: var(--bg-void);
+    background: var(--canvas);
     box-shadow: var(--edge-seam-top);
     display: flex;
     justify-content: center;
@@ -299,7 +298,7 @@
     align-items: center;
     gap: 10px;
     padding: 12px 16px;
-    background: var(--bg-void);
+    background: var(--toolbar);
     box-shadow: var(--edge-seam);
   }
 
@@ -337,7 +336,7 @@
   .modal-overlay {
     position: fixed;
     inset: 0;
-    background: color-mix(in srgb, var(--bg-void) 70%, transparent);
+    background: color-mix(in srgb, var(--canvas) 70%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -356,7 +355,7 @@
   }
 
   .modal p {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     line-height: 1.5;
     margin-bottom: 24px;
   }

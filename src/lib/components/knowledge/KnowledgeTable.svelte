@@ -91,7 +91,7 @@
     min-height: 0;
     flex: 1;
     overflow: auto;
-    background: var(--bg-void);
+    background: var(--canvas);
   }
 
   .knowledge-table {
@@ -105,28 +105,17 @@
   }
 
   .sort-mark {
-    color: var(--text-disabled);
+    color: var(--text-muted);
   }
 
   .sort-mark.active {
-    color: var(--accent-cyan);
+    color: var(--accent);
   }
 
-  /* Dense rows use a quieter wash than the 5% active-panel convention. */
+  /* Selection uses the shared tint and text, without a side stripe. */
   .knowledge-table tbody tr.selected td {
-    background: color-mix(in srgb, var(--accent-cyan) 4%, var(--bg-panel));
-    box-shadow:
-      var(--edge-seam),
-      var(--elev-1),
-      var(--edge-lip);
-  }
-
-  .knowledge-table tbody tr.selected td:first-child {
-    box-shadow:
-      inset 2px 0 var(--accent-cyan),
-      var(--edge-seam),
-      var(--elev-1),
-      var(--edge-lip);
+    background: var(--accent-tint);
+    color: var(--accent);
   }
 
   td:first-child {
@@ -141,7 +130,7 @@
   .path,
   .degree span {
     margin-top: 2px;
-    color: var(--text-disabled);
+    color: var(--text-muted);
     font-size: var(--text-micro);
   }
 
@@ -161,6 +150,6 @@
 
   .updated {
     white-space: nowrap;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 </style>

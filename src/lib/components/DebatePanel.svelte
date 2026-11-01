@@ -324,7 +324,7 @@
     flex-direction: column;
     height: 100%;
     padding: 16px;
-    background: var(--bg-void);
+    background: var(--canvas);
     gap: 16px;
     overflow-y: auto;
   }
@@ -346,8 +346,8 @@
   .state-tag {
     font-size: 11px;
     font-weight: 700;
-    background: var(--accent-cyan);
-    color: var(--bg-void);
+    background: var(--accent);
+    color: var(--on-accent);
     padding: 3px 8px;
     border-radius: var(--radius-sm);
   }
@@ -365,10 +365,9 @@
   .view-tabs {
     display: flex;
     /* Tab-group well remains distinct from the surrounding panel chrome. */
-    background: color-mix(in srgb, var(--text-primary) 3%, var(--bg-surface));
+    background: var(--track);
     padding: 4px;
-    border-radius: var(--radius-md);
-    box-shadow: var(--edge-seam), var(--edge-lip);
+    border-radius: var(--radius-full);
     gap: 4px;
   }
 
@@ -401,7 +400,7 @@
     gap: 8px;
     padding: 10px 14px;
     /* Fixed terminal header keeps a subtle chrome tint above terminal content. */
-    background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
+    background: var(--toolbar);
     box-shadow: var(--edge-seam);
   }
 
@@ -417,12 +416,12 @@
   }
 
   .section-header :global(.icon-judge) {
-    color: var(--accent-cyan);
+    color: var(--accent);
   }
 
   .orchestrator-terminal {
     height: 250px;
-    background: var(--bg-void);
+    background: var(--canvas);
   }
 
   .debaters-terminals-grid {
@@ -443,7 +442,7 @@
     align-items: center;
     padding: 10px 14px;
     /* Fixed terminal header keeps a subtle chrome tint above terminal content. */
-    background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
+    background: var(--toolbar);
     box-shadow: var(--edge-seam);
   }
 
@@ -458,13 +457,13 @@
     padding: 1px 6px;
     border-radius: var(--radius-sm);
     background: var(--border-structural);
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-family: var(--font-mono);
   }
 
   .terminal-container {
     height: 350px;
-    background: var(--bg-void);
+    background: var(--canvas);
   }
 
   /* Comparison View Styles */
@@ -482,12 +481,12 @@
 
   .debater-status-card {
     overflow: hidden;
-    transition: background-color var(--motion-duration-standard) var(--motion-ease-standard);
+    transition: background-color var(--motion-ui);
   }
 
   .debater-status-card.completed {
     /* Completed-card tint is semantic state layered over the structural panel. */
-    background: color-mix(in srgb, var(--status-success) 2%, var(--bg-panel));
+    background: color-mix(in srgb, var(--status-success) 2%, var(--surface));
   }
 
   .debater-card-header {
@@ -496,7 +495,7 @@
     align-items: center;
     padding: 12px 16px;
     /* Fixed comparison header keeps a subtle chrome tint above card content. */
-    background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
+    background: var(--toolbar);
     box-shadow: var(--edge-seam);
   }
 
@@ -513,8 +512,8 @@
     display: inline-block;
   }
 
-  .status-dot.queued { background: var(--text-disabled); }
-  .status-dot.running { background: var(--accent-cyan); }
+  .status-dot.queued { background: var(--state-queued); }
+  .status-dot.running { background: var(--accent); }
   .status-dot.completed { background: var(--status-success); }
   .status-dot.failed { background: var(--status-error); }
 
@@ -527,7 +526,7 @@
   .status-text {
     font-size: 11px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .debater-card-body {
@@ -545,7 +544,7 @@
 
   .data-label {
     font-size: 11px;
-    color: var(--text-disabled);
+    color: var(--text-muted);
     font-weight: 700;
   }
 
@@ -556,8 +555,8 @@
 
   .stance-badge {
     align-self: flex-start;
-    background: color-mix(in srgb, var(--accent-cyan) 12%, transparent);
-    color: var(--accent-cyan);
+    background: var(--accent-tint);
+    color: var(--accent);
     padding: 2px 8px;
     border-radius: var(--radius-sm);
     font-weight: 600;
@@ -569,7 +568,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .filepath {
@@ -589,7 +588,7 @@
     display: flex;
     align-items: center;
     /* Captured-PR banner intentionally uses a success-state surface. */
-    background: color-mix(in srgb, var(--status-success) 10%, var(--bg-surface));
+    background: color-mix(in srgb, var(--status-success) 10%, var(--surface));
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-success) 20%, transparent);
     border-radius: var(--radius-md);
     padding: 16px;
@@ -617,7 +616,7 @@
   .pr-info p {
     margin: 0;
     font-size: 12px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
   }
 
   .verdict-card {
@@ -630,7 +629,7 @@
     gap: 10px;
     padding: 12px 16px;
     /* Fixed verdict header keeps a subtle chrome tint above report content. */
-    background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
+    background: var(--toolbar);
     box-shadow: var(--edge-seam);
   }
 
@@ -643,8 +642,8 @@
   .report-path-badge {
     font-size: 10px;
     font-family: var(--font-mono);
-    color: var(--text-disabled);
-    background: color-mix(in srgb, var(--bg-void) 40%, transparent);
+    color: var(--text-muted);
+    background: color-mix(in srgb, var(--canvas) 40%, transparent);
     padding: 2px 8px;
     border-radius: var(--radius-sm);
     margin-left: auto;

@@ -40,7 +40,7 @@
   .inline-markdown :global(code) {
     padding: 2px 5px;
     background: var(--surface-raised);
-    box-shadow: var(--edge-seam), var(--edge-lip);
+    border-radius: var(--radius-md);
     color: var(--accent-chrome);
     font: 0.9em var(--font-mono);
   }
@@ -55,6 +55,6 @@
     color: var(--accent);
     font-family: var(--font-body);
   }
-  .wikilink::before { content: '[['; color: var(--text-disabled); }
-  .wikilink::after { content: ']]'; color: var(--text-disabled); }
+  .wikilink::before { content: '[['; color: var(--text-muted); }
+  .wikilink::after { content: ']]'; color: var(--text-muted); }
 </style>

@@ -60,13 +60,12 @@
     .summary-item {
         flex: 1;
         padding: 8px;
-        /* Semantic result tile: the mandated sunken tone is not a structural panel surface. */
-        background: var(--bg-sunken);
+        background: var(--surface-raised);
         border-radius: var(--radius-lg);
         display: flex;
         flex-direction: column;
         align-items: center;
-        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 5%, transparent);
+        box-shadow: var(--depth-1);
     }
 
     .summary-item.pass {
@@ -86,7 +85,7 @@
 
     .label {
         font-size: 10px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
     }
 
     .summary-item.pass .count { color: var(--status-success); }
@@ -100,7 +99,7 @@
 
     .failures-header {
         font-size: 11px;
-        color: var(--text-disabled);
+        color: var(--text-muted);
         font-weight: 700;
     }
 
@@ -125,9 +124,9 @@
         margin: 0;
     font-family: var(--font-mono);
         font-size: 11px;
-        color: var(--text-secondary);
-        /* Inset failure output remains sunken inside the error-detail surface. */
-        background: var(--bg-sunken);
+        color: var(--text-muted);
+        /* Raw failure output uses the input tone inside the error detail. */
+        background: var(--input);
         padding: 6px;
         border-radius: var(--radius-md);
         overflow-x: auto;

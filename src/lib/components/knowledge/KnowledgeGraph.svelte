@@ -654,8 +654,8 @@
     min-height: 320px;
     overflow: hidden;
     background:
-      radial-gradient(circle at 50% 45%, color-mix(in srgb, var(--accent-cyan) 5%, transparent), transparent 54%),
-      var(--bg-void);
+      radial-gradient(circle at 50% 45%, color-mix(in srgb, var(--accent) 5%, transparent), transparent 54%),
+      var(--canvas);
   }
 
   svg {
@@ -669,7 +669,7 @@
   .edges line {
     stroke-width: 1;
     stroke-opacity: 0.38;
-    transition: stroke-opacity var(--motion-duration-fast) ease;
+    transition: stroke-opacity var(--motion-ui);
   }
 
   .edges line.related {
@@ -684,7 +684,7 @@
     cursor: grab;
     outline: none;
     opacity: 0.9;
-    transition: opacity var(--motion-duration-fast) ease;
+    transition: opacity var(--motion-ui);
   }
 
   .node:active {
@@ -696,7 +696,7 @@
   }
 
   .node-core {
-    stroke: var(--bg-void);
+    stroke: var(--canvas);
     stroke-width: 2;
   }
 
@@ -726,14 +726,14 @@
     font-family: var(--font-body);
     font-size: 10px;
     paint-order: stroke;
-    stroke: var(--bg-void);
+    stroke: var(--canvas);
     stroke-width: 3px;
     stroke-linejoin: round;
     pointer-events: none;
   }
 
   .pin-mark {
-    fill: var(--bg-void);
+    fill: var(--canvas);
     stroke: var(--text-primary);
     stroke-width: 1;
     pointer-events: none;
@@ -749,7 +749,7 @@
     gap: var(--space-1);
     padding: var(--space-1);
     /* Floating graph-control scrim, not a structural panel surface. */
-    background: color-mix(in srgb, var(--bg-panel) 91%, transparent);
+    background: color-mix(in srgb, var(--surface) 91%, transparent);
     border-radius: var(--radius-md);
     box-shadow: var(--elev-2), var(--edge-lip);
     backdrop-filter: blur(8px);
@@ -757,7 +757,7 @@
 
   .pin-count {
     padding: 0 6px;
-    color: var(--text-disabled);
+    color: var(--text-muted);
     font: 10px var(--font-body);
   }
 
@@ -765,7 +765,7 @@
     position: absolute;
     left: var(--space-3);
     bottom: var(--space-3);
-    color: var(--text-disabled);
+    color: var(--text-muted);
     font: 10px var(--font-body);
     pointer-events: none;
   }

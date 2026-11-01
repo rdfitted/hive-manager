@@ -90,11 +90,10 @@
         display: flex;
         flex-direction: column;
         gap: 12px;
-        /* Semantic inset summary: the mandated sunken tone is distinct from a structural panel. */
-        background: var(--bg-sunken);
+        background: var(--surface-raised);
         padding: 12px;
         border-radius: var(--radius-lg);
-        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 5%, transparent);
+        box-shadow: var(--depth-1);
     }
 
     .artifact-summary.compact {
@@ -133,8 +132,8 @@
     }
 
     .label {
-        font-size: 9px;
-        color: var(--text-secondary);
+        font-size: var(--text-micro);
+        color: var(--text-muted);
     }
 
     .confidence-box {
@@ -156,7 +155,7 @@
         width: 100%;
         height: 100%;
         transform-origin: left center;
-        transition: transform var(--motion-duration-arrival) var(--motion-ease-arrival);
+        transition: transform var(--motion-ui);
     }
 
     .fill.high { background: var(--status-success); }
@@ -166,7 +165,7 @@
     .confidence-text {
         font-size: 10px;
         font-weight: 700;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         font-family: var(--font-body);
     }
 
@@ -192,7 +191,7 @@
 
     .detail-header {
         font-size: 10px;
-        color: var(--text-disabled);
+        color: var(--text-muted);
         font-weight: 800;
     }
 
@@ -206,7 +205,7 @@
         display: flex;
         align-items: center;
         gap: 6px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
     }
 
     .file-name {
@@ -219,7 +218,7 @@
 
     .more-files {
         font-size: 10px;
-        color: var(--text-disabled);
+        color: var(--text-muted);
         padding-left: 18px;
         font-style: italic;
     }

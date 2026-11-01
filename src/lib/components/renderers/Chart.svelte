@@ -157,7 +157,7 @@
 
   const plotWidth = VIEW_WIDTH - PADDING_LEFT - PADDING_RIGHT;
   const plotHeight = VIEW_HEIGHT - PADDING_TOP - PADDING_BOTTOM;
-  const palette = ['var(--accent-cyan)', 'var(--accent-amber)', 'var(--status-success)', 'var(--accent-chrome)'];
+  const palette = ['var(--accent)', 'var(--status-warning)', 'var(--status-success)', 'var(--accent-chrome)'];
 
   const chart = $derived(normalizeChart(data));
   const values = $derived(chart.points.map((point) => point.value));
@@ -274,9 +274,8 @@
 
 <style>
   .chart-widget {
-    /* Tool results are nested work products, so their body uses the shared sunken tone. */
-    background: var(--bg-sunken);
-    box-shadow: inset 0 0 0 1px var(--border-structural);
+    background: var(--surface-raised);
+    box-shadow: var(--edge-lip);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
@@ -287,7 +286,7 @@
     font-weight: 600;
     color: var(--text-primary);
     /* The opaque title strip remains table-like renderer chrome, not a structural panel. */
-    background: var(--bg-surface);
+    background: var(--surface);
     box-shadow: var(--edge-seam);
   }
 
@@ -314,14 +313,14 @@
   }
 
   .tick-label {
-    fill: var(--text-secondary);
+    fill: var(--text-muted);
     font-family: var(--font-body);
     font-size: 10px;
     text-anchor: end;
   }
 
   .chart-bar {
-    fill: var(--accent-cyan);
+    fill: var(--accent);
     opacity: 0.78;
   }
 
@@ -346,7 +345,7 @@
     grid-template-columns: repeat(auto-fit, minmax(48px, 1fr));
     gap: 6px;
     margin-left: 42px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-family: var(--font-body);
     font-size: 10px;
   }
@@ -360,7 +359,7 @@
   .chart-empty {
     padding: 12px;
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     font-style: italic;
   }
 </style>

@@ -65,9 +65,8 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    /* Tool results are nested work products, so their body uses the shared sunken tone. */
-    background: var(--bg-sunken);
-    box-shadow: inset 0 0 0 1px var(--border-structural);
+    background: var(--surface-raised);
+    box-shadow: var(--edge-lip);
     border-radius: var(--radius-lg);
     padding: 12px;
   }
@@ -80,7 +79,7 @@
 
   .approval-desc {
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     margin-top: 4px;
     line-height: 1.5;
   }

@@ -90,7 +90,7 @@
         height: 100%;
         overflow-x: auto;
         padding: 16px;
-        background: var(--bg-chrome);
+        background: var(--chrome);
         border-radius: var(--radius-shell);
         box-shadow: var(--edge-lip);
     }
@@ -106,17 +106,17 @@
         flex-direction: column;
         min-width: 320px;
         max-width: 500px;
-        transition: background-color var(--motion-duration-standard) var(--motion-ease-standard);
+        transition: background-color var(--motion-ui);
     }
 
     .candidate-card.completed {
         /* Candidate outcome tint is semantic state, layered over the structural panel. */
-        background: color-mix(in srgb, var(--status-success) 4%, var(--bg-panel));
+        background: color-mix(in srgb, var(--status-success) 4%, var(--surface));
     }
 
     .candidate-card.failed {
         /* Candidate outcome tint is semantic state, layered over the structural panel. */
-        background: color-mix(in srgb, var(--status-error) 4%, var(--bg-panel));
+        background: color-mix(in srgb, var(--status-error) 4%, var(--surface));
     }
 
     .card-header {
@@ -134,8 +134,8 @@
     }
 
     .type-tag {
-        font-size: 9px;
-        color: var(--text-disabled);
+        font-size: var(--text-micro);
+        color: var(--text-muted);
         font-weight: 800;
     }
 
@@ -151,7 +151,7 @@
         align-items: center;
         gap: 6px;
         font-size: 11px;
-        color: var(--text-secondary);
+        color: var(--text-muted);
         font-family: var(--font-mono);
     }
 
@@ -176,7 +176,7 @@
         align-items: center;
         justify-content: center;
         padding: 40px 20px;
-        color: var(--text-disabled);
+        color: var(--text-muted);
         font-size: 13px;
         text-align: center;
         gap: 12px;

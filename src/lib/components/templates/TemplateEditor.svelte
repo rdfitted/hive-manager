@@ -255,11 +255,11 @@
     .info-badge {
         margin-top: 8px;
         font-size: 11px;
-        color: var(--accent-cyan);
-        background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+        color: var(--accent);
+        background: var(--accent-tint);
         padding: 6px 10px;
         border-radius: var(--radius-sm);
-        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 20%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
     }
 
     .error-banner {
@@ -305,14 +305,14 @@
     .field-hint {
         display: block;
         margin-top: 4px;
-        color: var(--text-disabled);
+        color: var(--text-muted);
         font-size: 11px;
     }
 
     label {
         font-size: 12px;
         font-weight: 600;
-        color: var(--text-secondary);
+        color: var(--text-muted);
     }
 
     input, textarea, select {
@@ -347,7 +347,7 @@
     }
 
     .cell-editor-card {
-        background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+        background: var(--surface-raised);
         border-radius: var(--radius-md);
         padding: 12px;
         display: flex;
@@ -364,7 +364,7 @@
     .cell-num {
         font-size: 11px;
         font-weight: 800;
-        color: var(--text-disabled);
+        color: var(--text-muted);
     }
 
     .actions {

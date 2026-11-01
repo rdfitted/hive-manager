@@ -173,7 +173,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
-    color: var(--text-disabled);
+    color: var(--text-muted);
     font: var(--text-micro) var(--font-body);
   }
 

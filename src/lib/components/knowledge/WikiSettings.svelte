@@ -92,11 +92,11 @@
     gap: 0.6rem;
     padding: 1rem;
     border-radius: var(--radius-md);
-    background: var(--bg-panel);
+    background: var(--surface);
     box-shadow: var(--elev-1), var(--edge-lip);
   }
   label { font-weight: 600; }
-  p { margin: 0 0 0.35rem; color: var(--text-secondary); font-size: var(--text-small); }
+  p { margin: 0 0 0.35rem; color: var(--text-muted); font-size: var(--text-small); }
   input, select { width: 100%; }
   button { justify-self: start; }
 </style>
