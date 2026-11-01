@@ -57,4 +57,38 @@ describe('shared Markdown blocks', () => {
     await fireEvent.click(view.getByRole('link', { name: 'HTTPS' }));
     expect(view.container.textContent).toContain('[data](data:text/html,hello)');
   });
+
+  it.each([
+    { activation: 'primary click', type: 'click', button: 0, detail: 1 },
+    { activation: 'middle click', type: 'auxclick', button: 1, detail: 1 },
+    { activation: 'keyboard activation', type: 'click', button: 0, detail: 0 },
+  ])('cancels $activation navigation and invokes the native opener exactly once', async ({ activation, type, button, detail }) => {
+    const view = render(MarkdownBlocks, { source: '[docs](https://example.com/docs)' });
+    const link = view.getByRole('link', { name: 'docs' });
+    if (activation === 'keyboard activation') {
+      link.focus();
+      await fireEvent.keyDown(link, { key: 'Enter', code: 'Enter' });
+      // jsdom does not synthesize the browser's Enter activation click. Deliver
+      // that click (detail 0) explicitly; no key handler should open it twice.
+      expect(fixture.openUrl).not.toHaveBeenCalled();
+    }
+    const event = new MouseEvent(type, { bubbles: true, cancelable: true, button, detail });
+    expect(link.dispatchEvent(event)).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
+    await waitFor(() => expect(fixture.openUrl).toHaveBeenCalledTimes(1));
+    expect(fixture.openUrl).toHaveBeenCalledWith('https://example.com/docs');
+    if (activation === 'keyboard activation') {
+      await fireEvent.keyUp(link, { key: 'Enter', code: 'Enter' });
+      expect(document.activeElement).toBe(link);
+      expect(fixture.openUrl).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('cancels other auxiliary navigation without opening a second native window', () => {
+    const view = render(MarkdownBlocks, { source: '[docs](https://example.com/docs)' });
+    const event = new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 2 });
+    view.getByRole('link', { name: 'docs' }).dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(fixture.openUrl).not.toHaveBeenCalled();
+  });
 });

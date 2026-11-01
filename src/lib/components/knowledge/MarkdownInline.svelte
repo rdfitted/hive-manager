@@ -8,6 +8,7 @@
 
   function openLink(event: MouseEvent, href: string) {
     event.preventDefault();
+    if (event.type === 'auxclick' && event.button !== 1) return;
     // The parser admits only web URLs; check again at the native API boundary.
     try {
       const url = new URL(href);
@@ -25,7 +26,7 @@
     {:else if token.type === 'code'}
       <code>{token.text}</code>
     {:else if token.type === 'link'}
-      <a href={token.href} rel="noreferrer" onclick={(event) => openLink(event, token.href)}>{token.text}</a>
+      <a href={token.href} rel="noreferrer" onclick={(event) => openLink(event, token.href)} onauxclick={(event) => openLink(event, token.href)}>{token.text}</a>
     {:else if token.type === 'wikilink'}
       <span class="wikilink">{token.text}</span>
     {:else}
