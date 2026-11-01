@@ -651,6 +651,12 @@ fn record_injection_submission(
     agent_id: &str,
     receipt: &InjectionReceipt,
 ) {
+    // A queued protocol receipt has no exact delayed-delivery watcher. Leave the
+    // current status alone rather than creating an awaiting marker that cannot
+    // be reconciled. Confirmed/failed protocol receipts and PTY keep their path.
+    if receipt.protocol_delivery.as_ref().is_some_and(Delivery::is_pending) {
+        return;
+    }
     if let Err(error) = state.session_controller.read().record_injection_submission(
         session_id,
         agent_id,

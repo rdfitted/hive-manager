@@ -245,6 +245,19 @@ async fn protocol_inject_keeps_receipt_shape_without_terminal_writes_and_cleanup
         assert_eq!(value["submit_bytes_written"], 0);
         assert_eq!(value["submit_attempts"], 0);
         assert_eq!(value["submit_keystroke_issued"], false);
+        assert!(
+            matches!(
+                state
+                    .session_controller
+                    .read()
+                    .get_session("session")
+                    .unwrap()
+                    .agents[0]
+                    .status,
+                crate::pty::AgentStatus::Running
+            ),
+            "pending protocol receipt must not create an unreconciled awaiting marker"
+        );
         assert_eq!(value["pty_observation_available"], false);
         assert!(value["submit_retry_keystroke"].is_null());
         assert_eq!(
@@ -269,6 +282,69 @@ async fn protocol_inject_keeps_receipt_shape_without_terminal_writes_and_cleanup
     assert!(fake.stopped.load(Ordering::Acquire));
     assert!(!state.pty_manager.read().is_alive("worker-a"));
     assert!(state.transports().get("session", "worker-a").is_none());
+}
+
+#[tokio::test]
+async fn pending_protocol_preserves_another_submissions_awaiting_marker() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use serde_json::json;
+    use tower::ServiceExt;
+    let (temp, state, app) = super::tests_agent_events::setup();
+    let mut session = super::tests::make_test_session_with_agents(
+        "session",
+        temp.path().to_str().unwrap(),
+        &["worker-a"],
+    );
+    let marker = crate::pty::AgentStatus::WaitingForInput(
+        "awaiting_injected_turn:2026-01-01T00:00:00Z".into(),
+    );
+    session.agents[0].status = marker.clone();
+    session.agents[0].config.cli = "codex".into();
+    state.session_controller.read().insert_test_session(session);
+    state
+        .transports()
+        .register(
+            "session",
+            "worker-a",
+            Some("held".into()),
+            FakeTransport::new(),
+        )
+        .unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session/inject")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"target_agent_id":"worker-a","message":"queued","submit":true})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut unrelated = super::tests_agent_events::event("worker-a", "another turn");
+    unrelated.kind = crate::transport::AgentEventKind::TurnStart;
+    state
+        .transports()
+        .append_event("session", "worker-a", unrelated)
+        .unwrap();
+    assert_eq!(
+        state
+            .session_controller
+            .read()
+            .get_session("session")
+            .unwrap()
+            .agents[0]
+            .status,
+        marker,
+        "pending receipt and generic turn_start cannot overwrite/resolve another submission"
+    );
 }
 
 #[tokio::test]
