@@ -370,6 +370,7 @@ impl PtySession {
             env: identity_env.to_vec(),
             env_removed: ["HIVE_SESSION_ID", "HIVE_AGENT_ID", "HIVE_ROLE"]
                 .into_iter()
+                .chain(crate::adapters::wsl::PARENT_SESSION_ENV_NAMES.iter().copied())
                 .map(str::to_string)
                 .collect(),
             output_ring,
@@ -751,7 +752,7 @@ mod tests {
                 assert_eq!(super::resolve_payload_submit_gap(codex, Some(gap), bytes), gap);
             }
         }
-        for cli in ["claude", "cursor", "qwen", "unknown-shell"] {
+        for cli in ["claude", "cursor", "unknown-shell"] {
             let policy = crate::adapters::pty_submit_policy(cli);
             assert_eq!(super::resolve_payload_submit_gap(policy, None, 1_000_000), Duration::from_millis(50));
         }

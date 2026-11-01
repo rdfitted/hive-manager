@@ -5,6 +5,10 @@ pub mod state;
 #[cfg(test)]
 pub mod tests;
 #[cfg(test)]
+pub mod tests_agent_events;
+#[cfg(test)]
+pub mod tests_transport;
+#[cfg(test)]
 mod tests_plan_continue;
 #[cfg(test)]
 mod tests_terminal_continuity;

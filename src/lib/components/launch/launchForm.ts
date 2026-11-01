@@ -99,7 +99,7 @@ Do NOT work on backend/server code unless it directly interfaces with your front
   {
     type: 'coherence',
     label: 'Coherence',
-    cli: 'droid',
+    cli: 'codex',
     description: 'Ensures code consistency',
     promptTemplate: `You are the COHERENCE specialist. Focus on:
 - Ensuring consistent code patterns across the codebase

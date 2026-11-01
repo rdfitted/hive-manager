@@ -475,6 +475,26 @@ impl SessionStorage {
         self.sessions_dir().join(session_id)
     }
 
+    /// Additive session setting, separate from legacy session.json literals.
+    /// Empty launches create no file; old persisted session JSON stays byte-identical.
+    pub fn save_agent_transports(&self, session_id: &str, enabled: &crate::domain::agent_transport::AgentTransports) -> Result<(), StorageError> {
+        let dir = self.session_dir(session_id);
+        if enabled.is_empty() { return Ok(()); }
+        if !dir.exists() {self.create_session_dir(session_id)?;}
+        let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
+        serde_json::to_writer(&mut temp, enabled)?;
+        temp.persist(dir.join("agent-transports.json")).map_err(|e| StorageError::Io(e.error))?;
+        Ok(())
+    }
+
+    pub fn load_agent_transports(&self, session_id: &str) -> Result<crate::domain::agent_transport::AgentTransports, StorageError> {
+        match fs::read(self.session_dir(session_id).join("agent-transports.json")) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Create a new session directory structure
     pub fn create_session_dir(&self, session_id: &str) -> Result<PathBuf, StorageError> {
         let session_dir = self.session_dir(session_id);
@@ -852,20 +872,6 @@ impl SessionStorage {
             },
         );
 
-        clis.insert(
-            "opencode".to_string(),
-            CliConfig {
-                command: "opencode".to_string(),
-                auto_approve_flag: None,
-                model_flag: Some("-m".to_string()),
-                default_model: "opencode/big-pickle".to_string(),
-                env: Some({
-                    let mut env = HashMap::new();
-                    env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
-                    env
-                }),
-            },
-        );
 
         clis.insert(
             "codex".to_string(),
@@ -889,27 +895,7 @@ impl SessionStorage {
             },
         );
 
-        clis.insert(
-            "droid".to_string(),
-            CliConfig {
-                command: "droid".to_string(),
-                auto_approve_flag: None, // Interactive mode - no auto-approve flag
-                model_flag: None,        // Model selected via /model command in TUI
-                default_model: "glm-5.1".to_string(),
-                env: None,
-            },
-        );
 
-        clis.insert(
-            "qwen".to_string(),
-            CliConfig {
-                command: "qwen".to_string(),
-                auto_approve_flag: Some("-y".to_string()),
-                model_flag: Some("-m".to_string()),
-                default_model: "qwen3-coder".to_string(),
-                env: None,
-            },
-        );
 
         let mut default_roles = HashMap::new();
         default_roles.insert(
@@ -2023,13 +2009,19 @@ mod tests {
     }
 
     #[test]
-    fn test_default_config_excludes_removed_gemini_and_antigravity() {
+    fn test_default_config_excludes_removed_clis() {
         // gemini and antigravity were removed as spawnable CLIs; GPT-6 work
         // (astra/sol/luna) now routes through the codex entry.
         let config = SessionStorage::default_config();
 
-        assert!(config.clis.get("gemini").is_none());
-        assert!(config.clis.get("antigravity").is_none());
+        assert_eq!(crate::adapters::VALID_CLIS, crate::http::handlers::VALID_CLIS);
+        assert_eq!(config.clis.len(), crate::adapters::VALID_CLIS.len());
+        for cli in crate::adapters::VALID_CLIS {
+            assert!(config.clis.contains_key(*cli));
+        }
+        for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+            assert!(!config.clis.contains_key(cli));
+        }
 
         let codex = config.clis.get("codex").expect("codex entry present");
         assert_eq!(codex.command, "codex");
@@ -2049,6 +2041,26 @@ mod tests {
         let restored = reopened.load_config().unwrap();
         assert_eq!(restored.clis["codex"].default_model, "gpt-5.6-sol");
         assert_eq!(restored.default_roles["principal"].model, "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn removed_cli_config_loads_but_registry_ignores_retired_entries() {
+        let (storage, _temp) = create_test_storage();
+        let mut config = storage.load_config().unwrap();
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+            config.clis.insert(removed.to_string(), config.clis["claude"].clone());
+            config.default_roles.insert(removed.to_string(), RoleDefaults { cli: removed.to_string(), model: "old-model".to_string() });
+        }
+        storage.save_config(&config).unwrap();
+        let loaded = storage.load_config().unwrap();
+        assert_eq!(loaded.clis.len(), 9, "stale config remains readable without migration");
+        let registry = crate::cli::CliRegistry::new(loaded);
+        assert_eq!(registry.list_clis().len(), 3);
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+            assert!(registry.get_cli(removed).is_none());
+            assert!(registry.get_role_defaults(removed).is_none());
+            assert!(registry.build_command(&crate::pty::AgentConfig { cli: removed.to_string(), ..Default::default() }).is_err());
+        }
     }
 
     fn sample_persisted_session(session_id: &str) -> PersistedSession {

@@ -248,7 +248,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
             id: "feature-build-hive".to_string(),
             name: "Feature-build Hive".to_string(),
             description:
-                "Opus Queen plus GPT-6 backend/frontend coding principals and a Droid coherence specialist."
+                "Opus Queen plus GPT-6 backend/frontend coding principals and a Codex coherence specialist."
                     .to_string(),
             mode: SessionMode::Hive,
             cells: vec![
@@ -275,8 +275,8 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 },
                 CellTemplate {
                     role: "coherence".to_string(),
-                    cli: "droid".to_string(),
-                    model: Some("glm-5.1".to_string()),
+                    cli: "codex".to_string(),
+                    model: Some("gpt-6.1-sol".to_string()),
                     prompt_template: "roles/coherence".to_string(),
                     ..CellTemplate::default()
                 },
@@ -302,8 +302,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 },
                 CellTemplate {
                     role: "candidate-b".to_string(),
-                    // Formerly antigravity (agy). Reassigned to the fast
-                    // GPT-6 tier so the two candidates still diverge.
+                    // Use the fast GPT-6 tier so the two candidates diverge.
                     cli: "codex".to_string(),
                     model: Some("gpt-6-luna".to_string()),
                     prompt_template: "fusion-worker".to_string(),
@@ -354,8 +353,8 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             name: "Reviewer".to_string(),
             roles: vec![CellTemplate {
                 role: "coherence".to_string(),
-                cli: "droid".to_string(),
-                model: Some("glm-5.1".to_string()),
+                cli: "codex".to_string(),
+                model: Some("gpt-6.1-sol".to_string()),
                 prompt_template: "roles/coherence".to_string(),
                 ..CellTemplate::default()
             }],

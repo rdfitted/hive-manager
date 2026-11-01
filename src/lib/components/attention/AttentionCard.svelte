@@ -6,8 +6,13 @@
   import { ui } from '$lib/stores/ui';
   import { flushEnter } from './flush';
 
-  let { sessionId, agent }: { sessionId: string; agent: AgentInfo } = $props();
-  const visible = $derived(needsAttention(agent, $heartbeatStore.staleAgents));
+  let { sessionId, agent, hasTerminal = true, chatAvailable = false, eventAttention = null, feedError = null, onOpen }: {
+    sessionId: string; agent: AgentInfo; hasTerminal?: boolean; chatAvailable?: boolean;
+    eventAttention?: string | null; feedError?: string | null; onOpen?: () => void;
+  } = $props();
+  const waitingForInput = $derived(chatAvailable && typeof agent.status === 'object' && agent.status !== null
+    && 'WaitingForInput' in agent.status && !agent.status.WaitingForInput.startsWith('awaiting_injected_turn'));
+  const visible = $derived(needsAttention(agent, $heartbeatStore.staleAgents) || waitingForInput || !!eventAttention || !!feedError);
   const reason = $derived(attentionReason(agent, $heartbeatStore.staleAgents));
   const reasons = {
     delivery_failed: 'The last message could not be delivered.',
@@ -33,6 +38,7 @@
   }
 
   function openTerminal() {
+    if (onOpen) { onOpen(); return; }
     layout.setSessionViewMode('focus');
     ui.setFocusedAgent(agent.id);
   }
@@ -40,12 +46,14 @@
 
 {#if visible}
   <section class="attention lattice-forced-colors-boundary" aria-label="Agent needs attention">
-    <p class="reason">{reasons[reason]}</p>
+    <p class="reason" role={chatAvailable ? 'status' : undefined}>{reasons[reason] || eventAttention || feedError || (hasTerminal ? 'Agent needs input. A prompt may only be visible in the terminal.' : 'Agent needs input. Check the raw event log.')}</p>
     <div class="actions">
-      <button type="button" class="lattice-btn lattice-btn--secondary" disabled={pending} onclick={flush}>{pending ? 'Flushing…' : 'Flush Enter'}</button>
-      <button type="button" class="lattice-btn lattice-btn--ghost" onclick={openTerminal}>Open terminal</button>
-      <button type="button" class="lattice-btn lattice-btn--ghost" disabled title="original message unavailable">Resend</button>
-      <span class="unavailable">original message unavailable</span>
+      {#if hasTerminal}<button type="button" class="lattice-btn lattice-btn--secondary" disabled={pending} onclick={flush}>{pending ? 'Flushing…' : 'Flush Enter'}</button>{/if}
+      <button type="button" class="lattice-btn lattice-btn--ghost" onclick={openTerminal}>{hasTerminal ? 'Open terminal' : 'Open raw event log'}</button>
+      {#if hasTerminal}
+        <button type="button" class="lattice-btn lattice-btn--ghost" disabled title="original message unavailable">Resend</button>
+        <span class="unavailable">original message unavailable</span>
+      {/if}
     </div>
     {#if currentResult?.receipt !== undefined}<pre class="receipt" role="status" aria-label="Inject receipt">{currentResult.receipt}</pre>{/if}
     {#if currentResult?.error}<p role="alert">{currentResult.error}</p>{/if}

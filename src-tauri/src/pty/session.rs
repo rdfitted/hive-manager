@@ -76,7 +76,7 @@ impl Default for WorkerRole {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentConfig {
     #[serde(default = "default_cli")]
-    pub cli: String,              // "claude", "codex", "opencode", "cursor", "droid", "qwen"
+    pub cli: String,              // "claude", "codex", "cursor"
     pub model: Option<String>,    // "opus", "gpt-6.1-sol", "gpt-6-luna", etc.
     #[serde(default)]
     pub flags: Vec<String>,       // Additional CLI flags
@@ -694,11 +694,6 @@ impl PtySession {
     #[cfg(windows)]
     fn create_batch_content(command: &str, args: &[&str]) -> String {
         let mut lines = vec!["@echo off".to_string()];
-
-        // Add CLI-specific environment variables
-        if command == "opencode" {
-            lines.push("set OPENCODE_YOLO=true".to_string());
-        }
 
         // Build the command line with proper quoting
         let mut cmd_line = command.to_string();

@@ -14,7 +14,7 @@ A local, operator-controlled meta-harness for AI coding sessions. Launch, superv
 - **Solo Mode**: One directly supervised coding agent for focused work
 - **Legacy Swarm Compatibility**: Existing Swarm sessions remain programmatically launchable outside the primary flow
 - **Session Persistence**: Save and resume sessions across app restarts
-- **Multi-CLI Support**: Works with Claude Code, Codex, OpenCode, and more
+- **Multi-CLI Support**: Works with Claude Code, Codex, and Cursor
 - **Real-time Monitoring**: Watch all agents work simultaneously with live terminal output
 - **Git Integration**: Automatic branch management and coordination
 
@@ -106,15 +106,12 @@ When Master Planner is used, it is contract-only: it converts the objective into
 
 ## Supported CLIs
 
-Claude Code, Codex, OpenCode, Qwen, and Droid use their installed native executables on Windows and macOS when available on `PATH` or configured by absolute path. A Finder launch on macOS also discovers common Homebrew and user CLI directories. Cursor launches through WSL on Windows only; it is unavailable on macOS. Scratch terminals offer PowerShell and Command Prompt on Windows, and the login shell on macOS. Install and authenticate each CLI separately.
+Claude Code and Codex use their installed native executables on Windows and macOS when available on `PATH` or configured by absolute path. A Finder launch on macOS also discovers common Homebrew and user CLI directories. Cursor launches through WSL on Windows only; it is unavailable on macOS. Scratch terminals offer PowerShell and Command Prompt on Windows, and the login shell on macOS. Install and authenticate each CLI separately.
 
 | CLI | Behavior | Notes |
 |-----|----------|-------|
 | [Claude Code](https://claude.ai/claude-code) | Action-Prone | Anthropic's official CLI. Supports native delegation; Opus is the recommended Queen model. |
 | [Codex](https://github.com/openai/codex) | Explicit-Polling | OpenAI's CLI. Supports native delegation; `gpt-6.1-sol` is the recommended coding-principal model; the GPT-6 models are `gpt-6-astra` (frontier), `gpt-6-sol` (previous-generation workhorse), and `gpt-6-luna` (fast). GPT-5.6 presets remain selectable. Hive task activation uses a durable polling loop. |
-| [OpenCode](https://github.com/opencode-ai/opencode) | Explicit-Polling | Open-source alternative. |
-| [Qwen](https://github.com/QwenLM/qwen-agent) | Instruction-Following | Follows instructions literally, respects role boundaries naturally. |
-| [Droid](https://github.com/anthropics/droid) | Interactive | TUI mode with `/model` command for model selection. |
 | [Cursor](https://cursor.sh) | Interactive | Runs via WSL on Windows only (unavailable on macOS). Uses global model setting. |
 
 **Behavior profiles** guide CLI-specific prompt hardening. Capability cards separately report adapter-declared harness support; delegation policy records operator permission.

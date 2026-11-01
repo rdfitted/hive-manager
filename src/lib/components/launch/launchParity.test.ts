@@ -69,6 +69,18 @@ async function capture(mode: Mode, advanced: boolean, template?: SessionTemplate
 }
 
 describe('G-launch-parity: emitted composer and retained legacy-form payloads', () => {
+  it.each(['hive', 'solo'] as const)('%s transport opt-in survives Advanced and emits only the explicit setting', async (mode) => {
+    const view = openDialog(mode);
+    await fireEvent.click(view.getByRole('button', { name: /Project/ }));
+    expect((view.getByLabelText('Codex transport') as HTMLSelectElement).value).toBe('pty');
+    await fireEvent.change(view.getByLabelText('Codex transport'), { target: { value: 'protocol' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
+    expect((view.getByLabelText('Codex app server (experimental)') as HTMLInputElement).checked).toBe(true);
+    expect(view.getByText("Sub-agents aren't confined to the assignment, the same as PTY Codex.")).toBeTruthy();
+    await fireEvent.click(view.getByRole('button', { name: 'Launch' }));
+    expect(view.launch.mock.calls[0][0].detail.agent_transports).toEqual(['codex_app_server']);
+  });
+
   it.each(modes)('%s matches the legacy event and independent default oracle', async (mode) => {
     const oldForm = await capture(mode, true);
     const composer = await capture(mode, false);
@@ -77,6 +89,9 @@ describe('G-launch-parity: emitted composer and retained legacy-form payloads', 
   });
 
   it.each(builtinFixtures)('$id preserves the complete canonical template payload', async (template) => {
+    if (template.id === 'feature-build-hive') {
+      expect(template.cells.find((cell) => cell.role === 'coherence')).toMatchObject({ cli: 'codex', model: 'gpt-6.1-sol' });
+    }
     const mode = template.mode as Mode;
     const oldForm = await capture(mode, true, template);
     const composer = await capture(mode, false, template);

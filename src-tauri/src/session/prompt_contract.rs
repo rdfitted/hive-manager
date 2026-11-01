@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn unsupported_provider_renders_only_the_unavailable_tier_line() {
         let config = AgentConfig {
-            cli: "droid".to_string(),
+            cli: "cursor".to_string(),
             ..AgentConfig::default()
         };
         let section = render_tier_section(
@@ -508,7 +508,7 @@ mod tests {
 
         assert_eq!(
             section,
-            "## Tier\n\nTier routing unavailable for harness `droid`."
+            "## Tier\n\nTier routing unavailable for harness `cursor`."
         );
     }
 

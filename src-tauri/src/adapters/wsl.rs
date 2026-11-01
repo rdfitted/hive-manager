@@ -5,6 +5,24 @@ use std::path::Path;
 
 use portable_pty::CommandBuilder;
 
+/// Parent Claude session identity must never be inherited by a fresh agent.
+/// Exact names deliberately preserve user settings such as CLAUDE_CODE_GIT_BASH_PATH.
+pub const PARENT_SESSION_ENV_NAMES: &[&str] = &[
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_PID",
+    "CLAUDECODE",
+];
+
+/// Pure classifier shared by PTY and non-PTY child launchers.
+pub fn is_parent_session_env(name: &str) -> bool {
+    PARENT_SESSION_ENV_NAMES.iter().any(|marker| name.eq_ignore_ascii_case(marker))
+}
+
 /// Apply fresh agent identity and WSL forwarding to the actual PTY command.
 /// Inspect `executable` before Windows wraps it in a batch-file launcher.
 pub fn apply_launch_env(
@@ -16,7 +34,8 @@ pub fn apply_launch_env(
 ) -> Result<(), String> {
     let environment = launch_env(executable, cwd, injected, inherited)?;
     for (key, _) in inherited {
-        if key.to_string_lossy().to_ascii_uppercase().starts_with("HIVE_") {
+        let name = key.to_string_lossy();
+        if name.to_ascii_uppercase().starts_with("HIVE_") || is_parent_session_env(&name) {
             command.env_remove(key);
         }
     }
@@ -126,6 +145,59 @@ pub fn launch_env(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn removed_parent_session_markers_preserve_user_configuration() {
+        for executable in ["claude", "codex", "wsl"] {
+            let required_markers = [
+                "CLAUDE_CODE_CHILD_SESSION",
+                "CLAUDE_CODE_SESSION_ID",
+                "CLAUDE_CODE_MESSAGING_SOCKET",
+                "CLAUDE_CODE_MESSAGING_TOKEN",
+                "CLAUDE_CODE_ENTRYPOINT",
+                "CLAUDE_CODE_SESSION_ATTENDED",
+                "CLAUDE_PID",
+                "CLAUDECODE",
+            ];
+            for name in required_markers {
+                assert!(
+                    PARENT_SESSION_ENV_NAMES.contains(&name),
+                    "missing env_remove marker {name}"
+                );
+                assert!(is_parent_session_env(name));
+            }
+            let mut inherited: Vec<(OsString, OsString)> = required_markers
+                .iter()
+                .flat_map(|name| [name.to_string(), name.to_ascii_lowercase()])
+                .map(|name| (name.into(), "parent".into()))
+                .collect();
+            for name in [
+                "CLAUDE_CODE_GIT_BASH_PATH",
+                "CLAUDE_CONFIG_DIR",
+                "CODEX_HOME",
+                "USER_SETTING",
+                "CLAUDE_CODE_SESSION_ID_EXTRA",
+            ] {
+                assert!(!is_parent_session_env(name));
+                inherited.push((name.into(), "user-config".into()));
+            }
+            let mut command = CommandBuilder::new(executable);
+            for (name, value) in &inherited {
+                command.env(name, value);
+            }
+            apply_launch_env(&mut command, executable, None, &identity(), &inherited).unwrap();
+            for (name, _) in &inherited {
+                if is_parent_session_env(&name.to_string_lossy()) {
+                    assert!(
+                        command.get_env(name).is_none(),
+                        "{executable} inherited {name:?}"
+                    );
+                } else {
+                    assert_eq!(command.get_env(name).unwrap(), "user-config");
+                }
+            }
+        }
+    }
 
     fn identity() -> Vec<(String, String)> {
         ["HIVE_SESSION_ID", "HIVE_AGENT_ID", "HIVE_ROLE", "HIVE_FUTURE_KEY"]

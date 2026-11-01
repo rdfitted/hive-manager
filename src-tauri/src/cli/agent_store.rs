@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn non_codex_clis_are_left_untouched() {
-        for cli in ["claude", "droid", "cursor", "opencode", "qwen", "agy"] {
+        for cli in ["claude", "cursor"] {
             assert!(
                 isolation_args(cli, Path::new("/tmp/store")).is_empty(),
                 "{cli} should not be given codex flags"

@@ -27,6 +27,9 @@ pub async fn get_pty_buffer(
 ) -> Result<Json<PtyBufferResponse>, ApiError> {
     validate_session_id(&session_id)?;
     validate_agent_id(&agent_id)?;
+    if state.transports().get(&session_id,&agent_id).is_some() {
+        return Err(ApiError::bad_request("Agent has no terminal; use the agent event feed"));
+    }
 
     let session = state
         .session_controller
@@ -64,6 +67,9 @@ pub async fn get_pty_snapshot(
 ) -> Result<Json<PtySnapshot>, ApiError> {
     validate_session_id(&session_id)?;
     validate_agent_id(&agent_id)?;
+    if state.transports().get(&session_id,&agent_id).is_some() {
+        return Err(ApiError::bad_request("Agent has no terminal; use the agent event feed"));
+    }
 
     let session = state
         .session_controller

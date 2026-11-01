@@ -325,6 +325,7 @@ pub async fn launch_solo(
     let with_evaluator = with_evaluator.unwrap_or(true);
 
     let config = HiveLaunchConfig {
+        agent_transports: Default::default(),
         project_path,
         name: None,
         color: None,

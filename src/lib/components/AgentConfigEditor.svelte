@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import { cliOptions as supportedClis } from '$lib/config/clis';
   import { invoke, isTauri } from '@tauri-apps/api/core';
   import { apiUrl } from '$lib/config';
 
@@ -41,6 +42,7 @@
       const preset = entry as Record<string, unknown>;
       if (
         typeof preset.provider !== 'string' ||
+        !supportedClis.some((cli) => cli.value === preset.provider) ||
         typeof preset.id !== 'string' ||
         typeof preset.label !== 'string' ||
         typeof preset.model !== 'string' ||
@@ -299,13 +301,7 @@
       ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh|max|ultra"'
       : config.cli === 'cursor'
         ? 'Cursor Composer mode selection'
-        : config.cli === 'droid'
-          ? 'Droid GLM model selection'
-          : config.cli === 'opencode'
-            ? 'OpenCode multi-model selection'
-            : config.cli === 'qwen'
-              ? 'Qwen Code CLI model selection'
-              : '';
+        : '';
 
   function handleCliChange(e: Event) {
     const target = e.target as HTMLSelectElement;
@@ -319,14 +315,7 @@
       flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
     } else if (nextCli === 'codex') {
       flags.push('-c', 'model_reasoning_effort="medium"');
-    } else if (nextCli === 'droid') {
-      model = getDefaultModel('droid');
-    } else if (nextCli === 'cursor') {
-      model = getDefaultModel('cursor');
-    } else if (nextCli === 'opencode') {
-      model = getDefaultModel('opencode');
-    } else if (nextCli === 'qwen') {
-      model = getDefaultModel('qwen');
+
     }
 
     config = {
@@ -464,7 +453,7 @@
     </span>
   </div>
 
-  {#if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'cursor' || config.cli === 'droid' || config.cli === 'opencode' || config.cli === 'qwen'}
+  {#if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'cursor'}
     <div class="field">
       <label for={`${idPrefix}-preset`}>Model &amp; Effort</label>
       <select

@@ -14,8 +14,8 @@ pub const TRANSCRIPT_PENDING: &str = "transcript-pending";
 pub const TRANSCRIPT_PENDING_BUSY: &str = "transcript-pending-busy";
 pub const TRANSCRIPT_UNAVAILABLE: &str = "transcript-unavailable";
 pub const TRANSCRIPT_TIMEOUT: &str = "transcript-timeout";
-#[allow(dead_code)] // Reserved I1 basis for the protocol follow-up.
 pub const PROTOCOL_TURN_STARTED: &str = "protocol-turn-started";
+pub const PROTOCOL_PENDING: &str = "protocol-pending";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Delivery {
@@ -36,11 +36,19 @@ impl Delivery {
 
     /// Both pending bases keep the background watch and the flush-inheritable nonce alive.
     pub fn is_pending(&self) -> bool {
-        self.basis == TRANSCRIPT_PENDING || self.basis == TRANSCRIPT_PENDING_BUSY
+        self.basis == TRANSCRIPT_PENDING || self.basis == TRANSCRIPT_PENDING_BUSY || self.basis == PROTOCOL_PENDING
     }
 
     pub fn unavailable() -> Self {
         Self { confirmed: None, basis: TRANSCRIPT_UNAVAILABLE.into(), source: "none".into(), turn_id: None }
+    }
+
+    pub fn protocol_pending() -> Self {
+        Self { confirmed: None, basis: PROTOCOL_PENDING.into(), source: "protocol".into(), turn_id: None }
+    }
+
+    pub fn protocol_turn_started(turn_id: String) -> Self {
+        Self { confirmed: Some(true), basis: PROTOCOL_TURN_STARTED.into(), source: "protocol".into(), turn_id: Some(turn_id) }
     }
 
     pub fn confirmed(turn_id: String) -> Self {
@@ -56,6 +64,7 @@ impl Delivery {
 pub enum Confirmation {
     Codex(codex_rollout::CodexRolloutReader),
     Claude(claude_transcript::ClaudeTranscriptReader),
+    Protocol(ProtocolConfirmation),
     Unavailable,
 }
 
@@ -75,8 +84,32 @@ impl Confirmation {
         match self {
             Self::Codex(reader) => reader.message_recorded(),
             Self::Claude(reader) => reader.message_recorded(nonce),
+            Self::Protocol(reader) => reader.delivery().confirmed == Some(true),
             Self::Unavailable => false,
         }
+    }
+}
+
+/// A single protocol send, correlated after the response supplies its turn id.
+#[derive(Clone)]
+pub struct ProtocolConfirmation {
+    thread_id: String,
+    turn_id: String,
+    started: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl ProtocolConfirmation {
+    pub fn new(thread_id: String, turn_id: String) -> Self {
+        Self { thread_id, turn_id, started: Default::default() }
+    }
+    pub fn observe_started(&self, thread_id: &str, turn_id: &str) -> bool {
+        let matches = !self.turn_id.is_empty() && self.thread_id == thread_id && self.turn_id == turn_id;
+        if matches { self.started.store(true, std::sync::atomic::Ordering::Release); }
+        matches
+    }
+    pub fn delivery(&self) -> Delivery {
+        if self.started.load(std::sync::atomic::Ordering::Acquire) {
+            Delivery::protocol_turn_started(self.turn_id.clone())
+        } else { Delivery::protocol_pending() }
     }
 }
 
@@ -85,6 +118,7 @@ pub fn confirm(agent: &mut Confirmation, nonce: &str, since: SystemTime) -> Deli
     let turn = match agent {
         Confirmation::Codex(reader) => reader.poll(nonce, since),
         Confirmation::Claude(reader) => reader.poll(nonce, since),
+        Confirmation::Protocol(reader) => return reader.delivery(),
         Confirmation::Unavailable => return Delivery::unavailable(),
     };
     turn.map(Delivery::confirmed).unwrap_or_else(Delivery::pending)

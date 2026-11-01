@@ -20,6 +20,9 @@ use super::{CoordinationMessage, StateManager, WorkerStateInfo};
 /// after-write snapshot; neither kind of ring change proves that the agent took a turn.
 #[derive(Debug, Clone)]
 pub struct InjectionReceipt {
+    /// Protocol sends write no terminal bytes. Only correlated turn start confirms.
+    pub protocol_delivery: Option<crate::delivery::Delivery>,
+    pub protocol_submission_requested: bool,
     /// Exact marker in the submitted payload; absent for staging writes.
     pub nonce: Option<String>,
     pub confirmation_since: Option<DateTime<Utc>>,
@@ -255,6 +258,19 @@ impl InjectionManager {
     ) -> Result<InjectionReceipt, InjectionError> {
         let pty_manager = self.pty_manager.read();
         let write_started_at = Utc::now();
+        if let Some(entry)=pty_manager.protocol_agent(agent_id) {
+            let text=message.trim_end_matches(&['\r','\n'][..]);
+            let started=std::time::Instant::now();
+            let delivery=entry.transport.send_input(text,submit).map_err(InjectionError::PtyError)?;
+            let submitted_at=Utc::now();
+            return Ok(InjectionReceipt {
+                protocol_delivery:Some(delivery), protocol_submission_requested:submit, nonce:None,confirmation_since:None,confirmation_expires:None,
+                write_started_at,submitted_at,observation_started_at:submitted_at,payload_bytes_written:text.len(),
+                submit_keystroke_issued:false,submit_bytes_written:0,pty_output_before:None,pty_output_after_write:None,
+                pty_activity_observed:None,pty_output_bytes_before:None,pty_output_bytes_after_write:None,pty_output_bytes_after:None,
+                observation_window_ms:0,observation_elapsed_ms:started.elapsed().as_millis() as u64,
+            });
+        }
         let pty_output_before = pty_manager.recent_output(agent_id);
 
         // Strip any existing line endings first
@@ -302,6 +318,8 @@ impl InjectionManager {
         tracing::info!("=== INJECTION COMPLETE ===");
 
         Ok(InjectionReceipt {
+            protocol_delivery: None,
+            protocol_submission_requested: false,
             confirmation_expires: None,
             confirmation_since: nonce.as_ref().map(|_| write_started_at),
             nonce,

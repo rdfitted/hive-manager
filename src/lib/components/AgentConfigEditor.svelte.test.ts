@@ -17,9 +17,6 @@ const presets = [
   { provider: 'codex', id: 'codex-gpt-5-6-sol-ultra', label: 'GPT-5.6 Sol (Ultra effort)', model: 'gpt-5.6-sol', flags: ['-c', 'model_reasoning_effort="ultra"'] },
   { provider: 'cursor', id: 'composer-2.5', label: 'Composer 2.5 (latest)', model: 'composer-2.5', flags: [] },
   { provider: 'cursor', id: 'gemini-4-argon-high', label: 'Gemini 4 Argon (High)', model: 'gemini-4-argon-high', flags: [] },
-  { provider: 'droid', id: 'glm-5.1', label: 'GLM 5.1', model: 'glm-5.1', flags: [] },
-  { provider: 'opencode', id: 'opencode/big-pickle', label: 'BigPickle', model: 'opencode/big-pickle', flags: [] },
-  { provider: 'qwen', id: 'qwen3-coder', label: 'Qwen3 Coder', model: 'qwen3-coder', flags: [] },
 ];
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -212,31 +209,15 @@ describe('AgentConfigEditor', () => {
     });
   });
 
-  it('round-trips a Droid preset from the server catalogue', async () => {
-    await expectServerPresetRoundTrip({
-      cli: 'droid',
-      presetId: 'glm-5.1',
-      model: 'glm-5.1',
-      flags: [],
-    });
-  });
 
-  it('round-trips an OpenCode preset from the server catalogue', async () => {
-    await expectServerPresetRoundTrip({
-      cli: 'opencode',
-      presetId: 'opencode/big-pickle',
-      model: 'opencode/big-pickle',
-      flags: [],
-    });
-  });
 
-  it('round-trips a Qwen preset from the server catalogue', async () => {
-    await expectServerPresetRoundTrip({
-      cli: 'qwen',
-      presetId: 'qwen3-coder',
-      model: 'qwen3-coder',
-      flags: [],
+
+  it('offers only supported CLIs even when editing a stale config', async () => {
+    const { getByLabelText } = render(AgentConfigEditorHarness, {
+      props: { idPrefix: 'stale', config: { cli: 'droid', model: 'glm-5.1', flags: [] } },
     });
+    const picker = getByLabelText('CLI') as HTMLSelectElement;
+    expect(Array.from(picker.options, (option) => option.value)).toEqual(['claude', 'codex', 'cursor']);
   });
 
   it('keeps the custom selection as an early return', async () => {

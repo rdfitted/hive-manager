@@ -13,6 +13,7 @@ pub mod artifacts;
 pub mod cli;
 mod coordination;
 mod delivery;
+pub mod transport;
 pub mod domain;
 pub mod events;
 mod http;
@@ -694,8 +695,17 @@ pub fn run() {
             get_run_journal,
             list_session_files,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(state) = app.try_state::<Arc<AppState>>() {
+                    for error in state.pty_manager.read().shutdown_transports() {
+                        tracing::error!("Transport shutdown failed: {error}");
+                    }
+                }
+            }
+        });
 }
 
 #[cfg(test)]

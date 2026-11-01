@@ -110,7 +110,10 @@ export interface HiveLaunchPolicy extends Omit<HiveExecutionPolicy, 'workspace_s
   workspace_strategy: Extract<WorkspaceStrategy, 'shared_cell' | 'isolated_cell'>;
 }
 
+export type AgentTransportOption = 'codex_app_server' | 'claude_stream_json';
+
 export interface HiveLaunchConfig {
+  agent_transports?: AgentTransportOption[];
   name?: string;
   color?: string;
   project_path: string;
@@ -212,6 +215,7 @@ export interface SwarmLaunchConfig {
 }
 
 export interface SoloLaunchConfig {
+  agent_transports?: AgentTransportOption[];
   name?: string;
   color?: string;
   projectPath: string;
@@ -523,6 +527,7 @@ function createSessionsStore() {
       try {
         // Solo mode is implemented as a Hive session with 0 extra workers (just the Queen acting as the solo agent)
         const hiveConfig: HiveLaunchConfig = {
+          ...(config.agent_transports?.length ? { agent_transports: config.agent_transports } : {}),
           name: config.name,
           color: config.color,
           project_path: config.projectPath,

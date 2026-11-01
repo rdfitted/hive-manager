@@ -3,12 +3,14 @@ import { cleanup, fireEvent, render, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
 import type { AgentInfo, Session } from '$lib/stores/sessions';
+import type { AgentEventsState, AgentEvent } from '$lib/stores/agentEvents';
 import { terminalLifecycle } from './testing/terminalLifecycle';
 
 const fixture = vi.hoisted(() => ({
   setSessions: undefined as ((sessions: Session[]) => void) | undefined,
   setActive: undefined as ((session: Session | null) => void) | undefined,
   setHeartbeats: undefined as ((agents: Record<string, { summary: string; timestamp: string }>) => void) | undefined,
+  setAgentEvents: undefined as ((state: AgentEventsState) => void) | undefined,
   invoke: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -46,6 +48,12 @@ vi.mock('$lib/stores/events', async () => {
   return { events: {
     subscribe: writable({ events: [] }).subscribe, connect: vi.fn(), disconnect: vi.fn(),
   } };
+});
+vi.mock('$lib/stores/agentEvents', async () => {
+  const { writable } = await import('svelte/store');
+  const state = writable<AgentEventsState>({ sessionId: null, feeds: {}, histories: {}, connected: false, error: null });
+  fixture.setAgentEvents = state.set;
+  return { agentEvents: { subscribe: state.subscribe, setSessionId: vi.fn(), disconnect: vi.fn(), loadOlder: vi.fn() } };
 });
 vi.mock('$lib/stores/conversations', async () => {
   const { writable } = await import('svelte/store');
@@ -113,6 +121,7 @@ beforeEach(() => {
   ui.setFocusedAgent('session-a-agent-0');
   ui.setSelectedAgent('session-a-agent-0');
   fixture.setHeartbeats!({});
+  fixture.setAgentEvents!({ sessionId: null, feeds: {}, histories: {}, connected: false, error: null });
   publish(session());
 });
 
@@ -122,6 +131,76 @@ afterEach(() => {
 });
 
 describe('Focus/Grid session terminals', () => {
+  function chatFeed(events: AgentEvent[] = [{ agent_id: 'session-a-agent-0', cursor: 'initial', kind: 'assistant_message', ts: '2026-01-01T00:00:00Z', source_id: 'initial', truncated: false, payload: { text: 'Fixture transcript' } }], hasTerminal = true, error: string | null = null) {
+    const id = 'session-a-agent-0';
+    fixture.setAgentEvents!({ sessionId: 'session-a', feeds: {
+      [id]: { agent_id: id, capabilities: { has_terminal: hasTerminal, can_interrupt: true, supports_approvals: !hasTerminal, event_source: hasTerminal ? 'transcript' : 'protocol' } },
+    }, histories: { [id]: { events, before: null, hasMore: false, loading: false, error: null } }, connected: true, error });
+  }
+
+  it.each(['focus', 'grid'] as const)('G9: twenty chat/terminal toggles retain terminal nodes and scrollback in %s', async (mode) => {
+    layout.setSessionViewMode(mode);
+    chatFeed();
+    const view = render(SessionOverview);
+    await tick();
+    const pane = view.container.querySelector<HTMLElement>('.terminal-item')!;
+    const original = terminalLifecycle.terminals.get('session-a-agent-0')!.node;
+    expect(within(pane).getByRole('region', { name: 'Agent chat' })).toBeTruthy();
+    for (let index = 0; index < 20; index++) {
+      await fireEvent.click(within(pane).getByRole('button', { name: index % 2 === 0 ? 'Terminal' : 'Chat' }));
+      await tick();
+      expect(terminalLifecycle.created).toHaveLength(3);
+      expect(terminalLifecycle.destroyed).toHaveLength(0);
+      expect(terminalLifecycle.terminals.get('session-a-agent-0')!.node).toBe(original);
+      expect(original.textContent).toBe('scrollback:session-a-agent-0');
+      expect(terminalLifecycle.terminals.get('session-a-agent-0')!.props.isVisible).toBe(true);
+      expect(terminalLifecycle.terminals.get('session-a-agent-0')!.props.isFocused).toBe(false);
+      expect((pane.querySelector('.terminal-layer') as HTMLElement).inert).toBe(index % 2 !== 0);
+    }
+    cleanup();
+    expect(terminalLifecycle.destroyed).toHaveLength(3);
+  });
+
+  it.each([
+    ['focus', true, 'needs_approval'], ['grid', true, 'needs_input'],
+    ['focus', false, 'needs_input'], ['grid', false, 'needs_approval'],
+  ] as const)('G10: %s attention with terminal=%s and %s points to the right view without moving composer focus', async (mode, hasTerminal, status) => {
+    layout.setSessionViewMode(mode); chatFeed(undefined, hasTerminal);
+    const view = render(SessionOverview); await tick();
+    const pane = view.container.querySelector<HTMLElement>('.terminal-item')!;
+    const editor = within(pane).getByRole('textbox', { name: 'Message this agent…' }); editor.focus();
+    chatFeed([{ agent_id: 'session-a-agent-0', cursor: 'approval', kind: 'status', ts: '2026-01-01T00:00:00Z', source_id: 'approval', truncated: false, payload: { status, message: 'Fixture prompt' } }], hasTerminal);
+    await tick();
+    const attention = within(pane).getByRole('region', { name: 'Agent needs attention' });
+    expect(attention.textContent).toContain(status === 'needs_approval' ? 'Approval required.' : 'Agent needs input.');
+    const pointer = within(attention).getByRole('button', { name: hasTerminal ? 'Open terminal' : 'Open raw event log' });
+    expect(document.activeElement).toBe(editor);
+    expect(within(pane).getByRole('button', { name: 'Chat' }).getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(pointer);
+    if (hasTerminal) expect((pane.querySelector('.terminal-layer') as HTMLElement).inert).toBe(false);
+    else {
+      expect(within(pane).getByRole('region', { name: 'Raw agent event log' })).toBeTruthy();
+      expect(within(pane).queryByRole('button', { name: 'Terminal' })).toBeNull();
+      expect(within(pane).queryByRole('button', { name: 'Flush Enter' })).toBeNull();
+    }
+  });
+
+  it.each(['focus', 'grid'] as const)('G10: shows a waiting on-screen prompt, shared error or disconnected feed above %s chat without moving focus', async (mode) => {
+    layout.setSessionViewMode(mode); chatFeed();
+    const view = render(SessionOverview); await tick();
+    const pane = view.container.querySelector<HTMLElement>('.terminal-item')!;
+    const editor = within(pane).getByRole('textbox', { name: 'Message this agent…' }); editor.focus();
+    const active = session(); active.agents[0].status = { WaitingForInput: 'trust_prompt' }; publish(active); await tick();
+    expect(within(pane).getByText('Agent needs input. A prompt may only be visible in the terminal.')).toBeTruthy();
+    expect(document.activeElement).toBe(editor);
+    const failed = session(); failed.agents[0].status = { Error: 'fixture error' }; publish(failed); await tick();
+    expect(within(pane).getByText('This agent reported an error.')).toBeTruthy();
+    expect(document.activeElement).toBe(editor);
+    publish(session()); chatFeed(undefined, true, 'Agent feed disconnected; reconnecting.'); await tick();
+    expect(within(pane).getByText('Agent feed disconnected; reconnecting.')).toBeTruthy();
+    expect(document.activeElement).toBe(editor);
+  });
+
   it('G-no-remount: 20 individually flushed Focus agent switches create and destroy zero instances', async () => {
     const view = render(SessionOverview);
     await tick();

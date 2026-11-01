@@ -63,16 +63,27 @@ impl CliRegistry {
 
     /// Get CLI configuration for a specific CLI name
     pub fn get_cli(&self, name: &str) -> Option<&CliConfig> {
+        if !crate::adapters::is_valid_cli(name) {
+            return None;
+        }
         self.config.clis.get(name)
     }
 
     /// Get all registered CLIs
     pub fn list_clis(&self) -> Vec<String> {
-        self.config.clis.keys().cloned().collect()
+        self.config
+            .clis
+            .keys()
+            .filter(|name| crate::adapters::is_valid_cli(name))
+            .cloned()
+            .collect()
     }
 
     /// Build command, arguments, and environment variables from an agent config
     pub fn build_command(&self, agent_config: &AgentConfig) -> Result<BuiltCommand, RegistryError> {
+        if !crate::adapters::is_valid_cli(&agent_config.cli) {
+            return Err(RegistryError::UnknownCli(agent_config.cli.clone()));
+        }
         let cli = self
             .config
             .clis
@@ -148,6 +159,7 @@ impl CliRegistry {
         self.config
             .default_roles
             .get(role_type)
+            .filter(|defaults| crate::adapters::is_valid_cli(&defaults.cli))
             .map(|defaults| (defaults.cli.as_str(), defaults.model.as_str()))
     }
 
@@ -158,11 +170,8 @@ impl CliRegistry {
     pub fn default_model(cli: &str) -> Option<&'static str> {
         match cli {
             "claude" => Some("opus"),
-            "opencode" => Some("opencode/big-pickle"),
             "codex" => Some("gpt-6.1-sol"),
             "cursor" => Some("composer-2.5"),
-            "droid" => Some("glm-5.1"),
-            "qwen" => Some("qwen3-coder"),
             _ => None,
         }
     }
@@ -292,12 +301,11 @@ impl CliRegistry {
     pub fn get_behavior(cli: &str) -> CliBehavior {
         match cli {
             "claude" => CliBehavior::ActionProne,
-            "qwen" => CliBehavior::InstructionFollowing,
             // Codex principals commonly start in STANDBY and are activated by
             // a task-file update. Until the runtime injects an explicit wake-up,
-            // they need the same durable activation loop as OpenCode.
-            "codex" | "opencode" => CliBehavior::ExplicitPolling,
-            "droid" | "cursor" => CliBehavior::Interactive,
+            // they need a durable activation loop.
+            "codex" => CliBehavior::ExplicitPolling,
+            "cursor" => CliBehavior::Interactive,
             _ => CliBehavior::ActionProne, // Default to most constrained
         }
     }
@@ -369,26 +377,6 @@ mod tests {
             },
         );
         clis.insert(
-            "droid".to_string(),
-            CliConfig {
-                command: "droid".to_string(),
-                auto_approve_flag: None, // Interactive mode - no auto-approve flag
-                model_flag: None,        // Model selected via /model command in TUI
-                default_model: "glm-5.1".to_string(),
-                env: None,
-            },
-        );
-        clis.insert(
-            "qwen".to_string(),
-            CliConfig {
-                command: "qwen".to_string(),
-                auto_approve_flag: Some("-y".to_string()),
-                model_flag: Some("-m".to_string()),
-                default_model: "qwen3-coder".to_string(),
-                env: None,
-            },
-        );
-        clis.insert(
             "codex".to_string(),
             CliConfig {
                 command: "codex".to_string(),
@@ -396,20 +384,6 @@ mod tests {
                 model_flag: Some("-m".to_string()),
                 default_model: "gpt-6.1-sol".to_string(),
                 env: None,
-            },
-        );
-        clis.insert(
-            "opencode".to_string(),
-            CliConfig {
-                command: "opencode".to_string(),
-                auto_approve_flag: None,
-                model_flag: Some("-m".to_string()),
-                default_model: "opencode/big-pickle".to_string(),
-                env: Some({
-                    let mut env = HashMap::new();
-                    env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
-                    env
-                }),
             },
         );
 
@@ -524,48 +498,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_droid_command() {
-        let registry = CliRegistry::new(test_config());
-        let config = AgentConfig {
-            cli: "droid".to_string(),
-            model: Some("glm-5.1".to_string()),
-            flags: vec![],
-            label: None,
-            name: None,
-            description: None,
-            role: None,
-            initial_prompt: None,
-        };
-
-        let built = registry.build_command(&config).unwrap();
-        assert_eq!(built.command, "droid");
-        // Droid interactive mode - no auto-approve or model flags
-        // Model is selected via /model command in TUI
-        assert!(built.args.is_empty() || built.args == config.flags);
-    }
-
-    #[test]
-    fn test_build_qwen_command() {
-        let registry = CliRegistry::new(test_config());
-        let config = AgentConfig {
-            cli: "qwen".to_string(),
-            model: None,
-            flags: vec![],
-            label: None,
-            name: None,
-            description: None,
-            role: None,
-            initial_prompt: None,
-        };
-
-        let built = registry.build_command(&config).unwrap();
-        assert_eq!(built.command, "qwen");
-        assert!(built.args.contains(&"-y".to_string()));
-        assert!(built.args.contains(&"-m".to_string()));
-        assert!(built.args.contains(&"qwen3-coder".to_string()));
-    }
-
-    #[test]
     fn test_build_codex_command() {
         let registry = CliRegistry::new(test_config());
         let config = AgentConfig {
@@ -589,46 +521,15 @@ mod tests {
     }
 
     #[test]
-    fn test_build_opencode_command() {
-        let registry = CliRegistry::new(test_config());
-        let config = AgentConfig {
-            cli: "opencode".to_string(),
-            model: None,
-            flags: vec![],
-            label: None,
-            name: None,
-            description: None,
-            role: None,
-            initial_prompt: None,
-        };
-
-        let built = registry.build_command(&config).unwrap();
-        assert_eq!(built.command, "opencode");
-        assert!(built.args.contains(&"-m".to_string()));
-        assert!(built.args.contains(&"opencode/big-pickle".to_string()));
-        // Check env has OPENCODE_YOLO
-        assert_eq!(built.env.get("OPENCODE_YOLO"), Some(&"true".to_string()));
-    }
-
-    #[test]
     fn test_cli_behavior_profiles() {
         assert_eq!(
             CliRegistry::get_behavior("claude"),
             CliBehavior::ActionProne
         );
         assert_eq!(
-            CliRegistry::get_behavior("qwen"),
-            CliBehavior::InstructionFollowing
-        );
-        assert_eq!(
             CliRegistry::get_behavior("codex"),
             CliBehavior::ExplicitPolling
         );
-        assert_eq!(
-            CliRegistry::get_behavior("opencode"),
-            CliBehavior::ExplicitPolling
-        );
-        assert_eq!(CliRegistry::get_behavior("droid"), CliBehavior::Interactive);
         assert_eq!(
             CliRegistry::get_behavior("cursor"),
             CliBehavior::Interactive
@@ -642,9 +543,7 @@ mod tests {
     #[test]
     fn test_needs_role_hardening() {
         assert!(CliRegistry::needs_role_hardening("claude"));
-        assert!(!CliRegistry::needs_role_hardening("qwen"));
         assert!(!CliRegistry::needs_role_hardening("codex"));
-        assert!(!CliRegistry::needs_role_hardening("droid"));
     }
 
     #[test]
@@ -665,7 +564,6 @@ mod tests {
     fn test_default_model_lookup() {
         assert_eq!(CliRegistry::default_model("claude"), Some("opus"));
         assert_eq!(CliRegistry::default_model("codex"), Some("gpt-6.1-sol"));
-        assert_eq!(CliRegistry::default_model("droid"), Some("glm-5.1"));
         assert_eq!(CliRegistry::default_model("cursor"), Some("composer-2.5"));
         assert_eq!(CliRegistry::default_model("unknown"), None);
         // Removed CLIs must no longer resolve a default model.
@@ -859,9 +757,20 @@ mod tests {
     }
 
     #[test]
-    fn test_build_command_rejects_removed_gemini_and_antigravity() {
-        let registry = CliRegistry::new(test_config());
-        for cli in ["gemini", "antigravity"] {
+    fn test_build_command_rejects_removed_clis() {
+        let mut stale = test_config();
+        for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+            stale.clis.insert(cli.to_string(), stale.clis["claude"].clone());
+            stale.default_roles.insert(cli.to_string(), crate::storage::RoleDefaults {
+                cli: cli.to_string(), model: "stale-model".to_string(),
+            });
+        }
+        let registry = CliRegistry::new(stale);
+        assert_eq!(registry.list_clis().len(), 3);
+        for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+            assert!(registry.get_cli(cli).is_none());
+            assert!(registry.get_role_defaults(cli).is_none());
+            assert!(CliRegistry::default_model(cli).is_none());
             let config = AgentConfig {
                 cli: cli.to_string(),
                 model: None,

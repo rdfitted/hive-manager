@@ -1,6 +1,7 @@
 import { defaultRoles, getDefaultModel, normalizeModelId } from '$lib/config/clis';
 import type {
   AgentConfig,
+  AgentTransportOption,
   DelegationMode,
   HiveLaunchConfig,
   QaWorkerConfig,
@@ -146,6 +147,7 @@ function buildDelegationPolicy(
 export interface BuildHiveLaunchConfigInput<
   TTierPolicy extends LaunchTierPolicyFields = TierPolicy,
 > {
+  agentTransports?: AgentTransportOption[];
   name?: string;
   color?: string;
   projectPath: string;
@@ -187,6 +189,7 @@ export function buildHiveLaunchConfig<
   return {
     name: input.name,
     color: input.color,
+    ...(input.agentTransports?.length ? { agent_transports: [...input.agentTransports] } : {}),
     project_path: input.projectPath,
     queen_config: input.queenConfig,
     workers: input.principals,
