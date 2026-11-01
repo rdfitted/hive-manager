@@ -84,8 +84,8 @@
             {/if}
           </details>
         {:else}
-          <article class="message" aria-label={row.type === 'user' ? 'User message' : row.type === 'assistant' ? 'Assistant message' : 'Agent error'}>
-            <header><strong>{row.type === 'user' ? 'User' : row.type === 'assistant' ? 'Assistant' : 'Error'}</strong><time datetime={row.ts}>{new Date(row.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></header>
+          <article class="message" aria-label={row.type === 'user' ? 'User message' : row.type === 'assistant' ? 'Assistant message' : row.type === 'decision' ? 'Approval decision' : 'Agent error'}>
+            <header><strong>{row.type === 'user' ? 'User' : row.type === 'assistant' ? 'Assistant' : row.type === 'decision' ? 'Approval' : 'Error'}</strong><time datetime={row.ts}>{new Date(row.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></header>
             <p>{row.text}</p>
             {#if row.truncated}<span class="truncation">Message truncated</span>{/if}
           </article>

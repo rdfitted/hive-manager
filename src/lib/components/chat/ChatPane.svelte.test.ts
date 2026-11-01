@@ -111,4 +111,15 @@ describe('agent chat', () => {
     expect(protocolAttention([event('2', 'status', { status: 'needs_input' })])).toBe('Agent needs input.');
     expect(protocolAttention([event('1', 'status', { status: 'needs_input' }), event('2', 'turn_start')])).toBeNull();
   });
+
+  it('F2: renders declined decisions and legacy failed turns as persistent labelled rows', async () => {
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [
+      event('1', 'status', { status: 'needs_approval', message: 'Hive declined it; use PTY.', request_id: 7 }),
+      event('2', 'turn_end', { status: 'failed', error: { message: 'Fixture failure' } }),
+      event('3', 'status', { status: 'subagent_activity' }),
+    ] } });
+    expect(view.getByRole('article', { name: 'Approval decision' }).textContent).toContain('Hive declined it; use PTY.');
+    expect(view.getByRole('article', { name: 'Agent error' }).textContent).toContain('Fixture failure');
+    expect(view.queryByRole('button', { name: /approve|reject/i })).toBeNull();
+  });
 });
