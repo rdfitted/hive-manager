@@ -1,5 +1,13 @@
+<script module lang="ts">
+  export type ComposerControls = {
+    canSend: boolean;
+    submit(): void;
+    openMenu(mode: 'mention' | 'slash'): void;
+  };
+</script>
+
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, type Snippet } from 'svelte';
   import { get } from 'svelte/store';
   import MentionMenu from './MentionMenu.svelte';
   import SlashMenu from './SlashMenu.svelte';
@@ -28,6 +36,7 @@
     /** Called with the flattened plain-text prompt (one-shot context already prepended). */
     onsubmit?: (text: string) => void;
     disabled?: boolean;
+    toolbar?: Snippet<[ComposerControls]>;
   }
 
   let {
@@ -38,6 +47,7 @@
     persistDraft = true,
     onsubmit,
     disabled = false,
+    toolbar,
   }: Props = $props();
 
   let editor: HTMLDivElement;
@@ -53,6 +63,45 @@
 
   let mentionItems: MentionItem[] = $state([]);
   let commandItems: SlashCommand[] = $state([]);
+  const controls: ComposerControls = {
+    get canSend() { return !disabled && !!onsubmit && !!value.trim(); },
+    submit: () => { void submit(); },
+    openMenu,
+  };
+
+  function focusCard(event: PointerEvent) {
+    if (disabled || !(event.target instanceof Element)) return;
+    if (event.target.closest('[data-composer], button, input, select, textarea, a, [role="menu"], [role="listbox"]')) return;
+    event.preventDefault();
+    editor.focus();
+  }
+
+  /** Insert a real trigger so toolbar actions share keyboard menus and token replacement. */
+  function openMenu(mode: 'mention' | 'slash') {
+    if (disabled) return;
+    editor.focus();
+    const selection = window.getSelection();
+    if (!selection) return;
+    let range = selection.rangeCount ? selection.getRangeAt(0) : document.createRange();
+    if (!editor.contains(range.commonAncestorContainer)) {
+      range = document.createRange();
+      range.selectNodeContents(editor);
+      range.collapse(false);
+    }
+    const before = range.cloneRange();
+    before.selectNodeContents(editor);
+    before.setEnd(range.startContainer, range.startOffset);
+    const prefix = /\S$/.test(before.toString()) ? ' ' : '';
+    const trigger = document.createTextNode(prefix + (mode === 'mention' ? '@' : '/'));
+    range.deleteContents();
+    range.insertNode(trigger);
+    range.setStart(trigger, trigger.length);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    syncValue();
+    detectTrigger();
+  }
 
   // --- Draft load on session change ---
   let lastBoundSession: string | null = null;
@@ -336,15 +385,16 @@
   }
 </script>
 
-<div class="composer-wrap" class:disabled>
+<div class="composer-wrap" role="group" aria-label="Message composer" class:disabled class:has-toolbar={!!toolbar} onpointerdown={focusCard}>
   <div
     bind:this={editor}
-    class="composer lattice-input lattice-scroll-chrome"
+    class="composer lattice-scroll-chrome"
     data-composer
     contenteditable="true"
     role="textbox"
     tabindex="0"
     aria-multiline="true"
+    aria-disabled={disabled}
     aria-label={placeholder}
     data-placeholder={placeholder}
     oninput={handleInput}
@@ -352,6 +402,12 @@
     onkeyup={handleKeyup}
     onblur={closeMenu}
   ></div>
+
+  {#if toolbar}
+    <div class="composer-toolbar" role="group" aria-label="Composer toolbar" inert={disabled}>
+      {@render toolbar(controls)}
+    </div>
+  {/if}
 
   {#if menuMode === 'mention'}
     <MentionMenu
@@ -377,6 +433,22 @@
     position: relative;
     flex: 1;
     min-width: 0;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-shell);
+    background: var(--bg-void);
+    padding: var(--space-2);
+  }
+
+  .composer-wrap:focus-within {
+    border-color: var(--accent-cyan);
+  }
+
+  .composer-wrap.has-toolbar {
+    padding: var(--space-3);
+  }
+
+  .composer-toolbar {
+    padding-top: var(--space-3);
   }
 
   .composer {
@@ -387,6 +459,14 @@
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
+    font-family: var(--font-body);
+    font-size: var(--text-small);
+    color: var(--text-primary);
+    outline: none;
+  }
+
+  .has-toolbar .composer {
+    min-height: 64px;
   }
 
   .composer :global(.composer-token) {
@@ -421,5 +501,12 @@
   .composer-wrap.disabled .composer {
     opacity: 0.5;
     pointer-events: none;
+  }
+
+  @media (forced-colors: active) {
+    .composer-wrap { border-color: CanvasText; }
+    .composer-wrap:focus-within { border-color: Highlight; }
+    .composer:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+    .composer :global(.composer-token) { border: 1px solid CanvasText; }
   }
 </style>
