@@ -49,6 +49,37 @@ const answer = 42;
     ]);
   });
 
+  it.each(['[', '[a](', '*', '_', '`'])('bounds character work for long malformed input: %s', (fragment) => {
+    for (const length of [32000, 64000]) {
+      const source = fragment.repeat(Math.ceil(length / fragment.length)).slice(0, length);
+      // Instrument character access rather than asserting machine-dependent time.
+      // String's other methods retain their normal behavior on this boxed input.
+      const measured = new String(source);
+      let reads = 0;
+      measured.charAt = (index) => { reads++; return source.charAt(index); };
+      const tokens = parseInlineMarkdown(measured as unknown as string);
+      expect(tokens.map((token) => token.text).join('')).toBe(source);
+      expect(reads).toBeGreaterThanOrEqual(length);
+      expect(reads).toBeLessThanOrEqual(6 * length);
+    }
+  });
+
+  it('preserves the existing inline subset and delimiter precedence', () => {
+    expect(parseInlineMarkdown('**bold** __also bold__ *italic* _also italic_ `code` [[page]] [docs](https://example.com)')).toEqual([
+      { type: 'strong', text: 'bold' }, { type: 'text', text: ' ' },
+      { type: 'strong', text: 'also bold' }, { type: 'text', text: ' ' },
+      { type: 'emphasis', text: 'italic' }, { type: 'text', text: ' ' },
+      { type: 'emphasis', text: 'also italic' }, { type: 'text', text: ' ' },
+      { type: 'code', text: 'code' }, { type: 'text', text: ' ' },
+      { type: 'wikilink', text: 'page' }, { type: 'text', text: ' ' },
+      { type: 'link', text: 'docs', href: 'https://example.com/' },
+    ]);
+    expect(parseInlineMarkdown('***x*** **\nno cross-line**')).toEqual([
+      { type: 'text', text: '*' }, { type: 'strong', text: 'x' },
+      { type: 'emphasis', text: ' ' }, { type: 'text', text: '*\nno cross-line**' },
+    ]);
+  });
+
   it('keeps blank-separated bold numbered items together and nests lists under their parent', () => {
     expect(parseMarkdown('3. **First**\n   - child\n     7. **Nested**\n\n4. **Second**')).toEqual([
       { type: 'list', ordered: true, start: 3, items: ['**First**', '**Second**'], children: {

@@ -24,16 +24,55 @@ function safeLink(value: string): string | null {
   }
 }
 
-/** Parse a deliberately small inline subset without ever emitting HTML. */
+/** Parse a deliberately small inline subset without ever emitting HTML, in O(n) work. */
 export function parseInlineMarkdown(source: string): MarkdownInline[] {
   const tokens: MarkdownInline[] = [];
-  const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_([^_\n]+)_|\[([^\]\n]+)\]\(([^)\n]+)\)|\[\[([^\]\n]+)\]\])/g;
+  // Cache each candidate's exclusive end in one reverse pass. Failed openers
+  // must not search the same suffix again (notably '[' and unfinished links).
+  // Entries for '(' cache URL ends for the '[' candidate to its left.
+  const ends = new Uint32Array(source.length);
+  let newline = source.length;
+  let backtick = source.length;
+  let star = source.length;
+  let secondStar = source.length;
+  let underscore = source.length;
+  let secondUnderscore = source.length;
+  let bracket = source.length;
+  let parenthesis = source.length;
+  for (let index = source.length - 1; index >= 0; index--) {
+    const character = source.charAt(index);
+    if (character === '\n') newline = index;
+    else if (character === '`') {
+      if (backtick > index + 1 && backtick < newline) ends[index] = backtick + 1;
+      backtick = index;
+    } else if (character === '*' || character === '_') {
+      const next = character === '*' ? star : underscore;
+      const second = character === '*' ? secondStar : secondUnderscore;
+      if (next === index + 1 && second > index + 2 && second < newline && source.charAt(second + 1) === character) {
+        ends[index] = second + 2;
+      } else if (next > index + 1 && next < newline) ends[index] = next + 1;
+      if (character === '*') { secondStar = star; star = index; }
+      else { secondUnderscore = underscore; underscore = index; }
+    } else if (character === ']') bracket = index;
+    else if (character === ')') parenthesis = index;
+    else if (character === '(') {
+      if (parenthesis > index + 1 && parenthesis < newline) ends[index] = parenthesis + 1;
+    } else if (character === '[' && bracket < newline) {
+      // Links precede wiki links, matching the existing inline subset.
+      if (bracket > index + 1 && source.charAt(bracket + 1) === '(' && ends[bracket + 1]) {
+        ends[index] = ends[bracket + 1];
+      } else if (source.charAt(index + 1) === '[' && bracket > index + 2 && source.charAt(bracket + 1) === ']') {
+        ends[index] = bracket + 2;
+      }
+    }
+  }
   let cursor = 0;
 
-  for (const match of source.matchAll(pattern)) {
-    const start = match.index ?? 0;
+  for (let start = 0; start < source.length; start++) {
+    const end = ends[start];
+    if (!end || source.charAt(start) === '(') continue;
     if (start > cursor) tokens.push({ type: 'text', text: source.slice(cursor, start) });
-    const raw = match[0];
+    const raw = source.slice(start, end);
 
     if (raw.startsWith('`')) {
       tokens.push({ type: 'code', text: raw.slice(1, -1) });
@@ -52,7 +91,8 @@ export function parseInlineMarkdown(source: string): MarkdownInline[] {
     } else {
       tokens.push({ type: 'emphasis', text: raw.slice(1, -1) });
     }
-    cursor = start + raw.length;
+    cursor = end;
+    start = end - 1;
   }
 
   if (cursor < source.length) tokens.push({ type: 'text', text: source.slice(cursor) });
