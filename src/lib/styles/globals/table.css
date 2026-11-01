@@ -13,15 +13,15 @@
    consumer's scoped cell rules without resorting to !important. */
 table.lattice-table th,
 table.lattice-table td {
-  background-color: var(--bg-panel);
+  background-color: var(--surface);
   border-bottom: 0;
-  box-shadow: var(--edge-seam);
+  box-shadow: none;
 }
 
 table.lattice-table th {
   text-align: left;
   font-weight: 500;
-  color: var(--text-secondary);
+  color: var(--text-muted);
   text-transform: none;
   letter-spacing: normal;
   font-size: var(--text-micro);
@@ -34,8 +34,12 @@ table.lattice-table td {
   vertical-align: middle;
 }
 
+table.lattice-table tbody tr:nth-child(even) td {
+  background-color: var(--surface-raised);
+}
+
 table.lattice-table tbody tr:hover td {
-  background-color: var(--bg-raised);
+  background-color: var(--surface-raised);
 }
 
 @media (forced-colors: active) {

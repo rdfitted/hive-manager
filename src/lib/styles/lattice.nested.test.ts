@@ -86,7 +86,7 @@ describe('nested Lattice surfaces', () => {
         <div class="terminal-item lattice-panel"><div id="overlay" class="${overlay} lattice-panel"></div></div>
       </section>`;
       const style = getComputedStyle(document.getElementById('overlay')!);
-      expect(style.backgroundColor).toBe('rgb(17, 17, 17)');
+      expect(style.backgroundColor).toBe('rgb(18, 45, 82)');
       expect(style.boxShadow).toContain('0 1px 2px');
     },
   );

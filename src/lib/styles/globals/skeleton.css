@@ -63,7 +63,7 @@
   display: block;
   flex: 0 1 auto;
   min-width: 0;
-  background: var(--bg-elevated);
+  background: var(--surface-overlay);
 }
 
 .lattice-skel-bar[data-radius='none'] {

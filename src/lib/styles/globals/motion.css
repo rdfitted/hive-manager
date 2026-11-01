@@ -10,15 +10,15 @@
    ═══════════════════════════════════════════════════════════════════ */
 
 :root {
-  --motion-duration-instant:  120ms;
-  --motion-duration-fast:     160ms;
-  --motion-duration-standard: 200ms;
-  --motion-duration-arrival:  320ms;
+  --motion-duration-instant:  170ms;
+  --motion-duration-fast:     170ms;
+  --motion-duration-standard: 170ms;
+  --motion-duration-arrival:  170ms;
   --motion-duration-spin:     1s;
   --motion-duration-pulse:    1.5s;
   --motion-duration-sweep:    2s;
-  --motion-ease-standard: ease-out;
-  --motion-ease-arrival:  cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-ease-standard: cubic-bezier(.2,.7,.2,1);
+  --motion-ease-arrival:  cubic-bezier(.2,.7,.2,1);
   --motion-distance-arrival: 0.75rem;
   --motion-blur-arrival: 2px;
 }

@@ -3,8 +3,8 @@
    ═══════════════════════════════════════════════════════════════════ */
 
 .lattice-btn {
-  --lattice-btn-tone: var(--accent-cyan);
-  --lattice-btn-tone-rgb: var(--rgb-running);
+  --lattice-btn-tone: var(--accent);
+  --lattice-btn-tone-rgb: 0, 179, 255;
   --lattice-btn-ring: transparent;
 
   display: inline-flex;
@@ -20,7 +20,7 @@
   white-space: nowrap;
   min-height: var(--control-height);
   box-sizing: border-box;
-  padding: var(--space-1) var(--space-3);
+  padding: var(--space-2) var(--space-4);
   border: 0;
   border-radius: var(--control-radius);
   cursor: pointer;
@@ -34,35 +34,36 @@
 }
 
 .lattice-btn--primary {
-  --lattice-btn-tone: var(--accent-cyan);
-  --lattice-btn-tone-rgb: var(--rgb-running);
-  --lattice-btn-ring: var(--accent-cyan);
-  color: var(--accent-cyan);
-  background-color: rgba(var(--rgb-running), 0.1);
+  --lattice-btn-tone: var(--accent);
+  --lattice-btn-tone-rgb: 0, 179, 255;
+  --lattice-btn-ring: var(--accent);
+  color: var(--on-accent);
+  background-color: var(--accent);
 }
 
 .lattice-btn--primary:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
-  background-color: rgba(var(--rgb-running), 0.2);
+  background-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--lattice-btn-ring);
 }
 
 .lattice-btn--secondary {
   --lattice-btn-ring: var(--border-control);
+  background-color: var(--surface-raised);
   color: var(--text-primary);
 }
 
 .lattice-btn--secondary:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   --lattice-btn-ring: var(--accent-chrome);
-  background-color: var(--bg-elevated);
+  background-color: var(--surface-overlay);
 }
 
 .lattice-btn--ghost {
-  color: var(--text-secondary);
+  color: var(--text-muted);
 }
 
 .lattice-btn--ghost:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   color: var(--text-primary);
-  background-color: var(--bg-elevated);
+  background-color: var(--surface-overlay);
 }
 
 .lattice-btn--danger {
@@ -70,11 +71,11 @@
   --lattice-btn-tone-rgb: var(--rgb-error);
   --lattice-btn-ring: var(--status-error);
   color: var(--status-error);
-  background-color: rgba(var(--rgb-error), 0.08);
+  background-color: var(--danger-tint);
 }
 
 .lattice-btn--danger:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
-  background-color: rgba(var(--rgb-error), 0.16);
+  background-color: var(--danger-tint);
   box-shadow: inset 0 0 0 1px var(--lattice-btn-ring);
 }
 
@@ -116,13 +117,12 @@
 }
 
 .lattice-btn--filled {
-  --lattice-btn-ring: color-mix(in srgb, var(--bg-void) 35%, transparent);
-  color: var(--bg-void);
+  --lattice-btn-ring: transparent;
+  color: var(--on-accent);
   background-color: var(--lattice-btn-tone);
 }
 
 .lattice-btn--filled:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
-  opacity: 0.9;
   background-color: var(--lattice-btn-tone);
 }
 
@@ -130,8 +130,7 @@
 
 .lattice-btn.lattice-btn--dashed {
   --lattice-btn-ring: transparent;
-  outline: 1px dashed currentColor;
-  outline-offset: -1px;
+  border: 1px dashed var(--border-control);
   background-color: transparent;
 }
 
@@ -160,14 +159,14 @@
   padding: 0;
   border: 0;
   border-radius: var(--control-radius);
-  color: var(--text-secondary);
+  color: var(--text-muted);
   text-transform: none;
   letter-spacing: normal;
   white-space: normal;
 }
 
 .lattice-btn--link:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
-  color: var(--accent-cyan);
+  color: var(--accent);
   background-color: transparent;
 }
 
@@ -192,7 +191,7 @@
 }
 
 .lattice-btn--menu-item:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
-  background-color: var(--bg-elevated);
+  background-color: var(--surface-overlay);
 }
 
 .lattice-btn--row {
@@ -202,26 +201,26 @@
 
 .lattice-btn--row:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   color: var(--text-primary);
-  background-color: var(--bg-elevated);
+  background-color: var(--surface-overlay);
 }
 
 .lattice-btn--card {
   align-items: flex-start;
   --lattice-btn-ring: var(--border-control);
-  padding: calc(var(--space-3) + 1px);
-  background-color: var(--bg-surface);
+  padding: var(--space-4);
+  background-color: var(--chrome);
 }
 
 .lattice-btn--card:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   --lattice-btn-ring: var(--accent-chrome);
-  background-color: var(--bg-elevated);
+  background-color: var(--surface-overlay);
 }
 
 .lattice-btn--chip {
   --lattice-btn-ring: var(--border-control);
   padding: calc(2px + 1px) calc(var(--space-2) + 1px);
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
+  border-radius: var(--radius-full);
+  color: var(--text-muted);
   text-transform: none;
   letter-spacing: normal;
 }
@@ -259,8 +258,8 @@
 .lattice-btn[aria-current="true"],
 .lattice-btn[aria-current="page"] {
   color: var(--lattice-btn-tone);
-  background-color: rgba(var(--lattice-btn-tone-rgb), 0.1);
-  box-shadow: inset 0 0 0 1px rgba(var(--lattice-btn-tone-rgb), 0.65);
+  background-color: var(--accent-tint);
+  box-shadow: none;
 }
 
 .lattice-btn.lattice-btn--selected:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)),
@@ -269,8 +268,8 @@
 .lattice-btn[aria-current="true"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)),
 .lattice-btn[aria-current="page"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   color: var(--lattice-btn-tone);
-  background-color: rgba(var(--lattice-btn-tone-rgb), 0.16);
-  box-shadow: inset 0 0 0 1px rgba(var(--lattice-btn-tone-rgb), 0.75);
+  background-color: var(--accent-tint);
+  box-shadow: none;
 }
 
 /* Labels and role-controls can share selection/focus without button layout. */
@@ -294,10 +293,10 @@
 .lattice-selectable[aria-pressed="true"],
 .lattice-selectable[aria-selected="true"],
 .lattice-selectable[aria-checked="true"] {
-  color: var(--accent-cyan);
-  border-color: var(--accent-cyan);
-  background-color: rgba(var(--rgb-running), 0.1);
-  box-shadow: inset 0 0 0 1px rgba(var(--rgb-running), 0.25);
+  color: var(--accent);
+  border-color: var(--border-control);
+  background-color: var(--accent-tint);
+  box-shadow: none;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -309,7 +308,7 @@
   font-size: var(--text-small);
   min-height: var(--control-height);
   box-sizing: border-box;
-  background-color: var(--bg-void);
+  background-color: var(--input);
   color: var(--text-primary);
   border: 1px solid var(--border-control);
   border-radius: var(--control-radius);
@@ -323,8 +322,6 @@
 }
 
 .lattice-input:focus {
-  outline: none;
-  border-color: var(--accent-cyan);
   box-shadow: none;
 }
 
@@ -335,7 +332,7 @@
 .lattice-tab:focus-visible,
 .lattice-selectable:focus-visible,
 .lattice-selectable:has(:focus-visible) {
-  outline: 2px solid var(--accent-cyan);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -395,10 +392,10 @@
   font-size: var(--text-small);
   text-transform: none;
   letter-spacing: normal;
-  color: var(--text-secondary);
+  color: var(--text-muted);
   padding: var(--space-2) var(--space-4);
   border: none;
-  border-bottom: 2px solid transparent;
+  border-bottom: 0;
   border-radius: var(--control-radius);
   background: transparent;
   cursor: pointer;
@@ -412,21 +409,37 @@
 
 .lattice-tab:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])) {
   color: var(--text-primary);
-  background-color: var(--bg-elevated);
+  background-color: var(--surface-overlay);
 }
 
 .lattice-tab--active,
 .lattice-tab[aria-selected="true"],
 .lattice-tab[aria-pressed="true"] {
-  color: var(--accent-cyan);
-  border-bottom-color: var(--accent-cyan);
-  background-color: var(--bg-surface);
+  color: var(--accent);
+  background-color: var(--track-active);
 }
 
 .lattice-tab--active:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])),
 .lattice-tab[aria-selected="true"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])),
 .lattice-tab[aria-pressed="true"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])) {
-  color: var(--accent-cyan);
-  border-bottom-color: var(--accent-cyan);
-  background-color: var(--bg-surface);
+  color: var(--accent);
+  background-color: var(--track-active);
+}
+
+/* Shared tonal track; active tabs change surface and text without stripes. */
+.lattice-track {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 0;
+  border-radius: var(--control-radius);
+  background: var(--track);
+}
+
+/* Filled controls retain readable dark text when they also expose selection. */
+.lattice-btn.lattice-btn--primary:is(.lattice-btn--selected, [aria-pressed="true"], [aria-selected="true"], [aria-current="true"], [aria-current="page"]),
+.lattice-btn.lattice-btn--filled:is(.lattice-btn--selected, [aria-pressed="true"], [aria-selected="true"], [aria-current="true"], [aria-current="page"]) {
+  color: var(--on-accent);
+  background-color: var(--lattice-btn-tone);
 }
