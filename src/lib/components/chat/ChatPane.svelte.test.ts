@@ -27,6 +27,19 @@ export const event = (cursor: string, kind: AgentEvent['kind'] = 'assistant_mess
 afterEach(() => { cleanup(); fixture.setSource('none'); fixture.setAgents([]); vi.clearAllMocks(); });
 
 describe('agent chat', () => {
+  it('G30 source guard: prohibits raw HTML in every chat component and shared Markdown renderer', () => {
+    const sources = import.meta.glob<string>([
+      './**/*.svelte', '../ui/MarkdownBlocks.svelte', '../knowledge/MarkdownInline.svelte',
+    ], { eager: true, query: '?raw', import: 'default' });
+    expect(Object.keys(sources)).toEqual(expect.arrayContaining([
+      './ChatPane.svelte', '../ui/MarkdownBlocks.svelte', '../knowledge/MarkdownInline.svelte',
+    ]));
+    const rawHtmlFiles = Object.entries(sources)
+      .filter(([, source]) => /\{\s*@html\b/.test(source))
+      .map(([path]) => path);
+    expect(rawHtmlFiles).toEqual([]);
+  });
+
   it('G30: keeps script, image handlers, iframe HTML and executable links inert and visible', () => {
     const source = '<script>window.agentPayload = true</script> <img src=x onerror=alert(1)> <iframe srcdoc="unsafe"></iframe> [script](javascript:alert(1)) [data](data:text/html,unsafe)';
     const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [event('unsafe', 'assistant_message', { text: source })] } });
