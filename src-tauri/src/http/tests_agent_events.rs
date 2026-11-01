@@ -709,6 +709,69 @@ async fn legacy_hive_live_and_persisted_feeds_use_project_cwd_and_exact_ids() {
 }
 
 #[tokio::test]
+async fn persisted_swarm_and_hive_queen_feeds_keep_their_launch_cwd() {
+    for hive in [false, true] {
+        let (temp, state, app) = setup();
+        let project = temp.path().join("project");
+        let mut session =
+            make_test_session_with_agents("session", project.to_str().unwrap(), &["queen"]);
+        session.no_git = false;
+        session.execution_policy.workspace_strategy =
+            crate::domain::WorkspaceStrategy::IsolatedCell;
+        let queen_worktree = project.join(".hive-manager/worktrees/session/queen");
+        session.session_type = if hive {
+            crate::session::SessionType::Hive { worker_count: 1 }
+        } else {
+            crate::session::SessionType::Swarm { planner_count: 1 }
+        };
+        session.worktree_path = hive.then(|| queen_worktree.to_string_lossy().into_owned());
+        session.agents[0].role = crate::pty::AgentRole::Queen;
+        session.agents[0].transcript_session_id = Some("held-queen-transcript".into());
+        let expected = if hive {
+            "scrubbed Hive Queen worktree record"
+        } else {
+            "scrubbed Swarm Queen project record"
+        };
+        write_records(
+            &transcript_path(
+                &temp.path().join("claude-projects"),
+                if hive { &queen_worktree } else { &project },
+                "held-queen-transcript",
+            ),
+            &[
+                json!({"type":"user","uuid":"queen-record","message":{"role":"user","content":expected}}),
+            ],
+        );
+        state.session_controller.read().insert_test_session(session);
+        state
+            .session_controller
+            .read()
+            .persist_test_session("session");
+        // No live feed is configured: both HTTP requests must reload saved metadata.
+        let mut cold = SessionController::new(state.pty_manager.clone());
+        cold.set_storage(state.storage.clone());
+        *state.session_controller.write() = cold;
+        assert!(state
+            .session_controller
+            .read()
+            .get_session("session")
+            .is_none());
+        let feeds = body_json(get(&app, "/api/sessions/session/agent-feeds").await).await;
+        assert_eq!(feeds["agents"][0]["agent_id"], "queen");
+        assert_eq!(
+            feeds["agents"][0]["transcript_session_id"],
+            "held-queen-transcript"
+        );
+        let page = body_json(get(&app, "/api/sessions/session/agents/queen/events").await).await;
+        assert_eq!(
+            page["events"][0]["payload"]["text"], expected,
+            "persisted Queen history retains launch cwd after storage reload (hive={hive})"
+        );
+        assert_eq!(page["events"].as_array().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn persisted_worker_uses_its_own_cwd_and_held_transcript_id() {
     let (temp, state, app) = setup();
     let mut session = make_test_session_with_agents("session", "D:/fixture/project", &["worker-a"]);

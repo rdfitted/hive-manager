@@ -87,7 +87,12 @@ fn configure(state: &AppState, session_id: &str) -> Result<Vec<AgentFeed>, ApiEr
                             .join(".hive-manager/worktrees")
                             .join(session_id)
                             .join(format!("worker-{index}"))
-                    } else if agent.role == "Queen" {
+                    } else if agent.role == "Queen"
+                        && matches!(
+                            session.session_type,
+                            crate::storage::SessionTypeInfo::Hive { .. }
+                        )
+                    {
                         PathBuf::from(&session.project_path)
                             .join(".hive-manager/worktrees")
                             .join(session_id)
