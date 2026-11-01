@@ -247,9 +247,14 @@ impl TransportRegistry {
     pub async fn stop_agent(&self, session_id: &str, agent_id: &str) -> Result<(), String> {
         if let Some(entry) = self.get(session_id, agent_id) {
             entry.transport.stop().await?;
-            self.entries
-                .write()
-                .remove(&(session_id.into(), agent_id.into()));
+            let mut entries = self.entries.write();
+            let key = (session_id.into(), agent_id.into());
+            if entries
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(&current.transport, &entry.transport))
+            {
+                entries.remove(&key);
+            }
         }
         Ok(())
     }
@@ -286,6 +291,9 @@ mod tests {
         fail_stop: AtomicBool,
         stop_calls: AtomicUsize,
         on_stop: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        delay_async_stop: AtomicBool,
+        async_stop_started: tokio::sync::Notify,
+        async_stop_release: tokio::sync::Notify,
     }
 
     #[async_trait]
@@ -300,7 +308,11 @@ mod tests {
             Ok(())
         }
         async fn stop(&self) -> Result<(), String> {
-            Ok(())
+            if self.delay_async_stop.swap(false, Ordering::SeqCst) {
+                self.async_stop_started.notify_one();
+                self.async_stop_release.notified().await;
+            }
+            self.stop_sync()
         }
         fn stop_sync(&self) -> Result<(), String> {
             self.stop_calls.fetch_add(1, Ordering::SeqCst);
@@ -318,6 +330,34 @@ mod tests {
         fn capabilities(&self) -> Capabilities {
             Capabilities::pty(false)
         }
+    }
+
+    #[tokio::test]
+    async fn delayed_async_stop_cannot_unregister_a_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TransportRegistry::new(temp.path().join("feeds"), None));
+        let old = Arc::new(FakeTransport::default());
+        old.delay_async_stop.store(true, Ordering::Release);
+        registry
+            .register("session", "worker", None, old.clone())
+            .unwrap();
+        let stopping = registry.clone();
+        let stop = tokio::spawn(async move { stopping.stop_agent("session", "worker").await });
+        old.async_stop_started.notified().await;
+        registry.stop_agent_sync("session", "worker").unwrap();
+        let replacement = Arc::new(FakeTransport::default());
+        registry
+            .register("session", "worker", None, replacement.clone())
+            .unwrap();
+        old.async_stop_release.notify_one();
+        stop.await.unwrap().unwrap();
+        let expected: Arc<dyn AgentTransport> = replacement.clone();
+        let held = registry
+            .get("session", "worker")
+            .expect("replacement survives delayed old stop");
+        assert!(Arc::ptr_eq(&held.transport, &expected));
+        assert_eq!(replacement.stop_calls.load(Ordering::Acquire), 0);
+        registry.stop_agent_sync("session", "worker").unwrap();
     }
 
     #[test]
