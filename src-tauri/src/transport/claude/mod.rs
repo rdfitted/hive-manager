@@ -45,11 +45,24 @@ impl ClaudeOptions {
         let mut i = 0;
         while i < args.len() {
             match args[i] {
-                "--dangerously-skip-permissions" => { bypass = true; output.push(args[i].into()); },
-                "--session-id" | "--model" | "--effort" | "--append-system-prompt" | "--system-prompt"
-                | "--append-system-prompt-file" | "--system-prompt-file" | "--plugin-dir" | "--agent" => {
-                    let flag = args[i]; i += 1;
-                    let value = *args.get(i).ok_or("Missing Claude option value; select PTY")?;
+                "--dangerously-skip-permissions" => {
+                    bypass = true;
+                    output.push(args[i].into());
+                }
+                "--session-id"
+                | "--model"
+                | "--effort"
+                | "--append-system-prompt"
+                | "--system-prompt"
+                | "--append-system-prompt-file"
+                | "--system-prompt-file"
+                | "--plugin-dir"
+                | "--agent" => {
+                    let flag = args[i];
+                    i += 1;
+                    let value = *args
+                        .get(i)
+                        .ok_or("Missing Claude option value; select PTY")?;
                     if flag == "--session-id" {
                         if transcript_id.is_some() || uuid::Uuid::parse_str(value).is_err() {
                             return Err("Claude transport needs exactly one pinned session UUID; select PTY".into());
@@ -57,10 +70,15 @@ impl ClaudeOptions {
                         transcript_id = Some(value.to_owned());
                     }
                     output.extend([flag.to_string(), value.to_string()]);
-                },
-                "--verbose" => {},
-                text if !text.starts_with('-') && i + 1 == args.len() => initial_prompt = Some(text.into()),
-                other => return Err(format!("Claude stream-json cannot preserve option {other:?}; select PTY for this launch. --bare and authentication overrides are not supported.")),
+                }
+                "--verbose" => {}
+                text if !text.starts_with('-') && i + 1 == args.len() => {
+                    initial_prompt = Some(text.into())
+                }
+                other => {
+                    let option = other.split('=').next().unwrap_or("unknown");
+                    return Err(format!("Claude stream-json cannot preserve option {option:?}; select PTY for this launch. --bare and authentication overrides are not supported."));
+                }
             }
             i += 1;
         }

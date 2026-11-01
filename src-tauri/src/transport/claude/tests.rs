@@ -177,6 +177,22 @@ fn pty_conversion_preserves_policy_model_effort_and_pinned_id() {
         "worker".into(),
     )
     .unwrap();
+    let error = ClaudeOptions::from_pty(
+        "claude",
+        &[
+            "--session-id",
+            &id,
+            "--dangerously-skip-permissions",
+            "--settings=synthetic-secret",
+        ],
+        ".".into(),
+        vec![],
+        "session".into(),
+        "worker".into(),
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("--settings") && !error.contains("synthetic-secret"));
     assert_eq!(options.transcript_id, id);
     assert_eq!(options.initial_prompt.as_deref(), Some("initial task"));
     assert_eq!(
