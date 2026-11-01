@@ -41,7 +41,7 @@ describe('AttentionCard', () => {
   });
   it('names a startup death without offering to flush or resend into a dead process', () => {
     const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'exited_during_startup:101' }) });
-    expect(view.getByText("This agent's process exited during startup with code 101. It has not been restarted.")).toBeTruthy();
+    expect(view.getByRole('status').textContent).toBe("This agent's process exited during startup with code 101. It has not been restarted.");
     expect(view.queryByRole('button', { name: 'Flush Enter' })).toBeNull();
     expect(view.queryByRole('button', { name: 'Resend' })).toBeNull();
     expect(view.getByRole('button', { name: 'Open terminal' })).toBeTruthy();

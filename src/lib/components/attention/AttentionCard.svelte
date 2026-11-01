@@ -48,7 +48,7 @@
 
 {#if visible}
   <section class="attention lattice-forced-colors-boundary" aria-label="Agent needs attention">
-    <p class="reason" role={chatAvailable ? 'status' : undefined}>{exitCode !== null ? `This agent's process exited during startup with code ${exitCode}. It has not been restarted.` : reasons[reason] || eventAttention || feedError || (hasTerminal ? 'Agent needs input. A prompt may only be visible in the terminal.' : 'Agent needs input. Check the raw event log.')}</p>
+    <p class="reason" role={chatAvailable || exitCode !== null ? 'status' : undefined}>{exitCode !== null ? `This agent's process exited during startup with code ${exitCode}. It has not been restarted.` : reasons[reason] || eventAttention || feedError || (hasTerminal ? 'Agent needs input. A prompt may only be visible in the terminal.' : 'Agent needs input. Check the raw event log.')}</p>
     <div class="actions">
       {#if hasTerminal && exitCode === null}<button type="button" class="lattice-btn lattice-btn--secondary" disabled={pending} onclick={flush}>{pending ? 'Flushing…' : 'Flush Enter'}</button>{/if}
       <button type="button" class="lattice-btn lattice-btn--ghost" onclick={openTerminal}>{hasTerminal ? 'Open terminal' : 'Open raw event log'}</button>
