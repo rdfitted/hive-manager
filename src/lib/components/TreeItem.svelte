@@ -3,7 +3,7 @@
   import { createEventDispatcher } from 'svelte';
   import { serdeEnumVariantName, type AgentInfo } from '$lib/stores/sessions';
   import { heartbeatStore } from '$lib/stores/conversations';
-  import { attentionReason, needsAttention } from '$lib/stores/agentActivity';
+  import { attentionReason, needsAttention, workStateFor } from '$lib/stores/agentActivity';
   import AgentActivityLine from './agent/AgentActivityLine.svelte';
   import type { AgentDependencies } from '$lib/stores/agentDependencies';
 
@@ -83,8 +83,8 @@
     || (agent.config?.name && agent.config?.description ? `${agent.config.name} — ${agent.config.description}` : null)
     || agent.config?.name
     || getRoleName(agent.role);
-  $: attention = needsAttention(agent, $heartbeatStore.staleAgents);
-  $: reason = attentionReason(agent, $heartbeatStore.staleAgents);
+  $: attention = needsAttention(agent, $heartbeatStore.staleAgents, workStateFor(agent, $heartbeatStore.agents[agent.id]));
+  $: reason = attentionReason(agent, $heartbeatStore.staleAgents, workStateFor(agent, $heartbeatStore.agents[agent.id]));
   $: reasonLabel = reason === 'delivery_failed' ? 'Delivery failed' : reason === 'error' ? 'Agent error' : 'Stale heartbeat';
   $: dependencies = byAgent.get(agent.id);
   $: statusLabel = serdeEnumVariantName(agent.status) || 'Unknown status';

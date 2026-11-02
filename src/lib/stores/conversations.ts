@@ -25,6 +25,7 @@ export interface HeartbeatInfo {
   status: string;
   summary: string;
   timestamp: string;
+  work_state?: string;
 }
 
 interface ConversationState {
@@ -253,11 +254,9 @@ function createConversationStore() {
 // Staleness threshold: 3 minutes in milliseconds
 const STALENESS_THRESHOLD_MS = 3 * 60 * 1000;
 
-function isHeartbeatStale(timestamp: string | null | undefined): boolean {
-  if (!timestamp) return false;
-  const hbTime = new Date(timestamp).getTime();
-  if (isNaN(hbTime)) return false;
-  return Date.now() - hbTime > STALENESS_THRESHOLD_MS;
+function isHeartbeatStale(timestamp: string | undefined, injectedAt?: string): boolean {
+  const activity = [timestamp, injectedAt].map(value => Date.parse(value ?? '')).filter(Number.isFinite);
+  return activity.length > 0 && Date.now() - Math.max(...activity) > STALENESS_THRESHOLD_MS;
 }
 
 function createHeartbeatStore() {
@@ -301,7 +300,7 @@ function createHeartbeatStore() {
 
         const data = await resp.json();
         // Backend returns { sessions: [...] }; only populate the requested session.
-        const sessions: Array<{ id: string; agents?: Array<{ id?: string; agent_id?: string; status?: string; summary?: string; last_activity?: string }> }> =
+        const sessions: Array<{ id: string; agents?: Array<{ id?: string; agent_id?: string; status?: string; summary?: string; last_activity?: string; work_state?: string; awaiting_injected_turn_at?: string }> }> =
           Array.isArray(data?.sessions) ? data.sessions : [];
         const session = sessions.find((s) => s.id === sessionId);
         if (!session) {
@@ -320,8 +319,10 @@ function createHeartbeatStore() {
             status: agent.status || 'unknown',
             summary: agent.summary || '',
             timestamp,
+            work_state: agent.work_state,
           };
-          if (isHeartbeatStale(timestamp)) {
+          if (agent.work_state !== 'finished' && agent.work_state !== 'retired'
+            && isHeartbeatStale(timestamp, agent.awaiting_injected_turn_at)) {
             staleAgents.add(id);
           }
         }

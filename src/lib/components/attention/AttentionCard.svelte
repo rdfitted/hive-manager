@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { AgentInfo } from '$lib/stores/sessions';
-  import { needsAttention, attentionReason, startupExitCode } from '$lib/stores/agentActivity';
+  import { needsAttention, attentionReason, startupExitCode, isFinished, workStateFor } from '$lib/stores/agentActivity';
   import { heartbeatStore } from '$lib/stores/conversations';
   import { layout } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
@@ -13,8 +13,11 @@
   } = $props();
   const waitingForInput = $derived(chatAvailable && typeof agent.status === 'object' && agent.status !== null
     && 'WaitingForInput' in agent.status && !agent.status.WaitingForInput.startsWith('awaiting_injected_turn'));
-  const visible = $derived(needsAttention(agent, $heartbeatStore.staleAgents) || waitingForInput || !!eventAttention || !!feedError);
-  const reason = $derived(attentionReason(agent, $heartbeatStore.staleAgents));
+  const workState = $derived(workStateFor(agent, $heartbeatStore.agents[agent.id]));
+  const finished = $derived(isFinished(agent, workState));
+  const visible = $derived(needsAttention(agent, $heartbeatStore.staleAgents, workState)
+    || (!finished && (waitingForInput || !!eventAttention || !!feedError)));
+  const reason = $derived(attentionReason(agent, $heartbeatStore.staleAgents, workState));
   const exitCode = $derived(startupExitCode(agent));
   const reasons = {
     delivery_failed: 'The last message could not be delivered.',
@@ -50,12 +53,8 @@
   <section class="attention lattice-forced-colors-boundary" aria-label="Agent needs attention">
     <p class="reason" role={chatAvailable || exitCode !== null ? 'status' : undefined}>{exitCode !== null ? `This agent's process exited during startup with code ${exitCode}. It has not been restarted.` : reasons[reason] || eventAttention || feedError || (hasTerminal ? 'Agent needs input. A prompt may only be visible in the terminal.' : 'Agent needs input. Check the raw event log.')}</p>
     <div class="actions">
-      {#if hasTerminal && exitCode === null}<button type="button" class="lattice-btn lattice-btn--secondary" disabled={pending} onclick={flush}>{pending ? 'Flushing…' : 'Flush Enter'}</button>{/if}
+      {#if hasTerminal && !finished && reason !== 'error'}<button type="button" class="lattice-btn lattice-btn--secondary" disabled={pending} onclick={flush}>{pending ? 'Flushing…' : 'Flush Enter'}</button>{/if}
       <button type="button" class="lattice-btn lattice-btn--ghost" onclick={openTerminal}>{hasTerminal ? 'Open terminal' : 'Open raw event log'}</button>
-      {#if hasTerminal && exitCode === null}
-        <button type="button" class="lattice-btn lattice-btn--ghost" disabled title="original message unavailable">Resend</button>
-        <span class="unavailable">original message unavailable</span>
-      {/if}
     </div>
     {#if currentResult?.receipt !== undefined}<FlushReceipt body={currentResult.receipt} ondismiss={() => { result = null; }} />{/if}
     {#if currentResult?.error}<p role="alert">{currentResult.error}</p>{/if}
@@ -66,5 +65,4 @@
   .attention { padding: var(--space-3) var(--space-4); background: var(--surface); border-radius: var(--radius-md); box-shadow: var(--depth-1); }
   .reason { margin: 0 0 var(--space-2); color: var(--text-primary); font-size: var(--text-small); }
   .actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
-  .unavailable { color: var(--text-muted); font-size: var(--text-small); }
 </style>

@@ -7,7 +7,7 @@
   import { layout, COLLAPSED_PANEL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
   import { heartbeatStore } from '$lib/stores/conversations';
-  import { agentActivity, needsAttention } from '$lib/stores/agentActivity';
+  import { agentActivity, needsAttention, workStateFor } from '$lib/stores/agentActivity';
   import { agentDependencies } from '$lib/stores/agentDependencies';
   import { Dialog } from '$lib/components/ui';
   import { shortcutLabel } from '$lib/platform';
@@ -407,7 +407,7 @@
           {/if}
           <ul class="session-list" aria-label={projectGroups.length > 1 ? `Sessions in ${group.path}` : 'Active sessions'}>
             {#each group.items as session (session.id)}
-              {@const attentionAgents = session.agents.filter(agent => needsAttention(agent, $heartbeatStore.staleAgents))}
+              {@const attentionAgents = session.agents.filter(agent => needsAttention(agent, $heartbeatStore.staleAgents, workStateFor(agent, $heartbeatStore.agents[agent.id])))}
               <li class="session-item">
                 <div class="session-row">
                   <div
