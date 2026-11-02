@@ -1,6 +1,6 @@
 # Webview driver spike
 
-Status: investigation in progress; no driver accepted yet. No normal debug instance was started.
+Status: blocked under the Screen-saver input desktop; no driver accepted yet. No normal debug instance was started. This does not establish that CDP cannot work on an unlocked desktop.
 
 ## Observed
 
@@ -26,4 +26,10 @@ The active Screen-saver input desktop is also a possible cause of the unavailabl
 
 ## Next bounded experiment
 
-Requested from the app-source owner: provide the same debug-gated CDP arguments through `WindowConfig.additional_browser_args`, retaining all profile/environment isolation and browser defaults. No registry change or guard weakening is proposed. Driver and viewport selection waits for a successful real attach.
+The app-source owner provided the same debug-gated CDP arguments through `WindowConfig.additional_browser_args` in 6660345, retaining all profile/environment isolation and browser defaults. The rebuild passed in 193.78 seconds. The subsequent real attempt still had no reachable CDP endpoint after 60 seconds.
+
+That run recorded `inputDesktopBefore=Screen-saver`, `inputDesktopAfter=Screen-saver`, `rendererStarted=true`, `pageLoaded=unobserved`, and `foregroundPreserved=null`. It observed a real renderer process, not a loaded page. No `DevToolsActivePort` file was found. Exact PID/tree cleanup and profile removal passed; live health and PID were unchanged. No screenshot was possible, so pixel content remains unproven. A separate read-only `GetGUIThreadInfo` probe returned access denied (5). No registry, wake, unlock, or desktop change was attempted.
+
+CDP remains the preferred documented route. The proposed viewport method is `page.setViewportSize` with measured `innerWidth`, `innerHeight`, and `devicePixelRatio` at 1440x900 and 800x900; none has yet been observed. Real attach, origin, viewports, screenshots, foreground preservation, G41, and T11-T13 remain held pending a successful attach or the Queen's ruling.
+
+T10 investigation note [posted on #412](https://github.com/rdfitted/hive-manager/issues/412#issuecomment-6588505022) from PowerShell using a body file, then read back. It contains no screenshots or machine paths.

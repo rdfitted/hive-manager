@@ -93,6 +93,7 @@ try {
     await page.setViewportSize(size);
     await pause(1000);
     report.viewports.push(await page.evaluate(() => ({ innerWidth, innerHeight, devicePixelRatio, origin: location.origin, instance: window.__HIVE_INSTANCE__, bodyText: document.body.innerText.slice(0, 2000) })));
+    await page.screenshot({ path: path.join(out, `spike-${size.width}.png`) });
   }
   report.foregroundAfterAttach = foreground();
   report.webviewProcesses = JSON.parse(ps(`Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'msedgewebview2.exe' -and $_.CommandLine -like '*${root.replaceAll("'", "''")}*' } | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Depth 3`));
