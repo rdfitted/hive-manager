@@ -177,6 +177,9 @@ pub fn run() {
     if let Some(settings) = instance::settings() {
         for window in &mut context.config_mut().app.windows {
             window.data_directory = Some(settings.root.join("webview"));
+            if let Some(args) = settings.additional_browser_args() {
+                window.additional_browser_args = Some(args);
+            }
             window.focus = false;
             window.skip_taskbar = true;
             window.x = Some(-20000.0);

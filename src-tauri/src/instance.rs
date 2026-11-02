@@ -156,6 +156,15 @@ pub fn resolve(env: &Environment, profile: BuildProfile) -> Result<Instance, Str
 }
 
 impl Settings {
+    /// Supplying API arguments replaces wry 0.54.1's WebView2 defaults.
+    pub fn additional_browser_args(&self) -> Option<String> {
+        self.cdp_port.map(|port| {
+            format!(
+                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --remote-debugging-port={port} --remote-debugging-address=127.0.0.1"
+            )
+        })
+    }
+
     pub fn data_dir(&self) -> PathBuf {
         if cfg!(windows) {
             self.root.join("appdata/hive-manager")
@@ -694,6 +703,34 @@ mod tests {
             .contains("std::process::exit(78)"));
         assert!(source.contains("window.focus = false;"));
         assert!(source.contains("window.data_directory = Some(settings.root.join(\"webview\"));"));
+        let windows = source
+            .split_once("if let Some(settings) = instance::settings() {")
+            .unwrap()
+            .1
+            .split_once("let mut builder = tauri::Builder::default();")
+            .unwrap()
+            .0;
+        assert!(windows.contains("for window in &mut context.config_mut().app.windows {"));
+        assert!(windows.contains(
+            "if let Some(args) = settings.additional_browser_args() {\n                window.additional_browser_args = Some(args);\n            }"
+        ), "CDP API arguments must be applied only when the isolated settings provide them");
+    }
+
+    #[test]
+    fn instance_browser_args_preserve_defaults_and_loopback() {
+        let (_temp, mut env) = fixture();
+        let Instance::Isolated(settings) = resolve(&env, BuildProfile::Debug).unwrap() else {
+            panic!("expected isolated settings");
+        };
+        assert_eq!(settings.additional_browser_args(), None);
+        env.insert(CDP_PORT.into(), "18892".into());
+        let Instance::Isolated(settings) = resolve(&env, BuildProfile::Debug).unwrap() else {
+            panic!("expected isolated settings");
+        };
+        assert_eq!(
+            settings.additional_browser_args().as_deref(),
+            Some("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --remote-debugging-port=18892 --remote-debugging-address=127.0.0.1")
+        );
     }
 
     #[test]
