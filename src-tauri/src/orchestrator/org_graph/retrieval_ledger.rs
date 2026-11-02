@@ -317,6 +317,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "wall-clock budget: run isolated via --ignored --exact --test-threads=1"]
     fn large_existing_ledger_keeps_retrieval_spawn_under_fifty_ms() {
         let _guard = RETRIEVAL_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().unwrap();

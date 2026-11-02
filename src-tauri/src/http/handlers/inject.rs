@@ -101,6 +101,20 @@ fn injection_transaction_lock(state: &AppState, agent_id: &str) -> Arc<Injection
     lock
 }
 
+/// Tests can close the initial observation window after one completed read.
+/// No timer races an in-flight read, so absence (rather than unknown I/O) drives
+/// the real retry gate. Runtime windows and timeout handling remain unchanged.
+#[cfg(all(test, windows))]
+fn single_read_windows() -> &'static parking_lot::Mutex<std::collections::HashSet<usize>> {
+    static WINDOWS: OnceLock<parking_lot::Mutex<std::collections::HashSet<usize>>> = OnceLock::new();
+    WINDOWS.get_or_init(Default::default)
+}
+
+#[cfg(all(test, windows))]
+fn install_single_read_window(state: &AppState) {
+    assert!(single_read_windows().lock().insert(state as *const AppState as usize));
+}
+
 #[cfg(all(test, windows))]
 type BeforeSubmitRetryHook =
     std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
@@ -558,6 +572,14 @@ async fn observe_injection_with_retry(
         receipt.pty_output_after_write.as_deref(), &pre_write_baseline.change_offsets);
     let transcript = async {
         if receipt.submit_keystroke_issued {
+            #[cfg(all(test, windows))]
+            {
+                let single_read = single_read_windows().lock()
+                    .remove(&(state.as_ref() as *const AppState as usize));
+                if single_read {
+                    return poll_transcript(&reader, nonce, since).await;
+                }
+            }
             let deadline = receipt.confirmation_expires.map(|expires| expires.min(started + TRANSCRIPT_SYNC_WAIT))
                 .unwrap_or(started + TRANSCRIPT_SYNC_WAIT);
             wait_for_transcript(&reader, nonce, since, deadline).await
@@ -1311,6 +1333,7 @@ mod tests {
     async fn supported_missing_transcript_and_visible_staging_retries_once() {
         let (_temp, app, state) = setup_test_app();
         support_codex(&state);
+        install_single_read_window(&state);
         let staged = stage_after_write(state.clone());
         let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
             json!({"target_agent_id":AGENT_ID,"message":"retry fixture"})).await;
@@ -1394,6 +1417,7 @@ mod tests {
     async fn pending_background_watch_updates_status_after_late_turn() {
         let (_temp, app, state) = setup_test_app();
         support_codex(&state);
+        install_single_read_window(&state);
         let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
             json!({"target_agent_id":AGENT_ID,"message":"late fixture"})).await;
         assert_eq!(status, StatusCode::OK);

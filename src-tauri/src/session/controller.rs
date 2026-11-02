@@ -14072,6 +14072,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 }
 
                 {
+                    #[cfg(test)]
+                    SessionController::test_sync_hook(&sid, "qa-resolution-queued", None);
                     let _resolution = SessionController::lock_qa_resolution();
                     // A setting or heartbeat may have arrived while publication
                     // waited for the operator/window lock. Decide again under it.
@@ -14084,6 +14086,14 @@ The backend composed and persisted the following authoritative skeleton before l
                             return;
                         }
                         if matches!(session.state, SessionState::SpawningEvaluator) {
+                            // Release the read guard before a test barrier allows the
+                            // respawn to restore QaInProgress.
+                            #[cfg(test)]
+                            {
+                                drop(sessions);
+                                drop(_resolution);
+                                SessionController::test_sync_hook(&sid, "qa-respawn-preserved", None);
+                            }
                             continue 'watch;
                         }
                         let heartbeats = agent_heartbeats.read();
@@ -15172,6 +15182,31 @@ The backend composed and persisted the following authoritative skeleton before l
         }
     }
 
+    /// One-shot, session-scoped synchronization points for concurrency tests.
+    #[cfg(test)]
+    pub(crate) fn test_sync_hook(
+        session_id: &str,
+        point: &'static str,
+        install: Option<Box<dyn FnOnce() + Send>>,
+    ) {
+        type Hook = Box<dyn FnOnce() + Send>;
+        static HOOKS: std::sync::OnceLock<Mutex<HashMap<(String, &'static str), Hook>>> =
+            std::sync::OnceLock::new();
+        let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let key = (session_id.to_owned(), point);
+        let hook = {
+            let mut hooks = hooks.lock();
+            if let Some(hook) = install {
+                assert!(hooks.insert(key, hook).is_none(), "duplicate test hook");
+                return;
+            }
+            hooks.remove(&key)
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     /// Continue a session after planning phase - spawns Queen + Workers/Planners
     pub fn continue_after_planning(&self, session_id: &str) -> Result<Session, String> {
         self.continue_after_planning_checked(session_id)
@@ -15189,6 +15224,8 @@ The backend composed and persisted the following authoritative skeleton before l
         // with stop/close/resume) across the whole continuation so a concurrent
         // retry waits, then sees Running and gets WrongState instead of racing a
         // second launch. Nothing inside takes this lock (parking_lot, not reentrant).
+        #[cfg(test)]
+        Self::test_sync_hook(session_id, "continue-enter", None);
         let lifecycle_lock = self.session_lifecycle_lock(session_id);
         let _lifecycle_guard = lifecycle_lock.lock();
 
@@ -15222,6 +15259,8 @@ The backend composed and persisted the following authoritative skeleton before l
         if session.state == SessionState::Planning {
             self.mark_plan_ready_checked(session_id)?;
         }
+        #[cfg(test)]
+        Self::test_sync_hook(session_id, "continue-plan-ready", None);
 
         let session = {
             let sessions = self.sessions.read();
@@ -24392,15 +24431,28 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         session.qa_timeout_secs = 0;
         controller.insert_test_session(session);
         let original_timer;
+        let (queued_tx, queued_rx) = std::sync::mpsc::channel();
+        let (preserved_tx, preserved_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        SessionController::test_sync_hook("qa-queued-respawn", "qa-resolution-queued", Some(Box::new(move || {
+            queued_tx.send(()).unwrap();
+        })));
+        SessionController::test_sync_hook("qa-queued-respawn", "qa-respawn-preserved", Some(Box::new(move || {
+            preserved_tx.send(()).unwrap();
+            resume_rx.recv_timeout(std::time::Duration::from_secs(30))
+                .expect("respawn reopened the QA window");
+        })));
         {
             let _resolution = SessionController::lock_qa_resolution();
             controller.start_qa_timeout("qa-queued-respawn", 0);
             original_timer = controller.qa_timeout_handles.lock()["qa-queued-respawn"].id();
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            queued_rx.recv_timeout(std::time::Duration::from_secs(30))
+                .expect("expired timer reached the resolution lock");
             controller.sessions.write().get_mut("qa-queued-respawn").unwrap().state =
                 SessionState::SpawningEvaluator;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        preserved_rx.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("queued resolution recognized the respawn");
         assert!(!controller.qa_timeout_handles.lock()["qa-queued-respawn"].is_finished());
         controller.sessions.write().get_mut("qa-queued-respawn").unwrap().state =
             SessionState::QaInProgress { iteration: Some(1) };
@@ -24410,12 +24462,13 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             original_timer,
             "a queued respawn must retain the original absolute clock"
         );
+        resume_tx.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             while !matches!(
                 controller.get_session("qa-queued-respawn").unwrap().state,
                 SessionState::QaInconclusive
             ) {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
