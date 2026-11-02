@@ -1688,6 +1688,34 @@ impl SessionController {
         Ok(session)
     }
 
+    /// Synthetic state is admitted only after successful debug-instance bootstrap.
+    pub(crate) fn apply_instance_fixture(&self, fixture: &crate::instance::FixtureSession) -> Result<(), String> {
+        if !crate::instance::is_isolated() { return Err("Fixture overlay requires an isolated instance".into()); }
+        {
+            let mut sessions = self.sessions.write();
+            let session = sessions.get_mut(&fixture.session_id).ok_or("Unknown fixture session")?;
+            for entry in &fixture.agents {
+                let agent = session.agents.iter_mut().find(|agent| agent.id == entry.agent_id)
+                    .ok_or("Unknown fixture agent")?;
+                agent.status = entry.status.clone();
+                agent.work_state = entry.work_state;
+            }
+        }
+        {
+            let mut heartbeats = self.agent_heartbeats.write();
+            let agents = heartbeats.entry(fixture.session_id.clone()).or_default();
+            for entry in &fixture.agents {
+                if let Some(heartbeat) = &entry.heartbeat {
+                    agents.insert(entry.agent_id.clone(), AgentHeartbeatInfo {
+                        last_activity: heartbeat.last_activity, status: heartbeat.status.clone(), summary: heartbeat.summary.clone(),
+                    });
+                }
+            }
+        }
+        self.emit_session_update(&fixture.session_id);
+        Ok(())
+    }
+
     pub fn get_session(&self, id: &str) -> Option<Session> {
         self.refresh_session_from_storage_if_clean(id);
         let session = self.sessions.read().get(id).cloned()?;
@@ -1735,6 +1763,7 @@ impl SessionController {
         for (agent, state) in session.agents.iter_mut().zip(states) {
             agent.work_state = Some(state);
         }
+        crate::instance::project_fixture_work_states(&mut session);
         (session, heartbeats)
     }
 

@@ -316,6 +316,133 @@ impl Settings {
     }
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FixtureState {
+    pub version: u32,
+    pub sessions: Vec<FixtureSession>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FixtureSession {
+    pub session_id: String,
+    pub agents: Vec<FixtureAgent>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FixtureAgent {
+    pub agent_id: String,
+    pub status: crate::pty::AgentStatus,
+    pub work_state: Option<crate::session::work_state::WorkState>,
+    pub heartbeat: Option<FixtureHeartbeat>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FixtureHeartbeat {
+    pub status: String,
+    pub summary: Option<String>,
+    pub last_activity: chrono::DateTime<chrono::Utc>,
+}
+
+static FIXTURE_STATE: OnceLock<FixtureState> = OnceLock::new();
+
+/// Only startup after successful debug bootstrap can enter the fixture seam.
+pub(crate) fn load_fixtures(
+    controller: &crate::session::SessionController,
+    storage: &crate::storage::SessionStorage,
+) -> Result<(), String> {
+    let Some(settings) = settings() else {
+        return Ok(());
+    };
+    let path = settings.root.join("fixture-state.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let state: FixtureState =
+        serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("Invalid fixture overlay: {e}"))?;
+    if state.version != 1 {
+        return Err("Unsupported fixture overlay version".into());
+    }
+    settings.contains(storage.base_dir())?;
+    let mut sessions = std::collections::HashSet::new();
+    // Validate every session before resume can start a watcher or inspect a project.
+    for fixture in &state.sessions {
+        if fixture.session_id.is_empty()
+            || fixture.session_id.contains(['/', '\\'])
+            || fixture.session_id.contains("..")
+            || !sessions.insert(&fixture.session_id)
+        {
+            return Err("Invalid or duplicate fixture session ID".into());
+        }
+        let persisted = storage
+            .load_session(&fixture.session_id)
+            .map_err(|e| e.to_string())?;
+        if persisted.id != fixture.session_id {
+            return Err("Fixture session ID mismatch".into());
+        }
+        settings.contains(Path::new(&persisted.project_path))?;
+        if let Some(path) = &persisted.worktree_path {
+            settings.contains(Path::new(path))?;
+        }
+        for agent in &persisted.agents {
+            if let Some(path) = &agent.transcript_cwd {
+                settings.contains(Path::new(path))?;
+            }
+        }
+        let mut agents = std::collections::HashSet::new();
+        for agent in &fixture.agents {
+            if !agents.insert(&agent.agent_id)
+                || !persisted
+                    .agents
+                    .iter()
+                    .any(|known| known.id == agent.agent_id)
+            {
+                return Err("Unknown or duplicate fixture agent ID".into());
+            }
+        }
+    }
+    FIXTURE_STATE
+        .set(state)
+        .map_err(|_| "Fixture overlay already loaded".to_string())?;
+    for fixture in &FIXTURE_STATE
+        .get()
+        .expect("installed fixture overlay")
+        .sessions
+    {
+        controller.resume_session(&fixture.session_id)?;
+        controller.apply_instance_fixture(fixture)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn project_fixture_work_states(session: &mut crate::session::Session) {
+    if !is_isolated() {
+        return;
+    }
+    let Some(fixture) = FIXTURE_STATE.get().and_then(|state| {
+        state
+            .sessions
+            .iter()
+            .find(|fixture| fixture.session_id == session.id)
+    }) else {
+        return;
+    };
+    for agent in &mut session.agents {
+        if let Some(work_state) = fixture
+            .agents
+            .iter()
+            .find(|fixture| fixture.agent_id == agent.id)
+            .and_then(|fixture| fixture.work_state)
+        {
+            agent.work_state = Some(work_state);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,5 +819,140 @@ mod tests {
             .unwrap()
             .0;
         assert!(plugin.contains(".js_init_script(settings.init_script())"));
+    }
+
+    #[test]
+    fn instance_fixture_overlay_states_without_ptys() {
+        if std::env::var_os("HM_INSTANCE_OVERLAY_CHILD").is_some() {
+            bootstrap();
+            let settings = settings().unwrap();
+            let base = crate::storage::SessionStorage::get_app_data_dir().unwrap();
+            let storage =
+                std::sync::Arc::new(crate::storage::SessionStorage::new_with_base(base).unwrap());
+            let manager =
+                std::sync::Arc::new(parking_lot::RwLock::new(crate::pty::PtyManager::new()));
+            let mut controller = crate::session::SessionController::new(manager.clone());
+            controller.set_storage(storage.clone());
+            let path = settings.root.join("fixture-state.json");
+            let valid = std::fs::read(&path).unwrap();
+            let mut invalid: serde_json::Value = serde_json::from_slice(&valid).unwrap();
+            invalid["version"] = 2.into();
+            std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(load_fixtures(&controller, &storage).is_err());
+            assert!(controller.list_sessions().is_empty());
+            std::fs::write(&path, &valid).unwrap();
+            let mut persisted = storage.load_session("synthetic").unwrap();
+            let project = persisted.project_path.clone();
+            persisted.project_path = settings
+                .root
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            storage.save_session(&persisted).unwrap();
+            assert!(load_fixtures(&controller, &storage).is_err());
+            assert!(controller.list_sessions().is_empty());
+            persisted.project_path = project;
+            storage.save_session(&persisted).unwrap();
+            load_fixtures(&controller, &storage).unwrap();
+            let session = controller.get_session("synthetic").unwrap();
+            assert_eq!(session.agents[0].status, crate::pty::AgentStatus::Running);
+            assert_eq!(
+                session.agents[1].status,
+                crate::pty::AgentStatus::Error("exited_during_startup:7".into())
+            );
+            assert!(
+                matches!(&session.agents[2].status, crate::pty::AgentStatus::WaitingForInput(reason) if reason.starts_with("injected_delivery_failed:"))
+            );
+            assert_eq!(
+                session.agents[3].work_state,
+                Some(crate::session::work_state::WorkState::Finished)
+            );
+            assert_eq!(controller.get_heartbeat_info("synthetic").len(), 4);
+            let stalled = controller
+                .get_stalled_agent_reports("synthetic", std::time::Duration::from_secs(180));
+            assert!(stalled.iter().any(|(id, _, _)| id == "synthetic-worker-1"));
+            assert!(!stalled.iter().any(|(id, _, _)| id == "synthetic-worker-4"));
+            controller.sweep_dead_startup_seats("synthetic");
+            assert_eq!(
+                controller.get_session("synthetic").unwrap().agents[3].work_state,
+                Some(crate::session::work_state::WorkState::Finished)
+            );
+            assert!(manager.read().list_sessions().is_empty());
+            return;
+        }
+        let (temp, env) = fixture();
+        let Instance::Isolated(settings) = resolve(&env, BuildProfile::Debug).unwrap() else {
+            panic!("fixture settings")
+        };
+        let storage = crate::storage::SessionStorage::new_with_base(settings.data_dir()).unwrap();
+        let project = settings.root.join("projects/synthetic");
+        std::fs::create_dir_all(&project).unwrap();
+        let at = chrono::Utc::now() - chrono::Duration::minutes(5);
+        let ids = (1..=4)
+            .map(|n| format!("synthetic-worker-{n}"))
+            .collect::<Vec<_>>();
+        let agents = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                serde_json::json!({
+                    "id": id, "role": format!("Worker({})", index + 1), "parent_id": null,
+                    "config": {"cli":"codex", "flags":[]}, "transcript_cwd":project,
+                })
+            })
+            .collect::<Vec<_>>();
+        let persisted: crate::storage::PersistedSession =
+            serde_json::from_value(serde_json::json!({
+                "id":"synthetic", "session_type":{"Hive":{"worker_count":4}},
+                "project_path":project, "created_at":at, "agents":agents, "state":"Running"
+            }))
+            .unwrap();
+        storage.save_session(&persisted).unwrap();
+        let statuses = [
+            serde_json::json!("Running"),
+            serde_json::json!({"Error":"exited_during_startup:7"}),
+            serde_json::json!({"WaitingForInput":format!("injected_delivery_failed:fixture:{}", at.to_rfc3339())}),
+            serde_json::json!("Running"),
+        ];
+        let overlay = serde_json::json!({"version":1,"sessions":[{"session_id":"synthetic", "agents":
+            ids.iter().enumerate().map(|(index,id)| serde_json::json!({
+                "agent_id":id,"status":statuses[index],"work_state":if index==3 {"finished"} else {"working"},
+                "heartbeat":{"status":if index==3 {"completed"} else {"working"},"summary":"Synthetic fixture","last_activity":at}
+            })).collect::<Vec<_>>()
+        }]});
+        std::fs::write(
+            temp.path().join("fixture-state.json"),
+            serde_json::to_vec(&overlay).unwrap(),
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "instance::tests::instance_fixture_overlay_states_without_ptys",
+                "--nocapture",
+            ])
+            .envs(env)
+            .env("HM_INSTANCE_OVERLAY_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // A normal process never even parses an overlay, including a malformed one.
+        std::fs::write(temp.path().join("fixture-state.json"), "invalid").unwrap();
+        let mut controller = crate::session::SessionController::new(std::sync::Arc::new(
+            parking_lot::RwLock::new(crate::pty::PtyManager::new()),
+        ));
+        controller.set_storage(std::sync::Arc::new(storage));
+        load_fixtures(
+            &controller,
+            &crate::storage::SessionStorage::new_with_base(settings.data_dir()).unwrap(),
+        )
+        .unwrap();
+        assert!(controller.list_sessions().is_empty());
     }
 }

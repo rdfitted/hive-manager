@@ -18,6 +18,8 @@ pub mod domain;
 pub mod events;
 mod http;
 mod instance;
+#[cfg(test)]
+mod instance_fixture_tests;
 mod judgment;
 pub mod orchestrator;
 mod preview;
@@ -216,6 +218,9 @@ pub fn run() {
                 let mut injection = injection_manager.write();
                 injection.set_app_handle(app.handle().clone());
             }
+
+            instance::load_fixtures(&session_controller.read(), &storage)
+                .map_err(std::io::Error::other)?;
 
             // Build the SINGLE shared AppState now that the app handle exists, and
             // hand the SAME Arc to both the Tauri-managed state (used by migrated
