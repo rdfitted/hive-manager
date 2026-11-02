@@ -663,12 +663,24 @@ Use these defaults when spawning QA workers unless the plan specifies otherwise.
 4. You MUST wait for all {{qa_worker_count}} QA workers to finish before you render the verdict.
 5. {{qa_worker_coverage_rule}}
 
+## Surface Applicability
+
+Keep the same QA seats for smoke runs. Accept a UI or accessibility specialist's
+`CRITERION N: N/A - no applicable UI surface; <scope evidence>` only when the scope
+proves there is no UI change and no applicable UI surface. Treat that coverage as not applicable,
+not FAIL or BLOCKED. Functional criteria still require API evidence and must PASS.
+Do not send N/A as a typed HTTP criterion result: the API schema is unchanged.
+A missing browser alone does not establish N/A. For required UI behavior,
+a true UI failure must FAIL; blocked or incomplete applicable checks still fail.
+"All task files" in a smoke contract means implementation task files, excluding
+QA, Evaluator and Prince task files that are still active during review.
+
 ## Verdict Rules
 
 1. You MUST fail any criterion that misses a required functional behavior.
 2. You MUST NOT infer missing evidence.
 3. You MUST quote concrete evidence from QA workers or your own direct checks.
-4. You MUST fail any criterion whose evidence is incomplete, ambiguous, blocked, or flaky.
+4. For an applicable check, you MUST fail any criterion whose evidence is incomplete, ambiguous, blocked, or flaky.
 
 ## Structured Verdict Format
 
@@ -782,13 +794,24 @@ You are the UI QA specialist for session `{{session_id}}`.
    - {{api_curl}} "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    - {{api_curl}} "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 2. You MUST collect concrete evidence for every numbered criterion you touch.
-3. You MUST report only `CRITERION N: PASS|FAIL - ...` lines in your final result.
-4. You MUST fail any criterion that is flaky, blocked, ambiguous, or untestable.
+3. You MUST report only `CRITERION N: PASS|FAIL|N/A - ...` lines in your final result.
+4. For an applicable surface, you MUST fail any criterion that is flaky, blocked, ambiguous, or untestable.
 ```
 
 {{#if supports_chrome}}
 **You were launched with `--chrome` — you have native browser access.**
 {{/if}}
+
+## Surface Applicability
+
+For a smoke run with no UI change and no applicable UI surface, report
+`CRITERION N: N/A - no applicable UI surface; <scope evidence>` for UI or accessibility coverage.
+Give the reason and evidence from the implementation scope. Do not open the API root
+as a UI: `http://localhost:18800/` is an API server, not a browser application.
+A missing browser alone does not establish N/A. If a UI surface is required,
+a true UI failure must FAIL; blocked, untestable or incomplete applicable checks still fail.
+Functional API criteria remain subject to API QA; N/A is a specialist coverage report,
+not permission to skip or pass a required functional criterion.
 
 ## Start Here
 
@@ -808,9 +831,9 @@ test commands there (for example with `cd "{{execution_workspace}}"` in a subshe
 
 ## Execution Focus
 
-1. You MUST run click-through flows end to end using your UI automation or browser tooling.
-2. You MUST capture screenshot evidence for visual regressions or broken flows.
-3. You MUST verify buttons, links, forms, navigation, and modals on every criterion you cover.
+1. For applicable surfaces, you MUST run click-through flows end to end using your UI automation or browser tooling.
+2. For applicable surfaces, you MUST capture screenshot evidence for visual regressions or broken flows.
+3. For applicable surfaces, you MUST verify buttons, links, forms, navigation, and modals on every criterion you cover.
 
 ## Heartbeat
 
@@ -827,7 +850,7 @@ Before long-running checks and between major test steps, emit:
 
 You have Claude Code's built-in Chrome integration (`--chrome` flag). This gives you direct browser control through your real Chrome or Edge window with shared login sessions and cookies.
 
-You MUST use your native browser tools directly. Do NOT search the codebase for test files and do NOT try to run `playwright test`.
+For applicable surfaces, you MUST use your native browser tools directly. Do NOT search the codebase for test files and do NOT try to run `playwright test`.
 
 ### Core Tools
 - **Navigate**: Open URLs in the browser
@@ -872,11 +895,11 @@ You MUST use your native browser tools directly. Do NOT search the codebase for 
 ## Report Format
 
 ```text
-CRITERION 1: PASS|FAIL - [UI evidence, screenshots, or exact failure]
-CRITERION 2: PASS|FAIL - [UI evidence, screenshots, or exact failure]
+CRITERION 1: PASS|FAIL|N/A - [UI evidence, screenshots, or exact failure]
+CRITERION 2: PASS|FAIL|N/A - [UI evidence, screenshots, or exact failure]
 ```
 
-Always reference criteria by number. Fail when the behavior is flaky, blocked, ambiguous, or visually broken.
+Always reference criteria by number. For an applicable surface, fail when the behavior is flaky, blocked, ambiguous, or visually broken.
 
 ## Additional Guidance
 
@@ -966,9 +989,20 @@ You are the accessibility QA specialist for session `{{session_id}}`.
    - {{api_curl}} "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    - {{api_curl}} "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 2. You MUST collect concrete accessibility evidence for every numbered criterion you touch.
-3. You MUST report only `CRITERION N: PASS|FAIL - ...` lines in your final result.
-4. You MUST fail any criterion whose accessibility evidence is partial, blocked, or untestable.
+3. You MUST report only `CRITERION N: PASS|FAIL|N/A - ...` lines in your final result.
+4. For an applicable surface, you MUST fail any criterion whose accessibility evidence is partial, blocked, or untestable.
 ```
+
+## Surface Applicability
+
+For a smoke run with no UI change and no applicable UI surface, report
+`CRITERION N: N/A - no applicable UI surface; <scope evidence>` for UI or accessibility coverage.
+Give the reason and evidence from the implementation scope. Do not open the API root
+as a UI: `http://localhost:18800/` is an API server, not a browser application.
+A missing browser alone does not establish N/A. If a UI surface is required,
+a true UI failure must FAIL; blocked, untestable or incomplete applicable checks still fail.
+Functional API criteria remain subject to API QA; N/A is a specialist coverage report,
+not permission to skip or pass a required functional criterion.
 
 ## Start Here
 
@@ -981,13 +1015,13 @@ You are the accessibility QA specialist for session `{{session_id}}`.
 
 ## Execution Focus
 
-1. You MUST run axe-core, Lighthouse, or equivalent tooling when available.
+1. For applicable surfaces, you MUST run axe-core, Lighthouse, or equivalent tooling when available.
 
 The implementation under test lives at `{{execution_workspace}}`; your control-plane CWD stays
 at the project root for `.hive-manager/{{session_id}}/`. Run source, git, build, and test commands
 against the execution workspace (for example with `cd "{{execution_workspace}}"` in a subshell).
 
-2. You MUST check keyboard navigation, focus order, semantic roles, ARIA, and contrast.
+2. For applicable surfaces, you MUST check keyboard navigation, focus order, semantic roles, ARIA, and contrast.
 3. You MUST record the exact defect and the affected criterion.
 
 ## Heartbeat
@@ -1018,11 +1052,11 @@ Before long-running checks and between major test steps, emit:
 ## Report Format
 
 ```text
-CRITERION 1: PASS|FAIL - [a11y evidence, score, or exact defect]
-CRITERION 2: PASS|FAIL - [a11y evidence, score, or exact defect]
+CRITERION 1: PASS|FAIL|N/A - [a11y evidence, score, or exact defect]
+CRITERION 2: PASS|FAIL|N/A - [a11y evidence, score, or exact defect]
 ```
 
-Always reference criteria by number. Fail when accessibility evidence is partial or a key path is untestable.
+Always reference criteria by number. For an applicable surface, fail when accessibility evidence is partial or a key path is untestable.
 
 ## Additional Guidance
 
@@ -3123,6 +3157,32 @@ mod tests {
             parsed["summary"],
             "Don't block with \"quotes\"\nand slashes \\"
         );
+    }
+
+    #[test]
+    fn smoke_surface_applicability_preserves_real_ui_failure_rules() {
+        let engine = TemplateEngine::default();
+        for role in ["roles/qa-worker-ui", "roles/qa-worker-a11y", "roles/evaluator"] {
+            let prompt = engine.render_template(role, &PromptContext {
+                session_id: "smoke-applicability".into(), project_path: ".".into(),
+                task: None, variables: HashMap::new(),
+            }).unwrap();
+            assert!(prompt.contains("N/A - no applicable UI surface; <scope evidence>"), "{role} must allow reasoned N/A");
+            assert!(prompt.contains("a true UI failure must FAIL"), "{role} must retain real failures");
+            assert!(prompt.contains("A missing browser alone does not establish N/A"), "{role} must not waive required UI checks");
+            if role == "roles/qa-worker-ui" {
+                assert!(prompt.contains("For applicable surfaces, you MUST run click-through flows"));
+                assert!(prompt.contains("For applicable surfaces, you MUST verify buttons, links"));
+            } else if role == "roles/qa-worker-a11y" {
+                assert!(prompt.contains("For applicable surfaces, you MUST run axe-core"));
+                assert!(prompt.contains("For applicable surfaces, you MUST check keyboard navigation"));
+            }
+            if role == "roles/evaluator" {
+                assert!(prompt.contains("not FAIL or BLOCKED"));
+                assert!(prompt.contains("implementation task files, excluding"));
+                assert!(prompt.contains("Functional criteria still require API evidence and must PASS"));
+            }
+        }
     }
 
     #[test]

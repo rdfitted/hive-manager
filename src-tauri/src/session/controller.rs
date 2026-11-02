@@ -5581,7 +5581,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         let (template_name, default_guidance) = match specialization {
             "ui" => (
                 "roles/qa-worker-ui",
-                "Validate the full UI flow, capture screenshot evidence, and report failures only with criterion-numbered proof.",
+                "Validate applicable UI flows with criterion-numbered evidence. For a smoke run with no UI change and no applicable surface, report N/A with scope evidence; true UI failures still fail.",
             ),
             "api" => (
                 "roles/qa-worker-api",
@@ -5589,7 +5589,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             ),
             "a11y" => (
                 "roles/qa-worker-a11y",
-                "Audit accessibility rigorously with tooling and manual keyboard checks, then report criterion-numbered findings with exact defects.",
+                "Audit applicable accessibility surfaces with tooling and keyboard checks and report exact defects. For a smoke run with no UI change and no applicable surface, report N/A with scope evidence; true accessibility failures still fail.",
             ),
             "adversarial" => (
                 "roles/qa-worker-adversarial",
@@ -6145,7 +6145,7 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
    1. [FUNC] All workers spawned and ran successfully
    2. [FUNC] Heartbeat API exercised by all workers
    3. [FUNC] Conversation API exercised (queen inbox + shared channel)
-   4. [FUNC] All task files transitioned to COMPLETED status
+   4. [FUNC] All implementation task files transitioned to COMPLETED status (exclude QA, Evaluator and Prince task files still active during review)
 
    ## Pass Threshold
    - All pass/fail criteria must PASS
@@ -6924,7 +6924,7 @@ Workers MUST use curl to exercise the conversation and heartbeat APIs.
 None - this is a smoke test.
 
 ## Notes
-This smoke test validates the inter-agent conversation and heartbeat flow.
+This smoke test validates the inter-agent conversation and heartbeat flow. It makes no UI changes and has no applicable UI surface. UI and accessibility QA keep their seats and report N/A with this scope reason; the API server root is not a UI. Required functional API checks still must PASS.
 Testing all {worker_count} configured workers with real API calls.
 ```
 
@@ -7170,7 +7170,7 @@ Each Planner spawns their workers sequentially and assigns subtasks:
 None - this is a smoke test.
 
 ## Notes
-Swarm smoke test completed successfully. The planning phase flow is working.
+This Swarm smoke test makes no UI changes and has no applicable UI surface. UI and accessibility QA keep their seats and report N/A with this scope reason; required functional API checks still must PASS.
 Testing {planner_count} planners with {workers_per} workers each = {total_workers} total workers.
 ```
 
@@ -18570,6 +18570,21 @@ mod tests {
             assert!(!text.contains("{session_id}"), "unrendered session id");
         }
         assert_eq!(swarm.matches(&format!("http://localhost:18800/api/sessions/{id}/qa/verdict")).count(), 2);
+    }
+
+    #[test]
+    fn smoke_contract_scope_excludes_active_qa_task_files() {
+        let handoff = SessionController::build_qa_milestone_handoff("smoke-scope", Path::new("/repo"), "workers", "codex");
+        assert!(handoff.contains("All implementation task files transitioned to COMPLETED"));
+        assert!(handoff.contains("exclude QA, Evaluator and Prince task files still active during review"));
+        let prompt = SessionController::build_smoke_test_prompt("smoke-scope", &[AgentConfig::default()], true, None, Path::new("/repo"), "codex", None);
+        assert!(prompt.contains("no applicable UI surface"));
+        assert!(prompt.contains("report N/A with this scope reason"));
+        assert!(prompt.contains("Required functional API checks still must PASS"));
+        let config = AgentConfig::default();
+        let (_, _, count, coverage) = SessionController::build_evaluator_qa_plan("smoke-scope", &config, &[], 0);
+        assert_eq!(count, "3", "same UI, API and accessibility seats");
+        assert!(coverage.contains("MUST NOT skip any specialization"));
     }
 
     #[test]
