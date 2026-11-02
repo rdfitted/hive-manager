@@ -186,6 +186,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init());
+    if let Some(settings) = instance::settings() {
+        builder = builder.plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("instance")
+                .js_init_script(settings.init_script())
+                .build(),
+        );
+    }
     if !instance::is_isolated() {
         builder = builder
             .plugin(tauri_plugin_updater::Builder::new().build())

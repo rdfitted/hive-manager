@@ -305,6 +305,17 @@ pub fn refuse(operation: &str) -> Result<(), String> {
     }
 }
 
+impl Settings {
+    pub fn api_base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    pub fn init_script(&self) -> String {
+        format!("Object.defineProperty(window, '__HIVE_INSTANCE__', {{ value: Object.freeze({{isolated:true,apiBase:{}}}), writable:false, configurable:false }});",
+            serde_json::to_string(&self.api_base()).expect("API base is serializable"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,6 +522,8 @@ mod tests {
                 && cli.bin_path.is_none()
                 && cli.detail.contains("disabled")));
 
+            assert!(settings.init_script().contains(&settings.api_base()));
+            assert!(!settings.init_script().contains(":18800"));
             assert!(is_isolated());
             return;
         }
@@ -665,5 +678,19 @@ mod tests {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         scan_startup_code(&manifest.join("src"));
         scan_startup_code(&manifest.join("../src"));
+    }
+    #[test]
+    fn instance_webview_injection_precedes_scripts() {
+        let lib = source("src/lib.rs");
+        let plugin = lib
+            .split_once(
+                "if let Some(settings) = instance::settings() {\n        builder = builder.plugin(",
+            )
+            .unwrap()
+            .1
+            .split_once("\n    }")
+            .unwrap()
+            .0;
+        assert!(plugin.contains(".js_init_script(settings.init_script())"));
     }
 }
