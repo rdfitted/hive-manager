@@ -73,6 +73,26 @@ fn parse_since(since: Option<String>) -> Result<Option<DateTime<Utc>>, ApiError>
     }
 }
 
+fn ensure_session_exists(state: &AppState, session_id: &str) -> Result<(), ApiError> {
+    // Failed legacy posts may have left bare directories behind. Only session
+    // metadata or the controller roster establishes a real session, including
+    // closed/completed sessions whose histories remain on disk.
+    let known_session = state
+        .session_controller
+        .read()
+        .get_session(session_id)
+        .is_some()
+        || state
+            .storage
+            .session_dir(session_id)
+            .join("session.json")
+            .is_file();
+    if !known_session {
+        return Err(ApiError::not_found("Session not found"));
+    }
+    Ok(())
+}
+
 async fn reject_conversation(
     state: &AppState,
     session_id: &str,
@@ -112,6 +132,7 @@ pub async fn append_conversation(
     let from = sanitize_text(&req.from, MAX_FROM_LEN, "from")?;
     validate_agent_id(&from)?;
     let content = sanitize_text(&req.content, MAX_MESSAGE_CONTENT_LEN, "content")?;
+    ensure_session_exists(&state, &session_id)?;
 
     let token_headers = headers.get_all("X-Hive-Agent-Token");
     let token = headers
@@ -251,6 +272,7 @@ pub async fn read_conversation(
     validate_agent_id(&agent_id)?;
     let agent_id = canonical_conversation_id(&session_id, &agent_id);
     let since = parse_since(query.since)?;
+    ensure_session_exists(&state, &session_id)?;
 
     let messages = state
         .storage

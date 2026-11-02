@@ -258,3 +258,162 @@ async fn g39_conversation_credentials_never_reach_audit_history_or_live_messages
     assert!(history["messages"].as_array().unwrap().is_empty());
     assert!(!state.storage.session_dir(id).join("conversations").exists());
 }
+
+#[tokio::test]
+async fn g35_conversation_unknown_sessions_return_404_without_creating_storage() {
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    for (id, fixture) in [
+        ("conversation-missing", "absent"),
+        ("conversation-bare", "bare"),
+        ("conversation-metadata-directory", "directory"),
+        ("CON", "absent"),
+        ("NUL", "absent"),
+    ] {
+        let session_dir = state.storage.session_dir(id);
+        match fixture {
+            "bare" => {
+                std::fs::create_dir_all(&session_dir).unwrap();
+            }
+            "directory" => {
+                std::fs::create_dir_all(session_dir.join("session.json")).unwrap();
+            }
+            _ => {}
+        }
+        let response = append(&app, id, "shared", "operator", "unknown session", &[]).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "unknown session append must return 404"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{id}/conversations/shared"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "unknown session read must return 404"
+        );
+        assert!(!session_dir.join("conversations").exists());
+        assert!(
+            !state.event_bus.data_dir().join(id).exists(),
+            "unknown session must not create an audit directory"
+        );
+        match fixture {
+            "bare" => assert!(std::fs::read_dir(&session_dir).unwrap().next().is_none()),
+            "directory" => assert_eq!(std::fs::read_dir(&session_dir).unwrap().count(), 1),
+            _ => assert!(
+                !session_dir.exists(),
+                "unknown session must not create a storage directory"
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn g35_conversation_persisted_closed_and_archived_histories_stay_readable() {
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    for (id, status) in [
+        ("conversation-stored-closed", "Closed"),
+        ("conversation-stored-archived", "Completed"),
+    ] {
+        let persisted: crate::storage::PersistedSession = serde_json::from_value(json!({
+            "id":id, "session_type":{"Hive":{"worker_count":1}}, "project_path":"/repo",
+            "created_at":chrono::Utc::now(), "agents":[], "state":status
+        }))
+        .unwrap();
+        state.storage.save_session(&persisted).unwrap();
+        state
+            .storage
+            .append_conversation_message(id, "shared", "operator", "stored history")
+            .await
+            .unwrap();
+        if status == "Completed" {
+            let archive = crate::orchestrator::work_graph::archive::archive_completed_session(
+                state.storage.base_dir(),
+                None,
+                id,
+            )
+            .unwrap();
+            assert!(archive.path.is_file());
+        }
+        assert!(state.session_controller.read().get_session(id).is_none());
+        let history = read_json(&app, &format!("/api/sessions/{id}/conversations/shared")).await;
+        assert_eq!(history["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(history["messages"][0]["content"], "stored history");
+        // Presence of metadata also supports the append route without reopening a seat.
+        assert_eq!(
+            append(&app, id, "shared", "operator", "later message", &[])
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        let history = read_json(&app, &format!("/api/sessions/{id}/conversations/shared")).await;
+        assert_eq!(history["messages"].as_array().unwrap().len(), 2);
+        assert!(state
+            .storage
+            .session_dir(id)
+            .join("conversations/shared.md")
+            .is_file());
+        assert!(!state
+            .storage
+            .session_dir(id)
+            .join(format!("conversations/{id}-shared.md"))
+            .exists());
+        let events = read_json(&app, &format!("/api/sessions/{id}/events")).await;
+        assert!(events
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["payload"]["kind"] == "conversation_unauthenticated"));
+    }
+}
+
+#[tokio::test]
+async fn g35_conversation_controller_sessions_preserve_shared_and_windows_reserved_keys() {
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    let id = "conversation-reserved";
+    known_session(&state, id);
+    assert!(!state.storage.session_dir(id).join("session.json").exists());
+    for target in ["shared", "CON", "NUL"] {
+        assert_eq!(
+            append(&app, id, target, "operator", "safe key", &[])
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+        let history = read_json(&app, &format!("/api/sessions/{id}/conversations/{target}")).await;
+        assert_eq!(history["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(history["messages"][0]["content"], "safe key");
+        let key = if target == "shared" {
+            target.to_string()
+        } else {
+            format!("{id}-{target}")
+        };
+        assert!(state
+            .storage
+            .session_dir(id)
+            .join("conversations")
+            .join(format!("{key}.md"))
+            .is_file());
+    }
+    let mut names: Vec<_> = std::fs::read_dir(state.storage.session_dir(id).join("conversations"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            format!("{id}-CON.md"),
+            format!("{id}-NUL.md"),
+            "shared.md".into()
+        ]
+    );
+}
