@@ -365,6 +365,43 @@ struct HeartbeatCredential {
     queen: bool,
 }
 
+/// Digest-only snapshot: long scans need neither the manager nor credential locks.
+pub(crate) struct HeartbeatCredentialMatcher {
+    digests: std::collections::HashSet<[u8; 32]>,
+}
+
+impl HeartbeatCredentialMatcher {
+    pub(crate) fn contains(&self, text: &str) -> bool {
+        if self.digests.is_empty() { return false; }
+        let contains = |text: &str| text.as_bytes()
+            .split(|byte| !byte.is_ascii_hexdigit())
+            .any(|run| {
+                let mut previous: Option<&[u8]> = None;
+                // Every distinct window still counts, including embedded tokens.
+                run.windows(64).any(|candidate| {
+                    if previous == Some(candidate) { return false; }
+                    previous = Some(candidate);
+                    let digest: [u8; 32] = Sha256::digest(candidate).into();
+                    self.digests.contains(&digest)
+                })
+            });
+        // Removing controls preserves every raw hex window and additionally joins
+        // split credentials, so a second scan of the original text is redundant.
+        if text.chars().any(char::is_control) {
+            let normalized: String = text.chars().filter(|ch| !ch.is_control()).collect();
+            contains(&normalized)
+        } else { contains(text) }
+    }
+
+    pub(crate) fn redact(&self, value: &str, token: Option<&str>) -> String {
+        let supplied = token.is_some_and(|token| !token.is_empty()
+            && (value.contains(token) || value.chars().filter(|ch| !ch.is_control())
+                .collect::<String>().contains(token)));
+        if supplied || self.contains(value) { "redacted-credential".to_string() }
+        else { value.to_string() }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Instance {
     id: uuid::Uuid,
@@ -832,21 +869,14 @@ impl PtyManager {
 
     /// Recognize live spawn credentials in text without retaining their plaintext.
     /// Include every session: a rejected caller can paste somebody else's credential.
+    #[cfg(test)]
     pub(crate) fn contains_heartbeat_credential(&self, text: &str) -> bool {
-        let digests: std::collections::HashSet<[u8; 32]> = self.heartbeat_credentials
-            .read().values().map(|credential| credential.digest).collect();
-        if digests.is_empty() { return false; }
-        let contains = |text: &str| text.as_bytes()
-            .split(|byte| !byte.is_ascii_hexdigit())
-            // Sliding windows also catch credentials embedded in longer hex runs.
-            .any(|run| run.windows(64).any(|candidate| {
-                let digest: [u8; 32] = Sha256::digest(candidate).into();
-                digests.contains(&digest)
-            }));
-        contains(text) || (text.chars().any(char::is_control) && {
-            let normalized: String = text.chars().filter(|ch| !ch.is_control()).collect();
-            contains(&normalized)
-        })
+        self.heartbeat_credential_matcher().contains(text)
+    }
+
+    pub(crate) fn heartbeat_credential_matcher(&self) -> HeartbeatCredentialMatcher {
+        HeartbeatCredentialMatcher { digests: self.heartbeat_credentials
+            .read().values().map(|credential| credential.digest).collect() }
     }
 
     #[cfg(test)]
@@ -2591,6 +2621,25 @@ mod transport_tests {
         assert_eq!(manager.replay_capacity(), super::super::output_ring::MIN_REPLAY_CAPACITY);
         manager.set_replay_capacity(usize::MAX);
         assert_eq!(manager.replay_capacity(), super::super::output_ring::MAX_REPLAY_CAPACITY);
+    }
+
+    #[test]
+    fn credential_matcher_preserves_embedded_and_control_split_windows() {
+        let manager = PtyManager::new();
+        let secret = manager.mint_heartbeat_token_for_test("fixture-worker", "fixture", false);
+        assert!(manager.contains_heartbeat_credential(&secret));
+        let matcher = manager.heartbeat_credential_matcher();
+        for text in [secret.clone(), format!("a{secret}b"),
+            format!("{}\t{}", &secret[..32], &secret[32..]),
+            format!("a{}\u{0085}{}b", &secret[..17], &secret[17..]),
+            format!("{}{secret}{}", "a".repeat(4096), "b".repeat(4096))] {
+            assert!(matcher.contains(&text), "all embedded credential windows must match");
+        }
+        // A digest-only snapshot remains usable without holding either manager lock.
+        let _credentials = manager.heartbeat_credentials.write();
+        assert!(matcher.contains(&secret));
+        assert!(!matcher.contains(&"a".repeat(1_000_000)), "repetitive ordinary hex is not a credential");
+        assert!(!matcher.contains("ordinary summary with\ta tab"));
     }
 
     #[cfg(windows)]

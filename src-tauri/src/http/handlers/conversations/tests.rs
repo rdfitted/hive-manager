@@ -79,6 +79,158 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for AuditLogs {
     }
 }
 
+async fn heartbeat_summary(
+    app: &Router, session: &str, agent: &str, summary: &str, token: Option<&str>,
+) -> axum::response::Response {
+    let mut request = Request::builder().method("POST")
+        .uri(format!("/api/sessions/{session}/heartbeat"))
+        .header("content-type", "application/json");
+    if let Some(token) = token { request = request.header("X-Hive-Agent-Token", token); }
+    app.clone().oneshot(request.body(Body::from(json!({
+        "agent_id": agent, "status": "completed", "summary": summary,
+    }).to_string())).unwrap()).await.unwrap()
+}
+
+// Inspect decoded strings, including escaped tabs, without printing any credential.
+fn assert_no_credential(value: &Value, secret: &str, surface: &str) {
+    fn leaks(value: &Value, secret: &str) -> bool {
+        match value {
+            Value::String(text) => text.chars().filter(|ch| !ch.is_control())
+                .collect::<String>().contains(secret),
+            Value::Array(values) => values.iter().any(|value| leaks(value, secret)),
+            Value::Object(values) => values.iter().any(|(key, value)|
+                key.contains(secret) || leaks(value, secret)),
+            _ => false,
+        }
+    }
+    assert!(!leaks(value, secret), "credential escaped through {surface}");
+}
+
+#[tokio::test]
+async fn g39_pc3_raw_summary_is_rejected_before_storage_events_and_logs() {
+    assert_credential_summary_rejected(false).await;
+}
+
+#[tokio::test]
+async fn g39_pc3_tab_split_summary_is_rejected_before_storage_events_and_logs() {
+    assert_credential_summary_rejected(true).await;
+}
+
+async fn assert_credential_summary_rejected(split: bool) {
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    let id = "pc3-ingress";
+    let owner = "pc3-ingress-worker-1";
+    state.session_controller.write().insert_test_session(
+        crate::http::tests::make_test_session_with_agents(id, "/repo", &[owner]));
+    let secret = state.pty_manager.read().mint_heartbeat_token_for_test(owner, id, false);
+    let foreign = state.pty_manager.read().mint_heartbeat_token_for_test("foreign-worker", "foreign", false);
+    let logs = AuditLogs::default();
+    let subscriber = std::sync::Arc::new(tracing_subscriber::fmt()
+        .without_time().with_ansi(false).with_writer(logs.clone()).finish());
+    let mut live = state.event_bus.subscribe_session(id.into());
+    for credential in [&secret, &foreign] {
+      let summary = if split { format!("{}\t{}", &credential[..32], &credential[32..]) }
+          else { credential.to_string() };
+      for header in [None, Some(secret.as_str())] {
+        let response = heartbeat_summary(&app, id, owner, &summary, header)
+            .with_subscriber(subscriber.clone()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST,
+            "tokenless credential summary must be rejected at ingress");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_no_credential(&error, credential, "rejection response");
+        assert!(error.to_string().contains("summary"), "rejection must name the field");
+        let stored = state.session_controller.read().get_heartbeat_info(id);
+        assert!(stored.is_empty(), "rejected summary must never reach controller persistence");
+        for path in [format!("/api/sessions/{id}/heartbeats"),
+            "/api/sessions/active".into(), format!("/api/sessions/{id}/events")] {
+            assert_no_credential(&read_json(&app, &path).await, credential, &path);
+        }
+        let event = live.recv().await.unwrap();
+        assert_no_credential(&event.payload, credential, "live rejection audit");
+      }
+    }
+    assert_eq!(heartbeat_summary(&app, id, owner, "ordinary later summary", None).await.status(), StatusCode::OK);
+    let events = read_json(&app, &format!("/api/sessions/{id}/events")).await;
+    assert_no_credential(&events, &secret, "later previous summary");
+    assert_no_credential(&events, &foreign, "foreign credential in later previous summary");
+    assert!(events.as_array().unwrap().iter().filter(|event|
+        event["payload"]["kind"] == "heartbeat_status_requested").all(|event|
+            event["payload"]["previous_summary"].is_null()), "rejected summaries cannot become previous");
+    let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("local API authorization audit"), "must capture audit logs");
+    let output = Value::String(output);
+    assert_no_credential(&output, &secret, "captured logs");
+    assert_no_credential(&output, &foreign, "foreign credential in captured logs");
+}
+
+#[tokio::test]
+async fn g39_pc3_large_hex_conversation_keeps_existing_size_limit_and_acceptance() {
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    let id = "pc3-large-hex";
+    known_session(&state, id);
+    let _secret = state.pty_manager.read().mint_heartbeat_token_for_test("foreign-worker", "foreign", false);
+    let text = "a".repeat(1_000_000);
+    let started = std::time::Instant::now();
+    let response = append(&app, id, "queen", "operator", &text, &[]).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let history = read_json(&app, &format!("/api/sessions/{id}/conversations/queen")).await;
+    assert!(history["messages"][0]["content"].as_str() == Some(text.as_str()),
+        "large ordinary hex must remain intact");
+    println!("PC3 million-byte repetitive hex append and read: {:?}", started.elapsed());
+}
+
+#[tokio::test]
+async fn g39_pc3_legacy_active_and_previous_summaries_are_redacted() {
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    let id = "pc3-legacy";
+    let owner = "pc3-legacy-worker-1";
+    state.session_controller.write().insert_test_session(
+        crate::http::tests::make_test_session_with_agents(id, "/repo", &[owner]));
+    let secret = state.pty_manager.read().mint_heartbeat_token_for_test(owner, id, false);
+    for summary in [secret.clone(), format!("{}\t{}", &secret[..32], &secret[32..])] {
+        state.session_controller.read().update_heartbeat(id, owner, "completed", Some(&summary)).unwrap();
+        assert_no_credential(&read_json(&app, "/api/sessions/active").await, &secret, "legacy active summary");
+        assert_no_credential(&read_json(&app, &format!("/api/sessions/{id}/heartbeats")).await, &secret, "legacy heartbeat read");
+        assert_eq!(heartbeat_summary(&app, id, owner, "ordinary follow-up", None).await.status(), StatusCode::OK);
+        let events = read_json(&app, &format!("/api/sessions/{id}/events")).await;
+        assert_no_credential(&events, &secret, "legacy previous summary");
+        assert!(events.as_array().unwrap().iter().any(|event|
+            event["payload"]["previous_summary"] == "redacted-credential"));
+    }
+}
+
+#[tokio::test]
+async fn g39_pc3_wrong_header_stays_rejected_and_ordinary_summary_is_unchanged() {
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    let id = "pc3-auth";
+    let owner = "pc3-auth-worker-1";
+    state.session_controller.write().insert_test_session(
+        crate::http::tests::make_test_session_with_agents(id, "/repo", &[owner]));
+    let secret = state.pty_manager.read().mint_heartbeat_token_for_test(owner, id, false);
+    let logs = AuditLogs::default();
+    let subscriber = std::sync::Arc::new(tracing_subscriber::fmt()
+        .without_time().with_ansi(false).with_writer(logs.clone()).finish());
+    for summary in [secret.clone(), format!("{}\t{}", &secret[..32], &secret[32..])] {
+        assert_eq!(heartbeat_summary(&app, id, owner, &summary, Some("wrong-token"))
+            .with_subscriber(subscriber.clone()).await.status(), StatusCode::UNAUTHORIZED);
+        for path in [format!("/api/sessions/{id}/heartbeats"),
+            "/api/sessions/active".into(), format!("/api/sessions/{id}/events")] {
+            assert_no_credential(&read_json(&app, &path).await, &secret, &path);
+        }
+    }
+    assert!(state.session_controller.read().get_heartbeat_info(id).is_empty());
+    let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("local API authorization audit"), "must capture rejected audit logs");
+    assert_no_credential(&Value::String(output), &secret, "rejected captured logs");
+    for token in [None, Some(secret.as_str())] {
+        let summary = "ordinary summary with\ttab and embedded abcdef";
+        assert_eq!(heartbeat_summary(&app, id, owner, summary, token).await.status(), StatusCode::OK);
+        let stored = state.session_controller.read().get_heartbeat_info(id);
+        assert!(stored[owner].summary.as_deref() == Some(summary), "ordinary summary must be unchanged");
+    }
+}
+
 #[tokio::test]
 async fn g39_r2_headerless_credentials_in_content_sender_and_target_are_rejected() {
     let (_temp, state, app) = crate::http::tests_agent_events::setup();

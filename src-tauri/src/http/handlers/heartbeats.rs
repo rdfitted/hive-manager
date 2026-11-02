@@ -137,14 +137,11 @@ async fn heartbeat_security_event(
         token, reason, rejected, "heartbeat").await
 }
 
-/// Redact live credentials independently of the header selected by the caller.
-pub(super) fn redact_credential_text(state: &AppState, value: &str, token: Option<&str>) -> String {
-    let supplied_credential = token.is_some_and(|token| !token.is_empty()
-        && (value.contains(token)
-            || value.chars().filter(|ch| !ch.is_control()).collect::<String>().contains(token)));
-    if supplied_credential || state.pty_manager.read().contains_heartbeat_credential(value) {
-        "redacted-credential".to_string()
-    } else { value.to_string() }
+/// Snapshot under the short manager lock; hash untrusted text on the blocking pool.
+pub(super) async fn contains_credential_text(state: &AppState, values: Vec<String>) -> Result<bool, ApiError> {
+    let matcher = state.pty_manager.read().heartbeat_credential_matcher();
+    tokio::task::spawn_blocking(move || values.iter().any(|value| matcher.contains(value)))
+        .await.map_err(|_| ApiError::internal("Credential scan unavailable"))
 }
 
 /// Shared neutral audit for local API identity checks. Never persist credentials.
@@ -153,16 +150,18 @@ pub(super) async fn local_api_security_event(
     resolved_id: Option<&str>, token: Option<&str>, reason: &'static str, rejected: bool,
     surface: &'static str,
 ) -> Result<(), ApiError> {
-    let safe = |value: &str| redact_credential_text(state, value, token);
     // Preserve heartbeat audit scope; conversations also support persisted history.
     let known_session = state.session_controller.read().get_session(session_id).is_some()
         || (surface == "conversation" && state.storage.session_dir(session_id).join("session.json").is_file());
-    let safe_session_id = safe(session_id);
+    let matcher = state.pty_manager.read().heartbeat_credential_matcher();
+    let (session, caller, claimed, resolved, token) = (session_id.to_string(), caller_id.map(str::to_string),
+        claimed_id.to_string(), resolved_id.map(str::to_string), token.map(str::to_string));
+    let (safe_session_id, caller_id, claimed_id, resolved_id) = tokio::task::spawn_blocking(move || {
+        let safe = |value: &str| matcher.redact(value, token.as_deref());
+        (safe(&session), caller.as_deref().map(safe), safe(&claimed), resolved.as_deref().map(safe))
+    }).await.map_err(|_| ApiError::internal("Credential scan unavailable"))?;
     let may_persist = known_session && safe_session_id == session_id;
     let session_id = if may_persist { safe_session_id } else { "unattributed-session".to_string() };
-    let caller_id = caller_id.map(safe);
-    let claimed_id = safe(claimed_id);
-    let resolved_id = resolved_id.map(safe);
     tracing::warn!(session_id = %session_id, caller_agent_id = ?caller_id,
         claimed_agent_id = %claimed_id, resolved_agent_id = ?resolved_id, reason,
         rejected, surface, "local API authorization audit");
@@ -231,6 +230,15 @@ pub async fn post_heartbeat(
         return Err(ApiError::new(StatusCode::UNAUTHORIZED,
             "Missing or invalid X-Hive-Agent-Token; restart this agent to receive its spawn credential"));
     } else { None };
+    // Preserve header-error precedence and reject credential summaries even when
+    // no header was supplied. Never echo the rejected value into an audit event.
+    if let Some(summary) = req.summary.as_ref() {
+        if contains_credential_text(&state, vec![summary.clone()]).await? {
+            reject_heartbeat(&state, &session_id, authenticated.as_ref().map(|(id, _)| id.as_str()),
+                &claimed_id, req.mark_agent_id.as_deref(), token, "credential_in_payload").await;
+            return Err(ApiError::bad_request("Heartbeat summary must not contain a credential value"));
+        }
+    }
     let caller_id = authenticated.as_ref().map(|(id, _)| id.clone()).unwrap_or_else(|| claimed_id.clone());
     let caller_is_queen = authenticated.as_ref().is_some_and(|(_, queen)| *queen);
     // A confused agent must not persist its credential in a summary, provenance or target ID.
@@ -513,8 +521,14 @@ pub async fn post_heartbeat(
 
     // Neutral audit events do not infer work-graph completion, unlike AgentCompleted.
     // Persist before changing status so a failed audit write cannot silently erase evidence.
-    let previous = state.session_controller.read().get_heartbeat_info(&session_id)
+    let mut previous = state.session_controller.read().get_heartbeat_info(&session_id)
         .get(&agent_id).cloned();
+    if let Some(summary) = previous.as_mut().and_then(|heartbeat| heartbeat.summary.take()) {
+        let matcher = state.pty_manager.read().heartbeat_credential_matcher();
+        let safe = tokio::task::spawn_blocking(move || matcher.redact(&summary, None))
+            .await.map_err(|_| ApiError::internal("Credential scan unavailable"))?;
+        previous.as_mut().expect("previous heartbeat exists").summary = Some(safe);
+    }
     let confirmation = req.mark_agent_id.is_some() && req.status == "completed"
         && (!confirmation_nodes.is_empty() || (req.completed_nodes.is_empty()
             && previous.as_ref().is_some_and(|heartbeat| heartbeat.status == "completed")));
@@ -911,52 +925,66 @@ fn record_knowledge_ack_outcomes(
 pub async fn get_active_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ActiveSessionsResponse>, ApiError> {
-    let controller = state.session_controller.read();
-    let all_sessions = controller.list_sessions();
+    let sessions: Vec<ActiveSessionInfo> = {
+        let controller = state.session_controller.read();
+        let all_sessions = controller.list_sessions();
 
-    let sessions: Vec<ActiveSessionInfo> = all_sessions
-        .into_iter()
-        .filter(|s| s.state.is_monitorable())
-        .map(|session| {
-            let (session, agents_with_heartbeats) = controller.session_with_heartbeats(session);
-            let agents: Vec<ActiveAgentInfo> = session
-                .agents
-                .iter()
-                .map(|a| {
-                    let hb = agents_with_heartbeats.get(&a.id);
-                    ActiveAgentInfo {
-                        id: a.id.clone(),
-                        work_state: a.work_state.unwrap_or_default(),
-                        latest_input_at: controller.latest_input_at(&session.id, &a.id)
-                            .map(|at| at.to_rfc3339()),
-                        awaiting_injected_turn_at: crate::session::work_state::awaiting_injected_turn_since(&a.status)
-                            .map(|at| at.to_rfc3339()),
-                        role: format!("{:?}", a.role),
-                        last_activity: hb.map(|h| h.last_activity.to_rfc3339()),
-                        status: hb.map(|h| h.status.clone()),
-                        summary: hb.and_then(|h| h.summary.clone()),
-                    }
-                })
-                .collect();
+        all_sessions
+            .into_iter()
+            .filter(|s| s.state.is_monitorable())
+            .map(|session| {
+                let (session, agents_with_heartbeats) = controller.session_with_heartbeats(session);
+                let agents: Vec<ActiveAgentInfo> = session
+                    .agents
+                    .iter()
+                    .map(|a| {
+                        let hb = agents_with_heartbeats.get(&a.id);
+                        ActiveAgentInfo {
+                            id: a.id.clone(),
+                            work_state: a.work_state.unwrap_or_default(),
+                            latest_input_at: controller.latest_input_at(&session.id, &a.id)
+                                .map(|at| at.to_rfc3339()),
+                            awaiting_injected_turn_at: crate::session::work_state::awaiting_injected_turn_since(&a.status)
+                                .map(|at| at.to_rfc3339()),
+                            role: format!("{:?}", a.role),
+                            last_activity: hb.map(|h| h.last_activity.to_rfc3339()),
+                            status: hb.map(|h| h.status.clone()),
+                            summary: hb.and_then(|h| h.summary.clone()),
+                        }
+                    })
+                    .collect();
 
-            ActiveSessionInfo {
-                id: session.id.clone(),
-                session_type: match &session.session_type {
-                    crate::session::SessionType::Hive { worker_count } => {
-                        format!("Hive ({})", worker_count)
-                    }
-                    crate::session::SessionType::Swarm { planner_count } => {
-                        format!("Swarm ({})", planner_count)
-                    }
-                    crate::session::SessionType::Fusion { .. } => "Fusion".to_string(),
-                    crate::session::SessionType::Debate { .. } => "Debate".to_string(),
-                    crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
-                },
-                project_path: session.project_path.to_string_lossy().to_string(),
-                agents,
+                ActiveSessionInfo {
+                    id: session.id.clone(),
+                    session_type: match &session.session_type {
+                        crate::session::SessionType::Hive { worker_count } => {
+                            format!("Hive ({})", worker_count)
+                        }
+                        crate::session::SessionType::Swarm { planner_count } => {
+                            format!("Swarm ({})", planner_count)
+                        }
+                        crate::session::SessionType::Fusion { .. } => "Fusion".to_string(),
+                        crate::session::SessionType::Debate { .. } => "Debate".to_string(),
+                        crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
+                    },
+                    project_path: session.project_path.to_string_lossy().to_string(),
+                    agents,
+                }
+            })
+            .collect()
+    };
+    let matcher = state.pty_manager.read().heartbeat_credential_matcher();
+    let sessions = tokio::task::spawn_blocking(move || {
+        let mut sessions = sessions;
+        for session in &mut sessions {
+            for agent in &mut session.agents {
+                if let Some(summary) = agent.summary.as_mut() {
+                    *summary = matcher.redact(summary, None);
+                }
             }
-        })
-        .collect();
+        }
+        sessions
+    }).await.map_err(|_| ApiError::internal("Credential scan unavailable"))?;
 
     Ok(Json(ActiveSessionsResponse { sessions }))
 }

@@ -21,18 +21,21 @@ pub async fn get_heartbeats(
     Path(session_id): Path<String>,
 ) -> Result<Json<BTreeMap<String, HeartbeatSnapshot>>, ApiError> {
     validate_session_id(&session_id)?;
-    let controller = state.session_controller.read();
-    if controller.get_session(&session_id).is_none()
-        && !state
-            .storage
-            .session_dir(&session_id)
-            .join("session.json")
-            .is_file()
-    {
-        return Err(ApiError::not_found("Session not found"));
-    }
-    let snapshots = controller
-        .get_heartbeat_info(&session_id)
+    let heartbeats = {
+        let controller = state.session_controller.read();
+        if controller.get_session(&session_id).is_none()
+            && !state
+                .storage
+                .session_dir(&session_id)
+                .join("session.json")
+                .is_file()
+        {
+            return Err(ApiError::not_found("Session not found"));
+        }
+        controller.get_heartbeat_info(&session_id)
+    };
+    let matcher = state.pty_manager.read().heartbeat_credential_matcher();
+    let snapshots = tokio::task::spawn_blocking(move || heartbeats
         .into_iter()
         .map(|(id, info)| {
             (
@@ -41,12 +44,12 @@ pub async fn get_heartbeats(
                     last_activity: info.last_activity.to_rfc3339(),
                     status: info.status,
                     summary: info.summary.map(|summary| {
-                        super::heartbeats::redact_credential_text(&state, &summary, None)
+                        matcher.redact(&summary, None)
                     }),
                 },
             )
         })
-        .collect();
+        .collect()).await.map_err(|_| ApiError::internal("Credential scan unavailable"))?;
     Ok(Json(snapshots))
 }
 

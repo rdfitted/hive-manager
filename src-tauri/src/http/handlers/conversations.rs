@@ -187,18 +187,9 @@ pub async fn append_conversation(
     };
     // Check decoded raw fields and their control-free forms before validation,
     // normalization or compatibility-mode auditing can persist any of them.
-    let credential_in_payload = {
-        let manager = state.pty_manager.read();
-        [
-            &req.content,
-            &req.from,
-            &raw_agent_id,
-            &agent_id,
-            &session_id,
-        ]
-        .into_iter()
-        .any(|value| manager.contains_heartbeat_credential(value))
-    };
+    let credential_in_payload = super::heartbeats::contains_credential_text(&state, vec![
+        req.content.clone(), req.from.clone(), raw_agent_id.clone(), agent_id.clone(), session_id.clone(),
+    ]).await?;
     if credential_in_payload {
         reject_conversation(
             &state,
