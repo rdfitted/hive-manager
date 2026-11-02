@@ -292,7 +292,7 @@ async fn concurrent_continues_launch_exactly_one_queen() {
         SessionController::test_sync_hook(&session_id, "continue-plan-ready", Some(Box::new(move || {
             ready_tx.send(()).unwrap();
             retry_rx.recv_timeout(std::time::Duration::from_secs(30))
-                .expect("retry entered continuation");
+                .expect("retry observed the held continuation lifecycle lock");
         })));
         let first = tokio::spawn({
             let router = app.router.clone();
@@ -304,9 +304,9 @@ async fn concurrent_continues_launch_exactly_one_queen() {
             .expect("PlanReady hook signaled");
         assert_eq!(app.session(&session_id).state, SessionState::PlanReady);
         fired_during_plan_ready += 1;
-        // The retry releases the first caller only when it reaches the lifecycle
-        // lock, proving the request entered while PlanReady was held.
-        SessionController::test_sync_hook(&session_id, "continue-enter", Some(Box::new(move || {
+        // Release only after the retry observes the first caller's real lifecycle
+        // guard. Request entry alone does not prove contention at PlanReady.
+        SessionController::test_sync_hook(&session_id, "continue-contended", Some(Box::new(move || {
             retry_tx.send(()).unwrap();
         })));
         let (second_status, second_body) = post_empty(&app.router, &uri).await;

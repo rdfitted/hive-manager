@@ -15515,9 +15515,13 @@ The backend composed and persisted the following authoritative skeleton before l
         // with stop/close/resume) across the whole continuation so a concurrent
         // retry waits, then sees Running and gets WrongState instead of racing a
         // second launch. Nothing inside takes this lock (parking_lot, not reentrant).
-        #[cfg(test)]
-        Self::test_sync_hook(session_id, "continue-enter", None);
         let lifecycle_lock = self.session_lifecycle_lock(session_id);
+        // Observe the real lock without acquiring another guard: this seam must
+        // not serialize callers if the production lifecycle guard is removed.
+        #[cfg(test)]
+        if lifecycle_lock.is_locked() {
+            Self::test_sync_hook(session_id, "continue-contended", None);
+        }
         let _lifecycle_guard = lifecycle_lock.lock();
 
         // Get the session
