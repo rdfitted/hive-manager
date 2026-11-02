@@ -55,6 +55,17 @@ describe('G-attention-predicate', () => {
 });
 
 describe('activity derivation', () => {
+  it('G31 confirmed follow-up exposes the input time after the awaiting marker is gone', () => {
+    const latest_input_at = '2026-11-01T12:00:00Z';
+    set(heartbeatStore, { agents: { a: { summary: 'Previous completion',
+      timestamp: '2026-11-01T11:50:00Z', latest_input_at, work_state: 'working' } }, staleAgents: new Set() });
+    expect(get(agentActivity).a.lastActivityAt).toBe(Date.parse(latest_input_at));
+    expect(get(agentActivity).a.attention).toBe('none');
+    set(heartbeatStore, { agents: { a: { timestamp: '2026-11-01T12:01:00Z',
+      latest_input_at, work_state: 'working' } }, staleAgents: new Set(['a']) });
+    expect(get(agentActivity).a.lastActivityAt).toBe(Date.parse('2026-11-01T12:01:00Z'));
+    expect(get(agentActivity).a.attention).toBe('stale');
+  });
   it('G31: fresh backend work state overrides the older roster state', () => {
     set(activeAgents, [{ ...agent('Running'), work_state: 'finished' }]);
     set(heartbeatStore, { agents: { a: { work_state: 'working' } }, staleAgents: new Set(['a']) });

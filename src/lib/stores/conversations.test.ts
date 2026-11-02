@@ -44,6 +44,27 @@ beforeEach(() => {
 });
 
 describe('G31 heartbeat work state', () => {
+  it('G31 confirmed follow-up gets three minutes after input even with an old completed heartbeat', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-01T12:00:00Z'));
+      const latest_input_at = new Date().toISOString();
+      fetchMock.mockResolvedValue({ ok: true, json: async () => ({ sessions: [{ id: 's', agents: [
+        { id: 'confirmed', last_activity: '2026-11-01T11:50:00Z', status: 'completed',
+          work_state: 'working', latest_input_at },
+        { id: 'legacy', last_activity: '2026-11-01T11:50:00Z', work_state: 'working' },
+      ] }] }) });
+      await heartbeatStore.loadHeartbeats('s');
+      expect([...get(heartbeatStore).staleAgents]).toEqual(['legacy']);
+      expect(get(heartbeatStore).agents.confirmed).toHaveProperty('latest_input_at', latest_input_at);
+      vi.advanceTimersByTime(180_000);
+      await heartbeatStore.loadHeartbeats('s');
+      expect(get(heartbeatStore).staleAgents.has('confirmed')).toBe(false);
+      vi.advanceTimersByTime(1);
+      await heartbeatStore.loadHeartbeats('s');
+      expect(get(heartbeatStore).staleAgents.has('confirmed')).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
   it('silences completed work, preserves unknown/missing stale work, and re-arms resumed work', async () => {
     const old = new Date(Date.now() - 4 * 60_000).toISOString();
     let seats = [

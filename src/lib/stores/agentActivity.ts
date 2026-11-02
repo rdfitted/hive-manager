@@ -119,11 +119,13 @@ export const agentActivity: Readable<Record<string, AgentActivity>> = derived(
     return Object.fromEntries($agents.map((agent) => {
       const heartbeat = $heartbeats.agents[agent.id];
       const heartbeatAt = timestamp(heartbeat?.timestamp);
+      const inputAt = timestamp(heartbeat?.latest_input_at ?? agent.latest_input_at);
       const event = latest.get(agent.id);
+      const activity = [heartbeatAt, inputAt, event?.at ?? null].filter((at): at is number => at !== null);
       return [agent.id, {
         agentId: agent.id,
         summary: (heartbeat?.summary ?? '').replace(/\s+/g, ' ').trim(),
-        lastActivityAt: heartbeatAt === null ? event?.at ?? null : Math.max(heartbeatAt, event?.at ?? heartbeatAt),
+        lastActivityAt: activity.length ? Math.max(...activity) : null,
         latestEventLabel: event?.label ?? null,
         attention: attentionReason(agent, $heartbeats.staleAgents, workStateFor(agent, heartbeat)),
       }];

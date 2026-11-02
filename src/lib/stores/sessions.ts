@@ -51,6 +51,7 @@ export interface AgentConfig {
 export interface AgentInfo {
   id: string;
   work_state?: string;
+  latest_input_at?: string;
   role: AgentRole;
   status: AgentStatus;
   config: AgentConfig;

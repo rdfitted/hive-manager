@@ -26,6 +26,7 @@ export interface HeartbeatInfo {
   summary: string;
   timestamp: string;
   work_state?: string;
+  latest_input_at?: string;
 }
 
 interface ConversationState {
@@ -300,7 +301,7 @@ function createHeartbeatStore() {
 
         const data = await resp.json();
         // Backend returns { sessions: [...] }; only populate the requested session.
-        const sessions: Array<{ id: string; agents?: Array<{ id?: string; agent_id?: string; status?: string; summary?: string; last_activity?: string; work_state?: string; awaiting_injected_turn_at?: string }> }> =
+        const sessions: Array<{ id: string; agents?: Array<{ id?: string; agent_id?: string; status?: string; summary?: string; last_activity?: string; work_state?: string; awaiting_injected_turn_at?: string; latest_input_at?: string }> }> =
           Array.isArray(data?.sessions) ? data.sessions : [];
         const session = sessions.find((s) => s.id === sessionId);
         if (!session) {
@@ -320,9 +321,10 @@ function createHeartbeatStore() {
             summary: agent.summary || '',
             timestamp,
             work_state: agent.work_state,
+            latest_input_at: agent.latest_input_at,
           };
           if (agent.work_state !== 'finished' && agent.work_state !== 'retired'
-            && isHeartbeatStale(timestamp, agent.awaiting_injected_turn_at)) {
+            && isHeartbeatStale(timestamp, agent.latest_input_at ?? agent.awaiting_injected_turn_at)) {
             staleAgents.add(id);
           }
         }
