@@ -20,6 +20,7 @@ const report = { started: new Date().toISOString(), root, before: await live(), 
 let child, browser;
 try {
   await seed(root, new Date());
+  report.localDirectoryBeforeLaunch = !!(await stat(path.join(root, 'home/AppData/Local')).catch(() => null));
   const api = await port(), cdp = await port();
   report.ports = { api, cdp };
   const exe = path.join(process.env.LOCALAPPDATA, 'hive-manager-target/loop1/debug/hive-manager.exe');
@@ -110,6 +111,7 @@ try {
     const value = report.environmentRoots[key]?.replace(/^\\\\\?\\/, '');
     return value && path.relative(root, value).split(path.sep)[0] !== '..' && !path.isAbsolute(path.relative(root, value));
   });
+  report.localDirectoryAfterBootstrap = !!(await stat(path.join(root, 'home/AppData/Local')).catch(() => null));
   report.webviewProcesses = JSON.parse(ps(`Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'msedgewebview2.exe' -and $_.CommandLine -like '*${root.replaceAll("'", "''")}*' } | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Depth 3`));
   await page.screenshot({ path: path.join(out, 'spike.png') });
   report.attached = true;

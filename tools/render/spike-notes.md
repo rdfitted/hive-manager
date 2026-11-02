@@ -1,6 +1,6 @@
 # Webview driver spike
 
-Status: real CDP attach and viewport measurements proved with a temporary synthetic-profile directory. The bootstrap fix landed in 1ea4046; a rebuilt run without the temporary driver line is pending. No normal debug instance was started.
+Status: real CDP attach and viewport measurements proved on the rebuilt guarded app without a driver scaffold. The bootstrap fix is 1ea4046. No normal debug instance was started.
 
 ## Initial observations before the profile-directory bisect
 
@@ -66,4 +66,10 @@ Both PNGs were inspected: actual launch form, synthetic sidebar and version badg
 
 `environment.ps1` reads only the owned x64 process after matching PID, executable and creation time. It returns only nine isolation-root variables, never the full environment. Its self-process check and real-app read proved USERPROFILE, HOME, APPDATA, LOCALAPPDATA, TEMP, TMP, CODEX_HOME, CLAUDE_CONFIG_DIR and WEBVIEW2_USER_DATA_FOLDER all stayed inside the instance. Request listeners and resource timing found no request to port 18800. Every real-app run removed its process tree and profile; live health and PID were unchanged. Foreground inspection remains unavailable on the different input desktop and is recorded as null, not a pass.
 
-Chosen driver: Playwright CDP. Chosen viewport method: CDP emulation via `page.setViewportSize`, with actual renderer measurements. The permanent bootstrap folder fix is 1ea4046. The temporary directory-creation line has been removed from the spike. After the Queen confirms the fix, a rebuilt no-scaffold spike must repeat this proof before T11 opens. T11-T13 and the complete G41/G43 mutation gate remain pending.
+Chosen driver: Playwright CDP. Chosen viewport method: CDP emulation via `page.setViewportSize`, with actual renderer measurements. The permanent bootstrap folder fix is 1ea4046. The temporary directory-creation line has been removed from the spike.
+
+## Permanent bootstrap proof
+
+The confirmed bootstrap fix was rebuilt with `tauri build --debug --no-bundle` under the FIFO lock in 165.75 seconds. The unmodified seed had no `home/AppData/Local` before launch; it existed after bootstrap. The driver did not create it. Real attach, hydrated page, both measured viewports at DPR1, instance marker, contained process environment, no port-18800 requests, process/profile cleanup and unchanged live health/PID all passed again. Input desktop remained `Screen-saver`; foreground inspection remains explicitly unavailable. Scratch folder and compiled control host absence were verified after the Queen's cleanup.
+
+T9 is proved with that recorded foreground limitation. T11-T13 and the complete G41/G43 mutation gate remain pending.
