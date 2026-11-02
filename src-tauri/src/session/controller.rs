@@ -2553,7 +2553,7 @@ impl SessionController {
         {
             let completions = self.retirement_completions.read();
             if !completions.get(&(session.id.clone(), agent.id.clone()))
-                .is_some_and(|(completed_instance, _)| *completed_instance == instance) {
+                .is_some_and(|completed| completed.0 == instance && Some(*completed) == manager.input_fence(&agent.id)) {
                 return false;
             }
         }
@@ -22588,7 +22588,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     #[test]
     fn g33_completion_fence_rejects_before_expensive_eligibility() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        for fence in ["missing", "stale-instance", "current-instance"] {
+        for fence in ["missing", "stale-instance", "stale-revision", "current-instance"] {
             let (_temp, state, id) = retirement_fixture(&[]);
             let controller = state.session_controller.read();
             let instance = state.pty_manager.read().instance_id(&id).unwrap();
@@ -22596,8 +22596,16 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             match fence {
                 "missing" => { controller.retirement_completions.write().remove(&key); }
                 "stale-instance" => { controller.retirement_completions.write().insert(key, (uuid::Uuid::new_v4(), 0)); }
+                "stale-revision" => {
+                    let before = state.pty_manager.read().input_fence(&id).unwrap();
+                    state.pty_manager.read().submit(&id, b"follow-up").unwrap();
+                    let after = state.pty_manager.read().input_fence(&id).unwrap();
+                    assert_eq!(before.0, after.0);
+                    assert!(after.1 > before.1);
+                }
                 _ => {}
             }
+            let before = controller.get_session("retire").unwrap().agents[0].clone();
             let entries = Arc::new(AtomicUsize::new(0));
             let observed = entries.clone();
             SessionController::test_sync_hook(&instance.to_string(), "retirement-eligibility", Some(Box::new(move || {
@@ -22607,11 +22615,18 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             let actual_entries = entries.load(Ordering::SeqCst);
             // Clear an unconsumed observer without leaving a hook for another fixture.
             SessionController::test_sync_hook(&instance.to_string(), "retirement-eligibility", None);
+            let alive = state.pty_manager.read().is_alive(&id);
+            let after = controller.get_session("retire").unwrap().agents[0].clone();
             if state.pty_manager.read().is_alive(&id) {
                 state.pty_manager.read().kill(&id).unwrap();
             }
             assert_eq!(actual_entries, usize::from(fence == "current-instance"),
-                "{fence}: queue/graph/git eligibility must require a current-instance completion fence");
+                "{fence}: queue/graph/git eligibility must require a current completion input fence");
+            if fence != "current-instance" {
+                assert!(alive, "{fence}: rejected proof must leave the process alive");
+                assert_eq!(after.work_state, before.work_state, "{fence}: rejected proof must preserve work state");
+                assert_eq!(after.status, before.status, "{fence}: rejected proof must preserve process status");
+            }
             assert_eq!(retired, if fence == "current-instance" { vec![id] } else { vec![] });
             assert!(!state.storage.session_dir("retire").join("state/work-graph-completions.jsonl").exists());
         }
