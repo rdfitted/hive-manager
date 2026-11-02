@@ -5,6 +5,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 use tower::ServiceExt;
+use tracing::instrument::WithSubscriber;
 
 use crate::http::{state::AppState, tests::make_test_session};
 
@@ -55,6 +56,201 @@ async fn read_json(app: &Router, path: &str) -> Value {
         .await
         .unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[derive(Clone, Default)]
+struct AuditLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for AuditLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for AuditLogs {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+#[tokio::test]
+async fn g39_r2_headerless_credentials_in_content_sender_and_target_are_rejected() {
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    let id = "r2-headerless";
+    known_session(&state, id);
+    // Deliberately use a credential belonging to a different session.
+    let secret =
+        state
+            .pty_manager
+            .read()
+            .mint_heartbeat_token_for_test("foreign-worker", "foreign", false);
+    for (target, from, content) in [
+        ("queen", "operator", format!("a{secret}b")),
+        ("queen", secret.as_str(), "ordinary text".into()),
+        (secret.as_str(), "operator", "ordinary text".into()),
+    ] {
+        let response = append(&app, id, target, from, &content, &[]).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "headerless credential-bearing fields must be rejected"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains(&secret));
+    }
+    let history = read_json(&app, &format!("/api/sessions/{id}/conversations/queen")).await;
+    assert!(history["messages"].as_array().unwrap().is_empty());
+    assert!(!state.storage.session_dir(id).join("conversations").exists());
+    let audit = read_json(&app, &format!("/api/sessions/{id}/events"))
+        .await
+        .to_string();
+    assert!(!audit.contains(&secret));
+}
+
+#[tokio::test]
+async fn g39_r2_control_split_credentials_are_rejected_with_and_without_headers() {
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    let id = "r2-control";
+    known_session(&state, id);
+    let secret =
+        state
+            .pty_manager
+            .read()
+            .mint_heartbeat_token_for_test("r2-control-worker-1", id, false);
+    let mut events = state.event_bus.subscribe_session(id.into());
+    for headers in [vec![], vec![HeaderValue::from_str(&secret).unwrap()]] {
+        for control in ['\u{1}', '\n', '\r', '\t', '\u{85}'] {
+            let split = format!("{}{}{}", &secret[..32], control, &secret[32..]);
+            // Percent-encode the path separator character so the router decodes it.
+            let encoded_control: String = control
+                .to_string()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("%{byte:02X}"))
+                .collect();
+            let target = format!("{}{}{}", &secret[..32], encoded_control, &secret[32..]);
+            for (target, from, content) in [
+                ("queen", "worker-1", split.as_str()),
+                ("queen", split.as_str(), "ordinary text"),
+                (target.as_str(), "worker-1", "ordinary text"),
+            ] {
+                let response = append(&app, id, target, from, content, &headers).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "control-split credentials must be rejected"
+                );
+                let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                    .await
+                    .expect("credential rejection must be audited")
+                    .unwrap();
+                assert_eq!(event.payload["reason"], "credential_in_payload");
+                let audit = serde_json::to_string(&event).unwrap();
+                assert!(!audit.contains(&secret));
+                assert!(!audit.contains(&split));
+            }
+        }
+    }
+    let history = read_json(&app, &format!("/api/sessions/{id}/conversations/queen")).await;
+    assert!(history["messages"].as_array().unwrap().is_empty());
+    assert!(!state.storage.session_dir(id).join("conversations").exists());
+}
+
+#[tokio::test]
+async fn g39_r2_wrong_header_redacts_another_live_credential_from_audit_events_and_logs() {
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    let id = "r2-audit";
+    known_session(&state, id);
+    let secret =
+        state
+            .pty_manager
+            .read()
+            .mint_heartbeat_token_for_test("r2-audit-worker-2", id, false);
+    let logs = AuditLogs::default();
+    let subscriber = std::sync::Arc::new(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish(),
+    );
+    let mut events = state.event_bus.subscribe_session(id.into());
+    let mut live_safe = true;
+    for claimed in [
+        secret.clone(),
+        format!("{}\u{1}{}", &secret[..32], &secret[32..]),
+    ] {
+        let response = append(
+            &app,
+            id,
+            "queen",
+            &claimed,
+            "ordinary text",
+            &[HeaderValue::from_static("unrelated-invalid-token")],
+        )
+        .with_subscriber(subscriber.clone())
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains(&secret));
+        let event = events.recv().await.unwrap();
+        live_safe &= event.payload["claimed_agent_id"] == "redacted-credential";
+    }
+    let audit = read_json(&app, &format!("/api/sessions/{id}/events"))
+        .await
+        .to_string();
+    let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        output.contains("local API authorization audit"),
+        "must capture the audit log"
+    );
+    assert!(
+        live_safe && !audit.contains(&secret) && !output.contains(&secret),
+        "live events, persisted audit and captured logs must redact another live credential"
+    );
+    assert!(!state.storage.session_dir(id).join("conversations").exists());
+}
+
+#[tokio::test]
+async fn g39_r2_ordinary_text_and_tokenless_operator_remain_accepted() {
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    let id = "r2-ordinary";
+    known_session(&state, id);
+    let secret =
+        state
+            .pty_manager
+            .read()
+            .mint_heartbeat_token_for_test("r2-ordinary-worker-1", id, false);
+    let ordinary = format!("ordinary {} text", "a".repeat(256));
+    for (from, headers) in [
+        ("operator", vec![]),
+        ("worker-1", vec![HeaderValue::from_str(&secret).unwrap()]),
+    ] {
+        assert_eq!(
+            append(&app, id, "shared", from, &ordinary, &headers)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+    }
+    let history = read_json(&app, &format!("/api/sessions/{id}/conversations/shared")).await;
+    assert_eq!(history["messages"].as_array().unwrap().len(), 2);
+    let audit = read_json(&app, &format!("/api/sessions/{id}/events")).await;
+    assert!(audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["payload"]["kind"] == "conversation_unauthenticated"));
 }
 
 #[tokio::test]

@@ -137,17 +137,23 @@ async fn heartbeat_security_event(
         token, reason, rejected, "heartbeat").await
 }
 
+/// Redact live credentials independently of the header selected by the caller.
+pub(super) fn redact_credential_text(state: &AppState, value: &str, token: Option<&str>) -> String {
+    let supplied_credential = token.is_some_and(|token| !token.is_empty()
+        && (value.contains(token)
+            || value.chars().filter(|ch| !ch.is_control()).collect::<String>().contains(token)));
+    if supplied_credential || state.pty_manager.read().contains_heartbeat_credential(value) {
+        "redacted-credential".to_string()
+    } else { value.to_string() }
+}
+
 /// Shared neutral audit for local API identity checks. Never persist credentials.
 pub(super) async fn local_api_security_event(
     state: &AppState, session_id: &str, caller_id: Option<&str>, claimed_id: &str,
     resolved_id: Option<&str>, token: Option<&str>, reason: &'static str, rejected: bool,
     surface: &'static str,
 ) -> Result<(), ApiError> {
-    let safe = |value: &str| {
-        if token.is_some_and(|token| !token.is_empty() && value.contains(token)) {
-            "redacted-credential".to_string()
-        } else { value.to_string() }
-    };
+    let safe = |value: &str| redact_credential_text(state, value, token);
     // Preserve heartbeat audit scope; conversations also support persisted history.
     let known_session = state.session_controller.read().get_session(session_id).is_some()
         || (surface == "conversation" && state.storage.session_dir(session_id).join("session.json").is_file());

@@ -127,12 +127,21 @@ pub async fn append_conversation(
     Json(req): Json<AppendMessageRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     validate_session_id(&session_id)?;
-    validate_agent_id(&agent_id)?;
-    let agent_id = canonical_conversation_id(&session_id, &agent_id);
-    let from = sanitize_text(&req.from, MAX_FROM_LEN, "from")?;
-    validate_agent_id(&from)?;
-    let content = sanitize_text(&req.content, MAX_MESSAGE_CONTENT_LEN, "content")?;
-    ensure_session_exists(&state, &session_id)?;
+    let raw_agent_id = agent_id;
+    let agent_id = canonical_conversation_id(&session_id, &raw_agent_id);
+    let fields: Result<_, ApiError> = (|| {
+        validate_agent_id(&raw_agent_id)?;
+        let from = sanitize_text(&req.from, MAX_FROM_LEN, "from")?;
+        validate_agent_id(&from)?;
+        let content = sanitize_text(&req.content, MAX_MESSAGE_CONTENT_LEN, "content")?;
+        Ok((from, content))
+    })();
+    if let Err(error) = ensure_session_exists(&state, &session_id) {
+        // Preserve malformed-request errors for unknown sessions. Known sessions
+        // defer these errors until after credential detection and safe auditing.
+        fields?;
+        return Err(error);
+    }
 
     let token_headers = headers.get_all("X-Hive-Agent-Token");
     let token = headers
@@ -142,7 +151,7 @@ pub async fn append_conversation(
     let usable_token_absent = !headers.contains_key("X-Hive-Agent-Token")
         || (token_headers.iter().count() == 1
             && token.is_some_and(|token| token.trim().is_empty()));
-    if !usable_token_absent {
+    let authenticated = if !usable_token_absent {
         let authenticated = if token_headers.iter().count() == 1 {
             token.and_then(|token| {
                 state
@@ -156,7 +165,7 @@ pub async fn append_conversation(
         if authenticated.is_none() {
             // A duplicate or undecodable header cannot safely redact the claimed identity.
             let audit_from = if token_headers.iter().count() == 1 && token.is_some() {
-                from.as_str()
+                req.from.as_str()
             } else {
                 "redacted-untrusted-identity"
             };
@@ -172,29 +181,40 @@ pub async fn append_conversation(
             return Err(ApiError::new(StatusCode::UNAUTHORIZED,
                 "Missing or invalid X-Hive-Agent-Token; restart this agent to receive its spawn credential"));
         }
-        let (caller_id, _) = authenticated.expect("credential was checked above");
-        let payload = serde_json::to_string(&req)
-            .map_err(|_| ApiError::bad_request("Invalid conversation payload"))?;
-        if token.is_some_and(|token| {
-            !token.is_empty()
-                && (payload.contains(token)
-                    || content.contains(token)
-                    || from.contains(token)
-                    || agent_id.contains(token))
-        }) {
-            reject_conversation(
-                &state,
-                &session_id,
-                Some(&caller_id),
-                &from,
-                token,
-                "credential_in_payload",
-            )
-            .await;
-            return Err(ApiError::bad_request(
-                "Conversation payload must not contain a credential value",
-            ));
-        }
+        authenticated
+    } else {
+        None
+    };
+    // Check decoded raw fields and their control-free forms before validation,
+    // normalization or compatibility-mode auditing can persist any of them.
+    let credential_in_payload = {
+        let manager = state.pty_manager.read();
+        [
+            &req.content,
+            &req.from,
+            &raw_agent_id,
+            &agent_id,
+            &session_id,
+        ]
+        .into_iter()
+        .any(|value| manager.contains_heartbeat_credential(value))
+    };
+    if credential_in_payload {
+        reject_conversation(
+            &state,
+            &session_id,
+            authenticated.as_ref().map(|(id, _)| id.as_str()),
+            &req.from,
+            token,
+            "credential_in_payload",
+        )
+        .await;
+        return Err(ApiError::bad_request(
+            "Conversation payload must not contain a credential value",
+        ));
+    }
+    let (from, content) = fields?;
+    if let Some((caller_id, _)) = authenticated {
         if canonical_agent_id(&session_id, &from) != canonical_agent_id(&session_id, &caller_id) {
             reject_conversation(
                 &state,

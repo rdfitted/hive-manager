@@ -830,6 +830,25 @@ impl PtyManager {
         })
     }
 
+    /// Recognize live spawn credentials in text without retaining their plaintext.
+    /// Include every session: a rejected caller can paste somebody else's credential.
+    pub(crate) fn contains_heartbeat_credential(&self, text: &str) -> bool {
+        let digests: std::collections::HashSet<[u8; 32]> = self.heartbeat_credentials
+            .read().values().map(|credential| credential.digest).collect();
+        if digests.is_empty() { return false; }
+        let contains = |text: &str| text.as_bytes()
+            .split(|byte| !byte.is_ascii_hexdigit())
+            // Sliding windows also catch credentials embedded in longer hex runs.
+            .any(|run| run.windows(64).any(|candidate| {
+                let digest: [u8; 32] = Sha256::digest(candidate).into();
+                digests.contains(&digest)
+            }));
+        contains(text) || (text.chars().any(char::is_control) && {
+            let normalized: String = text.chars().filter(|ch| !ch.is_control()).collect();
+            contains(&normalized)
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn mint_heartbeat_token_for_test(&self, id: &str, session_id: &str, queen: bool) -> String {
         let token = Self::new_heartbeat_token();
