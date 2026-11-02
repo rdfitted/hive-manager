@@ -70,6 +70,69 @@ fn absolute(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// dunce is locked transitively, but is not a direct dependency. Unlike its
+// simplified(), this boundary must refuse paths that cannot lose the prefix.
+fn environment_path(path: &Path) -> Result<String, String> {
+    let text = path
+        .to_str()
+        .ok_or("Instance environment path is not Unicode")?;
+    #[cfg(windows)]
+    {
+        let plain = text.strip_prefix(r"\\?\").unwrap_or(text);
+        let bytes = plain.as_bytes();
+        if bytes.len() < 3
+            || !bytes[0].is_ascii_alphabetic()
+            || bytes[1] != b':'
+            || bytes[2] != b'\\'
+        {
+            return Err("Instance environment requires an absolute disk path".into());
+        }
+        // MAX_PATH includes the terminating NUL; count UTF-16, not UTF-8 bytes.
+        if plain.encode_utf16().count() >= 260 {
+            return Err("Instance environment path exceeds MAX_PATH".into());
+        }
+        for name in plain[3..]
+            .split(['\\', '/'])
+            .filter(|name| !name.is_empty())
+        {
+            let stem = name.split('.').next().unwrap().trim_end_matches(' ');
+            let upper = stem.to_uppercase();
+            let reserved = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+                .contains(&upper.as_str())
+                || ["COM", "LPT"].iter().any(|prefix| {
+                    upper.strip_prefix(prefix).is_some_and(|tail| {
+                        matches!(
+                            tail,
+                            "1" | "2"
+                                | "3"
+                                | "4"
+                                | "5"
+                                | "6"
+                                | "7"
+                                | "8"
+                                | "9"
+                                | "\u{b9}"
+                                | "\u{b2}"
+                                | "\u{b3}"
+                        )
+                    })
+                });
+            if reserved
+                || name.encode_utf16().count() > 255
+                || name.ends_with(['.', ' '])
+                || name
+                    .chars()
+                    .any(|c| c <= '\u{1f}' || "<>:\"|?*".contains(c))
+            {
+                return Err("Instance environment path cannot be safely represented without a verbatim prefix".into());
+            }
+        }
+        return Ok(plain.to_owned());
+    }
+    #[cfg(not(windows))]
+    Ok(text.to_owned())
+}
+
 // Resolve existing ancestors too, so a missing descendant cannot disguise a junction.
 fn resolved_path(path: &Path) -> Result<PathBuf, String> {
     absolute(path)?;
@@ -173,7 +236,7 @@ impl Settings {
         }
     }
 
-    pub fn environment(&self) -> Environment {
+    pub fn environment(&self) -> Result<Environment, String> {
         let mut env = Environment::new();
         for (key, relative) in [
             ("APPDATA", "appdata"),
@@ -191,25 +254,16 @@ impl Settings {
             ("CLAUDE_CONFIG_DIR", "home/.claude"),
             ("WEBVIEW2_USER_DATA_FOLDER", "webview"),
         ] {
-            env.insert(
-                key.into(),
-                self.root.join(relative).to_string_lossy().into_owned(),
-            );
+            env.insert(key.into(), environment_path(&self.root.join(relative))?);
         }
         env.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
         env.insert(
             "GIT_CONFIG_GLOBAL".into(),
-            self.root
-                .join("home/.gitconfig")
-                .to_string_lossy()
-                .into_owned(),
+            environment_path(&self.root.join("home/.gitconfig"))?,
         );
         env.insert(
             "GIT_CONFIG_SYSTEM".into(),
-            self.root
-                .join("home/.gitconfig-system")
-                .to_string_lossy()
-                .into_owned(),
+            environment_path(&self.root.join("home/.gitconfig-system"))?,
         );
         env.insert(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS".into(),
@@ -219,7 +273,7 @@ impl Settings {
                 })
                 .unwrap_or_default(),
         );
-        env
+        Ok(env)
     }
 
     pub fn contains(&self, path: &Path) -> Result<(), String> {
@@ -295,7 +349,7 @@ pub fn bootstrap() -> &'static Instance {
                         std::env::remove_var(key);
                     }
                 }
-                for (key, value) in settings.environment() {
+                for (key, value) in settings.environment()? {
                     std::env::set_var(key, value);
                 }
                 std::env::set_current_dir(&settings.root).map_err(|e| e.to_string())?;
@@ -757,10 +811,49 @@ mod tests {
                 ("WEBVIEW2_USER_DATA_FOLDER", "webview"),
             ] {
                 assert_eq!(
-                    PathBuf::from(std::env::var(key).unwrap()),
-                    settings.root.join(relative),
+                    resolved_path(Path::new(&std::env::var(key).unwrap())).unwrap(),
+                    resolved_path(&settings.root.join(relative)).unwrap(),
                     "{key}"
                 );
+            }
+            for (key, value) in settings.environment().unwrap() {
+                if key == "GIT_CONFIG_NOSYSTEM" || key == "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS" {
+                    continue;
+                }
+                assert_eq!(std::env::var(&key).unwrap(), value, "{key}");
+                #[cfg(windows)]
+                assert!(
+                    !value.starts_with(r"\\?\"),
+                    "verbatim environment root: {key}"
+                );
+                settings.contains(Path::new(&value)).unwrap();
+            }
+            // Git must actually consume the emitted global config in a contained repo.
+            // Git is also required by instance_git_paths_are_contained; fail loudly if absent.
+            let repo = settings.root.join("projects/config-probe");
+            std::fs::create_dir_all(&repo).unwrap();
+            let config = std::env::var("GIT_CONFIG_GLOBAL").unwrap();
+            std::fs::write(&config, "[instance]\n\tprobe = contained\n").unwrap();
+            for args in [
+                vec!["init", "--quiet"],
+                vec!["config", "--get", "instance.probe"],
+            ] {
+                let output = std::process::Command::new("git")
+                    .current_dir(&repo)
+                    .args(&args)
+                    .output()
+                    .expect("Git is required for the instance config probe");
+                assert!(
+                    output.status.success(),
+                    "git {args:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if args[0] == "config" {
+                    assert_eq!(
+                        String::from_utf8(output.stdout).unwrap().trim(),
+                        "contained"
+                    );
+                }
             }
             let profile_local =
                 PathBuf::from(std::env::var("USERPROFILE").unwrap()).join("AppData/Local");
@@ -1231,7 +1324,7 @@ mod tests {
             .split_once("\npub fn refuse(")
             .unwrap()
             .0;
-        assert!(bootstrap.contains("for (key, value) in settings.environment()"));
+        assert!(bootstrap.contains("for (key, value) in settings.environment()?"));
         assert!(bootstrap.contains("std::env::set_var(key, value)"));
         assert!(bootstrap.contains("std::env::remove_var(key)"));
         assert!(bootstrap.contains("std::env::set_current_dir(&settings.root)"));
@@ -1704,13 +1797,42 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn instance_environment_path_refuses_unsafe_plain_forms() {
+        assert_eq!(
+            environment_path(Path::new(r"\\?\C:\fixture\home")).unwrap(),
+            r"C:\fixture\home"
+        );
+        assert_eq!(
+            environment_path(Path::new(r"C:\fixture\home")).unwrap(),
+            r"C:\fixture\home"
+        );
+        for suffix in ["name.", "name ", "CON.txt", "COM\u{b9}", "..", "bad:stream"] {
+            assert!(
+                environment_path(Path::new(&format!(r"\\?\C:\fixture\{suffix}"))).is_err(),
+                "{suffix}"
+            );
+        }
+        let long = format!(r"\\?\C:\{}", "\u{1f600}".repeat(129));
+        assert!(environment_path(Path::new(&long))
+            .unwrap_err()
+            .contains("MAX_PATH"));
+        let settings = Settings {
+            root: PathBuf::from(long),
+            port: 18891,
+            cdp_port: None,
+        };
+        assert!(settings.environment().is_err());
+    }
+
+    #[test]
     fn instance_environment_roots_are_contained() {
         let (_temp, env) = fixture();
         let Instance::Isolated(mut settings) = resolve(&env, BuildProfile::Debug).unwrap() else {
             panic!("fixture")
         };
         settings.cdp_port = Some(18892);
-        let environment = settings.environment();
+        let environment = settings.environment().unwrap();
         for (key, relative) in [
             ("APPDATA", "appdata"),
             ("LOCALAPPDATA", "localappdata"),
@@ -1730,8 +1852,8 @@ mod tests {
             ("GIT_CONFIG_SYSTEM", "home/.gitconfig-system"),
         ] {
             assert_eq!(
-                PathBuf::from(environment.get(key).unwrap()),
-                settings.root.join(relative),
+                resolved_path(Path::new(environment.get(key).unwrap())).unwrap(),
+                resolved_path(&settings.root.join(relative)).unwrap(),
                 "{key}"
             );
         }
