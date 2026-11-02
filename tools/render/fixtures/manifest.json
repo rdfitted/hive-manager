@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "sessions": [
+    {
+      "id": "fixture-orbit",
+      "name": "Synthetic Orbit",
+      "state": "Running",
+      "project": "orbit",
+      "agents": [
+        { "id": "fixture-orbit-queen", "role": "Queen", "state": "markdown", "label": "Orbit coordinator" },
+        { "id": "fixture-orbit-worker-1", "role": "Worker(1)", "state": "finished", "label": "Finished principal" },
+        { "id": "fixture-orbit-worker-2", "role": "Worker(2)", "state": "stalled", "label": "Stalled principal" },
+        { "id": "fixture-orbit-worker-3", "role": "Worker(3)", "state": "exited_during_startup", "label": "Startup exit" },
+        { "id": "fixture-orbit-worker-4", "role": "Worker(4)", "state": "delivery_failed", "label": "Delivery failure" },
+        { "id": "fixture-orbit-worker-5", "role": "Worker(5)", "state": "working", "label": "Working principal" },
+        { "id": "fixture-orbit-worker-6", "role": "Worker(6)", "state": "idle", "label": "Idle principal" },
+        { "id": "fixture-orbit-worker-7", "role": "Worker(7)", "state": "working", "label": "Review principal" }
+      ]
+    },
+    {
+      "id": "fixture-beacon",
+      "name": "Synthetic Beacon",
+      "state": "Completed",
+      "project": "beacon",
+      "agents": [
+        { "id": "fixture-beacon-queen", "role": "Queen", "state": "finished", "label": "Beacon coordinator" }
+      ]
+    }
+  ],
+  "screens": {
+    "launch": { "action": "open launch form without submitting" },
+    "focus": { "sessionId": "fixture-orbit", "agentId": "fixture-orbit-queen" },
+    "grid": { "sessionId": "fixture-orbit", "paneCount": 8 },
+    "kanban": { "sessionIds": ["fixture-orbit", "fixture-beacon"] },
+    "sidebar": { "sessionIds": ["fixture-orbit", "fixture-beacon"] },
+    "review": { "sessionId": "fixture-orbit", "cellId": "primary", "agentId": "fixture-orbit-worker-7", "file": "navigation.txt" },
+    "dialog": { "action": "open Settings without saving" }
+  },
+  "chat": {
+    "sessionId": "fixture-orbit",
+    "agentId": "fixture-orbit-queen",
+    "file": "chat.md",
+    "tableText": "Orbital checks",
+    "codeText": "const syntheticOrbit = true;",
+    "link": "https://example.com/synthetic-orbit",
+    "literalHtml": "<span data-fixture=\"literal\">synthetic inline HTML</span>"
+  },
+  "timing": { "oldActivitySeconds": 600, "createdSeconds": 1200, "recentActivitySeconds": 5 }
+}
