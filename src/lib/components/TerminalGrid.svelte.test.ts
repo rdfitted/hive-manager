@@ -7,6 +7,23 @@ const { readFileSync } = await vi.importActual<{
 afterEach(() => document.querySelectorAll('[data-terminal-frame-test]').forEach((element) => element.remove()));
 
 describe('terminal frame styles', () => {
+  it('G31: Grid attention shares the content cell and cannot consume composer height', () => {
+    const source = readFileSync('src/lib/components/TerminalGrid.svelte', 'utf8');
+    const styles = source.split('<style>')[1].split('</style>')[0];
+    const containerStart = source.indexOf('<div class="terminal-container">');
+    const beforeTerminal = source.slice(containerStart, source.indexOf('{#if hasTerminal}', containerStart));
+    expect(beforeTerminal).toContain('!focusMode');
+    expect(beforeTerminal).toContain('<div class="agent-info">');
+    expect(beforeTerminal).toContain('<AttentionCard');
+    const card = styles.match(/\.agent-info\s*\{([^{}]*)\}/)?.[1] ?? '';
+    expect(card).toMatch(/grid-area:\s*1\s*\/\s*1\s*;/);
+    expect(card).toMatch(/align-self:\s*start\s*;/);
+    expect(card).toMatch(/min-height:\s*0\s*;/);
+    expect(card).toMatch(/max-height:\s*min\(7rem,\s*35%\)\s*;/);
+    expect(card).toMatch(/overflow:\s*auto\s*;/);
+    expect(styles).toMatch(/\.terminal-layer,\s*\.chat-layer\s*\{\s*grid-area:\s*1\s*\/\s*1/);
+    expect(styles).toMatch(/\.terminal-container\s*\{[^{}]*grid-template:\s*minmax\(0,\s*1fr\)\s*\/\s*minmax\(0,\s*1fr\)/);
+  });
   it('terminal_panel_does_not_inherit_shared_panel_padding', () => {
     const shared = readFileSync('src/lib/styles/globals/surfaces.css', 'utf8');
     const grid = readFileSync('src/lib/components/TerminalGrid.svelte', 'utf8').split('<style>')[1].split('</style>')[0];

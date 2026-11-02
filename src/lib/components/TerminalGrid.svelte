@@ -465,8 +465,8 @@
             {/if}
           </div>
         </div>
-        {#if visible && pane.kind === 'agent' && ((focusMode && pane.id === localMaximizedId) || chatEligible || startupExitCode(pane.agent) !== null)}
-          <div class={focusMode ? 'focused-agent-info' : 'agent-info'}>
+        {#if focusMode && visible && pane.kind === 'agent' && (pane.id === localMaximizedId || chatEligible || startupExitCode(pane.agent) !== null)}
+          <div class="focused-agent-info">
             <AgentActivityLine agentId={pane.id} />
             <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} chatAvailable={chatEligible}
               eventAttention={protocolAttention(history)} feedError={chatEligible ? $agentEvents.error ?? $agentEvents.histories[pane.id]?.error : null}
@@ -474,6 +474,14 @@
           </div>
         {/if}
         <div class="terminal-container">
+          {#if !focusMode && visible && pane.kind === 'agent' && (chatEligible || startupExitCode(pane.agent) !== null)}
+            <div class="agent-info">
+              <AgentActivityLine agentId={pane.id} />
+              <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} chatAvailable={chatEligible}
+                eventAttention={protocolAttention(history)} feedError={chatEligible ? $agentEvents.error ?? $agentEvents.histories[pane.id]?.error : null}
+                onOpen={chatEligible ? () => { paneModes[pane.id] = hasTerminal ? 'terminal' : 'raw'; } : undefined} />
+            </div>
+          {/if}
           {#if hasTerminal}
             <div class="terminal-layer" class:chat-hidden={chatShowing} inert={chatShowing} aria-hidden={chatShowing}
               onfocusin={() => { terminalFocusId = pane.id; }}
@@ -551,11 +559,26 @@
     text-overflow: ellipsis;
   }
 
-  .focused-agent-info, .agent-info {
+  .focused-agent-info {
     flex: 0 0 auto;
     min-width: 0;
     padding: var(--space-2) var(--space-3);
   }
+
+  /* Share the content's grid cell so this bounded overlay never shrinks the composer. */
+  .agent-info {
+    grid-area: 1 / 1;
+    align-self: start;
+    z-index: 1;
+    min-width: 0;
+    min-height: 0;
+    max-height: min(7rem, 35%);
+    overflow: auto;
+    padding: var(--space-1) var(--space-2);
+    background: var(--surface);
+  }
+
+  .agent-info :global(.attention) { padding: var(--space-2); }
 
   .shell-picker select:disabled {
     opacity: 0.5;
