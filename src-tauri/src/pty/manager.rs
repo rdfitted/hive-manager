@@ -331,8 +331,23 @@ struct HeartbeatCredential {
     queen: bool,
 }
 
+#[derive(Clone, Copy)]
+struct Instance {
+    id: uuid::Uuid,
+    spawned_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl Instance {
+    fn new() -> Self {
+        Self { id: uuid::Uuid::new_v4(), spawned_at: chrono::Utc::now() }
+    }
+}
+
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
+    /// Runtime generations, including protocol startup reservations. All changes
+    /// share lifecycle with publication/kill; history must never stand in for a seat.
+    instances: RwLock<HashMap<String, Instance>>,
     /// Actual spawn arguments, retained after close for transcript attribution.
     spawn_cwds: RwLock<HashMap<String, String>>,
     transports: RwLock<Option<Arc<crate::transport::TransportRegistry>>>,
@@ -367,6 +382,7 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            instances: RwLock::new(HashMap::new()),
             spawn_cwds: RwLock::new(HashMap::new()),
             transports: RwLock::new(None),
             agent_transports: RwLock::new(HashMap::new()),
@@ -418,6 +434,7 @@ impl PtyManager {
         transport: Arc<dyn crate::transport::AgentTransport>,
         registry: &crate::transport::TransportRegistry,
     ) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock();
         let mut starting = self.starting_transports.write();
         if self.transport_shutdown.load(Ordering::Acquire) {
             return Err("Transport manager is shutting down".into());
@@ -429,6 +446,7 @@ impl PtyManager {
             return Err(format!("Agent runtime already exists: {id}"));
         }
         starting.insert(id.into(), transport);
+        self.instances.write().insert(id.into(), Instance::new());
         Ok(())
     }
 
@@ -496,6 +514,7 @@ impl PtyManager {
         if starting.get(id).is_some_and(|held| Arc::ptr_eq(held, &transport)) {
             starting.remove(id);
             self.heartbeat_credentials.write().remove(id);
+            self.instances.write().remove(id);
         }
         Ok(())
     }
@@ -522,9 +541,10 @@ impl PtyManager {
         // A startup's final publication/bind and kill use this same short guard.
         let _lifecycle = self.lifecycle.lock();
         if let Some(registry) = self.transport_registry() {
-            let credential_ids: Vec<_> =
+            let mut instance_ids: Vec<_> =
                 self.heartbeat_credentials.read().keys().cloned().collect();
-            let protocol_ids: Vec<_> = credential_ids
+            instance_ids.extend(self.instances.read().keys().cloned());
+            let protocol_ids: Vec<_> = instance_ids
                 .into_iter()
                 .filter(|id| registry.get_agent(id).is_some())
                 .collect();
@@ -532,6 +552,7 @@ impl PtyManager {
             for id in protocol_ids {
                 if registry.get_agent(&id).is_none() {
                     self.heartbeat_credentials.write().remove(&id);
+                    self.instances.write().remove(&id);
                 }
             }
         }
@@ -543,6 +564,7 @@ impl PtyManager {
             {
                 pending.remove(&id);
                 self.heartbeat_credentials.write().remove(&id);
+                self.instances.write().remove(&id);
             }
         }
         errors
@@ -819,6 +841,9 @@ impl PtyManager {
         }
 
         let _lifecycle_guard = self.lifecycle.lock();
+        if self.starting_transports.read().contains_key(&id) || self.protocol_agent(&id).is_some() {
+            return Err(PtyError::CreateError(format!("Agent runtime already exists: {id}")));
+        }
         let existing = { self.sessions.read().get(&id).cloned() };
         if let Some(existing) = existing {
             if existing.is_alive() {
@@ -837,6 +862,7 @@ impl PtyManager {
             {
                 sessions.remove(&id);
                 self.heartbeat_credentials.write().remove(&id);
+                self.instances.write().remove(&id);
             }
         }
 
@@ -888,6 +914,7 @@ impl PtyManager {
         if args.contains(&"--stub-create-fails") {
             return Err(PtyError::CreateError("injected PTY constructor failure".to_string()));
         }
+        let instance = Instance::new();
         let session = Arc::new(PtySession::new(
             id.clone(),
             role,
@@ -910,6 +937,7 @@ impl PtyManager {
         {
             let mut sessions = self.sessions.write();
             sessions.insert(id.clone(), Arc::clone(&session));
+            self.instances.write().insert(id.clone(), instance);
             self.record_spawn_cwd(&id, cwd);
         }
 
@@ -1038,12 +1066,45 @@ impl PtyManager {
         session.resize(cols, rows)
     }
 
+    /// Identity of the current runtime, including a protocol seat still starting.
+    /// A same-ID respawn always gets a new identity; removed seats return None.
+    pub fn instance_id(&self, id: &str) -> Option<uuid::Uuid> {
+        self.instances.read().get(id).map(|instance| instance.id)
+    }
+
+    /// Wall-clock spawn boundary for the current instance. Protocol seats use
+    /// startup admission, before initialize/first input, so early facts belong to it.
+    pub fn spawned_at(&self, id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.instances.read().get(id).map(|instance| instance.spawned_at)
+    }
+
+    /// Kill only this generation. False means absent/replaced, without touching
+    /// its replacement. Failed cleanup keeps the identity and handle for retry.
+    pub fn kill_instance(&self, id: &str, instance_id: uuid::Uuid) -> Result<bool, PtyError> {
+        self.kill_inner(id, Some(instance_id))
+    }
+
     pub fn kill(&self, id: &str) -> Result<(), PtyError> {
+        self.kill_inner(id, None).map(|_| ())
+    }
+
+    fn kill_inner(&self, id: &str, expected: Option<uuid::Uuid>) -> Result<bool, PtyError> {
         // Cancellation reaches a starting server without waiting for startup's
         // publication guard. The same guard then orders token cleanup.
-        let starting=self.starting_transports.read().get(id).cloned();
+        let starting = {
+            let _lifecycle = self.lifecycle.lock();
+            if expected.is_some_and(|instance| self.instance_id(id) != Some(instance)) {
+                return Ok(false);
+            }
+            self.starting_transports.read().get(id).cloned()
+        };
         if let Some(starting) = &starting { starting.stop_sync().map_err(PtyError::CreateError)?; }
         let _lifecycle_guard = self.lifecycle.lock();
+        // A cancelled startup may finish cleanup and a replacement may publish
+        // while stop_sync runs. Never apply old-instance cleanup to that runtime.
+        if expected.is_some_and(|instance| self.instance_id(id) != Some(instance)) {
+            return Ok(false);
+        }
         if let Some(registry)=self.transport_registry() {
             if let Some((session_id,_))=registry.get_agent(id) {
                 registry.stop_agent_sync(&session_id,id).map_err(PtyError::CreateError)?;
@@ -1076,7 +1137,8 @@ impl PtyManager {
                 pending.remove(id);
             }
         }
-        Ok(())
+        self.instances.write().remove(id);
+        Ok(true)
     }
 
     pub fn get_status(&self, id: &str) -> Option<AgentStatus> {
@@ -2402,6 +2464,178 @@ mod transport_tests {
         manager.kill(&id).unwrap();
     }
 
+}
+
+#[cfg(test)]
+mod instance_tests {
+    use super::*;
+    use crate::{delivery::Delivery, transport::{AgentEvent, AgentTransport, Capabilities, TransportRegistry}};
+    use std::sync::atomic::AtomicUsize;
+
+    fn spawn_pty(manager: &PtyManager, id: &str, args: &[&str]) -> Result<String, PtyError> {
+        manager.create_session(id.into(), AgentRole::Worker { index: 1, parent: None },
+            "fixture-shell", args, None, 80, 24)
+    }
+
+    #[test]
+    fn old_instance_kill_preserves_same_id_pty_replacement() {
+        let manager = PtyManager::new();
+        let before = chrono::Utc::now();
+        spawn_pty(&manager, "worker", &["--stub-clean-exit"]).unwrap();
+        let old = manager.instance_id("worker").unwrap();
+        let spawned = manager.spawned_at("worker").unwrap();
+        assert!(spawned >= before && spawned <= chrono::Utc::now());
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        let current = manager.instance_id("worker").unwrap();
+        assert_ne!(old, current);
+        assert!(!manager.kill_instance("worker", old).unwrap());
+        assert_eq!(manager.instance_id("worker"), Some(current));
+        assert!(manager.is_alive("worker"));
+        assert!(manager.kill_instance("worker", current).unwrap());
+        assert_eq!(manager.instance_id("worker"), None);
+        assert_eq!(manager.spawned_at("worker"), None);
+        assert!(!manager.kill_instance("worker", current).unwrap());
+        manager.kill("worker").unwrap();
+    }
+
+    #[test]
+    fn failed_pty_cleanup_retains_instance_until_exact_retry_succeeds() {
+        let manager = PtyManager::new();
+        spawn_pty(&manager, "worker", &["--stub-tree-kill-fails-once"]).unwrap();
+        let instance = manager.instance_id("worker").unwrap();
+        let spawned = manager.spawned_at("worker");
+        assert!(spawn_pty(&manager, "worker", &[]).is_err());
+        assert!(manager.kill_instance("worker", instance).is_err());
+        assert_eq!(manager.instance_id("worker"), Some(instance));
+        assert_eq!(manager.spawned_at("worker"), spawned);
+        assert!(manager.kill_instance("worker", instance).unwrap());
+        spawn_pty(&manager, "worker", &["--stub-clean-exit"]).unwrap();
+        assert!(spawn_pty(&manager, "worker", &["--stub-create-fails"]).is_err());
+        assert_eq!(manager.instance_id("worker"), None);
+        assert_eq!(manager.spawned_at("worker"), None);
+    }
+
+    #[derive(Default)]
+    struct TestTransport {
+        stops: AtomicUsize,
+        fail_stop: AtomicBool,
+        on_stop: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentTransport for TestTransport {
+        async fn start(&self) -> Result<(), String> { Ok(()) }
+        async fn send(&self, _: &str) -> Result<Delivery, String> { Ok(Delivery::protocol_pending()) }
+        async fn interrupt(&self) -> Result<(), String> { Ok(()) }
+        async fn stop(&self) -> Result<(), String> { self.stop_sync() }
+        fn stop_sync(&self) -> Result<(), String> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            if self.fail_stop.swap(false, Ordering::SeqCst) { return Err("fixture stop failure".into()); }
+            let callback = self.on_stop.lock().take();
+            if let Some(callback) = callback { callback(); }
+            Ok(())
+        }
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AgentEvent> {
+            tokio::sync::broadcast::channel(1).1
+        }
+        fn capabilities(&self) -> Capabilities { Capabilities::pty(false) }
+    }
+
+    fn registry(manager: &PtyManager, root: &std::path::Path) -> Arc<TransportRegistry> {
+        let registry = Arc::new(TransportRegistry::new(root.join("feeds"), None));
+        manager.attach_transports(registry.clone());
+        registry
+    }
+
+    fn publish(manager: &PtyManager, registry: &TransportRegistry, transport: Arc<TestTransport>) {
+        {
+            let _lifecycle = manager.lifecycle.lock();
+            manager.register_started_transport(registry, "session", "worker", None, transport.clone()).unwrap();
+        }
+        manager.finish_transport_start(registry, "worker", transport, None).unwrap();
+    }
+
+    #[test]
+    fn protocol_instance_spans_start_and_publication_then_rotates() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = PtyManager::new();
+        let registry = registry(&manager, temp.path());
+        let transport = Arc::new(TestTransport::default());
+        let before = chrono::Utc::now();
+        manager.begin_transport_start("worker", transport.clone(), &registry).unwrap();
+        let old = manager.instance_id("worker").unwrap();
+        let spawned = manager.spawned_at("worker").unwrap();
+        assert!(spawned >= before && spawned <= chrono::Utc::now());
+        assert!(spawn_pty(&manager, "worker", &[]).is_err());
+        publish(&manager, &registry, transport.clone());
+        assert_eq!(manager.instance_id("worker"), Some(old));
+        assert_eq!(manager.spawned_at("worker"), Some(spawned));
+        assert!(spawn_pty(&manager, "worker", &[]).is_err());
+        transport.fail_stop.store(true, Ordering::SeqCst);
+        assert!(manager.kill_instance("worker", old).is_err());
+        assert_eq!(manager.instance_id("worker"), Some(old));
+        assert!(manager.protocol_agent("worker").is_some());
+        assert!(manager.kill_instance("worker", old).unwrap());
+        let replacement = Arc::new(TestTransport::default());
+        manager.begin_transport_start("worker", replacement.clone(), &registry).unwrap();
+        publish(&manager, &registry, replacement.clone());
+        let current = manager.instance_id("worker").unwrap();
+        assert_ne!(old, current);
+        assert!(!manager.kill_instance("worker", old).unwrap());
+        assert_eq!(replacement.stops.load(Ordering::SeqCst), 0);
+        assert!(manager.kill_instance("worker", current).unwrap());
+        assert_eq!(manager.spawned_at("worker"), None);
+        assert!(!manager.kill_instance("worker", current).unwrap());
+    }
+
+    #[test]
+    fn starting_instance_kill_rechecks_after_replacement_during_stop() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Arc::new(PtyManager::new());
+        let registry = registry(&manager, temp.path());
+        let old_transport = Arc::new(TestTransport::default());
+        manager.begin_transport_start("worker", old_transport.clone(), &registry).unwrap();
+        let old = manager.instance_id("worker").unwrap();
+        // Deterministic interleaving: old startup finishes cleanup and a new seat
+        // is admitted while the old instance's blocking cancellation runs.
+        let owner = manager.clone();
+        let registered = registry.clone();
+        let old_runtime = old_transport.clone();
+        let replacement = Arc::new(TestTransport::default());
+        let new_runtime = replacement.clone();
+        *old_transport.on_stop.lock() = Some(Box::new(move || {
+            assert!(owner.lifecycle.try_lock().is_some(), "startup stop must not hold lifecycle");
+            owner.cleanup_transport_start(&registered, "session", "worker", old_runtime).unwrap();
+            owner.begin_transport_start("worker", new_runtime, &registered).unwrap();
+        }));
+        assert!(!manager.kill_instance("worker", old).unwrap());
+        let current = manager.instance_id("worker").unwrap();
+        assert_ne!(old, current);
+        assert_eq!(replacement.stops.load(Ordering::SeqCst), 0);
+        assert!(manager.kill_instance("worker", current).unwrap());
+        assert_eq!(replacement.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_start_cleanup_and_shutdown_preserve_only_retryable_instances() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = PtyManager::new();
+        let registry = registry(&manager, temp.path());
+        let transport = Arc::new(TestTransport::default());
+        manager.begin_transport_start("worker", transport.clone(), &registry).unwrap();
+        let instance = manager.instance_id("worker").unwrap();
+        transport.fail_stop.store(true, Ordering::SeqCst);
+        assert!(manager.cleanup_transport_start(&registry, "session", "worker", transport.clone()).is_err());
+        assert_eq!(manager.instance_id("worker"), Some(instance));
+        manager.cleanup_transport_start(&registry, "session", "worker", transport).unwrap();
+        assert_eq!(manager.spawned_at("worker"), None);
+        let transport = Arc::new(TestTransport::default());
+        manager.begin_transport_start("worker", transport.clone(), &registry).unwrap();
+        publish(&manager, &registry, transport);
+        assert!(manager.shutdown_transports().is_empty());
+        assert_eq!(manager.instance_id("worker"), None);
+        assert_eq!(manager.spawned_at("worker"), None);
+    }
 }
 
 #[cfg(test)]
