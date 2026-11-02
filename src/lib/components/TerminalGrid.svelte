@@ -23,6 +23,7 @@
   import { TERMINAL_SESSION_STATES } from '$lib/stores/terminalPool';
   import AgentActivityLine from './agent/AgentActivityLine.svelte';
   import AttentionCard from './attention/AttentionCard.svelte';
+  import { createFlushState } from './attention/flushState';
   import { startupExitCode } from '$lib/stores/agentActivity';
   import Terminal from './Terminal.svelte';
   import ChatPane from './chat/ChatPane.svelte';
@@ -56,6 +57,7 @@
   const isWindows = typeof navigator !== 'undefined' && navigator.platform.toLowerCase().startsWith('win');
   const readyTerminalIds = new Set<string>();
   const terminalReadyWaiters = new Map<string, TerminalReadyWaiter>();
+  const flushState = createFlushState();
 
   let { session, visible = true, focusedAgentId, onSelect }: Props = $props();
 
@@ -468,7 +470,7 @@
         {#if focusMode && visible && pane.kind === 'agent' && (pane.id === localMaximizedId || chatEligible || startupExitCode(pane.agent) !== null)}
           <div class="focused-agent-info">
             <AgentActivityLine agentId={pane.id} />
-            <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} chatAvailable={chatEligible}
+            <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} {flushState} chatAvailable={chatEligible}
               eventAttention={protocolAttention(history)} feedError={chatEligible ? $agentEvents.error ?? $agentEvents.histories[pane.id]?.error : null}
               onOpen={chatEligible ? () => { paneModes[pane.id] = hasTerminal ? 'terminal' : 'raw'; } : undefined} />
           </div>
@@ -477,7 +479,7 @@
           {#if !focusMode && visible && pane.kind === 'agent' && (chatEligible || startupExitCode(pane.agent) !== null)}
             <div class="agent-info">
               <AgentActivityLine agentId={pane.id} />
-              <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} chatAvailable={chatEligible}
+              <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} {flushState} chatAvailable={chatEligible}
                 eventAttention={protocolAttention(history)} feedError={chatEligible ? $agentEvents.error ?? $agentEvents.histories[pane.id]?.error : null}
                 onOpen={chatEligible ? () => { paneModes[pane.id] = hasTerminal ? 'terminal' : 'raw'; } : undefined} />
             </div>

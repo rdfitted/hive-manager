@@ -4,12 +4,12 @@
   import { heartbeatStore } from '$lib/stores/conversations';
   import { layout } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
-  import { flushEnter } from './flush';
+  import { createFlushState, flushKey, type FlushState } from './flushState';
   import FlushReceipt from './FlushReceipt.svelte';
 
-  let { sessionId, agent, hasTerminal = true, chatAvailable = false, eventAttention = null, feedError = null, onOpen }: {
+  let { sessionId, agent, hasTerminal = true, chatAvailable = false, eventAttention = null, feedError = null, onOpen, flushState = createFlushState() }: {
     sessionId: string; agent: AgentInfo; hasTerminal?: boolean; chatAvailable?: boolean;
-    eventAttention?: string | null; feedError?: string | null; onOpen?: () => void;
+    eventAttention?: string | null; feedError?: string | null; onOpen?: () => void; flushState?: FlushState;
   } = $props();
   const waitingForInput = $derived(chatAvailable && typeof agent.status === 'object' && agent.status !== null
     && 'WaitingForInput' in agent.status && !agent.status.WaitingForInput.startsWith('awaiting_injected_turn'));
@@ -25,22 +25,8 @@
     error: 'This agent reported an error.',
     none: '',
   };
-  let pending = $state(false);
-  let result = $state<{ sessionId: string; agentId: string; receipt?: string; error?: string } | null>(null);
-  const currentResult = $derived(result?.sessionId === sessionId && result?.agentId === agent.id ? result : null);
-
-  async function flush() {
-    if (pending) return;
-    const id = agent.id;
-    const session = sessionId;
-    pending = true;
-    result = null;
-    try {
-      result = { sessionId: session, agentId: id, receipt: await flushEnter(session, id) };
-    } catch (cause) {
-      result = { sessionId: session, agentId: id, error: String(cause) };
-    } finally { pending = false; }
-  }
+  const currentResult = $derived($flushState[flushKey(sessionId, agent.id)]);
+  const pending = $derived(currentResult?.pending ?? false);
 
   function openTerminal() {
     if (onOpen) { onOpen(); return; }
@@ -53,10 +39,10 @@
   <section class="attention lattice-forced-colors-boundary" aria-label="Agent needs attention">
     <p class="reason" role={chatAvailable || exitCode !== null ? 'status' : undefined}>{exitCode !== null ? `This agent's process exited during startup with code ${exitCode}. It has not been restarted.` : reasons[reason] || eventAttention || feedError || (hasTerminal ? 'Agent needs input. A prompt may only be visible in the terminal.' : 'Agent needs input. Check the raw event log.')}</p>
     <div class="actions">
-      {#if hasTerminal && !finished && reason !== 'error'}<button type="button" class="lattice-btn lattice-btn--secondary" disabled={pending} onclick={flush}>{pending ? 'Flushing…' : 'Flush Enter'}</button>{/if}
+      {#if hasTerminal && !finished && reason !== 'error'}<button type="button" class="lattice-btn lattice-btn--secondary" disabled={pending} onclick={() => flushState.flush(sessionId, agent.id)}>{pending ? 'Flushing…' : 'Flush Enter'}</button>{/if}
       <button type="button" class="lattice-btn lattice-btn--ghost" onclick={openTerminal}>{hasTerminal ? 'Open terminal' : 'Open raw event log'}</button>
     </div>
-    {#if currentResult?.receipt !== undefined}<FlushReceipt body={currentResult.receipt} ondismiss={() => { result = null; }} />{/if}
+    {#if currentResult?.receipt !== undefined}<FlushReceipt body={currentResult.receipt} ondismiss={() => flushState.dismiss(sessionId, agent.id)} />{/if}
     {#if currentResult?.error}<p role="alert">{currentResult.error}</p>{/if}
   </section>
 {/if}

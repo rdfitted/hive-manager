@@ -30,6 +30,36 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
 describe('AttentionCard', () => {
+  it.each(['agent', 'session'])('CR-4: isolates pending requests and receipts by %s', async (switchBy) => {
+    const resolve: ((response: unknown) => void)[] = [];
+    const fetcher = vi.fn(() => new Promise((done) => { resolve.push(done); }));
+    vi.stubGlobal('fetch', fetcher);
+    const first = { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:first' }) };
+    const second = switchBy === 'agent'
+      ? { ...first, agent: { ...first.agent, id: 'other' } }
+      : { ...first, sessionId: 'other-session' };
+    const view = render(AttentionCard, first);
+    await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
+    await view.rerender(second);
+    const ownFlush = view.getByRole('button', { name: 'Flush Enter' }) as HTMLButtonElement;
+    expect(ownFlush.disabled, 'another owner must not inherit the first request').toBe(false);
+    await fireEvent.click(ownFlush);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    resolve[0]({ ok: true, text: async () => '{"submit_confirmed":false,"owner":"first"}' });
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    expect(view.queryByText('Enter may not have landed. Check the terminal.')).toBeNull();
+    await view.rerender(first);
+    await waitFor(() => expect(view.getByText('Enter may not have landed. Check the terminal.')).toBeTruthy());
+    await view.rerender(second);
+    expect((view.getByRole('button', { name: /^Flushing/ }) as HTMLButtonElement).disabled,
+      'the first completion must not clear the second request').toBe(true);
+    resolve[1]({ ok: true, text: async () => '{"submit_confirmed":false,"owner":"second"}' });
+    await view.rerender(second);
+    await waitFor(() => expect(view.container.querySelector('pre')?.textContent).toContain('"owner":"second"'));
+    expect(view.container.querySelector('pre')?.textContent).not.toContain('"owner":"first"');
+    await view.rerender(first);
+    expect(view.container.querySelector('pre')?.textContent).toContain('"owner":"first"');
+  });
   it.each(['finished', 'retired'])('G31: hides the stale card and Flush for %s work', (work_state) => {
     (heartbeatStore as unknown as { set: (value: unknown) => void }).set({
       agents: { 'worker-5': { work_state } }, staleAgents: new Set(['worker-5']), stalledAgents: new Set() });
