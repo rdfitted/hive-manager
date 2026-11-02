@@ -1,22 +1,21 @@
 <script lang="ts">
   import type { AgentInfo } from '$lib/stores/sessions';
-  import { needsAttention, attentionReason, startupExitCode, isFinished, workStateFor } from '$lib/stores/agentActivity';
+  import { attentionReason, startupExitCode, isFinished, workStateFor } from '$lib/stores/agentActivity';
   import { heartbeatStore } from '$lib/stores/conversations';
   import { layout } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
   import { createFlushState, flushKey, type FlushState } from './flushState';
+  import { attentionVisible } from './visibility';
   import FlushReceipt from './FlushReceipt.svelte';
 
   let { sessionId, agent, hasTerminal = true, chatAvailable = false, eventAttention = null, feedError = null, onOpen, flushState = createFlushState() }: {
     sessionId: string; agent: AgentInfo; hasTerminal?: boolean; chatAvailable?: boolean;
     eventAttention?: string | null; feedError?: string | null; onOpen?: () => void; flushState?: FlushState;
   } = $props();
-  const waitingForInput = $derived(chatAvailable && typeof agent.status === 'object' && agent.status !== null
-    && 'WaitingForInput' in agent.status && !agent.status.WaitingForInput.startsWith('awaiting_injected_turn'));
   const workState = $derived(workStateFor(agent, $heartbeatStore.agents[agent.id]));
   const finished = $derived(isFinished(agent, workState));
-  const visible = $derived(needsAttention(agent, $heartbeatStore.staleAgents, workState)
-    || (!finished && (waitingForInput || !!eventAttention || !!feedError)));
+  const attention = $derived(attentionVisible(agent, $heartbeatStore.staleAgents, workState,
+    { chatAvailable, eventAttention, feedError }));
   const reason = $derived(attentionReason(agent, $heartbeatStore.staleAgents, workState));
   const exitCode = $derived(startupExitCode(agent));
   const reasons = {
@@ -35,11 +34,11 @@
   }
 </script>
 
-{#if visible}
+{#if attention || currentResult}
   <section class="attention lattice-forced-colors-boundary" aria-label="Agent needs attention">
-    <p class="reason" role={chatAvailable || exitCode !== null ? 'status' : undefined}>{exitCode !== null ? `This agent's process exited during startup with code ${exitCode}. It has not been restarted.` : reasons[reason] || eventAttention || feedError || (hasTerminal ? 'Agent needs input. A prompt may only be visible in the terminal.' : 'Agent needs input. Check the raw event log.')}</p>
+    {#if attention}<p class="reason" role={chatAvailable || exitCode !== null ? 'status' : undefined}>{exitCode !== null ? `This agent's process exited during startup with code ${exitCode}. It has not been restarted.` : reasons[reason] || eventAttention || feedError || (hasTerminal ? 'Agent needs input. A prompt may only be visible in the terminal.' : 'Agent needs input. Check the raw event log.')}</p>{/if}
     <div class="actions">
-      {#if hasTerminal && !finished && reason !== 'error'}<button type="button" class="lattice-btn lattice-btn--secondary" disabled={pending} onclick={() => flushState.flush(sessionId, agent.id)}>{pending ? 'Flushing…' : 'Flush Enter'}</button>{/if}
+      {#if attention && hasTerminal && !finished && reason !== 'error'}<button type="button" class="lattice-btn lattice-btn--secondary" disabled={pending} onclick={() => flushState.flush(sessionId, agent.id)}>{pending ? 'Flushing…' : 'Flush Enter'}</button>{/if}
       <button type="button" class="lattice-btn lattice-btn--ghost" onclick={openTerminal}>{hasTerminal ? 'Open terminal' : 'Open raw event log'}</button>
     </div>
     {#if currentResult?.receipt !== undefined}<FlushReceipt body={currentResult.receipt} ondismiss={() => flushState.dismiss(sessionId, agent.id)} />{/if}

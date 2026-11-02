@@ -30,6 +30,16 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
 describe('AttentionCard', () => {
+  it('CR-5: retains a receipt warning after attention clears without granting Flush eligibility', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '{"submit_confirmed":false}' }));
+    const view = render(AttentionCard, { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:fixture' }) });
+    await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
+    await waitFor(() => expect(view.getByText('Enter may not have landed. Check the terminal.')).toBeTruthy());
+    await view.rerender({ agent: agent('Running') });
+    expect(view.getByText('Enter may not have landed. Check the terminal.')).toBeTruthy();
+    expect(view.queryByRole('button', { name: 'Flush Enter' })).toBeNull();
+    expect(view.queryByText('Agent needs input. A prompt may only be visible in the terminal.')).toBeNull();
+  });
   it.each(['agent', 'session'])('CR-4: isolates pending requests and receipts by %s', async (switchBy) => {
     const resolve: ((response: unknown) => void)[] = [];
     const fetcher = vi.fn(() => new Promise((done) => { resolve.push(done); }));

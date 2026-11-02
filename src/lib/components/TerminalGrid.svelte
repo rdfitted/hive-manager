@@ -23,8 +23,10 @@
   import { TERMINAL_SESSION_STATES } from '$lib/stores/terminalPool';
   import AgentActivityLine from './agent/AgentActivityLine.svelte';
   import AttentionCard from './attention/AttentionCard.svelte';
-  import { createFlushState } from './attention/flushState';
-  import { startupExitCode } from '$lib/stores/agentActivity';
+  import { createFlushState, flushKey } from './attention/flushState';
+  import { attentionVisible } from './attention/visibility';
+  import { startupExitCode, workStateFor } from '$lib/stores/agentActivity';
+  import { heartbeatStore } from '$lib/stores/conversations';
   import Terminal from './Terminal.svelte';
   import ChatPane from './chat/ChatPane.svelte';
   import PaneToggle from './chat/PaneToggle.svelte';
@@ -389,6 +391,11 @@
       {@const defaultMode = hasTerminal && feed?.capabilities.event_source === 'transcript' && history.length === 0 ? 'terminal' : 'chat'}
       {@const mode = chatEligible ? (paneModes[pane.id] ?? defaultMode) : 'terminal'}
       {@const chatShowing = chatEligible && (mode !== 'terminal' || !hasTerminal)}
+      {@const eventAttention = protocolAttention(history)}
+      {@const feedError = chatEligible ? $agentEvents.error ?? $agentEvents.histories[pane.id]?.error : null}
+      {@const showAttention = pane.kind === 'agent' && (attentionVisible(pane.agent, $heartbeatStore.staleAgents,
+        workStateFor(pane.agent, $heartbeatStore.agents[pane.id]), { chatAvailable: chatEligible, eventAttention, feedError })
+        || !!$flushState[flushKey(session.id, pane.id)])}
       <!-- Container click is a convenience; the dedicated header button carries
            accessible focus semantics without wrapping the terminal or other controls. -->
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
@@ -413,6 +420,9 @@
           >
             <span class="role-label" title={pane.title}>{pane.title}</span>
           </button>
+          {#if !focusMode && visible && pane.kind === 'agent'}
+            <span class="pane-activity"><AgentActivityLine agentId={pane.id} compact /></span>
+          {/if}
           <div class="terminal-meta">
             {#if chatEligible}<PaneToggle {hasTerminal} mode={chatShowing ? mode === 'raw' ? 'raw' : 'chat' : 'terminal'} onchange={(next) => { paneModes[pane.id] = next; }} />{/if}
             {#if pane.kind === 'agent'}
@@ -471,16 +481,15 @@
           <div class="focused-agent-info">
             <AgentActivityLine agentId={pane.id} />
             <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} {flushState} chatAvailable={chatEligible}
-              eventAttention={protocolAttention(history)} feedError={chatEligible ? $agentEvents.error ?? $agentEvents.histories[pane.id]?.error : null}
+              {eventAttention} {feedError}
               onOpen={chatEligible ? () => { paneModes[pane.id] = hasTerminal ? 'terminal' : 'raw'; } : undefined} />
           </div>
         {/if}
         <div class="terminal-container">
-          {#if !focusMode && visible && pane.kind === 'agent' && (chatEligible || startupExitCode(pane.agent) !== null)}
+          {#if !focusMode && visible && showAttention && pane.kind === 'agent' && (chatEligible || startupExitCode(pane.agent) !== null)}
             <div class="agent-info">
-              <AgentActivityLine agentId={pane.id} />
               <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} {flushState} chatAvailable={chatEligible}
-                eventAttention={protocolAttention(history)} feedError={chatEligible ? $agentEvents.error ?? $agentEvents.histories[pane.id]?.error : null}
+                {eventAttention} {feedError}
                 onOpen={chatEligible ? () => { paneModes[pane.id] = hasTerminal ? 'terminal' : 'raw'; } : undefined} />
             </div>
           {/if}
@@ -670,6 +679,12 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+
+  .pane-activity {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .terminal-pane-focus {

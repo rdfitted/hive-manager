@@ -1,4 +1,4 @@
-﻿import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import type { Session } from '$lib/stores/sessions';
@@ -129,5 +129,40 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     expect(original.every((term) => !term.disposed)).toBe(true);
     expect(fixture.focuses).toBe(0);
   });
-});
+  it.each(['chat', 'terminal'] as const)('CR-5: %s has no empty overlay and preserves Terminal and composer through attention changes', async (mode) => {
+    layout.setSessionViewMode('grid');
+    const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
+    await waitFor(() => expect(fixture.terminals).toHaveLength(2));
+    if (mode === 'terminal') await fireEvent.click(view.getByRole('button', { name: 'Terminal' }));
+    const pane = view.getByText('Claude agent').closest('.terminal-item')!;
+    const content = pane.querySelector('.terminal-container')!;
+    const original = [...fixture.terminals];
+    const composer = pane.querySelector('.chat-composer [role="textbox"]');
+    expect(composer).toBeTruthy();
+    expect(content.querySelector('.agent-info'), 'no opaque wrapper or padding without attention').toBeNull();
+    expect(pane.querySelector('.terminal-header .activity-line'), 'activity belongs in the existing header').toBeTruthy();
+    expect(content.querySelector('.activity-line')).toBeNull();
+    const waiting = { ...session, agents: session.agents.map((agent) => agent.id === 'claude'
+      ? { ...agent, status: { WaitingForInput: 'injected_delivery_failed:fixture' } } : agent) };
+    await view.rerender({ session: waiting });
+    const warning = within(pane as HTMLElement).getByRole('region', { name: 'Agent needs attention' });
+    expect(warning.closest('.agent-info')).toBeTruthy();
+    expect(within(warning).getByRole('button', { name: 'Open terminal' })).toBeTruthy();
+    for (const next of ['focus', 'grid'] as const) {
+      layout.setSessionViewMode(next); await tick();
+      expect(within(pane as HTMLElement).getByRole('region', { name: 'Agent needs attention' })).toBeTruthy();
+      expect(pane.querySelector('.chat-composer [role="textbox"]')).toBe(composer);
+      expect(fixture.terminals).toHaveLength(original.length);
+      original.forEach((term, index) => expect(fixture.terminals[index]).toBe(term));
+      expect(original.every((term) => !term.disposed)).toBe(true);
+    }
+    await view.rerender({ session });
+    expect(content.querySelector('.agent-info')).toBeNull();
+    expect(within(pane as HTMLElement).queryByRole('region', { name: 'Agent needs attention' })).toBeNull();
+    expect(pane.querySelector('.chat-composer [role="textbox"]')).toBe(composer);
+    original.forEach((term, index) => expect(fixture.terminals[index]).toBe(term));
+    expect(original.every((term) => !term.disposed)).toBe(true);
+    expect(fixture.focuses).toBe(0);
+  });
 
+});
