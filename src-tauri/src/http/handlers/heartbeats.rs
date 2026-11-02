@@ -508,7 +508,10 @@ pub async fn post_heartbeat(
             .map(|node| node.id.clone())
             .collect::<Vec<_>>();
         let confirmation_nodes = if req.mark_agent_id.is_some() {
-            prior_finished_nodes(&state, &session_id, graph.as_ref().expect("validated node ids require graph"), &hierarchy)?
+            match prior_finished_nodes(&state, &session_id, graph.as_ref().expect("validated node ids require graph"), &hierarchy)? {
+                ConfirmationEvidence::Complete(nodes) => nodes,
+                ConfirmationEvidence::Incomplete => BTreeSet::new(),
+            }
                 .into_iter().filter(|node_id| normalized.contains_key(node_id)).collect()
         } else { BTreeSet::new() };
         (normalized.into_iter().collect::<Vec<_>>(), external_completion_ids, confirmation_nodes)
@@ -667,6 +670,11 @@ pub async fn post_heartbeat(
     ))
 }
 
+enum ConfirmationEvidence {
+    Complete(BTreeSet<String>),
+    Incomplete,
+}
+
 /// Determine node-level confirmation before this request mutates the queue or ledger.
 /// Replaying claims and mutation resets avoids confirming a predecessor run's completion.
 fn prior_finished_nodes(
@@ -674,7 +682,7 @@ fn prior_finished_nodes(
     session_id: &str,
     graph: &crate::orchestrator::work_graph::TaskGraph,
     hierarchy: &[crate::coordination::HierarchyNode],
-) -> Result<BTreeSet<String>, ApiError> {
+) -> Result<ConfirmationEvidence, ApiError> {
     use crate::orchestrator::work_graph::runtime::{
         derive_runtime_graph_with_completion_facts, mutation_log_snapshot, RuntimeOutcomeStatus,
     };
@@ -687,18 +695,28 @@ fn prior_finished_nodes(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(_) => return Err(ApiError::internal("Failed to read confirmation event evidence")),
     };
-    let events = contents.lines().filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str::<Event>).collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ApiError::internal("Invalid confirmation event evidence"))?;
-    let events = events.into_iter().filter(|event| event.session_id == session_id).collect::<Vec<_>>();
+    let mut events = Vec::new();
+    for (index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() { continue; }
+        let event = match serde_json::from_str::<Event>(line) {
+            Ok(event) => event,
+            Err(_) => {
+                // A malformed line could hide a WorkerClaimed reset. Never confirm
+                // from a partial replay, or include untrusted journal text in logs.
+                tracing::warn!(line_number = index + 1, "Incomplete confirmation event evidence");
+                return Ok(ConfirmationEvidence::Incomplete);
+            }
+        };
+        if event.session_id == session_id { events.push(event); }
+    }
     let principals = hierarchy.iter().filter_map(|node|
         node.principal.as_ref().map(|principal| (node.id.clone(), principal.clone()))).collect();
     let mutations = mutation_log_snapshot(session_id);
     let projection = derive_runtime_graph_with_completion_facts(Some(graph), &events,
         &[], &[], &mutations.deltas, &facts, &principals);
-    Ok(projection.outcomes.into_iter().filter(|outcome| matches!(outcome.status,
+    Ok(ConfirmationEvidence::Complete(projection.outcomes.into_iter().filter(|outcome| matches!(outcome.status,
         RuntimeOutcomeStatus::Completed | RuntimeOutcomeStatus::Finalized))
-        .filter_map(|outcome| outcome.task_id).collect())
+        .filter_map(|outcome| outcome.task_id).collect()))
 }
 
 /// Rebind incomplete, row-less work. Queue-backed transfers require their assignment lifecycle,
@@ -2083,6 +2101,50 @@ mod tests {
             Some(facts[0].completed_at));
         assert!(security_events(&fixture).iter().any(|event|
             event["payload"]["queen_mark"] == true && event["payload"]["confirmation"] == true));
+    }
+
+    #[tokio::test]
+    async fn first_finish_malformed_event_evidence_accepts_mark_without_confirmation() {
+        use std::io::Write;
+        let fixture = fixture();
+        let manager = write_graph_and_worker_principal(&fixture,
+            TaskGraph::new(vec![work_node("T1", "backend")], vec![]), Some("backend"));
+        let _ = expect_success(heartbeat_with_completed_nodes(Arc::clone(&fixture.state), WORKER_ID,
+            "completed", None, &["T1"]).await, "worker first finish");
+        let headers = authenticated_headers(&fixture.state, QUEEN_ID);
+        let credential = headers.get("X-Hive-Agent-Token").unwrap().to_str().unwrap().to_owned();
+        let raw_line = format!("{{\"private-malformed-marker\":\"{credential}");
+        let path = fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl");
+        writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{raw_line}").unwrap();
+        let mut events = fixture.state.event_bus.subscribe();
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_writer(log.reopen().unwrap()).finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let mut request = auth_request("queen", "completed");
+        request.mark_agent_id = Some(WORKER_ID.into());
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T1".into())];
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.into()),
+            headers, Json(request)).await, "mark with incomplete event evidence");
+        assert_eq!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID)[WORKER_ID].status, "completed");
+        let facts = manager.read_node_completion_facts().unwrap();
+        assert_eq!(facts.len(), 2, "accepted mark remains auditable");
+        assert!(facts.iter().all(|fact| !fact.confirmation), "incomplete evidence cannot confirm prior work");
+        let mut saw_mark = false;
+        while let Ok(event) = events.try_recv() {
+            let audit = serde_json::to_string(&event).unwrap();
+            assert!(!audit.contains("private-malformed-marker"));
+            assert!(!audit.contains(&credential));
+            if event.payload["kind"] == "heartbeat_status_requested" {
+                saw_mark = true;
+                assert_eq!(event.payload["confirmation"], false);
+            }
+        }
+        assert!(saw_mark, "accepted mark has a sanitized audit event");
+        let diagnostic = std::fs::read_to_string(log.path()).unwrap();
+        assert!(diagnostic.contains("Incomplete confirmation event evidence"), "{diagnostic}");
+        assert!(!diagnostic.contains("private-malformed-marker"));
+        assert!(!diagnostic.contains(&credential));
     }
 
     #[tokio::test]
