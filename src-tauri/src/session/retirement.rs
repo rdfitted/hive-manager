@@ -110,8 +110,8 @@ mod tests {
         for role in [AgentRole::Queen, AgentRole::MasterPlanner, AgentRole::Evaluator,
             AgentRole::Prince, AgentRole::Planner { index: 1 }, AgentRole::ScratchShell,
             AgentRole::Fusion { variant: "a".into() }, AgentRole::Judge { session_id: "s".into() }] {
-            evidence.role = &role;
-            assert!(!eligible(&settings, &evidence, true, true, true, true, true));
+            let protected = WorkEvidence { role: &role, ..evidence };
+            assert!(!eligible(&settings, &protected, true, true, true, true, true));
         }
         evidence.role = &worker;
         assert!(!eligible(&RetirementSettings { enabled: false, ..settings.clone() }, &evidence, true,true,true,true,true));
