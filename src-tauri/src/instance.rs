@@ -297,6 +297,14 @@ pub fn bootstrap() -> &'static Instance {
     })
 }
 
+pub fn refuse(operation: &str) -> Result<(), String> {
+    if is_isolated() {
+        Err(format!("Isolated instance: {operation} is disabled"))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +465,52 @@ mod tests {
             ] {
                 assert!(std::env::var_os(key).is_none(), "inherited {key}");
             }
+            let manager = crate::pty::PtyManager::new();
+            let error = manager
+                .create_session(
+                    "synthetic-agent".into(),
+                    crate::pty::AgentRole::Queen,
+                    "missing-instance-test-command",
+                    &[],
+                    None,
+                    80,
+                    24,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("Isolated instance"));
+            assert!(manager.resize("synthetic-agent", 80, 24).is_ok());
+            use crate::runtime::RuntimeAdapter;
+            let runtime = crate::runtime::LocalProcessRuntime::new();
+            let spec = crate::runtime::LaunchSpec::new("missing-instance-test-command");
+            assert!(runtime
+                .launch(&spec)
+                .unwrap_err()
+                .to_string()
+                .contains("Isolated instance"));
+            let controller = crate::session::SessionController::new(std::sync::Arc::new(
+                parking_lot::RwLock::new(manager),
+            ));
+            let project = settings.root.join("must-not-be-created");
+            assert!(controller
+                .launch_hive(
+                    project.clone(),
+                    1,
+                    "missing-instance-test-command",
+                    None,
+                    None,
+                    None
+                )
+                .unwrap_err()
+                .contains("Isolated instance"));
+            assert!(!project.exists());
+            let health = tokio::runtime::Runtime::new().unwrap().block_on(
+                crate::cli::health::CliHealthRegistry::check_all(settings.port),
+            );
+            assert!(!health.clis.is_empty());
+            assert!(health.clis.iter().all(|cli| !cli.resolved
+                && cli.bin_path.is_none()
+                && cli.detail.contains("disabled")));
+
             assert!(is_isolated());
             return;
         }
@@ -483,5 +537,133 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(!is_isolated(), "parent must stay normal");
+    }
+
+    fn source(relative: &str) -> String {
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(relative))
+            .unwrap()
+            .replace("\r\n", "\n")
+    }
+
+    fn first_statement<'a>(source: &'a str, name: &str) -> &'a str {
+        source
+            .split_once(&format!("fn {name}("))
+            .unwrap()
+            .1
+            .split_once(" {\n")
+            .unwrap()
+            .1
+            .trim_start()
+    }
+
+    #[test]
+    fn instance_spawn_guards_precede_side_effects() {
+        let manager = source("src/pty/manager.rs");
+        assert!(first_statement(&manager, "create_session").starts_with("crate::instance::refuse("));
+        // Windows tests replace LocalPtyRuntime with a stub: inspect the production file.
+        for path in ["src/runtime/local_pty.rs", "src/runtime/local_process.rs"] {
+            let runtime = source(path);
+            assert!(
+                first_statement(&runtime, "launch").starts_with("crate::instance::refuse("),
+                "{path}"
+            );
+        }
+        let controller = source("src/session/controller.rs");
+        for name in [
+            "launch_hive",
+            "launch_solo",
+            "launch_hive_v2",
+            "launch_research",
+            "launch_fusion",
+            "launch_debate",
+            "launch_swarm",
+            "launch_evaluator",
+            "launch_prince",
+            "add_worker",
+            "add_worker_for_plan_task",
+            "add_qa_worker",
+            "add_planner",
+            "reserve_add_worker",
+            "continue_after_planning_checked",
+            "spawn_next_worker",
+            "spawn_debate_round",
+            "spawn_fusion_judge",
+            "spawn_debate_judge",
+            "spawn_launch_evaluator_agents",
+        ] {
+            assert!(
+                first_statement(&controller, name).starts_with("crate::instance::refuse("),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn instance_probe_sweep_preview_and_updater_guards() {
+        for (path, name) in [
+            ("src/cli/health.rs", "check_all"),
+            ("src/cli/agent_store.rs", "cleanup_stale_stores"),
+        ] {
+            let source = source(path);
+            assert!(
+                first_statement(&source, name).starts_with("if crate::instance::is_isolated()"),
+                "{path}"
+            );
+        }
+        let preview = source("src/preview/mod.rs");
+        assert!(first_statement(&preview, "open_preview_window")
+            .starts_with("crate::instance::refuse("));
+        let lib = source("src/lib.rs");
+        let plugins = lib
+            .split_once("if !instance::is_isolated() {\n        builder = builder")
+            .unwrap()
+            .1
+            .split_once("\n    }")
+            .unwrap()
+            .0;
+        assert!(plugins.contains("tauri_plugin_updater::Builder::new().build()"));
+        assert!(plugins.contains("tauri_plugin_process::init()"));
+        let macos = lib
+            .split_once("cli::env_path::initialize_macos_cli_environment();")
+            .unwrap()
+            .0;
+        assert!(macos.trim_end().ends_with("if !instance::is_isolated() {"));
+    }
+
+    fn forbidden_startup_code(text: &str) -> bool {
+        let text = text.to_ascii_lowercase().replace("\\\\", "\\");
+        [
+            ["tauri_plugin_", "autostart"].concat(),
+            ["tauri-plugin-", "autostart"].concat(),
+            ["\\currentversion", "\\run"].concat(),
+            ["regset", "value"].concat(),
+        ]
+        .iter()
+        .any(|pattern| text.contains(pattern))
+    }
+
+    fn scan_startup_code(path: &Path) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                scan_startup_code(&path);
+            } else if path
+                .extension()
+                .is_some_and(|ext| ["rs", "ts", "svelte"].iter().any(|allowed| ext == *allowed))
+            {
+                assert!(
+                    !forbidden_startup_code(&std::fs::read_to_string(&path).unwrap()),
+                    "startup registration in {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn instance_no_autostart_source_guard() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        scan_startup_code(&manifest.join("src"));
+        scan_startup_code(&manifest.join("../src"));
     }
 }

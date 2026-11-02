@@ -101,6 +101,13 @@ tokio::task_local! {
 
 impl CliHealthRegistry {
     pub async fn check_all(api_port: u16) -> CliHealthResponse {
+        if crate::instance::is_isolated() {
+            return CliHealthResponse { clis: VALID_CLIS.iter().map(|cli| CliHealth {
+                cli: (*cli).into(), resolved: false, bin_path: None,
+                logged_in: LoginStatus::Unknown,
+                detail: "CLI probes disabled in isolated instance".into(), stale_hint: false,
+            }).collect() };
+        }
         #[cfg(test)]
         if let Ok(response) = HEALTH_PORT_PROBE.try_with(|probe| probe(api_port)) {
             return response;

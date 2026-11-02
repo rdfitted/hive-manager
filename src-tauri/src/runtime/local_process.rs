@@ -63,6 +63,7 @@ impl LocalProcessRuntime {
 
 impl RuntimeAdapter for LocalProcessRuntime {
     fn launch(&self, spec: &LaunchSpec) -> Result<LaunchedAgent, RuntimeError> {
+        crate::instance::refuse("runtime launch").map_err(RuntimeError::launch)?;
         let process_id = Self::generate_process_id();
 
         let mut cmd = Command::new(&spec.command);

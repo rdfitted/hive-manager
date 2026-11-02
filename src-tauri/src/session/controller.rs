@@ -1492,6 +1492,7 @@ impl SessionController {
         name: Option<String>,
         color: Option<String>,
     ) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
         let prompt_str = prompt.unwrap_or_default();
@@ -9963,6 +9964,7 @@ Last updated: {timestamp}
     }
 
     pub fn launch_solo(&self, config: HiveLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         let project_path = PathBuf::from(&config.project_path);
         let task_description = config
             .prompt
@@ -9993,6 +9995,7 @@ Last updated: {timestamp}
     }
 
     pub fn launch_hive_v2(&self, config: HiveLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         self.launch_hive_internal(config, None, HashMap::new(), true, true)
     }
 
@@ -10536,6 +10539,7 @@ Last updated: {timestamp}
     ///   (template key `roles/researcher`).
     /// - Planning and the evaluator are always disabled.
     pub fn launch_research(&self, config: ResearchLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         let smoke_test = config.smoke_test;
 
         // Assign the "researcher" role to any worker that doesn't already carry one,
@@ -10666,6 +10670,7 @@ phases and do EXACTLY this, then stop:
     }
 
     pub fn launch_fusion(&self, config: FusionLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         tracing::info!(
             "launch_fusion called: with_planning={}, variants={}, task={}",
             config.with_planning,
@@ -10963,6 +10968,7 @@ phases and do EXACTLY this, then stop:
     }
 
     pub fn launch_debate(&self, mut config: DebateLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         tracing::info!(
             "launch_debate called: with_planning={}, debaters={}, rounds={}, topic={}",
             config.with_planning,
@@ -11205,6 +11211,7 @@ phases and do EXACTLY this, then stop:
         round: u8,
         wiki_batch: Option<crate::wiki::WikiBatch>,
     ) -> Result<(), String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -12896,6 +12903,7 @@ The backend composed and persisted the following authoritative skeleton before l
         config: &HiveLaunchConfig,
         queen_id: &str,
     ) -> Result<(), SessionError> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", session_id)))?;
@@ -14625,6 +14633,7 @@ The backend composed and persisted the following authoritative skeleton before l
     }
 
     fn spawn_fusion_judge(&self, session_id: &str) -> Result<(), String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -14958,6 +14967,7 @@ The backend composed and persisted the following authoritative skeleton before l
         session_id: &str,
         wiki_batch: Option<crate::wiki::WikiBatch>,
     ) -> Result<(), String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -15510,6 +15520,7 @@ The backend composed and persisted the following authoritative skeleton before l
         &self,
         session_id: &str,
     ) -> Result<Session, PlanningPhaseError> {
+        crate::instance::refuse("agent launch").map_err(PlanningPhaseError::Failed)?;
         // mark_plan_ready moves the session to PlanReady before the Queen is up,
         // and PlanReady passes the guard below. Hold the lifecycle lock (shared
         // with stop/close/resume) across the whole continuation so a concurrent
@@ -16576,6 +16587,7 @@ The backend composed and persisted the following authoritative skeleton before l
     }
 
     pub fn launch_swarm(&self, config: SwarmLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         let session_id = Uuid::new_v4().to_string();
         let default_cli = config.default_cli.trim().to_string();
         let default_model = config.default_model.clone();
@@ -16754,6 +16766,7 @@ The backend composed and persisted the following authoritative skeleton before l
         qa_workers: Option<&[QaWorkerConfig]>,
         smoke_test: bool,
     ) -> Result<(), String> {
+        crate::instance::refuse("agent launch")?;
         if !with_evaluator {
             return Ok(());
         }
@@ -17110,6 +17123,9 @@ The backend composed and persisted the following authoritative skeleton before l
         parent_id: Option<&str>,
         dispatch_tiers: Option<(TaskTier, TaskTier)>,
     ) -> Result<AddWorkerReservation, AddWorkerError> {
+        crate::instance::refuse("agent launch").map_err(|error| AddWorkerError::Rejected(AddWorkerRejection {
+            error, reason: AddWorkerRejectionReason::StateNotAcceptingWorkers, current_state: "isolated".into(),
+        }))?;
         let sessions = self.sessions.read();
         let session = sessions
             .get(session_id)
@@ -17134,6 +17150,7 @@ The backend composed and persisted the following authoritative skeleton before l
         parent_id: Option<String>,
         expected_index: Option<u8>,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         self.add_worker_for_plan_task(
             session_id,
             config,
@@ -17157,6 +17174,7 @@ The backend composed and persisted the following authoritative skeleton before l
         plan_task_id: Option<&str>,
         dispatch_tiers: Option<(TaskTier, TaskTier)>,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         // Get session and validate
         let session = {
             let sessions = self.sessions.read();
@@ -17458,6 +17476,7 @@ The backend composed and persisted the following authoritative skeleton before l
         mut config: AgentConfig,
         smoke_test: bool,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -17662,6 +17681,7 @@ The backend composed and persisted the following authoritative skeleton before l
         mut config: AgentConfig,
         smoke_test: bool,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -17784,6 +17804,7 @@ The backend composed and persisted the following authoritative skeleton before l
         specialization: String,
         parent_id: Option<String>,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -17916,6 +17937,7 @@ The backend composed and persisted the following authoritative skeleton before l
         domain: String,
         workers: Vec<AgentConfig>,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         // Get session and validate
         let session = {
             let sessions = self.sessions.read();

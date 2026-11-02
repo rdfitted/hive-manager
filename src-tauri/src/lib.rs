@@ -92,7 +92,9 @@ pub fn run() {
         .init();
 
     #[cfg(target_os = "macos")]
-    cli::env_path::initialize_macos_cli_environment();
+    if !instance::is_isolated() {
+        cli::env_path::initialize_macos_cli_environment();
+    }
 
     // Initialize session storage
     let storage = Arc::new(SessionStorage::new().expect("Failed to initialize session storage"));
@@ -180,12 +182,16 @@ pub fn run() {
         }
     }
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_shell::init());
+    if !instance::is_isolated() {
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
+    }
+    builder
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(PtyManagerState(Arc::clone(&pty_manager)))
         .manage(SessionControllerState(Arc::clone(&session_controller)))

@@ -1597,6 +1597,7 @@ pub async fn open_preview_window(
     url: String,
     session_id: Option<String>,
 ) -> Result<PreviewStatus, String> {
+    crate::instance::refuse("preview window")?;
     let configured_api_port = app_state.config.read().await.api.port;
     // The one and only normalizing entry point: this URL was typed by a human.
     let url = validate_operator_preview_input(&url, configured_api_port)?;
