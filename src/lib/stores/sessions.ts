@@ -121,6 +121,7 @@ export interface HiveLaunchPolicy extends Omit<HiveExecutionPolicy, 'workspace_s
 export type AgentTransportOption = 'codex_app_server' | 'claude_stream_json';
 
 export interface HiveLaunchConfig {
+  retirement_settings?: { enabled: boolean; on_call_agent_id: string | null };
   agent_transports?: AgentTransportOption[];
   name?: string;
   color?: string;
