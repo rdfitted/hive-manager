@@ -7,19 +7,33 @@ import net from 'node:net';
 import { seed, manifest } from './seed.mjs';
 import { repo, target, ensureBuild } from './build.mjs';
 import { acquireGate } from './gate.mjs';
+import { runRenderAssertions, diagnoseReview } from './assertions.mjs';
+import { classifyFinding } from './findings.mjs';
+import { mutationProver } from './mutations.mjs';
 import { ps, quote, identity, sameProcess, tree, killOwned, liveState, liveUnchanged, desktopState, environment, inside, plainPath, sleep } from './windows.mjs';
 
 if (process.platform !== 'win32') throw new Error('render:check requires Windows WebView2');
 const pool = path.join(process.env.LOCALAPPDATA, 'hmr');
 const out = path.join(repo, 'tools/render/out');
 await mkdir(out, { recursive: true });
+const runId = `${new Date().toISOString().replaceAll(':', '-')}-${randomBytes(2).toString('hex')}`;
+const captureOut = path.join(out, 'runs', runId);
+await mkdir(captureOut, { recursive: true });
 const controller = new AbortController();
-let browser;
+let browser, page;
 const interrupt = () => { controller.abort(); void browser?.close().catch(() => {}); };
 process.once('SIGINT', interrupt);
 process.once('SIGTERM', interrupt);
-const report = { version: 1, phase: 'lifecycle', startedAt: new Date().toISOString(), assertions: [], screenshots: [], mutations: [] };
-const assertion = (name, passed, details) => { report.assertions.push({ name, passed: !!passed, details }); return !!passed; };
+const report = { version: 1, runId, phase: 'lifecycle', startedAt: new Date().toISOString(), assertions: [], screenshots: [], mutations: [] };
+const requests = [], consoleErrors = [];
+const errorReads = [];
+const knownFindings = JSON.parse(await readFile(path.join(repo, 'tools/render/known-findings.json'), 'utf8'));
+const assertion = (name, passed, details, context = {}) => {
+  const result = classifyFinding(name, passed, details, knownFindings);
+  report.assertions.push({ name, ...result, details, ...context });
+  if (!result.accepted) console.log(`render:check ${result.status} ${name} ${context.viewport ?? ''} ${context.stage ?? ''}`);
+  return result.accepted;
+};
 const stateFile = root => path.join(root, 'render-run.json');
 async function validateRoot(root) {
   if (path.dirname(root) !== pool || !/^[a-f0-9]{8}$/.test(path.basename(root))) throw new Error('Unsafe instance cleanup path');
@@ -75,6 +89,7 @@ try {
   root = path.join(pool, randomBytes(4).toString('hex'));
   const seeded = await seed(root, new Date());
   report.seededAt = seeded.seededAt;
+  report.profileDirectoryBeforeLaunch = !!(await lstat(path.join(root, 'home/AppData/Local')).catch(() => null));
   state = { marker: 'hm-render-v1', root, exe: target, driver: identity(process.pid), app: null, processes: [] };
   await writeFile(stateFile(root), JSON.stringify(state, null, 2));
   const api = await freePort();
@@ -98,38 +113,109 @@ try {
   await writeFile(stateFile(root), JSON.stringify(state, null, 2));
   browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdp}`, { timeout: 15000 });
   const context = browser.contexts()[0];
-  const requests = [], consoleErrors = [];
   context.on('request', request => { try { if (new URL(request.url()).port === '18800') requests.push(request.url()); } catch {} });
+  report.httpErrors = [];
+  context.on('response', response => {
+    if (response.status() >= 400) errorReads.push(response.text().catch(() => '').then(body => report.httpErrors.push({ url: response.url(), status: response.status(), body: body.slice(0, 4000) })));
+  });
   await context.route(/https?:\/\/[^/]*:18800(?:\/|$)/, route => route.abort());
-  const page = context.pages()[0];
+  page = context.pages()[0];
   if (!page) throw new Error('No guarded webview page');
   page.setDefaultTimeout(10000);
+  report.initialPageUrl = page.url();
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
   page.on('pageerror', error => consoleErrors.push(error.message));
+  // CDP can expose the initial about:blank target before Tauri navigates it.
+  // Reloading that target races the custom-protocol navigation.
+  await page.waitForURL(url => url.hostname === 'tauri.localhost', { timeout: 30000, waitUntil: 'domcontentloaded' });
   report.resourcesBeforeReload = await page.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name));
   await page.reload({ waitUntil: 'domcontentloaded' });
+  // The default 250 entries fill during the 66-second observation. Keep late
+  // requests observable, and fail through the console gate if capacity is hit.
+  report.resourceTimingBufferSize = 20000;
+  await page.evaluate(size => {
+    performance.setResourceTimingBufferSize(size);
+    performance.addEventListener('resourcetimingbufferfull', () => console.error('render:check resource timing buffer full'));
+  }, report.resourceTimingBufferSize);
   await page.waitForFunction(name => document.body.innerText.includes(name), manifest.sessions[0].name);
   assertion('custom-protocol-origin', new URL(page.url()).hostname === 'tauri.localhost', page.url());
   const marker = await page.evaluate(() => window.__HIVE_INSTANCE__);
   assertion('isolated-api-base', marker?.isolated && marker.apiBase === `http://127.0.0.1:${api}`, marker);
   const roots = environment(state.app, repo);
   assertion('environment-contained', Object.values(roots).length === 9 && Object.values(roots).every(value => inside(root, value)), roots);
+  report.environmentNonVerbatim = Object.values(roots).every(value => !value.startsWith('\\\\?\\'));
+  report.profileDirectoryAfterBootstrap = !!(await lstat(path.join(root, 'home/AppData/Local')).catch(() => null));
   if (process.argv.includes('--force-failure')) throw new Error('forced-mid-run-failure');
-  for (const viewport of [{ width: 1440, height: 900 }, { width: 800, height: 900 }]) {
-    await page.setViewportSize(viewport);
-    await page.waitForTimeout(150);
-    const measured = await page.evaluate(() => ({ width: innerWidth, height: innerHeight, devicePixelRatio, text: document.body.innerText }));
-    assertion(`viewport-${viewport.width}`, measured.width === viewport.width && measured.height === viewport.height, measured);
-    assertion(`launch-not-empty-${viewport.width}`, measured.text.includes(manifest.sessions[0].name) && measured.text.includes('What would you like to work on?'));
-    const png = path.join(out, `launch-${viewport.width}.png`);
-    await page.screenshot({ path: png });
-    report.screenshots.push({ screen: 'launch', viewport, path: path.relative(repo, png).replaceAll('\\', '/') });
+  if (process.argv.includes('--diagnose-review')) {
+    report.phase = 'diagnostic';
+    await diagnoseReview({ page, manifest, report, out: captureOut });
+  } else {
+    report.phase = 'render';
+    await runRenderAssertions({ page, manifest, report, assert: assertion, out: captureOut, repo, signal: controller.signal });
   }
+  await Promise.all(errorReads);
   report.resourceUrls = await page.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name));
   assertion('no-live-api-request', ![...requests, ...report.resourcesBeforeReload, ...report.resourceUrls].some(url => { try { return new URL(url).port === '18800'; } catch { return false; } }), requests);
-  assertion('no-console-errors', consoleErrors.length === 0, consoleErrors);
-} catch (error) { report.error = error.stack; assertion(error.message === 'forced-mid-run-failure' ? 'forced-mid-run-failure' : 'lifecycle', false, error.message); }
+  assertion('no-console-errors', consoleErrors.length === 0, [...consoleErrors]);
+  if (report.phase === 'render') {
+    const prove = mutationProver(report, assertion);
+    const message = `render-mutation-console-${runId}`;
+    await prove('no-console-errors', async () => ({ passed: consoleErrors.length === 0, details: [...consoleErrors] }), async () => {
+      await page.evaluate(value => console.error(value), message);
+      await page.waitForTimeout(100);
+      return async () => {
+        const index = consoleErrors.indexOf(message);
+        if (index < 0) throw new Error('Deliberate console error was not observed');
+        consoleErrors.splice(index, 1);
+      };
+    });
+    const noLive = async () => {
+      const resources = await page.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name));
+      const observed = [...requests, ...report.resourcesBeforeReload, ...resources];
+      return { passed: !observed.some(url => { try { return new URL(url).port === '18800'; } catch { return false; } }), details: { requests: requests.filter(url => url.includes(':18800')), resources: resources.filter(url => url.includes(':18800')) } };
+    };
+    await prove('no-live-api-request', noLive, async () => {
+      // Fulfill this one synthetic URL inside Playwright: never contact the
+      // live service. A completed local response also exercises ResourceTiming;
+      // an aborted fetch is visible only to the request listener in WebView2.
+      const url = 'http://127.0.0.1:18800/render-mutation-blocked';
+      const requestStart = requests.length;
+      let fulfilled = false;
+      const handler = async route => {
+        fulfilled = true;
+        await route.fulfill({ status: 200, headers: { 'Access-Control-Allow-Origin': '*', 'Timing-Allow-Origin': '*', 'Content-Type': 'application/json' }, body: '{"synthetic":true}' });
+      };
+      await context.route(url, handler);
+      await page.evaluate(async value => { await (await fetch(value)).text(); }, url);
+      await page.waitForTimeout(100);
+      const resources = await page.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name));
+      report.blockedNetworkMutation = { fulfilledInsideDriver: fulfilled, requests: requests.slice(requestStart), resources: resources.filter(value => value === url) };
+      return async () => {
+        await context.unroute(url, handler);
+        requests.splice(requestStart);
+        await page.evaluate(() => performance.clearResourceTimings());
+      };
+    });
+    assertion('network-mutation-both-observers', report.blockedNetworkMutation?.fulfilledInsideDriver && report.blockedNetworkMutation.requests.length > 0 && report.blockedNetworkMutation.resources.length > 0, report.blockedNetworkMutation);
+    const required = ['screen-not-empty', 'screenshot-has-pixels', 'version-badge-unobscured', 'grid-eight-panes', 'grid-composer-with-attention', 'grid-composer-without-attention', 'finished-attention-card', 'finished-needs-you-count', 'stalled-attention-card', 'stalled-needs-you-count', 'exited_during_startup-attention-card', 'exited_during_startup-needs-you-count', 'chat-table', 'chat-code', 'chat-literal', 'kanban-fixture-present', 'sidebar-fixture-present', 'viewport-1440', 'viewport-800', 'updater-invoke-rejected', 'all-screens-captured', 'no-live-api-request', 'no-console-errors'];
+    assertion('all-required-mutations-proved', required.every(name => report.mutations.some(item => item.name === name && item.passed)), { required, proved: report.mutations.filter(item => item.passed).map(item => item.name) });
+  }
+} catch (error) {
+  report.error = error.stack;
+  if (page) report.failurePage = await page.evaluate(() => ({ url: location.href, readyState: document.readyState, text: document.body?.innerText.slice(0, 1500) })).catch(() => null);
+  assertion(error.message === 'forced-mid-run-failure' ? 'forced-mid-run-failure' : report.phase === 'render' ? 'render-execution' : 'lifecycle', false, error.message);
+  if (page) await page.screenshot({ path: path.join(captureOut, 'failure.png') }).catch(() => {});
+}
 finally {
+  await Promise.all(errorReads);
+  if (report.phase === 'render' && !report.assertions.some(item => item.name === 'all-screens-captured')) assertion('all-screens-captured', false, report.screenshots.map(item => `${item.screen}-${item.viewport.width}`));
+  if (page && !report.assertions.some(item => item.name === 'no-live-api-request')) {
+    try {
+      report.resourceUrls = await page.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name));
+      assertion('no-live-api-request', ![...requests, ...(report.resourcesBeforeReload ?? []), ...report.resourceUrls].some(url => { try { return new URL(url).port === '18800'; } catch { return false; } }), requests);
+    } catch (error) { assertion('no-live-api-request', false, error.message); }
+  }
+  if (page && !report.assertions.some(item => item.name === 'no-console-errors')) assertion('no-console-errors', consoleErrors.length === 0, consoleErrors);
   if (browser) await browser.close().catch(() => {});
   try {
     if (state) await stopRecord(state);
@@ -146,8 +232,9 @@ finally {
   } catch (error) { assertion('G42-live-app-unchanged', false, error.message); }
   if (gate) { try { await gate.release(); } catch (error) { assertion('gate-release', false, error.message); } }
   report.completedAt = new Date().toISOString();
-  report.passed = report.assertions.every(item => item.passed);
+  report.passed = report.assertions.every(item => item.accepted);
   await writeFile(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
+  await writeFile(path.join(captureOut, 'report.json'), JSON.stringify(report, null, 2));
   console.log(`render:check ${report.passed ? 'PASS' : 'FAIL'} (${report.phase}); build ${report.build?.reused ? 'reused' : 'built'}`);
   if (!report.passed) process.exitCode = 1;
 }
