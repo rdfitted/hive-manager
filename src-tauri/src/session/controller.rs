@@ -25702,7 +25702,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
                 assert_eq!(controller.get_stalled_agents("retire", std::time::Duration::from_secs(180)).len(), 1);
                 let verdict = submitted + Duration::seconds(1);
                 let session = controller.get_session("retire").unwrap();
-                if role == AgentRole::Evaluator {
+                if matches!(role, AgentRole::Evaluator) {
                     let path = state.storage.session_dir("retire").join("state/qa-verdict.json");
                     std::fs::write(path, serde_json::to_vec(&serde_json::json!({
                         "schema_version":1,"session_id":"retire","milestone_id":"fixture","iteration":1,
