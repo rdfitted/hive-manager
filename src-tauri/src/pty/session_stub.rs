@@ -517,6 +517,10 @@ impl PtySession {
         self.output_ring.lock().tail_lossy(RECENT_OUTPUT_VIEW_BYTES)
     }
 
+    pub(crate) fn output_history(&self) -> Arc<Mutex<OutputRing>> {
+        Arc::clone(&self.output_ring)
+    }
+
     pub fn snapshot(&self) -> OutputSnapshot {
         self.output_ring.lock().snapshot()
     }

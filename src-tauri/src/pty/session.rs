@@ -600,6 +600,10 @@ impl PtySession {
     }
 
     /// The whole retained history, aligned for a terminal to parse from its first byte.
+    pub(crate) fn output_history(&self) -> Arc<Mutex<OutputRing>> {
+        Arc::clone(&self.output_ring)
+    }
+
     pub fn snapshot(&self) -> OutputSnapshot {
         self.output_ring.lock().snapshot()
     }

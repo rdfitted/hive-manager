@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::work_state::{work_state, WorkEvidence, WorkState};
 use crate::pty::AgentRole;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RetirementSettings {
     #[serde(default = "enabled_by_default")]
@@ -67,13 +67,16 @@ pub fn holds_no_locks(root: &Path, agent_id: &str) -> bool {
 /// Restrict git to declared relative files. Literal pathspecs prevent a plan output
 /// from turning into a git pathspec expression; git errors are never clean evidence.
 pub fn owned_work_committed(cwd: &Path, outputs: &[String]) -> bool {
-    let paths: Vec<_> = outputs.iter().filter_map(|output| {
+    let mut paths = Vec::new();
+    for output in outputs {
         let path = output.strip_prefix("file:").unwrap_or(output);
-        (!path.is_empty() && !path.contains(':') && !Path::new(path).is_absolute()
-            && !path.split(['/', '\\']).any(|part| part == "..")
-            && (output.starts_with("file:") || path.contains('/') || path.contains('.')))
-            .then_some(path)
-    }).collect();
+        if !output.starts_with("file:") && path.contains(':') { continue; }
+        if path.is_empty() || path.contains(':') || Path::new(path).is_absolute()
+            || path.split(['/', '\\']).any(|part| part == "..") { return false; }
+        if output.starts_with("file:") || path.contains('/') || path.contains('.') {
+            paths.push(path);
+        }
+    }
     if paths.is_empty() { return false; }
     Command::new("git").arg("--literal-pathspecs").arg("-C").arg(cwd)
         .args(["status", "--porcelain", "--untracked-files=all", "--"])
@@ -164,6 +167,7 @@ mod tests {
         assert!(!owned_work_committed(temp.path(), &["file:owned.txt".into()]));
         assert!(!owned_work_committed(temp.path(), &[]));
         assert!(!owned_work_committed(temp.path(), &["file:../outside".into()]));
+        assert!(!owned_work_committed(temp.path(), &["file:owned.txt".into(), "file:../outside".into()]));
         assert!(!owned_work_committed(&temp.path().join("missing"), &["owned.txt".into()]));
         assert_eq!(git(&["rev-parse", "HEAD"]).stdout, head);
     }

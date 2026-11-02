@@ -369,11 +369,31 @@ struct HeartbeatCredential {
 struct Instance {
     id: uuid::Uuid,
     spawned_at: chrono::DateTime<chrono::Utc>,
+    input_revision: u64,
+    input_active: u64,
 }
 
 impl Instance {
     fn new() -> Self {
-        Self { id: uuid::Uuid::new_v4(), spawned_at: chrono::Utc::now() }
+        Self { id: uuid::Uuid::new_v4(), spawned_at: chrono::Utc::now(), input_revision: 0, input_active: 0 }
+    }
+}
+
+// Holds only input admission metadata. Blocking I/O must never own lifecycle,
+// so a manual kill can still terminate a child whose input pipe is full.
+struct InputAdmission {
+    instances: Arc<RwLock<HashMap<String, Instance>>>,
+    id: String,
+    instance: uuid::Uuid,
+}
+
+impl Drop for InputAdmission {
+    fn drop(&mut self) {
+        if let Some(current) = self.instances.write().get_mut(&self.id) {
+            if current.id == self.instance {
+                current.input_active = current.input_active.saturating_sub(1);
+            }
+        }
     }
 }
 
@@ -382,6 +402,8 @@ pub struct PtyManager {
     /// Runtime generations, including protocol startup reservations. All changes
     /// share lifecycle with publication/kill; history must never stand in for a seat.
     instances: Arc<RwLock<HashMap<String, Instance>>>,
+    /// Bounded bytes only: retired terminals retain no process, reader or master.
+    retired_output: RwLock<HashMap<String, Arc<Mutex<super::output_ring::OutputRing>>>>,
     /// Actual spawn arguments, retained after close for transcript attribution.
     spawn_cwds: RwLock<HashMap<String, String>>,
     transports: RwLock<Option<Arc<crate::transport::TransportRegistry>>>,
@@ -419,6 +441,7 @@ impl PtyManager {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             instances: Arc::new(RwLock::new(HashMap::new())),
+            retired_output: RwLock::new(HashMap::new()),
             spawn_cwds: RwLock::new(HashMap::new()),
             transports: RwLock::new(None),
             agent_transports: RwLock::new(HashMap::new()),
@@ -827,6 +850,7 @@ impl PtyManager {
     }
 
     fn record_spawn_cwd(&self, id: &str, cwd: Option<&str>) {
+        self.retired_output.write().remove(id);
         // Keep the exact argument, and publish under the runtime's lifecycle guard
         // so a rejected duplicate cannot overwrite the existing seat's attribution.
         if let Some(cwd) = cwd {
@@ -1098,36 +1122,35 @@ impl PtyManager {
         Ok(id)
     }
 
+    fn admit_input(&self, id: &str) -> Result<(Arc<PtySession>, InputAdmission), PtyError> {
+        let _lifecycle = self.lifecycle.lock();
+        if self.protocol_agent(id).is_some() {
+            return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));
+        }
+        let session = self.sessions.read().get(id).cloned()
+            .ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        let mut instances = self.instances.write();
+        let current = instances.get_mut(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        current.input_revision = current.input_revision.saturating_add(1);
+        current.input_active = current.input_active.saturating_add(1);
+        let admission = InputAdmission { instances: Arc::clone(&self.instances), id: id.to_string(), instance: current.id };
+        Ok((session, admission))
+    }
+
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
-        if self.protocol_agent(id).is_some() {return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));}
-        tracing::debug!("PtyManager::write called for session: {}", id);
-        let sessions = self.sessions.read();
-        tracing::debug!("Available sessions: {:?}", sessions.keys().collect::<Vec<_>>());
-        let session = sessions.get(id).ok_or_else(|| {
-            tracing::error!("PTY session not found: {}", id);
-            PtyError::NotFound(id.to_string())
-        })?;
-        tracing::debug!("Found session {}, calling write", id);
+        let (session, _admission) = self.admit_input(id)?;
         session.write(data)
     }
 
     /// Deliver a payload as a bracketed paste and then a discrete bare Enter to submit it.
     pub fn submit(&self, id: &str, data: &[u8]) -> Result<PtySubmitResult, PtyError> {
-        if self.protocol_agent(id).is_some() {return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));}
-        tracing::debug!("PtyManager::submit called for session: {}", id);
-        let sessions = self.sessions.read();
-        let session = sessions
-            .get(id)
-            .ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        let (session, _admission) = self.admit_input(id)?;
         session.submit(data)
     }
 
-    /// Write with bracketed paste mode wrapping for large pastes
+    /// Write with bracketed paste mode wrapping for large pastes.
     pub fn write_bracketed(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
-        if self.protocol_agent(id).is_some() {return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));}
-        tracing::debug!("PtyManager::write_bracketed called for session: {} ({} bytes)", id, data.len());
-        let sessions = self.sessions.read();
-        let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        let (session, _admission) = self.admit_input(id)?;
         session.write_bracketed(data)
     }
 
@@ -1150,14 +1173,27 @@ impl PtyManager {
         self.instances.read().get(id).map(|instance| instance.spawned_at)
     }
 
+    /// Input admission and retirement share lifecycle. This fence binds completion
+    /// to the last submitted input even before HTTP records its pending marker.
+    pub fn input_fence(&self, id: &str) -> Option<(uuid::Uuid, u64)> {
+        self.instances.read().get(id).filter(|instance| instance.input_active == 0)
+            .map(|instance| (instance.id, instance.input_revision))
+    }
+
     /// Kill only this generation. False means absent/replaced, without touching
     /// its replacement. Failed cleanup keeps the identity and handle for retry.
     pub fn kill_instance(&self, id: &str, instance_id: uuid::Uuid) -> Result<bool, PtyError> {
-        self.kill_inner(id, Some(instance_id))
+        self.kill_inner(id, Some(instance_id), false, None)
+    }
+
+    /// Exact-instance retirement preserves just its bounded terminal replay bytes.
+    /// Failure/replacement never publishes history or removes the replacement.
+    pub fn retire_instance(&self, id: &str, instance_id: uuid::Uuid, input_revision: u64) -> Result<bool, PtyError> {
+        self.kill_inner(id, Some(instance_id), true, Some(input_revision))
     }
 
     pub fn kill(&self, id: &str) -> Result<(), PtyError> {
-        self.kill_inner(id, None).map(|_| ())
+        self.kill_inner(id, None, false, None).map(|_| ())
     }
 
     fn release_session_master(&self, session: &PtySession) {
@@ -1169,12 +1205,13 @@ impl PtyManager {
         session.release_master();
     }
 
-    fn kill_inner(&self, id: &str, expected: Option<uuid::Uuid>) -> Result<bool, PtyError> {
+    fn kill_inner(&self, id: &str, expected: Option<uuid::Uuid>, retain_output: bool, expected_input: Option<u64>) -> Result<bool, PtyError> {
         // Cancellation reaches a starting server without waiting for startup's
         // publication guard. The same guard then orders token cleanup.
         let starting = {
             let _lifecycle = self.lifecycle.lock();
-            if expected.is_some_and(|instance| self.instance_id(id) != Some(instance)) {
+            if expected.is_some_and(|instance| self.instance_id(id) != Some(instance))
+                || expected_input.is_some_and(|revision| self.input_fence(id).is_none_or(|(_, current)| current != revision)) {
                 return Ok(false);
             }
             self.starting_transports.read().get(id).cloned()
@@ -1183,7 +1220,8 @@ impl PtyManager {
         let _lifecycle_guard = self.lifecycle.lock();
         // A cancelled startup may finish cleanup and a replacement may publish
         // while stop_sync runs. Never apply old-instance cleanup to that runtime.
-        if expected.is_some_and(|instance| self.instance_id(id) != Some(instance)) {
+        if expected.is_some_and(|instance| self.instance_id(id) != Some(instance))
+                || expected_input.is_some_and(|revision| self.input_fence(id).is_none_or(|(_, current)| current != revision)) {
             return Ok(false);
         }
         if let Some(registry)=self.transport_registry() {
@@ -1197,6 +1235,9 @@ impl PtyManager {
             // Direct-child liveness cannot prove that its descendants were reaped.
             // Retain the exact session on any failed tree cleanup for a later retry.
             session.kill()?;
+            if retain_output {
+                self.retired_output.write().insert(id.to_string(), session.output_history());
+            }
 
             // Remove only the exact session we killed. This avoids retaining its process
             // handle without deleting a same-id replacement created concurrently.
@@ -1210,6 +1251,7 @@ impl PtyManager {
             }
         }
         self.heartbeat_credentials.write().remove(id);
+        if !retain_output { self.retired_output.write().remove(id); }
         // A successful cancellation releases only the reservation it stopped.
         // The old startup's final decision and cleanup both check this identity.
         if let Some(stopped) = starting {
@@ -1265,7 +1307,10 @@ impl PtyManager {
     /// into "database is locked".
     pub fn recent_output(&self, id: &str) -> Option<String> {
         let sessions = self.sessions.read();
-        sessions.get(id).map(|session| session.recent_output())
+        sessions.get(id).map(|session| session.recent_output()).or_else(|| {
+            self.retired_output.read().get(id).map(|ring|
+                ring.lock().tail_lossy(super::output_ring::RECENT_OUTPUT_VIEW_BYTES))
+        })
     }
 
     /// The whole retained history of an agent's PTY, for a freshly mounted pane (#287).
@@ -1275,6 +1320,8 @@ impl PtyManager {
         sessions
             .get(id)
             .map(|session| PtySnapshot::from_snapshot(id, session.snapshot()))
+            .or_else(|| self.retired_output.read().get(id).cloned()
+                .map(|ring| PtySnapshot::from_snapshot(id, ring.lock().snapshot())))
     }
 
     /// Test hook: the argv a session was actually spawned with, so store isolation can be
@@ -2619,6 +2666,69 @@ mod instance_tests {
         assert_eq!(manager.instance_id("worker"), None);
         assert_eq!(manager.spawned_at("worker"), None);
         assert!(!manager.kill_instance("worker", current).unwrap());
+        manager.kill("worker").unwrap();
+    }
+
+    #[test]
+    fn g33_retired_history_contains_only_bytes_and_respawn_clears_it() {
+        let mut manager = PtyManager::new();
+        manager.set_replay_capacity(super::super::output_ring::MIN_REPLAY_CAPACITY);
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        let weak = Arc::downgrade(manager.sessions.read().get("worker").unwrap());
+        let draining_history = manager.sessions.read()["worker"].output_history();
+        manager.record_output_for_test("worker", &vec![b'x'; 20_000]);
+        let before = manager.snapshot("worker").unwrap();
+        let old = manager.instance_id("worker").unwrap();
+        assert!(manager.retire_instance("worker", old, 0).unwrap());
+        assert_eq!(manager.snapshot("worker"), Some(before));
+        assert!(manager.recent_output("worker").unwrap().len() <= super::super::output_ring::RECENT_OUTPUT_VIEW_BYTES);
+        assert!(manager.retired_output.read()["worker"].lock().len() <= super::super::output_ring::MIN_REPLAY_CAPACITY);
+        let until = Instant::now() + Duration::from_secs(1);
+        while weak.strong_count() != 0 && Instant::now() < until { thread::yield_now(); }
+        assert_eq!(weak.strong_count(), 0, "history must not retain the PTY wrapper");
+        // A reader can drain more bytes after the runtime has been removed. Only
+        // this bounded ring survives; retaining it must preserve those final bytes.
+        draining_history.lock().record(b"late EOF drain");
+        assert!(manager.recent_output("worker").unwrap().ends_with("late EOF drain"));
+        let final_snapshot = manager.snapshot("worker").unwrap();
+        assert!(base64::engine::general_purpose::STANDARD.decode(&final_snapshot.data).unwrap()
+            .ends_with(b"late EOF drain"));
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        assert!(manager.retired_output.read().is_empty());
+        let current = manager.instance_id("worker").unwrap();
+        assert!(!manager.retire_instance("worker", old, 0).unwrap());
+        assert_eq!(manager.instance_id("worker"), Some(current));
+        assert!(manager.snapshot("worker").unwrap().data.is_empty());
+        manager.kill("worker").unwrap();
+    }
+
+    #[test]
+    fn g33_input_admission_fences_retirement_before_pending_marker_exists() {
+        let manager = PtyManager::new();
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        let (instance, completed_revision) = manager.input_fence("worker").unwrap();
+        manager.submit("worker", b"follow-up").unwrap();
+        assert!(!manager.retire_instance("worker", instance, completed_revision).unwrap());
+        assert!(manager.is_alive("worker"));
+        let (_, accepted_revision) = manager.input_fence("worker").unwrap();
+        assert!(manager.retire_instance("worker", instance, accepted_revision).unwrap());
+        assert!(manager.write("worker", b"too late").is_err(), "a retirement that wins admission must reject input");
+    }
+
+    #[test]
+    fn g33_inflight_input_does_not_hold_lifecycle_or_prevent_manual_kill() {
+        let manager = PtyManager::new();
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        let (instance, revision) = manager.input_fence("worker").unwrap();
+        let (_writer, admitted) = manager.admit_input("worker").unwrap();
+        assert!(manager.input_fence("worker").is_none(), "in-flight I/O supplies no completion fence");
+        assert!(manager.lifecycle.try_lock().is_some(), "blocked I/O must not hold lifecycle");
+        assert!(!manager.retire_instance("worker", instance, revision).unwrap());
+        assert!(manager.kill_instance("worker", instance).unwrap(), "manual cancellation remains available");
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        let replacement = manager.input_fence("worker").unwrap();
+        drop(admitted);
+        assert_eq!(manager.input_fence("worker"), Some(replacement), "late writer cleanup must not affect replacement");
         manager.kill("worker").unwrap();
     }
 
