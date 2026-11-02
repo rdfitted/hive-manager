@@ -675,6 +675,8 @@ impl SessionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     #[serde(default)]
+    pub work_state: Option<super::work_state::WorkState>,
+    #[serde(default)]
     pub transcript_spawned_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub transcript_session_id: Option<String>,
@@ -1031,6 +1033,8 @@ pub struct SessionController {
     /// Durable run journal + side-effect ledger (#125). Optional so tests/legacy
     /// construction paths can run without a SQLite DB; write-step seams no-op when unset.
     run_journal: Option<crate::storage::RunJournalStore>,
+    queue_repo: Option<Arc<crate::storage::QueueRepo>>,
+    heartbeat_marks: RwLock<HashSet<(String, String)>>,
 }
 
 // Explicitly implement Send + Sync
@@ -1316,12 +1320,18 @@ impl SessionController {
             qa_timeout_handles: Mutex::new(HashMap::new()),
             evaluator_respawns_inflight: Mutex::new(HashSet::new()),
             run_journal: None,
+            queue_repo: None,
+            heartbeat_marks: RwLock::new(HashSet::new()),
         }
     }
 
     /// Attach the run journal store (#125). Schema must already be ensured by the caller.
     pub fn set_run_journal(&mut self, store: crate::storage::RunJournalStore) {
         self.run_journal = Some(store);
+    }
+
+    pub fn set_queue_repo(&mut self, repo: Arc<crate::storage::QueueRepo>) {
+        self.queue_repo = Some(repo);
     }
 
     /// Record a write-step as `Started`, returning its deterministic id. No-op (returns
@@ -1538,6 +1548,7 @@ impl SessionController {
             };
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(cmd, &queen_args),
                 id: queen_id,
@@ -1600,6 +1611,7 @@ impl SessionController {
                 };
 
                 agents.push(AgentInfo {
+                    work_state: None,
                     transcript_spawned_at,
                     transcript_session_id: Self::transcript_key(cmd, &worker_args),
                     id: worker_id.clone(),
@@ -1668,8 +1680,45 @@ impl SessionController {
 
     pub fn get_session(&self, id: &str) -> Option<Session> {
         self.refresh_session_from_storage_if_clean(id);
-        let sessions = self.sessions.read();
-        sessions.get(id).cloned()
+        let session = self.sessions.read().get(id).cloned()?;
+        Some(self.project_work_states(session))
+    }
+
+    fn project_work_states(&self, session: Session) -> Session {
+        self.session_with_heartbeats(session).0
+    }
+
+    /// Publish heartbeat fields and their derived work state from the same snapshot.
+    pub fn session_with_heartbeats(&self, mut session: Session) -> (Session, HashMap<String, AgentHeartbeatInfo>) {
+        use super::work_state::{work_state, verdict_at, WorkEvidence, WorkState};
+        for agent in &mut session.agents { agent.work_state = Some(WorkState::Working); }
+        let evidence = self.agent_heartbeats.try_read().and_then(|heartbeats| {
+            self.heartbeat_marks.try_read().map(|marks|
+                (heartbeats.get(&session.id).cloned().unwrap_or_default(), marks.clone()))
+        });
+        let Some((heartbeats, marks)) = evidence else { return (session, HashMap::new()) };
+        let queue = self.queue_repo.as_ref()
+            .and_then(|repo| repo.rows_for_session(&session.id).ok());
+        let states = session.agents.iter().map(|agent| {
+            let verdict_at = verdict_at(&session, agent, self.storage.as_deref());
+            // Roster reads also occur inside lifecycle operations that already own this
+            // lock. Unavailable runtime evidence must stay working, never deadlock a read.
+            let Some(manager) = self.pty_manager.try_read() else { return WorkState::Working };
+            let instance = manager.instance_id(&agent.id);
+            let state = work_state(&WorkEvidence {
+                agent_id: &agent.id, role: &agent.role, status: &agent.status,
+                alive: manager.is_alive(&agent.id), spawned_at: manager.spawned_at(&agent.id),
+                heartbeat: heartbeats.get(&agent.id).map(|heartbeat|
+                    (heartbeat.status.as_str(), heartbeat.last_activity)),
+                heartbeat_is_self: !marks.contains(&(session.id.clone(), agent.id.clone())),
+                queue: queue.as_deref(), verdict_at,
+            });
+            if manager.instance_id(&agent.id) != instance { WorkState::Working } else { state }
+        }).collect::<Vec<_>>();
+        for (agent, state) in session.agents.iter_mut().zip(states) {
+            agent.work_state = Some(state);
+        }
+        (session, heartbeats)
     }
 
     fn refresh_session_from_storage_if_clean(&self, session_id: &str) {
@@ -1971,7 +2020,7 @@ impl SessionController {
     pub fn list_sessions(&self) -> Vec<Session> {
         let sessions = self.sessions.read();
         let heartbeats = self.agent_heartbeats.read();
-        sessions
+        let result = sessions
             .values()
             .cloned()
             .map(|mut session| {
@@ -1991,7 +2040,10 @@ impl SessionController {
                 }
                 session
             })
-            .collect()
+            .collect::<Vec<_>>();
+        drop(heartbeats);
+        drop(sessions);
+        result.into_iter().map(|session| self.project_work_states(session)).collect()
     }
 
     pub(crate) fn session_requires_internal_evaluator(session: &Session) -> bool {
@@ -2080,6 +2132,17 @@ impl SessionController {
         status: &str,
         summary: Option<&str>,
     ) -> Result<(), String> {
+        self.update_heartbeat_with_source(session_id, agent_id, status, summary, false)
+    }
+
+    pub fn update_heartbeat_with_source(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        status: &str,
+        summary: Option<&str>,
+        queen_mark: bool,
+    ) -> Result<(), String> {
         let now = Utc::now();
         let prev_status = {
             let mut heartbeats = self.agent_heartbeats.write();
@@ -2093,6 +2156,9 @@ impl SessionController {
                     summary: summary.map(String::from),
                 },
             );
+            let key = (session_id.to_string(), agent_id.to_string());
+            let mut marks = self.heartbeat_marks.write();
+            if queen_mark { marks.insert(key); } else { marks.remove(&key); }
             prev
         };
         let session_snapshot = {
@@ -2540,7 +2606,7 @@ impl SessionController {
         };
 
         if let (Some(app_handle), Some(session)) = (self.app_handle.as_ref(), session) {
-            let _ = app_handle.emit("session-update", SessionUpdate { session });
+            let _ = app_handle.emit("session-update", SessionUpdate { session: self.project_work_states(session) });
         }
     }
 
@@ -9568,6 +9634,7 @@ Last updated: {timestamp}
             created_at: Utc::now(),
             last_activity_at: Utc::now(),
             agents: vec![AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: solo_id,
@@ -9929,6 +9996,7 @@ Last updated: {timestamp}
         spawned_agent_ids.push(queen_id.clone());
 
         agents.push(AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: queen_id.clone(),
@@ -10125,6 +10193,7 @@ Last updated: {timestamp}
             spawned_agent_ids.push(worker_id.clone());
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: worker_id,
@@ -10612,6 +10681,7 @@ phases and do EXACTLY this, then stop:
             }
 
             let agent_info = AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: variant.agent_id.clone(),
@@ -11063,6 +11133,7 @@ phases and do EXACTLY this, then stop:
             }
 
             new_agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: agent_id,
@@ -11654,6 +11725,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 })?;
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
@@ -11781,6 +11853,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
@@ -11919,6 +11992,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
@@ -12128,6 +12202,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Fusion Queen: {}", e))?;
 
             new_agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id,
@@ -12258,6 +12333,7 @@ The backend composed and persisted the following authoritative skeleton before l
             }
 
             new_agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: variant.agent_id.clone(),
@@ -12520,6 +12596,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
@@ -12848,6 +12925,7 @@ The backend composed and persisted the following authoritative skeleton before l
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
+                    work_state: None,
                     transcript_spawned_at,
                     transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: worker_id,
@@ -14419,6 +14497,7 @@ The backend composed and persisted the following authoritative skeleton before l
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
+                    work_state: None,
                     transcript_spawned_at,
                     transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: judge_id,
@@ -14763,6 +14842,7 @@ The backend composed and persisted the following authoritative skeleton before l
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
+                    work_state: None,
                     transcript_spawned_at,
                     transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: judge_id,
@@ -15432,6 +15512,7 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         new_agents.push(AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: queen_id.clone(),
@@ -16056,6 +16137,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 };
 
                 Some(AgentInfo {
+                    work_state: None,
                     transcript_spawned_at: pa.transcript_spawned_at,
                     transcript_session_id: pa.transcript_session_id.clone(),
                     id: pa.id.clone(),
@@ -16209,6 +16291,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
 
             new_agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id.clone(),
@@ -16360,6 +16443,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id.clone(),
@@ -17097,6 +17181,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let agent_config = config_with_role;
 
         let agent_info = AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: worker_id.clone(),
@@ -17289,6 +17374,7 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let agent_info = AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: evaluator_id,
@@ -17445,6 +17531,7 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let agent_info = AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: prince_id,
@@ -17572,6 +17659,7 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let agent_info = AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: qa_worker_id,
@@ -17719,6 +17807,7 @@ The backend composed and persisted the following authoritative skeleton before l
         agent_config.label = Some(format!("{} Planner", domain));
 
         let agent_info = AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: planner_id.clone(),
@@ -18685,6 +18774,7 @@ mod tests {
         session.worktree_path = Some(project_path.to_string_lossy().to_string());
         session.agents = vec![
             AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{SESSION_ID}-queen"),
@@ -18698,6 +18788,7 @@ mod tests {
                 base_commit_sha: None,
             },
             AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{SESSION_ID}-worker-1"),
@@ -18714,6 +18805,7 @@ mod tests {
                 base_commit_sha: None,
             },
             AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{SESSION_ID}-worker-2"),
@@ -19863,6 +19955,7 @@ mod tests {
         let mut session = waiting_worker_session(session_id, temp.path(), 1);
         session.state = SessionState::PlanReady;
         session.agents = vec![AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: planner_id,
@@ -22181,6 +22274,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             created_at: Utc::now(),
             last_activity_at: Utc::now(),
             agents: vec![AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{session_id}-worker-{worker_id}"),
@@ -22223,6 +22317,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let mut agents = Vec::new();
         if with_evaluator {
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{id}-evaluator"),
@@ -22450,6 +22545,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         with_prince: bool,
     ) -> Session {
         let mut agents = vec![AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: format!("{id}-evaluator"),
@@ -22464,6 +22560,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         }];
         if with_prince {
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{id}-prince"),

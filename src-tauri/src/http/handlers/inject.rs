@@ -924,6 +924,7 @@ mod tests {
 
     fn agent(id: &str, role: AgentRole) -> AgentInfo {
         AgentInfo {
+            work_state: None,
             id: id.to_string(),
             role,
             status: AgentStatus::Running,

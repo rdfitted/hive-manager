@@ -88,6 +88,8 @@ pub struct PostHeartbeatResponse {
 #[derive(Serialize)]
 pub struct ActiveAgentInfo {
     pub id: String,
+    pub work_state: crate::session::work_state::WorkState,
+    pub awaiting_injected_turn_at: Option<String>,
     pub role: String,
     pub last_activity: Option<String>,
     pub status: Option<String>,
@@ -545,7 +547,8 @@ pub async fn post_heartbeat(
     {
         let controller = state.session_controller.read();
         controller
-            .update_heartbeat(&session_id, &agent_id, &req.status, req.summary.as_deref())
+            .update_heartbeat_with_source(&session_id, &agent_id, &req.status,
+                req.summary.as_deref(), req.mark_agent_id.is_some())
             .map_err(ApiError::internal)?;
     }
 
@@ -853,7 +856,7 @@ pub async fn get_active_sessions(
         .into_iter()
         .filter(|s| s.state.is_monitorable())
         .map(|session| {
-            let agents_with_heartbeats = controller.get_heartbeat_info(&session.id);
+            let (session, agents_with_heartbeats) = controller.session_with_heartbeats(session);
             let agents: Vec<ActiveAgentInfo> = session
                 .agents
                 .iter()
@@ -861,6 +864,9 @@ pub async fn get_active_sessions(
                     let hb = agents_with_heartbeats.get(&a.id);
                     ActiveAgentInfo {
                         id: a.id.clone(),
+                        work_state: a.work_state.unwrap_or_default(),
+                        awaiting_injected_turn_at: crate::session::work_state::awaiting_injected_turn_since(&a.status)
+                            .map(|at| at.to_rfc3339()),
                         role: format!("{:?}", a.role),
                         last_activity: hb.map(|h| h.last_activity.to_rfc3339()),
                         status: hb.map(|h| h.status.clone()),
@@ -927,6 +933,7 @@ mod tests {
 
     fn agent(id: &str, role: AgentRole, parent_id: Option<&str>) -> AgentInfo {
         AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: id.to_string(),
@@ -1018,6 +1025,36 @@ mod tests {
         });
 
         HeartbeatFixture { _temp: temp, state }
+    }
+
+    #[tokio::test]
+    async fn active_sessions_expose_work_state_without_replacing_heartbeat_status() {
+        let fixture = fixture();
+        fixture.state.pty_manager.read().create_session(WORKER_ID.into(),
+            AgentRole::Worker { index: 1, parent: Some(QUEEN_ID.into()) },
+            "fixture-cli", &[], None, 80, 24).unwrap();
+        fixture.state.session_controller.read().update_heartbeat(
+            SESSION_ID, WORKER_ID, "completed", Some("Finished fixture work")).unwrap();
+        let Json(response) = get_active_sessions(State(Arc::clone(&fixture.state)))
+            .await.unwrap_or_else(|error| panic!("active sessions failed: {}", error.message));
+        let value = serde_json::to_value(response).unwrap();
+        let worker = value["sessions"][0]["agents"].as_array().unwrap().iter()
+            .find(|agent| agent["id"] == WORKER_ID).unwrap();
+        assert_eq!(worker["status"], "completed");
+        assert_eq!(worker["work_state"], "finished");
+
+        let mut session = fixture.state.session_controller.read().get_session(SESSION_ID).unwrap();
+        let submitted = chrono::Utc::now() + chrono::Duration::seconds(1);
+        session.agents.iter_mut().find(|agent| agent.id == WORKER_ID).unwrap().status =
+            AgentStatus::WaitingForInput(format!("awaiting_injected_turn:{}", submitted.to_rfc3339()));
+        fixture.state.session_controller.read().insert_test_session(session);
+        let Json(response) = get_active_sessions(State(Arc::clone(&fixture.state)))
+            .await.unwrap_or_else(|error| panic!("active sessions failed: {}", error.message));
+        let value = serde_json::to_value(response).unwrap();
+        let worker = value["sessions"][0]["agents"].as_array().unwrap().iter()
+            .find(|agent| agent["id"] == WORKER_ID).unwrap();
+        assert_eq!(worker["work_state"], "working");
+        assert_eq!(worker["awaiting_injected_turn_at"], submitted.to_rfc3339());
     }
 
     fn running_row() -> QueueRow {

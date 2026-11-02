@@ -2157,6 +2157,7 @@ async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
         .unwrap();
     let mut session = quiet_hive_session(session_id, &project);
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: worker_id.clone(),
@@ -2384,6 +2385,7 @@ async fn http_reassignment_refreshes_finalized_liveness_and_restores_stall_cover
 
     let mut session = quiet_hive_session(session_id, &project);
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: worker_id.clone(),
@@ -3427,6 +3429,7 @@ async fn queen_completed_node_unblocks_the_same_task_spawn_only_after_ownership_
 
     let mut session = quiet_hive_session(session_id, &project);
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: queen_id.clone(),
@@ -3440,6 +3443,7 @@ async fn queen_completed_node_unblocks_the_same_task_spawn_only_after_ownership_
         role_definition_version: None,
     });
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: principal_id.clone(),
@@ -3563,6 +3567,7 @@ async fn queen_external_completion_keeps_dependent_code_conflict_serialized() {
     let mut session = quiet_hive_session(session_id, &project);
     session.execution_policy.workspace_strategy = crate::domain::WorkspaceStrategy::SharedCell;
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: queen_id.clone(),
@@ -3713,6 +3718,7 @@ async fn queen_legacy_completion_for_another_principal_does_not_unblock() {
 
     let mut session = quiet_hive_session(session_id, &project);
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: queen_id,

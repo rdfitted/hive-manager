@@ -1424,6 +1424,7 @@ pub async fn list_workers(
             "role": agent.config.role.as_ref().map(|role| &role.label).unwrap_or(&"Worker".to_string()),
             "cli": agent.config.cli,
             "status": format!("{:?}", agent.status),
+            "work_state": agent.work_state.unwrap_or_default(),
             "task_file": task_file.to_string_lossy().to_string()
         }));
     }
@@ -1797,6 +1798,7 @@ mod tests {
             created_at: now,
             last_activity_at: now,
             agents: vec![AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: "parent".to_string(),
@@ -1828,6 +1830,37 @@ mod tests {
             no_git: false,
             resume_report: None,
         }
+    }
+
+    #[tokio::test]
+    async fn work_state_is_separate_from_workers_process_status_and_roster() {
+        let (directory, state) = test_app_state();
+        let mut session = ceiling_session(false);
+        session.project_path = directory.path().to_path_buf();
+        session.no_git = true;
+        session.agents[0].id = "session-worker-1".into();
+        state.pty_manager.read().create_session(
+            session.agents[0].id.clone(), session.agents[0].role.clone(),
+            "fixture-cli", &[], None, 80, 24).unwrap();
+        state.session_controller.read().insert_test_session(session);
+        state.session_controller.read().update_heartbeat(
+            "session", "session-worker-1", "completed", Some("Finished fixture work")).unwrap();
+
+        let Json(response) = list_workers(State(Arc::clone(&state)), Path("session".into()))
+            .await.unwrap_or_else(|error| panic!("worker list failed: {}", error.message));
+        assert_eq!(response["workers"][0]["status"], "Running", "ruling 6 preserves process truth");
+        assert_eq!(response["workers"][0]["work_state"], "finished");
+        let roster = state.session_controller.read().get_session("session").unwrap();
+        assert_eq!(serde_json::to_value(&roster.agents[0]).unwrap()["work_state"], "finished");
+
+        // Same ID, different process: the predecessor's completed heartbeat is not proof.
+        state.pty_manager.read().kill("session-worker-1").unwrap();
+        state.pty_manager.read().create_session("session-worker-1".into(),
+            roster.agents[0].role.clone(), "fixture-cli", &[], None, 80, 24).unwrap();
+        let Json(response) = list_workers(State(Arc::clone(&state)), Path("session".into()))
+            .await.unwrap_or_else(|error| panic!("worker list failed: {}", error.message));
+        assert_eq!(response["workers"][0]["status"], "Running");
+        assert_eq!(response["workers"][0]["work_state"], "working");
     }
 
     #[test]

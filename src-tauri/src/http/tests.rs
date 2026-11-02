@@ -412,6 +412,7 @@ pub(super) fn make_test_session_with_agents(id: &str, project_path: &str, agent_
         .iter()
         .enumerate()
         .map(|(i, aid)| AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: (*aid).to_string(),
@@ -459,6 +460,7 @@ pub(super) fn make_test_session_with_agents(id: &str, project_path: &str, agent_
 
 fn make_test_agent(id: &str, role: AgentRole) -> AgentInfo {
     AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: id.to_string(),
@@ -495,6 +497,7 @@ fn make_test_session_for_completion(
     session.created_at = last_activity_at - chrono::Duration::minutes(1);
     if with_evaluator {
         session.agents.push(AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: format!("{id}-evaluator"),
@@ -4407,6 +4410,7 @@ async fn test_add_qa_worker_valid_request_reaches_controller() {
 
     let mut session = make_test_session("session-qa-valid", temp_dir.to_str().unwrap());
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: "session-qa-valid-evaluator".to_string(),
@@ -5343,6 +5347,7 @@ async fn milestone_ready_respawn_branch_arms_qa_and_preserves_iteration() {
     // Rostered Evaluator with NO registered PTY -> is_alive() is false -> the
     // dead-evaluator respawn branch.
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: format!("{}-evaluator", session_id),
@@ -5433,6 +5438,7 @@ async fn force_pass_is_allowed_before_the_milestone_handoff() {
     let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
     session.state = SessionState::Running;
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: format!("{}-evaluator", session_id),
@@ -7198,6 +7204,7 @@ async fn test_post_verdict_persists_commit_sha_and_rationale() {
     let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
     session.state = SessionState::QaInProgress { iteration: Some(2) };
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: format!("{session_id}-evaluator"),
@@ -7317,6 +7324,7 @@ async fn test_post_verdict_fail_persists_commit_sha_and_failure_state() {
     let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
     session.state = SessionState::QaInProgress { iteration: Some(2) };
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: format!("{session_id}-evaluator"),
@@ -10697,6 +10705,7 @@ async fn heartbeat_accepts_the_bare_queen_alias_and_canonicalizes_it() {
     let queen_id = format!("{}-queen", session_id);
     let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
     session.agents.push(AgentInfo {
+        work_state: None,
         transcript_spawned_at: None,
         transcript_session_id: None,
         id: queen_id.clone(),

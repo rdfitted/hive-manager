@@ -276,6 +276,7 @@ mod tests {
                 .into_iter()
                 .enumerate()
                 .map(|(idx, status)| AgentInfo {
+                    work_state: None,
                     transcript_spawned_at: None,
                     transcript_session_id: None,
                     id: format!("agent-{idx}"),
@@ -513,6 +514,7 @@ mod tests {
     fn fusion_variant_cell_only_matches_fusion_agents() {
         // Fusion variant cells contain only Fusion agents matching that variant
         let fusion_agent = AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: "fusion-agent".to_string(),
@@ -528,6 +530,7 @@ mod tests {
             base_commit_sha: None,
         };
         let judge_agent = AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: "judge-agent".to_string(),
@@ -558,6 +561,7 @@ mod tests {
     fn fusion_resolver_cell_contains_non_fusion_agents() {
         // Resolver cell contains non-Fusion agents (judge, planner, evaluator, QA)
         let fusion_agent = AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: "fusion-agent".to_string(),
@@ -573,6 +577,7 @@ mod tests {
             base_commit_sha: None,
         };
         let judge_agent = AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: "judge-agent".to_string(),
