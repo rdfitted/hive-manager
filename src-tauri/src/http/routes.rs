@@ -1,7 +1,7 @@
 use crate::cli::health as cli_health;
 use crate::http::handlers::{
     actions, agents, agent_events, application_state, artifacts, cells, conversations, evaluator, events, health,
-    heartbeats, inject, knowledge, learnings, maintenance, planners, pty_buffer, queue, resolver, review,
+    heartbeat_history, heartbeats, inject, knowledge, learnings, maintenance, planners, pty_buffer, queue, resolver, review,
     session_files,
     sessions, templates, work_graph, workers,
 };
@@ -263,6 +263,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/sessions/{id}/project-dna",
             get(learnings::get_project_dna_for_session),
+        )
+        .route(
+            "/api/sessions/{id}/heartbeats",
+            get(heartbeat_history::get_heartbeats),
         )
         // Conversation routes
         .route(
