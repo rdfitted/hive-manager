@@ -1717,6 +1717,7 @@ impl SessionController {
     }
 
     pub fn get_session(&self, id: &str) -> Option<Session> {
+        if crate::instance::guard_id(id).is_err() { return None; }
         self.refresh_session_from_storage_if_clean(id);
         let session = self.sessions.read().get(id).cloned()?;
         Some(self.project_work_states(session))
@@ -4314,6 +4315,7 @@ cat "{prince_verdict}"
     }
 
     fn run_git_in_dir(project_path: &PathBuf, args: &[&str]) -> Result<String, String> {
+        crate::instance::guard_path(project_path)?;
         if !project_path.exists() {
             return Err(format!(
                 "Project path does not exist: {}",
@@ -4426,6 +4428,8 @@ cat "{prince_verdict}"
         session_id: &str,
     ) -> Result<FusionSessionMetadata, String> {
         let metadata_path = Self::fusion_metadata_path(project_path, session_id);
+        crate::instance::guard_id(session_id)?;
+        crate::instance::guard_path(&metadata_path)?;
         let json = std::fs::read_to_string(&metadata_path).map_err(|e| {
             format!(
                 "Failed to read fusion metadata {}: {}",
@@ -4433,7 +4437,9 @@ cat "{prince_verdict}"
                 e
             )
         })?;
-        serde_json::from_str(&json).map_err(|e| format!("Failed to parse fusion metadata: {}", e))
+        let metadata: FusionSessionMetadata = serde_json::from_str(&json).map_err(|e| format!("Failed to parse fusion metadata: {}", e))?;
+        crate::instance::guard_serialized_paths(&metadata)?;
+        Ok(metadata)
     }
 
     fn debate_metadata_path(project_path: &PathBuf, session_id: &str) -> PathBuf {
@@ -4465,6 +4471,8 @@ cat "{prince_verdict}"
         session_id: &str,
     ) -> Result<DebateSessionMetadata, String> {
         let metadata_path = Self::debate_metadata_path(project_path, session_id);
+        crate::instance::guard_id(session_id)?;
+        crate::instance::guard_path(&metadata_path)?;
         let json = std::fs::read_to_string(&metadata_path).map_err(|e| {
             format!(
                 "Failed to read debate metadata {}: {}",
@@ -4472,7 +4480,9 @@ cat "{prince_verdict}"
                 e
             )
         })?;
-        serde_json::from_str(&json).map_err(|e| format!("Failed to parse debate metadata: {}", e))
+        let metadata: DebateSessionMetadata = serde_json::from_str(&json).map_err(|e| format!("Failed to parse debate metadata: {}", e))?;
+        crate::instance::guard_serialized_paths(&metadata)?;
+        Ok(metadata)
     }
 
     fn parse_task_status(content: &str) -> Option<String> {
@@ -15211,6 +15221,7 @@ The backend composed and persisted the following authoritative skeleton before l
     }
 
     pub fn select_fusion_winner(&self, session_id: &str, variant_name: &str) -> Result<(), String> {
+        crate::instance::refuse("Fusion winner selection")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -16159,6 +16170,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
     /// Resume a persisted session from storage
     pub fn resume_session(&self, session_id: &str) -> Result<Session, String> {
+        crate::instance::guard_id(session_id)?;
         // Validate session ID format to prevent path traversal
         if session_id.contains("..") || session_id.contains("/") || session_id.contains("\\") {
             return Err("Invalid session ID format".to_string());

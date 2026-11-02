@@ -33,6 +33,7 @@ pub(crate) const VALID_CLIS: &[&str] = &["claude", "codex", "cursor"];
 
 /// Validate session_id for path traversal attacks
 pub fn validate_session_id(session_id: &str) -> Result<(), ApiError> {
+    crate::instance::guard_id(session_id).map_err(ApiError::bad_request)?;
     if session_id.contains("..") || session_id.contains('/') || session_id.contains('\\') {
         return Err(ApiError::bad_request(
             "Invalid session ID: must not contain '..', '/', or '\\'",
@@ -137,6 +138,7 @@ pub fn validate_candidate_ids(candidate_ids: &[String]) -> Result<(), ApiError> 
     let mut seen = HashSet::new();
 
     for id in candidate_ids {
+        crate::instance::guard_id(id).map_err(ApiError::bad_request)?;
         if id.is_empty() || id.len() > 64 {
             return Err(ApiError::bad_request(
                 "Invalid candidate ID: must be 1-64 characters",
@@ -171,6 +173,7 @@ pub fn validate_cli(cli: &str) -> Result<(), ApiError> {
 
 /// Validate project path for path traversal and existence
 pub fn validate_project_path(path: &str) -> Result<(), ApiError> {
+    crate::instance::guard_path(std::path::Path::new(path)).map_err(ApiError::bad_request)?;
     use std::path::Path;
 
     // Check for path traversal sequences

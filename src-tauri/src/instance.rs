@@ -51,6 +51,15 @@ pub fn is_isolated() -> bool {
 }
 
 fn absolute(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    if let Some(Component::Prefix(prefix)) = path.components().next() {
+        if !matches!(
+            prefix.kind(),
+            std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
+        ) {
+            return Err("Network and device paths are disabled for isolated instances".into());
+        }
+    }
     if !path.is_absolute()
         || path
             .components()
@@ -443,6 +452,137 @@ pub(crate) fn project_fixture_work_states(session: &mut crate::session::Session)
     }
 }
 
+/// Every caller-supplied or stored filesystem target crosses this boundary.
+pub(crate) fn guard_path(path: &Path) -> Result<(), String> {
+    let Some(settings) = settings() else {
+        return Ok(());
+    };
+    settings
+        .contains(path)
+        .map_err(|error| format!("Isolated instance: {error}"))
+}
+
+pub(crate) fn guard_json_paths(value: &serde_json::Value) -> Result<(), String> {
+    if !is_isolated() {
+        return Ok(());
+    }
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                let key = key.to_ascii_lowercase();
+                let path_key = key.ends_with("_path")
+                    || key.ends_with("_file")
+                    || key.ends_with("_dir")
+                    || ["path", "cwd", "transcript_cwd", "directory"].contains(&key.as_str());
+                if path_key {
+                    if let Some(path) = value.as_str() {
+                        guard_path(Path::new(path))?;
+                    }
+                }
+                guard_json_paths(value)?;
+            }
+        }
+        serde_json::Value::Array(array) => {
+            for value in array {
+                guard_json_paths(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn guard_serialized_paths(value: &impl serde::Serialize) -> Result<(), String> {
+    if !is_isolated() {
+        return Ok(());
+    }
+    guard_json_paths(&serde_json::to_value(value).map_err(|error| error.to_string())?)
+}
+
+pub(crate) fn guard_action(name: &str, input: &serde_json::Value) -> Result<(), String> {
+    if !is_isolated() {
+        return Ok(());
+    }
+    const READS: &[&str] = &[
+        "session.list",
+        "session.get",
+        "session.get_info",
+        "git.list_branches",
+        "git.current_branch",
+        "git.worktree_list",
+        "pty.status",
+        "pty.list",
+        "pty.snapshot",
+        "pty.resize",
+        "coordination.get_log",
+        "coordination.get_workers_state",
+        "coordination.get_session_storage_path",
+        "coordination.get_current_directory",
+        "coordination.list_stored_sessions",
+        "coordination.get_app_config",
+        "coordination.get_session_plan",
+    ];
+    if !READS.contains(&name) {
+        return Err(format!("Isolated instance: action {name} is disabled"));
+    }
+    guard_action_ids(input)?;
+    guard_json_paths(input)
+}
+
+pub(crate) fn guard_id(id: &str) -> Result<(), String> {
+    if !is_isolated() {
+        return Ok(());
+    }
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("Isolated instance: IDs must be flat ASCII names".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn guard_stored_session(
+    expected_id: &str,
+    session: &crate::storage::PersistedSession,
+) -> Result<(), String> {
+    if !is_isolated() {
+        return Ok(());
+    }
+    guard_id(expected_id)?;
+    guard_id(&session.id)?;
+    if session.id != expected_id {
+        return Err("Isolated instance: stored session ID mismatch".into());
+    }
+    for agent in &session.agents {
+        guard_id(&agent.id)?;
+    }
+    guard_serialized_paths(session)
+}
+
+fn guard_action_ids(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if ["id", "session_id", "agent_id", "parent_id"].contains(&key.as_str()) {
+                    if let Some(id) = value.as_str() {
+                        guard_id(id)?;
+                    }
+                }
+                guard_action_ids(value)?;
+            }
+        }
+        serde_json::Value::Array(array) => {
+            for value in array {
+                guard_action_ids(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,6 +791,10 @@ mod tests {
 
             assert!(settings.init_script().contains(&settings.api_base()));
             assert!(!settings.init_script().contains(":18800"));
+            assert_eq!(
+                resolved_path(&std::env::current_dir().unwrap()).unwrap(),
+                resolved_path(&settings.root).unwrap()
+            );
             assert!(is_isolated());
             return;
         }
@@ -763,6 +907,18 @@ mod tests {
             .0;
         assert!(plugins.contains("tauri_plugin_updater::Builder::new().build()"));
         assert!(plugins.contains("tauri_plugin_process::init()"));
+        for plugin in [
+            "tauri_plugin_dialog",
+            "tauri_plugin_opener",
+            "tauri_plugin_shell",
+            "tauri_plugin_clipboard_manager",
+        ] {
+            assert!(
+                plugins.contains(plugin),
+                "native side-effect plugin outside isolation guard: {plugin}"
+            );
+            assert_eq!(lib.matches(plugin).count(), 1);
+        }
         let macos = lib
             .split_once("cli::env_path::initialize_macos_cli_environment();")
             .unwrap()
@@ -954,5 +1110,624 @@ mod tests {
         )
         .unwrap();
         assert!(controller.list_sessions().is_empty());
+    }
+
+    #[test]
+    fn instance_refuses_default_profile_and_home() {
+        let (temp, mut env) = fixture();
+        let local = temp.path().join("real-localappdata");
+        let profile = local.join("com.rduff.hive-manager");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join(".hive-instance"), "fixture").unwrap();
+        env.insert("LOCALAPPDATA".into(), local.to_string_lossy().into_owned());
+        env.insert(DIR.into(), profile.to_string_lossy().into_owned());
+        assert!(resolve(&env, BuildProfile::Debug).is_err());
+        env.insert(DIR.into(), temp.path().to_string_lossy().into_owned());
+        assert!(
+            resolve(&env, BuildProfile::Debug).is_err(),
+            "profile ancestor"
+        );
+        env.remove("LOCALAPPDATA");
+        env.insert(DIR.into(), profile.to_string_lossy().into_owned());
+        env.insert("USERPROFILE".into(), profile.to_string_lossy().into_owned());
+        assert!(resolve(&env, BuildProfile::Debug).is_err(), "real home");
+        env.insert(
+            "USERPROFILE".into(),
+            temp.path().to_string_lossy().into_owned(),
+        );
+        assert!(
+            matches!(
+                resolve(&env, BuildProfile::Debug),
+                Ok(Instance::Isolated(_))
+            ),
+            "separate folder under home is allowed"
+        );
+    }
+
+    #[test]
+    fn instance_environment_contract_is_complete() {
+        let text = source("src/instance.rs");
+        let environment = first_statement(&text, "environment")
+            .split_once("    pub fn contains(")
+            .unwrap()
+            .0;
+        let compact = environment.split_whitespace().collect::<String>();
+        for (key, relative) in [
+            ("APPDATA", "appdata"),
+            ("LOCALAPPDATA", "localappdata"),
+            ("USERPROFILE", "home"),
+            ("HOME", "home"),
+            ("XDG_CONFIG_HOME", "home/.config"),
+            ("XDG_DATA_HOME", "home/.local/share"),
+            ("XDG_CACHE_HOME", "home/.cache"),
+            ("TEMP", "temp"),
+            ("TMP", "temp"),
+            ("TMPDIR", "temp"),
+            ("HIVE_WIKI_ROOT", "home/.ai-docs/wiki"),
+            ("CODEX_HOME", "home/.codex"),
+            ("CLAUDE_CONFIG_DIR", "home/.claude"),
+            ("WEBVIEW2_USER_DATA_FOLDER", "webview"),
+        ] {
+            assert!(
+                compact.contains(&format!("(\"{key}\",\"{relative}\")")),
+                "redirect missing: {key}"
+            );
+        }
+        for key in [
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        ] {
+            assert!(
+                environment.contains(&format!("\"{key}\"")),
+                "isolated override missing: {key}"
+            );
+        }
+        let bootstrap = first_statement(&text, "bootstrap")
+            .split_once("\npub fn refuse(")
+            .unwrap()
+            .0;
+        assert!(bootstrap.contains("for (key, value) in settings.environment()"));
+        assert!(bootstrap.contains("std::env::set_var(key, value)"));
+        assert!(bootstrap.contains("std::env::remove_var(key)"));
+        assert!(bootstrap.contains("std::env::set_current_dir(&settings.root)"));
+        let scrub = first_statement(&text, "scrub_key")
+            .split_once("\nfn reject_links(")
+            .unwrap()
+            .0;
+        for prefix in ["HIVE_", "CLAUDE_CODE_", "GIT_", "WEBVIEW2_"] {
+            assert!(
+                scrub.contains(&format!("key.starts_with(\"{prefix}\")")),
+                "inherited redirect/identity: {prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn instance_no_pty_resize_guard() {
+        let manager = source("src/pty/manager.rs");
+        let resize = first_statement(&manager, "resize")
+            .split_once("    pub fn instance_id(")
+            .unwrap()
+            .0;
+        let compact = resize.split_whitespace().collect::<String>();
+        assert!(compact.contains(
+            "ifcrate::instance::is_isolated()&&!sessions.contains_key(id){returnOk(());}"
+        ));
+    }
+
+    #[test]
+    fn instance_fixture_seam_is_isolated_only() {
+        let instance = source("src/instance.rs");
+        assert!(first_statement(&instance, "load_fixtures")
+            .starts_with("let Some(settings) = settings() else"));
+        assert!(first_statement(&instance, "project_fixture_work_states")
+            .starts_with("if !is_isolated()"));
+        let controller = source("src/session/controller.rs");
+        assert!(first_statement(&controller, "apply_instance_fixture")
+            .starts_with("if !crate::instance::is_isolated()"));
+        assert!(controller.contains("crate::instance::project_fixture_work_states(&mut session);"));
+        assert!(source("src/lib.rs")
+            .contains("instance::load_fixtures(&session_controller.read(), &storage)"));
+    }
+
+    #[test]
+    fn instance_reparse_points_are_refused() {
+        let (root, _) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let link = root.path().join("escaping-directory");
+        #[cfg(windows)]
+        {
+            let mut command = std::process::Command::new("cmd.exe");
+            command
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(&link)
+                .arg(outside.path());
+            crate::process::hide_std_console_window(&mut command);
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "junction setup: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let result = reject_links(root.path());
+        let env = Environment::from([
+            (DIR.into(), root.path().to_string_lossy().into_owned()),
+            (PORT.into(), "18891".into()),
+        ]);
+        let Instance::Isolated(settings) = resolve(&env, BuildProfile::Debug).unwrap() else {
+            panic!("fixture")
+        };
+        let contained = settings.contains(&link);
+        #[cfg(windows)]
+        std::fs::remove_dir(&link).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(&link).unwrap();
+        assert!(
+            result.is_err(),
+            "reparse point must be refused before opening storage"
+        );
+        assert!(
+            contained.is_err(),
+            "canonical target must remain in the instance"
+        );
+        assert!(outside.path().exists());
+    }
+
+    fn boundary_child(name: &str) -> bool {
+        if std::env::var("HM_INSTANCE_BOUNDARY_TEST").ok().as_deref() == Some(name) {
+            bootstrap();
+            return true;
+        }
+        let (_root, env) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("sentinel.md"),
+            "## Status: ACTIVE\nSynthetic outside fixture\n",
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("instance::tests::{name}"),
+                "--nocapture",
+            ])
+            .envs(env)
+            .env("HM_INSTANCE_BOUNDARY_TEST", name)
+            .env("HM_INSTANCE_OUTSIDE", outside.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    fn boundary_state() -> std::sync::Arc<crate::http::state::AppState> {
+        use std::sync::Arc;
+        let storage = Arc::new(
+            crate::storage::SessionStorage::new_with_base(settings().unwrap().data_dir()).unwrap(),
+        );
+        let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
+        let manager = Arc::new(parking_lot::RwLock::new(crate::pty::PtyManager::new()));
+        let controller = Arc::new(parking_lot::RwLock::new(
+            crate::session::SessionController::new(manager.clone()),
+        ));
+        controller.write().set_storage(storage.clone());
+        let injection = Arc::new(parking_lot::RwLock::new(
+            crate::coordination::InjectionManager::new(
+                manager.clone(),
+                crate::storage::SessionStorage::new_with_base(settings().unwrap().data_dir())
+                    .unwrap(),
+            ),
+        ));
+        let events = crate::events::EventBus::new(storage.base_dir().clone());
+        let db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
+        let repo = Arc::new(crate::storage::QueueRepo::new(db.clone()));
+        repo.ensure_schema().unwrap();
+        let queue = Arc::new(crate::coordination::QueueManager::new(repo, events.clone()));
+        Arc::new(crate::http::state::AppState::new(
+            config, manager, controller, injection, storage, events, db, queue, None,
+        ))
+    }
+
+    struct BoundaryProbe(&'static str);
+    #[async_trait::async_trait]
+    impl crate::actions::Action for BoundaryProbe {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn input_schema(&self) -> schemars::schema::RootSchema {
+            schemars::schema_for!(serde_json::Value)
+        }
+        async fn run(
+            &self,
+            _: &crate::actions::ActionContext,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, crate::actions::ActionError> {
+            Ok(serde_json::Value::Null)
+        }
+    }
+
+    #[test]
+    fn instance_registry_denies_mutations_and_external_paths() {
+        let registry_source = source("src/actions/registry.rs");
+        assert!(first_statement(&registry_source, "dispatch")
+            .starts_with("crate::instance::guard_action("));
+        if !boundary_child("instance_registry_denies_mutations_and_external_paths") {
+            return;
+        }
+        let state = boundary_state();
+        let mut registry = crate::actions::ActionRegistry::new();
+        registry.register(Box::new(BoundaryProbe("git.worktree_add")));
+        registry.register(Box::new(BoundaryProbe("git.current_branch")));
+        let outside = std::env::var("HM_INSTANCE_OUTSIDE").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for caller in [
+            crate::actions::Caller::Frontend,
+            crate::actions::Caller::Http,
+        ] {
+            let context = crate::actions::ActionContext::new(caller, state.clone());
+            let error = runtime.block_on(registry.dispatch("git.worktree_add", &context,
+                serde_json::json!({"project_path":settings().unwrap().root,"worktree_path":settings().unwrap().root.join("projects/synthetic-worktree")}))).unwrap_err();
+            assert!(error.message.contains("Isolated instance"));
+            let error = runtime
+                .block_on(registry.dispatch(
+                    "git.current_branch",
+                    &context,
+                    serde_json::json!({"project_path":outside}),
+                ))
+                .unwrap_err();
+            assert!(error.message.contains("Isolated instance"));
+            assert!(runtime
+                .block_on(registry.dispatch(
+                    "git.current_branch",
+                    &context,
+                    serde_json::json!({"project_path":settings().unwrap().root})
+                ))
+                .is_ok());
+        }
+    }
+
+    #[test]
+    fn instance_git_paths_are_contained() {
+        let git = source("src/actions/git/mod.rs");
+        for name in ["run_git_in_dir", "run_git_ls_files_capped"] {
+            let head = first_statement(&git, name)
+                .split_once("if !path.exists()")
+                .unwrap()
+                .0;
+            assert!(head.contains("crate::instance::guard_path(path)"), "{name}");
+        }
+        let controller = source("src/session/controller.rs");
+        assert!(first_statement(&controller, "run_git_in_dir")
+            .starts_with("crate::instance::guard_path(project_path)"));
+        if !boundary_child("instance_git_paths_are_contained") {
+            return;
+        }
+        let outside = std::env::var("HM_INSTANCE_OUTSIDE").unwrap();
+        assert!(
+            crate::actions::git::run_git_in_dir(&["--version"], &outside)
+                .unwrap_err()
+                .contains("Isolated instance")
+        );
+        assert!(crate::actions::git::run_git_ls_files_capped(&outside, 10, 1000).is_err());
+        assert!(crate::actions::git::run_git_in_dir(
+            &["--version"],
+            settings().unwrap().root.to_str().unwrap()
+        )
+        .unwrap()
+        .contains("git version"));
+    }
+
+    #[test]
+    fn instance_tier_sources_are_contained() {
+        let tier = source("src/cli/tier_ladder.rs");
+        assert!(first_statement(&tier, "resolve_tier_ladder")
+            .starts_with("if let Err(detail) = crate::instance::guard_path("));
+        if !boundary_child("instance_tier_sources_are_contained") {
+            return;
+        }
+        let outside = PathBuf::from(std::env::var("HM_INSTANCE_OUTSIDE").unwrap());
+        let root = &settings().unwrap().root;
+        for (project, wiki) in [(&outside, None), (root, Some(outside.as_path()))] {
+            let result = crate::cli::tier_ladder::resolve_tier_ladder(project, wiki);
+            assert!(result.ladder.is_none());
+            assert!(result
+                .issues
+                .iter()
+                .any(|issue| issue.detail.contains("Isolated instance")));
+        }
+        assert!(crate::cli::tier_ladder::resolve_tier_ladder(root, None)
+            .ladder
+            .is_some());
+    }
+
+    #[test]
+    fn instance_review_paths_are_contained() {
+        let review = source("src/review/diff.rs");
+        for name in ["collect", "git", "load_untracked"] {
+            assert!(
+                first_statement(&review, name).starts_with("crate::instance::guard_path("),
+                "{name}"
+            );
+        }
+        assert!(review.contains("crate::instance::guard_path(&root.join(relative))?;"));
+        if !boundary_child("instance_review_paths_are_contained") {
+            return;
+        }
+        let outside = PathBuf::from(std::env::var("HM_INSTANCE_OUTSIDE").unwrap());
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(crate::review::diff::collect(
+                &outside,
+                Some("invalid"),
+                "synthetic".into(),
+            ))
+            .unwrap_err();
+        assert!(error.contains("Isolated instance"));
+    }
+
+    fn boundary_session(
+        id: &str,
+        project: &Path,
+        kind: serde_json::Value,
+    ) -> crate::storage::PersistedSession {
+        serde_json::from_value(
+            serde_json::json!({"id":id,"session_type":kind,"project_path":project,
+            "created_at":chrono::Utc::now(),"agents":[],"state":"Running"}),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn instance_stored_sessions_are_contained_before_admission() {
+        let storage_source = source("src/storage/mod.rs");
+        assert!(first_statement(&storage_source, "load_session")
+            .starts_with("crate::instance::guard_id("));
+        assert!(
+            storage_source.contains("crate::instance::guard_stored_session(session_id, &session)")
+        );
+        let load = first_statement(&storage_source, "load_session")
+            .split_once("let json =")
+            .unwrap()
+            .0;
+        assert!(load.contains("crate::instance::guard_path(&session_file)"));
+        if !boundary_child("instance_stored_sessions_are_contained_before_admission") {
+            return;
+        }
+        let state = boundary_state();
+        let outside = PathBuf::from(std::env::var("HM_INSTANCE_OUTSIDE").unwrap());
+        let session = boundary_session(
+            "unlisted",
+            &outside,
+            serde_json::json!({"Hive":{"worker_count":0}}),
+        );
+        let directory = state.storage.create_session_dir("unlisted").unwrap();
+        std::fs::write(
+            directory.join("session.json"),
+            serde_json::to_vec(&session).unwrap(),
+        )
+        .unwrap();
+        assert!(state
+            .storage
+            .load_session("unlisted")
+            .unwrap_err()
+            .to_string()
+            .contains("Isolated instance"));
+        assert!(state
+            .session_controller
+            .read()
+            .resume_session("unlisted")
+            .unwrap_err()
+            .contains("Isolated instance"));
+        assert!(state.session_controller.read().list_sessions().is_empty());
+    }
+
+    #[test]
+    fn instance_workspace_metadata_is_contained() {
+        let controller_source = source("src/session/controller.rs");
+        for kind in ["fusion", "debate"] {
+            let method = first_statement(&controller_source, &format!("read_{kind}_metadata"));
+            let before_read = method.split_once("let json =").unwrap().0;
+            assert!(before_read.contains("crate::instance::guard_path(&metadata_path)"));
+            let before_return = method.split_once("Ok(metadata)").unwrap().0;
+            assert!(before_return.contains("crate::instance::guard_serialized_paths(&metadata)"));
+        }
+        if !boundary_child("instance_workspace_metadata_is_contained") {
+            return;
+        }
+        let state = boundary_state();
+        let root = &settings().unwrap().root;
+        let outside = PathBuf::from(std::env::var("HM_INSTANCE_OUTSIDE").unwrap());
+        let config = crate::pty::AgentConfig::default();
+        for (id, kind, metadata) in [
+            (
+                "synthetic-fusion",
+                serde_json::json!({"Fusion":{"variants":["synthetic"]}}),
+                serde_json::json!({
+                "base_branch":"main","variants":[{"index":1,"name":"Synthetic","slug":"synthetic","branch":"synthetic",
+                    "worktree_path":root,"task_file":outside.join("sentinel.md"),"agent_id":"synthetic-agent"}],
+                "judge_config":config,"task_description":"Synthetic","decision_file":outside.join("sentinel.md") }),
+            ),
+            (
+                "synthetic-debate",
+                serde_json::json!({"Debate":{"variants":["synthetic"]}}),
+                serde_json::json!({
+                "base_branch":"main","debaters":[{"index":1,"name":"Synthetic","stance":null,"slug":"synthetic",
+                    "branch":"synthetic","worktree_path":outside,"config":config}],
+                "judge_config":config,"topic":"Synthetic","rounds":1,"verdict_file":outside.join("sentinel.md") }),
+            ),
+        ] {
+            state
+                .storage
+                .save_session(&boundary_session(id, root, kind))
+                .unwrap();
+            state.session_controller.read().resume_session(id).unwrap();
+            let directory = root.join(".hive-manager").join(id);
+            std::fs::create_dir_all(&directory).unwrap();
+            let name = if id.ends_with("fusion") {
+                "fusion-config.json"
+            } else {
+                "debate-config.json"
+            };
+            std::fs::write(directory.join(name), serde_json::to_vec(&metadata).unwrap()).unwrap();
+        }
+        let controller = state.session_controller.read();
+        assert!(controller
+            .get_fusion_variant_statuses("synthetic-fusion")
+            .unwrap_err()
+            .contains("Isolated instance"));
+        assert!(controller
+            .get_fusion_evaluation("synthetic-fusion")
+            .unwrap_err()
+            .contains("Isolated instance"));
+        assert!(controller
+            .get_debate_debater_statuses("synthetic-debate")
+            .unwrap_err()
+            .contains("Isolated instance"));
+        assert!(controller
+            .get_debate_evaluation("synthetic-debate")
+            .unwrap_err()
+            .contains("Isolated instance"));
+    }
+
+    #[test]
+    fn instance_fusion_selection_is_disabled() {
+        let controller = source("src/session/controller.rs");
+        assert!(first_statement(&controller, "select_fusion_winner")
+            .starts_with("crate::instance::refuse("));
+        if !boundary_child("instance_fusion_selection_is_disabled") {
+            return;
+        }
+        assert!(boundary_state()
+            .session_controller
+            .read()
+            .select_fusion_winner("synthetic", "synthetic")
+            .unwrap_err()
+            .contains("Isolated instance"));
+    }
+
+    #[test]
+    fn instance_ids_and_project_admission_precede_io() {
+        let handlers = source("src/http/handlers/mod.rs");
+        assert!(first_statement(&handlers, "validate_session_id")
+            .starts_with("crate::instance::guard_id("));
+        assert!(first_statement(&handlers, "validate_project_path")
+            .starts_with("crate::instance::guard_path("));
+        assert!(first_statement(&handlers, "validate_candidate_ids")
+            .split_once("if id.is_empty()")
+            .unwrap()
+            .0
+            .contains("crate::instance::guard_id(id)"));
+        assert!(first_statement(
+            &source("src/commands/qa_commands.rs"),
+            "validate_session_id"
+        )
+        .starts_with("crate::instance::guard_id("));
+        let controller = source("src/session/controller.rs");
+        assert!(first_statement(&controller, "resume_session")
+            .starts_with("crate::instance::guard_id("));
+        assert!(first_statement(&controller, "get_session")
+            .starts_with("if crate::instance::guard_id(id).is_err()"));
+        // This primitive performs no IO, so UNC refusal cannot contact a network share.
+        assert!(absolute(Path::new(r"\\invalid-host\share\synthetic")).is_err());
+        if !boundary_child("instance_ids_and_project_admission_precede_io") {
+            return;
+        }
+        for id in ["D:entry", "../entry", "entry/child", "", "entry.child"] {
+            assert!(guard_id(id).is_err());
+            assert!(crate::http::handlers::validate_session_id(id).is_err());
+            assert!(crate::http::handlers::validate_candidate_ids(&[id.into()]).is_err());
+        }
+        assert!(guard_id("synthetic-session_1").is_ok());
+        let outside = std::env::var("HM_INSTANCE_OUTSIDE").unwrap();
+        assert!(crate::http::handlers::validate_project_path(&outside)
+            .unwrap_err()
+            .message
+            .contains("Isolated instance"));
+    }
+
+    #[test]
+    fn instance_environment_roots_are_contained() {
+        let (_temp, env) = fixture();
+        let Instance::Isolated(mut settings) = resolve(&env, BuildProfile::Debug).unwrap() else {
+            panic!("fixture")
+        };
+        settings.cdp_port = Some(18892);
+        let environment = settings.environment();
+        for (key, relative) in [
+            ("APPDATA", "appdata"),
+            ("LOCALAPPDATA", "localappdata"),
+            ("USERPROFILE", "home"),
+            ("HOME", "home"),
+            ("XDG_CONFIG_HOME", "home/.config"),
+            ("XDG_DATA_HOME", "home/.local/share"),
+            ("XDG_CACHE_HOME", "home/.cache"),
+            ("TEMP", "temp"),
+            ("TMP", "temp"),
+            ("TMPDIR", "temp"),
+            ("HIVE_WIKI_ROOT", "home/.ai-docs/wiki"),
+            ("CODEX_HOME", "home/.codex"),
+            ("CLAUDE_CONFIG_DIR", "home/.claude"),
+            ("WEBVIEW2_USER_DATA_FOLDER", "webview"),
+            ("GIT_CONFIG_GLOBAL", "home/.gitconfig"),
+            ("GIT_CONFIG_SYSTEM", "home/.gitconfig-system"),
+        ] {
+            assert_eq!(
+                PathBuf::from(environment.get(key).unwrap()),
+                settings.root.join(relative),
+                "{key}"
+            );
+        }
+        assert_eq!(environment.get("GIT_CONFIG_NOSYSTEM").unwrap(), "1");
+        assert!(environment
+            .get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+            .unwrap()
+            .contains("18892"));
+        assert!(settings.contains(&settings.root.join("..")).is_err());
+    }
+
+    #[test]
+    fn instance_network_paths_are_refused_without_io() {
+        assert!(absolute(Path::new(r"\\invalid-host\share\synthetic")).is_err());
+    }
+
+    #[test]
+    fn instance_bootstrap_checks_tree_before_writes() {
+        let text = source("src/instance.rs");
+        let bootstrap = first_statement(&text, "bootstrap")
+            .split_once("\npub fn refuse(")
+            .unwrap()
+            .0;
+        let links = bootstrap.find("reject_links(&settings.root)?;").unwrap();
+        let writes = bootstrap.find("std::fs::create_dir_all").unwrap();
+        assert!(links < writes);
+    }
+
+    #[test]
+    fn instance_shared_spawn_policy_is_enforced() {
+        if !boundary_child("instance_shared_spawn_policy_is_enforced") {
+            assert!(refuse("synthetic operation").is_ok());
+            return;
+        }
+        assert!(refuse("synthetic operation").is_err());
+    }
+
+    #[test]
+    fn instance_shared_path_policy_is_enforced() {
+        if !boundary_child("instance_shared_path_policy_is_enforced") {
+            return;
+        }
+        let outside = PathBuf::from(std::env::var("HM_INSTANCE_OUTSIDE").unwrap());
+        assert!(guard_path(&outside).is_err());
+        assert!(guard_path(&settings().unwrap().root).is_ok());
     }
 }

@@ -24,6 +24,7 @@ pub struct ReviewDiff {
 }
 
 async fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    crate::instance::guard_path(root)?;
     let mut command = tokio::process::Command::new("git");
     crate::process::hide_tokio_console_window(&mut command);
     command.current_dir(root).env("GIT_OPTIONAL_LOCKS", "0")
@@ -65,6 +66,7 @@ async fn fallback_base(root: &Path) -> Result<String, String> {
 
 /// Include committed, index and working-tree changes in one diff, then untracked additions.
 pub async fn collect(root: &Path, recorded_base: Option<&str>, agent_id: String) -> Result<ReviewDiff, String> {
+    crate::instance::guard_path(root)?;
     collect_with_loader(root, recorded_base, agent_id, |path, full| async move {
         load_untracked(&path, &full).await
     }).await
@@ -89,6 +91,7 @@ where
         if relative.is_absolute() || relative.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
             return Err("Unsafe untracked path".to_string());
         }
+        crate::instance::guard_path(&root.join(relative))?;
         match load(path.to_string(), root.join(relative)).await {
             Ok(file) => files.push(file),
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -106,6 +109,7 @@ async fn bounded_bytes(reader: impl AsyncRead + Unpin) -> io::Result<Vec<u8>> {
 }
 
 async fn load_untracked(path: &str, full: &Path) -> io::Result<ReviewFile> {
+    crate::instance::guard_path(full).map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
     // Never follow an untracked symlink out of the selected worktree.
     let metadata = tokio::fs::symlink_metadata(full).await?;
     let bytes = if metadata.file_type().is_symlink() {

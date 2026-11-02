@@ -42,6 +42,7 @@ pub struct WorktreeInfo {
 /// without it git spawns a flashing console window on Windows.
 pub fn run_git_in_dir(args: &[&str], project_path: &str) -> Result<String, String> {
     let path = Path::new(project_path);
+    crate::instance::guard_path(path)?;
     if !path.exists() {
         return Err(format!("Project path does not exist: {}", project_path));
     }
@@ -82,6 +83,7 @@ pub fn run_git_ls_files_capped(
     max_bytes: usize,
 ) -> Result<Vec<u8>, CappedGitError> {
     let path = Path::new(project_path);
+    crate::instance::guard_path(path).map_err(|_| CappedGitError::Unavailable)?;
     if !path.exists() {
         return Err(CappedGitError::Unavailable);
     }

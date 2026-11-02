@@ -780,6 +780,12 @@ pub fn resolve_tier_ladder(
     project_path: &Path,
     institutional_wiki_root: Option<&Path>,
 ) -> ResolvedTierLadder {
+    if let Err(detail) = crate::instance::guard_path(project_path).and_then(|_| {
+        institutional_wiki_root.map(crate::instance::guard_path).transpose().map(|_| ())
+    }) {
+        return ResolvedTierLadder { ladder: None, base_source: None, applied_override: None,
+            issues: vec![source_unreadable(project_path, detail)] };
+    }
     let mut issues = Vec::new();
     let (mut ladder, base_source) = load_base_ladder(institutional_wiki_root, &mut issues);
     let mut applied_override = None;
