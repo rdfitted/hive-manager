@@ -1,5 +1,5 @@
 import { chromium } from 'playwright-core';
-import { seed } from './seed.mjs';
+import { seed, manifest } from './seed.mjs';
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdir, writeFile, rm, stat, readdir } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
@@ -82,10 +82,16 @@ try {
   }
   browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdp}`);
   const context = browser.contexts()[0];
+  report.requests18800 = [];
+  context.on('request', request => { try { if (new URL(request.url()).port === '18800') report.requests18800.push(request.url()); } catch {} });
+  await context.route(/https?:\/\/[^/]*:18800(?:\/|$)/, route => route.abort());
   let page = context.pages()[0];
   for (let n = 0; n < 40 && (!page || !page.url().includes('tauri.localhost')); n++) { await pause(250); page = context.pages()[0]; }
   if (!page) throw new Error('No webview page');
   await page.waitForLoadState('domcontentloaded');
+  report.resourcesBeforeReload = await page.evaluate(() => performance.getEntriesByType('resource').map(e => e.name));
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(name => document.body.innerText.includes(name), manifest.sessions[0].name, { timeout: 10000 });
   report.url = page.url();
   report.pageLoaded = await page.evaluate(() => location.hostname === 'tauri.localhost' && document.body.innerText.length > 0);
   report.viewports = [];
@@ -96,6 +102,14 @@ try {
     await page.screenshot({ path: path.join(out, `spike-${size.width}.png`) });
   }
   report.foregroundAfterAttach = foreground();
+  report.resourceUrls = await page.evaluate(() => performance.getEntriesByType('resource').map(e => e.name));
+  report.noRequest18800 = ![...report.requests18800, ...report.resourcesBeforeReload, ...report.resourceUrls].some(url => { try { return new URL(url).port === '18800'; } catch { return false; } });
+  const identity = JSON.parse(ps(`$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${child.pid}';@{exe=$p.ExecutablePath;started=$p.CreationDate.ToFileTimeUtc().ToString()}|ConvertTo-Json -Compress`));
+  report.environmentRoots = JSON.parse(ps(`& '${path.resolve('tools/render/environment.ps1').replaceAll("'", "''")}' -ProcessId ${child.pid} -ExpectedExe '${identity.exe.replaceAll("'", "''")}' -ExpectedStart '${identity.started}'`));
+  report.environmentContained = ['USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'WEBVIEW2_USER_DATA_FOLDER'].every(key => {
+    const value = report.environmentRoots[key]?.replace(/^\\\\\?\\/, '');
+    return value && path.relative(root, value).split(path.sep)[0] !== '..' && !path.isAbsolute(path.relative(root, value));
+  });
   report.webviewProcesses = JSON.parse(ps(`Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'msedgewebview2.exe' -and $_.CommandLine -like '*${root.replaceAll("'", "''")}*' } | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Depth 3`));
   await page.screenshot({ path: path.join(out, 'spike.png') });
   report.attached = true;
