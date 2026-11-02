@@ -24,6 +24,38 @@ pub struct SendAgentInputRequest {
     pub input: String,
 }
 
+pub async fn get_retirement_settings(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<crate::session::retirement::RetirementSettings>, ApiError> {
+    validate_session_id(&session_id)?;
+    if state.session_controller.read().get_session(&session_id).is_none() {
+        return Err(ApiError::not_found("Session not found"));
+    }
+    state.storage.load_retirement_settings(&session_id).map(Json)
+        .map_err(|error| ApiError::internal(error.to_string()))
+}
+
+pub async fn put_retirement_settings(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(mut settings): Json<crate::session::retirement::RetirementSettings>,
+) -> Result<Json<crate::session::retirement::RetirementSettings>, ApiError> {
+    validate_session_id(&session_id)?;
+    let controller = state.session_controller.read();
+    let session = controller.get_session(&session_id).ok_or_else(|| ApiError::not_found("Session not found"))?;
+    if let Some(id) = settings.on_call_agent_id.as_mut() {
+        validate_agent_id(id)?;
+        *id = super::canonical_agent_id(&session_id, id);
+        if !session.agents.iter().any(|agent| agent.id == *id) {
+            return Err(ApiError::bad_request("On-call agent must be in this session"));
+        }
+    }
+    state.storage.save_retirement_settings(&session_id, &settings)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(settings))
+}
+
 pub async fn list_agents_in_cell(
     State(state): State<Arc<AppState>>,
     Path((session_id, cell_id)): Path<(String, String)>,
