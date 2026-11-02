@@ -17,6 +17,8 @@
   export let mode: SessionMode;
   export let codexAppServer = false;
   export let claudeStreamJson = false;
+  export let autoRetireFinished = true;
+  export let onCallPrincipal = '';
   export let projectPath: string;
   export let sessionName: string;
   export let sessionColor: string;
@@ -151,6 +153,23 @@
         {#if mode === 'templates'}
           <div data-launch-owned class="form-section">
             <TemplatePicker />
+          </div>
+        {/if}
+
+        {#if mode === 'hive'}
+          <div data-launch-owned class="form-section">
+            <label data-launch-owned class="checkbox-label">
+              <input data-launch-owned type="checkbox" bind:checked={autoRetireFinished} disabled={launching} />
+              Retire finished agents automatically
+            </label>
+            <p data-launch-owned class="hint">Accepted workers retire when their work is committed and their screen is idle. QA workers stay until a final passing verdict. History remains available.</p>
+            <label data-launch-owned for="onCallPrincipal">Keep a principal on call</label>
+            <select data-launch-owned id="onCallPrincipal" class="lattice-input" bind:value={onCallPrincipal} disabled={launching || !autoRetireFinished}>
+              <option data-launch-owned value="">No on-call principal</option>
+              {#each codingPrincipals as principal, index}
+                <option data-launch-owned value={`worker-${index + 1}`}>{principal.label || `Coding Principal ${index + 1}`}</option>
+              {/each}
+            </select>
           </div>
         {/if}
 

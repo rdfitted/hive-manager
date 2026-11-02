@@ -287,24 +287,28 @@ async fn concurrent_continues_launch_exactly_one_queen() {
         );
         let uri = format!("/api/sessions/{session_id}/continue");
 
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (retry_tx, retry_rx) = std::sync::mpsc::channel();
+        SessionController::test_sync_hook(&session_id, "continue-plan-ready", Some(Box::new(move || {
+            ready_tx.send(()).unwrap();
+            retry_rx.recv_timeout(std::time::Duration::from_secs(30))
+                .expect("retry observed the held continuation lifecycle lock");
+        })));
         let first = tokio::spawn({
             let router = app.router.clone();
             let uri = uri.clone();
             async move { post_empty(&router, &uri).await }
         });
-        // Fire the retry the moment the first call has marked the plan ready.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            let state = app.session(&session_id).state;
-            if state == SessionState::PlanReady {
-                fired_during_plan_ready += 1;
-                break;
-            }
-            if state != SessionState::Planning || std::time::Instant::now() > deadline {
-                break;
-            }
-            std::hint::spin_loop();
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(30), ready_rx)
+            .await.expect("first continue reached PlanReady before deadline")
+            .expect("PlanReady hook signaled");
+        assert_eq!(app.session(&session_id).state, SessionState::PlanReady);
+        fired_during_plan_ready += 1;
+        // Release only after the retry observes the first caller's real lifecycle
+        // guard. Request entry alone does not prove contention at PlanReady.
+        SessionController::test_sync_hook(&session_id, "continue-contended", Some(Box::new(move || {
+            retry_tx.send(()).unwrap();
+        })));
         let (second_status, second_body) = post_empty(&app.router, &uri).await;
         let (first_status, first_body) = first.await.expect("first continue task");
 

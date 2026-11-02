@@ -8,6 +8,7 @@ pub mod conversations;
 pub mod evaluator;
 pub mod events;
 pub mod health;
+pub mod heartbeat_history;
 pub mod heartbeats;
 pub mod inject;
 pub mod knowledge;

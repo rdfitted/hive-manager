@@ -6,6 +6,13 @@ import type { TaskTier } from '$lib/workgraph/types';
 import { applicationState } from './applicationState';
 import { ui } from './ui';
 
+/** One title for live and persisted sessions, including unnamed Windows projects. */
+export function sessionDisplayName(session: { name?: string | null; project_path: string; id: string }): string {
+  const name = session.name?.trim();
+  const folder = session.project_path.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+  return name || folder || session.id.slice(0, 8);
+}
+
 export type AgentRole =
   | 'MasterPlanner'
   | 'Queen'
@@ -43,6 +50,8 @@ export interface AgentConfig {
 
 export interface AgentInfo {
   id: string;
+  work_state?: string;
+  latest_input_at?: string;
   role: AgentRole;
   status: AgentStatus;
   config: AgentConfig;
@@ -113,6 +122,7 @@ export interface HiveLaunchPolicy extends Omit<HiveExecutionPolicy, 'workspace_s
 export type AgentTransportOption = 'codex_app_server' | 'claude_stream_json';
 
 export interface HiveLaunchConfig {
+  retirement_settings?: { enabled: boolean; on_call_agent_id: string | null };
   agent_transports?: AgentTransportOption[];
   name?: string;
   color?: string;

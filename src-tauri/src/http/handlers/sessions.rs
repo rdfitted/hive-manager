@@ -276,6 +276,7 @@ pub struct LaunchDebateRequest {
 
 #[derive(Deserialize)]
 pub struct LaunchSoloRequest {
+    pub retirement_settings: Option<crate::session::retirement::RetirementSettings>,
     #[serde(default)]
     pub agent_transports: crate::domain::agent_transport::AgentTransports,
     pub project_path: String,
@@ -293,6 +294,7 @@ pub struct LaunchSoloRequest {
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
+    pub retirement_settings: Option<crate::session::retirement::RetirementSettings>,
     #[serde(default)]
     pub agent_transports: crate::domain::agent_transport::AgentTransports,
     pub project_path: String,
@@ -502,6 +504,7 @@ pub async fn create_session(
             };
 
             let config = HiveLaunchConfig {
+                retirement_settings: req.retirement_settings,
                 project_path: req.project_path,
                 name: req.name,
                 color: req.color,
@@ -940,6 +943,7 @@ pub async fn launch_solo(
     )?;
 
     let config = HiveLaunchConfig {
+        retirement_settings: req.retirement_settings,
         project_path: req.project_path,
         name: req.name,
         color: req.color,

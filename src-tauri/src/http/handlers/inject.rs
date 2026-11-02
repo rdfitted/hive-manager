@@ -101,6 +101,20 @@ fn injection_transaction_lock(state: &AppState, agent_id: &str) -> Arc<Injection
     lock
 }
 
+/// Tests can close the initial observation window after one completed read.
+/// No timer races an in-flight read, so absence (rather than unknown I/O) drives
+/// the real retry gate. Runtime windows and timeout handling remain unchanged.
+#[cfg(all(test, windows))]
+fn single_read_windows() -> &'static parking_lot::Mutex<std::collections::HashSet<usize>> {
+    static WINDOWS: OnceLock<parking_lot::Mutex<std::collections::HashSet<usize>>> = OnceLock::new();
+    WINDOWS.get_or_init(Default::default)
+}
+
+#[cfg(all(test, windows))]
+fn install_single_read_window(state: &AppState) {
+    assert!(single_read_windows().lock().insert(state as *const AppState as usize));
+}
+
 #[cfg(all(test, windows))]
 type BeforeSubmitRetryHook =
     std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
@@ -558,6 +572,14 @@ async fn observe_injection_with_retry(
         receipt.pty_output_after_write.as_deref(), &pre_write_baseline.change_offsets);
     let transcript = async {
         if receipt.submit_keystroke_issued {
+            #[cfg(all(test, windows))]
+            {
+                let single_read = single_read_windows().lock()
+                    .remove(&(state.as_ref() as *const AppState as usize));
+                if single_read {
+                    return poll_transcript(&reader, nonce, since).await;
+                }
+            }
             let deadline = receipt.confirmation_expires.map(|expires| expires.min(started + TRANSCRIPT_SYNC_WAIT))
                 .unwrap_or(started + TRANSCRIPT_SYNC_WAIT);
             wait_for_transcript(&reader, nonce, since, deadline).await
@@ -651,6 +673,10 @@ fn record_injection_submission(
     agent_id: &str,
     receipt: &InjectionReceipt,
 ) {
+    if receipt.submit_keystroke_issued
+        || (receipt.protocol_submission_requested && receipt.payload_bytes_written > 0) {
+        state.session_controller.read().record_input_time(session_id, agent_id, receipt.submitted_at);
+    }
     // A queued protocol receipt has no exact delayed-delivery watcher. Leave the
     // current status alone rather than creating an awaiting marker that cannot
     // be reconciled. Confirmed/failed protocol receipts and PTY keep their path.
@@ -902,6 +928,7 @@ mod tests {
 
     fn agent(id: &str, role: AgentRole) -> AgentInfo {
         AgentInfo {
+            work_state: None,
             id: id.to_string(),
             role,
             status: AgentStatus::Running,
@@ -1311,6 +1338,7 @@ mod tests {
     async fn supported_missing_transcript_and_visible_staging_retries_once() {
         let (_temp, app, state) = setup_test_app();
         support_codex(&state);
+        install_single_read_window(&state);
         let staged = stage_after_write(state.clone());
         let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
             json!({"target_agent_id":AGENT_ID,"message":"retry fixture"})).await;
@@ -1394,6 +1422,7 @@ mod tests {
     async fn pending_background_watch_updates_status_after_late_turn() {
         let (_temp, app, state) = setup_test_app();
         support_codex(&state);
+        install_single_read_window(&state);
         let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
             json!({"target_agent_id":AGENT_ID,"message":"late fixture"})).await;
         assert_eq!(status, StatusCode::OK);
@@ -1432,6 +1461,27 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }).await.expect("bounded watch status transition");
+    }
+
+    #[test]
+    fn g31_admitted_pending_protocol_input_rearms_completed_work_without_a_marker() {
+        let (_temp, _app, state) = setup_test_app();
+        let mut receipt = state.injection_manager.read().write_to_agent(AGENT_ID, "fixture input", true).unwrap();
+        receipt.protocol_delivery = Some(Delivery::protocol_pending());
+        receipt.protocol_submission_requested = true;
+        receipt.submit_keystroke_issued = false;
+        state.session_controller.read().update_heartbeat(SESSION_ID, AGENT_ID, "completed", None).unwrap();
+        // The protocol admission precedes this test heartbeat, so make the old proof
+        // explicit without sleeps or changing the runtime's admission timestamp.
+        state.session_controller.read().set_heartbeat_last_activity_for_test(
+            SESSION_ID, AGENT_ID, receipt.submitted_at - ChronoDuration::seconds(1));
+        record_injection_submission(&state, SESSION_ID, AGENT_ID, &receipt);
+        let controller = state.session_controller.read();
+        assert_eq!(controller.latest_input_at(SESSION_ID, AGENT_ID), Some(receipt.submitted_at));
+        let agent = controller.get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).unwrap();
+        assert!(!matches!(agent.status, AgentStatus::WaitingForInput(_)), "queued protocol keeps its existing status");
+        assert_eq!(agent.work_state, Some(crate::session::work_state::WorkState::Working));
     }
 
     #[tokio::test]

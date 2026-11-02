@@ -46,6 +46,7 @@ impl AppState {
         queue_manager: Arc<QueueManager>,
         app_handle: Option<AppHandle>,
     ) -> Self {
+        session_controller.write().set_queue_repo(Arc::clone(queue_manager.repo()));
         let state = Self {
             config,
             pty_manager,

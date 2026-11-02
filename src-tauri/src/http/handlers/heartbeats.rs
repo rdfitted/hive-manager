@@ -88,6 +88,9 @@ pub struct PostHeartbeatResponse {
 #[derive(Serialize)]
 pub struct ActiveAgentInfo {
     pub id: String,
+    pub work_state: crate::session::work_state::WorkState,
+    pub awaiting_injected_turn_at: Option<String>,
+    pub latest_input_at: Option<String>,
     pub role: String,
     pub last_activity: Option<String>,
     pub status: Option<String>,
@@ -130,21 +133,38 @@ async fn heartbeat_security_event(
     state: &AppState, session_id: &str, caller_id: Option<&str>, claimed_id: &str,
     resolved_id: Option<&str>, token: Option<&str>, reason: &'static str, rejected: bool,
 ) -> Result<(), ApiError> {
-    let safe = |value: &str| {
-        if token.is_some_and(|token| !token.is_empty() && value.contains(token)) {
-            "redacted-credential".to_string()
-        } else { value.to_string() }
-    };
-    let known_session = state.session_controller.read().get_session(session_id).is_some();
-    let safe_session_id = safe(session_id);
+    local_api_security_event(state, session_id, caller_id, claimed_id, resolved_id,
+        token, reason, rejected, "heartbeat").await
+}
+
+/// Snapshot under the short manager lock; hash untrusted text on the blocking pool.
+pub(super) async fn contains_credential_text(state: &AppState, values: Vec<String>) -> Result<bool, ApiError> {
+    let matcher = state.pty_manager.read().heartbeat_credential_matcher();
+    tokio::task::spawn_blocking(move || values.iter().any(|value| matcher.contains(value)))
+        .await.map_err(|_| ApiError::internal("Credential scan unavailable"))
+}
+
+/// Shared neutral audit for local API identity checks. Never persist credentials.
+pub(super) async fn local_api_security_event(
+    state: &AppState, session_id: &str, caller_id: Option<&str>, claimed_id: &str,
+    resolved_id: Option<&str>, token: Option<&str>, reason: &'static str, rejected: bool,
+    surface: &'static str,
+) -> Result<(), ApiError> {
+    // Preserve heartbeat audit scope; conversations also support persisted history.
+    let known_session = state.session_controller.read().get_session(session_id).is_some()
+        || (surface == "conversation" && state.storage.session_dir(session_id).join("session.json").is_file());
+    let matcher = state.pty_manager.read().heartbeat_credential_matcher();
+    let (session, caller, claimed, resolved, token) = (session_id.to_string(), caller_id.map(str::to_string),
+        claimed_id.to_string(), resolved_id.map(str::to_string), token.map(str::to_string));
+    let (safe_session_id, caller_id, claimed_id, resolved_id) = tokio::task::spawn_blocking(move || {
+        let safe = |value: &str| matcher.redact(value, token.as_deref());
+        (safe(&session), caller.as_deref().map(safe), safe(&claimed), resolved.as_deref().map(safe))
+    }).await.map_err(|_| ApiError::internal("Credential scan unavailable"))?;
     let may_persist = known_session && safe_session_id == session_id;
     let session_id = if may_persist { safe_session_id } else { "unattributed-session".to_string() };
-    let caller_id = caller_id.map(safe);
-    let claimed_id = safe(claimed_id);
-    let resolved_id = resolved_id.map(safe);
     tracing::warn!(session_id = %session_id, caller_agent_id = ?caller_id,
         claimed_agent_id = %claimed_id, resolved_agent_id = ?resolved_id, reason,
-        rejected, "heartbeat authorization audit");
+        rejected, surface, "local API authorization audit");
     // Unknown or credential-bearing session paths must never create a token-named directory.
     if !may_persist { return Ok(()); }
     state.event_bus.publish(Event {
@@ -152,11 +172,11 @@ async fn heartbeat_security_event(
         agent_id: caller_id.clone(), event_type: EventType::ArtifactUpdated,
         timestamp: chrono::Utc::now(), severity: Severity::Warning,
         payload: serde_json::json!({
-            "kind": if rejected { "heartbeat_rejected" } else { "heartbeat_unauthenticated" },
+            "kind": format!("{surface}_{}", if rejected { "rejected" } else { "unauthenticated" }),
             "caller_agent_id": caller_id, "claimed_agent_id": claimed_id,
             "resolved_agent_id": resolved_id, "reason": reason,
         }),
-    }).await.map_err(|_| ApiError::internal("Failed to persist heartbeat authorization audit"))
+    }).await.map_err(|_| ApiError::internal(format!("Failed to persist {surface} authorization audit")))
 }
 
 async fn reject_heartbeat(
@@ -210,6 +230,15 @@ pub async fn post_heartbeat(
         return Err(ApiError::new(StatusCode::UNAUTHORIZED,
             "Missing or invalid X-Hive-Agent-Token; restart this agent to receive its spawn credential"));
     } else { None };
+    // Preserve header-error precedence and reject credential summaries even when
+    // no header was supplied. Never echo the rejected value into an audit event.
+    if let Some(summary) = req.summary.as_ref() {
+        if contains_credential_text(&state, vec![summary.clone()]).await? {
+            reject_heartbeat(&state, &session_id, authenticated.as_ref().map(|(id, _)| id.as_str()),
+                &claimed_id, req.mark_agent_id.as_deref(), token, "credential_in_payload").await;
+            return Err(ApiError::bad_request("Heartbeat summary must not contain a credential value"));
+        }
+    }
     let caller_id = authenticated.as_ref().map(|(id, _)| id.clone()).unwrap_or_else(|| claimed_id.clone());
     let caller_is_queen = authenticated.as_ref().is_some_and(|(_, queen)| *queen);
     // A confused agent must not persist its credential in a summary, provenance or target ID.
@@ -353,8 +382,8 @@ pub async fn post_heartbeat(
     // Validate the whole declared set before the queue or controller is mutated. Exact ids are
     // deliberate: aliases and labels are not node identity, and a mixed valid/invalid request
     // must apply none of its declarations.
-    let (completed_nodes, external_completion_ids) = if req.completed_nodes.is_empty() {
-        (Vec::new(), Vec::new())
+    let (completed_nodes, external_completion_ids, confirmation_nodes) = if req.completed_nodes.is_empty() {
+        (Vec::new(), Vec::new(), BTreeSet::new())
     } else {
         if req.status != "completed" {
             return Err(ApiError::bad_request(
@@ -478,7 +507,14 @@ pub async fn post_heartbeat(
             })
             .map(|node| node.id.clone())
             .collect::<Vec<_>>();
-        (normalized.into_iter().collect::<Vec<_>>(), external_completion_ids)
+        let confirmation_nodes = if req.mark_agent_id.is_some() {
+            match prior_finished_nodes(&state, &session_id, graph.as_ref().expect("validated node ids require graph"), &hierarchy)? {
+                ConfirmationEvidence::Complete(nodes) => nodes,
+                ConfirmationEvidence::Incomplete => BTreeSet::new(),
+            }
+                .into_iter().filter(|node_id| normalized.contains_key(node_id)).collect()
+        } else { BTreeSet::new() };
+        (normalized.into_iter().collect::<Vec<_>>(), external_completion_ids, confirmation_nodes)
     };
 
     if authenticated.is_none() {
@@ -488,8 +524,17 @@ pub async fn post_heartbeat(
 
     // Neutral audit events do not infer work-graph completion, unlike AgentCompleted.
     // Persist before changing status so a failed audit write cannot silently erase evidence.
-    let previous = state.session_controller.read().get_heartbeat_info(&session_id)
+    let mut previous = state.session_controller.read().get_heartbeat_info(&session_id)
         .get(&agent_id).cloned();
+    if let Some(summary) = previous.as_mut().and_then(|heartbeat| heartbeat.summary.take()) {
+        let matcher = state.pty_manager.read().heartbeat_credential_matcher();
+        let safe = tokio::task::spawn_blocking(move || matcher.redact(&summary, None))
+            .await.map_err(|_| ApiError::internal("Credential scan unavailable"))?;
+        previous.as_mut().expect("previous heartbeat exists").summary = Some(safe);
+    }
+    let confirmation = req.mark_agent_id.is_some() && req.status == "completed"
+        && (!confirmation_nodes.is_empty() || (req.completed_nodes.is_empty()
+            && previous.as_ref().is_some_and(|heartbeat| heartbeat.status == "completed")));
     if req.mark_agent_id.is_some() || req.status == "completed"
         || previous.as_ref().is_some_and(|heartbeat| heartbeat.status == "completed")
     {
@@ -505,6 +550,7 @@ pub async fn post_heartbeat(
                 "actor_agent_id": authenticated.as_ref().map(|(id, _)| id.as_str()),
                 "target_agent_id": agent_id,
                 "queen_mark": req.mark_agent_id.is_some(),
+                "confirmation": confirmation,
                 "status": req.status,
                 "summary": req.summary,
                 "completed_nodes": req.completed_nodes,
@@ -545,7 +591,8 @@ pub async fn post_heartbeat(
     {
         let controller = state.session_controller.read();
         controller
-            .update_heartbeat(&session_id, &agent_id, &req.status, req.summary.as_deref())
+            .update_heartbeat_with_source(&session_id, &agent_id, &req.status,
+                req.summary.as_deref(), req.mark_agent_id.is_some())
             .map_err(ApiError::internal)?;
     }
 
@@ -563,11 +610,12 @@ pub async fn post_heartbeat(
         let facts = completed_nodes
             .into_iter()
             .map(|(task_id, executed_as)| {
+                let confirmation = confirmation_nodes.contains(&task_id);
                 let fact = NodeCompletionFact::new(
                     task_id,
                     agent_id.clone(),
                     NodeCompletionProvenance::Heartbeat,
-                );
+                ).with_confirmation(confirmation);
                 match executed_as {
                     Some(executed_as) => fact.with_executed_as(executed_as),
                     None => fact,
@@ -620,6 +668,55 @@ pub async fn post_heartbeat(
             message: "Heartbeat recorded".to_string(),
         }),
     ))
+}
+
+enum ConfirmationEvidence {
+    Complete(BTreeSet<String>),
+    Incomplete,
+}
+
+/// Determine node-level confirmation before this request mutates the queue or ledger.
+/// Replaying claims and mutation resets avoids confirming a predecessor run's completion.
+fn prior_finished_nodes(
+    state: &AppState,
+    session_id: &str,
+    graph: &crate::orchestrator::work_graph::TaskGraph,
+    hierarchy: &[crate::coordination::HierarchyNode],
+) -> Result<ConfirmationEvidence, ApiError> {
+    use crate::orchestrator::work_graph::runtime::{
+        derive_runtime_graph_with_completion_facts, mutation_log_snapshot, RuntimeOutcomeStatus,
+    };
+    let facts = StateManager::new(state.storage.session_dir(session_id))
+        .read_node_completion_facts()
+        .map_err(|_| ApiError::internal("Failed to read completion confirmation evidence"))?;
+    let path = state.event_bus.data_dir().join(session_id).join("events.jsonl");
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return Err(ApiError::internal("Failed to read confirmation event evidence")),
+    };
+    let mut events = Vec::new();
+    for (index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() { continue; }
+        let event = match serde_json::from_str::<Event>(line) {
+            Ok(event) => event,
+            Err(_) => {
+                // A malformed line could hide a WorkerClaimed reset. Never confirm
+                // from a partial replay, or include untrusted journal text in logs.
+                tracing::warn!(line_number = index + 1, "Incomplete confirmation event evidence");
+                return Ok(ConfirmationEvidence::Incomplete);
+            }
+        };
+        if event.session_id == session_id { events.push(event); }
+    }
+    let principals = hierarchy.iter().filter_map(|node|
+        node.principal.as_ref().map(|principal| (node.id.clone(), principal.clone()))).collect();
+    let mutations = mutation_log_snapshot(session_id);
+    let projection = derive_runtime_graph_with_completion_facts(Some(graph), &events,
+        &[], &[], &mutations.deltas, &facts, &principals);
+    Ok(ConfirmationEvidence::Complete(projection.outcomes.into_iter().filter(|outcome| matches!(outcome.status,
+        RuntimeOutcomeStatus::Completed | RuntimeOutcomeStatus::Finalized))
+        .filter_map(|outcome| outcome.task_id).collect()))
 }
 
 /// Rebind incomplete, row-less work. Queue-backed transfers require their assignment lifecycle,
@@ -846,47 +943,66 @@ fn record_knowledge_ack_outcomes(
 pub async fn get_active_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ActiveSessionsResponse>, ApiError> {
-    let controller = state.session_controller.read();
-    let all_sessions = controller.list_sessions();
+    let sessions: Vec<ActiveSessionInfo> = {
+        let controller = state.session_controller.read();
+        let all_sessions = controller.list_sessions();
 
-    let sessions: Vec<ActiveSessionInfo> = all_sessions
-        .into_iter()
-        .filter(|s| s.state.is_monitorable())
-        .map(|session| {
-            let agents_with_heartbeats = controller.get_heartbeat_info(&session.id);
-            let agents: Vec<ActiveAgentInfo> = session
-                .agents
-                .iter()
-                .map(|a| {
-                    let hb = agents_with_heartbeats.get(&a.id);
-                    ActiveAgentInfo {
-                        id: a.id.clone(),
-                        role: format!("{:?}", a.role),
-                        last_activity: hb.map(|h| h.last_activity.to_rfc3339()),
-                        status: hb.map(|h| h.status.clone()),
-                        summary: hb.and_then(|h| h.summary.clone()),
-                    }
-                })
-                .collect();
+        all_sessions
+            .into_iter()
+            .filter(|s| s.state.is_monitorable())
+            .map(|session| {
+                let (session, agents_with_heartbeats) = controller.session_with_heartbeats(session);
+                let agents: Vec<ActiveAgentInfo> = session
+                    .agents
+                    .iter()
+                    .map(|a| {
+                        let hb = agents_with_heartbeats.get(&a.id);
+                        ActiveAgentInfo {
+                            id: a.id.clone(),
+                            work_state: a.work_state.unwrap_or_default(),
+                            latest_input_at: controller.latest_input_at(&session.id, &a.id)
+                                .map(|at| at.to_rfc3339()),
+                            awaiting_injected_turn_at: crate::session::work_state::awaiting_injected_turn_since(&a.status)
+                                .map(|at| at.to_rfc3339()),
+                            role: format!("{:?}", a.role),
+                            last_activity: hb.map(|h| h.last_activity.to_rfc3339()),
+                            status: hb.map(|h| h.status.clone()),
+                            summary: hb.and_then(|h| h.summary.clone()),
+                        }
+                    })
+                    .collect();
 
-            ActiveSessionInfo {
-                id: session.id.clone(),
-                session_type: match &session.session_type {
-                    crate::session::SessionType::Hive { worker_count } => {
-                        format!("Hive ({})", worker_count)
-                    }
-                    crate::session::SessionType::Swarm { planner_count } => {
-                        format!("Swarm ({})", planner_count)
-                    }
-                    crate::session::SessionType::Fusion { .. } => "Fusion".to_string(),
-                    crate::session::SessionType::Debate { .. } => "Debate".to_string(),
-                    crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
-                },
-                project_path: session.project_path.to_string_lossy().to_string(),
-                agents,
+                ActiveSessionInfo {
+                    id: session.id.clone(),
+                    session_type: match &session.session_type {
+                        crate::session::SessionType::Hive { worker_count } => {
+                            format!("Hive ({})", worker_count)
+                        }
+                        crate::session::SessionType::Swarm { planner_count } => {
+                            format!("Swarm ({})", planner_count)
+                        }
+                        crate::session::SessionType::Fusion { .. } => "Fusion".to_string(),
+                        crate::session::SessionType::Debate { .. } => "Debate".to_string(),
+                        crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
+                    },
+                    project_path: session.project_path.to_string_lossy().to_string(),
+                    agents,
+                }
+            })
+            .collect()
+    };
+    let matcher = state.pty_manager.read().heartbeat_credential_matcher();
+    let sessions = tokio::task::spawn_blocking(move || {
+        let mut sessions = sessions;
+        for session in &mut sessions {
+            for agent in &mut session.agents {
+                if let Some(summary) = agent.summary.as_mut() {
+                    *summary = matcher.redact(summary, None);
+                }
             }
-        })
-        .collect();
+        }
+        sessions
+    }).await.map_err(|_| ApiError::internal("Credential scan unavailable"))?;
 
     Ok(Json(ActiveSessionsResponse { sessions }))
 }
@@ -927,6 +1043,7 @@ mod tests {
 
     fn agent(id: &str, role: AgentRole, parent_id: Option<&str>) -> AgentInfo {
         AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: id.to_string(),
@@ -1018,6 +1135,59 @@ mod tests {
         });
 
         HeartbeatFixture { _temp: temp, state }
+    }
+
+    #[tokio::test]
+    async fn g31_active_sessions_keep_confirmed_followup_working_and_expose_input_time() {
+        let fixture = fixture();
+        fixture.state.pty_manager.read().create_session(WORKER_ID.into(),
+            AgentRole::Worker { index: 1, parent: None }, "fixture-cli", &[], None, 80, 24).unwrap();
+        let submitted = chrono::Utc::now();
+        {
+            let controller = fixture.state.session_controller.read();
+            controller.update_heartbeat(SESSION_ID, WORKER_ID, "completed", None).unwrap();
+            let submitted = submitted + chrono::Duration::seconds(1);
+            controller.record_injection_submission(SESSION_ID, WORKER_ID, submitted, true).unwrap();
+            controller.record_injection_delivery(SESSION_ID, WORKER_ID, submitted,
+                &crate::delivery::Delivery::protocol_turn_started("fixture-turn".into())).unwrap();
+        }
+        let value = serde_json::to_value(get_active_sessions(State(fixture.state.clone())).await
+            .unwrap_or_else(|error| panic!("active sessions failed: {}", error.message)).0).unwrap();
+        let agent = value["sessions"][0]["agents"].as_array().unwrap().iter()
+            .find(|agent| agent["id"] == WORKER_ID).unwrap();
+        assert_eq!(agent["work_state"], "working");
+        assert_eq!(agent["latest_input_at"], (submitted + chrono::Duration::seconds(1)).to_rfc3339());
+        assert!(agent["awaiting_injected_turn_at"].is_null(), "confirmation cleared only the marker");
+    }
+
+    #[tokio::test]
+    async fn active_sessions_expose_work_state_without_replacing_heartbeat_status() {
+        let fixture = fixture();
+        fixture.state.pty_manager.read().create_session(WORKER_ID.into(),
+            AgentRole::Worker { index: 1, parent: Some(QUEEN_ID.into()) },
+            "fixture-cli", &[], None, 80, 24).unwrap();
+        fixture.state.session_controller.read().update_heartbeat(
+            SESSION_ID, WORKER_ID, "completed", Some("Finished fixture work")).unwrap();
+        let Json(response) = get_active_sessions(State(Arc::clone(&fixture.state)))
+            .await.unwrap_or_else(|error| panic!("active sessions failed: {}", error.message));
+        let value = serde_json::to_value(response).unwrap();
+        let worker = value["sessions"][0]["agents"].as_array().unwrap().iter()
+            .find(|agent| agent["id"] == WORKER_ID).unwrap();
+        assert_eq!(worker["status"], "completed");
+        assert_eq!(worker["work_state"], "finished");
+
+        let mut session = fixture.state.session_controller.read().get_session(SESSION_ID).unwrap();
+        let submitted = chrono::Utc::now() + chrono::Duration::seconds(1);
+        session.agents.iter_mut().find(|agent| agent.id == WORKER_ID).unwrap().status =
+            AgentStatus::WaitingForInput(format!("awaiting_injected_turn:{}", submitted.to_rfc3339()));
+        fixture.state.session_controller.read().insert_test_session(session);
+        let Json(response) = get_active_sessions(State(Arc::clone(&fixture.state)))
+            .await.unwrap_or_else(|error| panic!("active sessions failed: {}", error.message));
+        let value = serde_json::to_value(response).unwrap();
+        let worker = value["sessions"][0]["agents"].as_array().unwrap().iter()
+            .find(|agent| agent["id"] == WORKER_ID).unwrap();
+        assert_eq!(worker["work_state"], "working");
+        assert_eq!(worker["awaiting_injected_turn_at"], submitted.to_rfc3339());
     }
 
     fn running_row() -> QueueRow {
@@ -1907,6 +2077,118 @@ mod tests {
         assert_eq!(audit["payload"]["target_agent_id"], WORKER_ID);
         assert_eq!(audit["payload"]["queen_mark"], true);
         assert_eq!(audit["payload"]["summary"], "verified gate evidence");
+    }
+
+    #[tokio::test]
+    async fn first_finish_queen_mark_records_confirmation_without_replacing_worker_time() {
+        let fixture = fixture();
+        let graph = TaskGraph::new(vec![work_node("T1", "backend")], vec![]);
+        let manager = write_graph_and_worker_principal(&fixture, graph.clone(), Some("backend"));
+        let _ = expect_success(heartbeat_with_completed_nodes(Arc::clone(&fixture.state), WORKER_ID,
+            "completed", None, &["T1"]).await, "worker first finish");
+        let mut request = auth_request("queen", "completed");
+        request.mark_agent_id = Some(WORKER_ID.into());
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T1".into())];
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.into()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await, "Queen confirmation");
+        let facts = manager.read_node_completion_facts().unwrap();
+        assert_eq!(facts.len(), 2, "keep both auditable rows");
+        assert!(!facts[0].confirmation);
+        assert!(facts[1].confirmation);
+        let result = crate::orchestrator::work_graph::runtime::derive_runtime_graph_with_completion_facts(
+            Some(&graph), &[], &[], &[], &[], &facts, &BTreeMap::new());
+        assert_eq!(result.outcomes.iter().find(|outcome| outcome.subject_id == "T1").unwrap().finished_at,
+            Some(facts[0].completed_at));
+        assert!(security_events(&fixture).iter().any(|event|
+            event["payload"]["queen_mark"] == true && event["payload"]["confirmation"] == true));
+    }
+
+    #[tokio::test]
+    async fn first_finish_malformed_event_evidence_accepts_mark_without_confirmation() {
+        use std::io::Write;
+        let fixture = fixture();
+        let manager = write_graph_and_worker_principal(&fixture,
+            TaskGraph::new(vec![work_node("T1", "backend")], vec![]), Some("backend"));
+        let _ = expect_success(heartbeat_with_completed_nodes(Arc::clone(&fixture.state), WORKER_ID,
+            "completed", None, &["T1"]).await, "worker first finish");
+        let headers = authenticated_headers(&fixture.state, QUEEN_ID);
+        let credential = headers.get("X-Hive-Agent-Token").unwrap().to_str().unwrap().to_owned();
+        let raw_line = format!("{{\"private-malformed-marker\":\"{credential}");
+        let path = fixture.state.event_bus.data_dir().join(SESSION_ID).join("events.jsonl");
+        writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{raw_line}").unwrap();
+        let mut events = fixture.state.event_bus.subscribe();
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_writer(log.reopen().unwrap()).finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let mut request = auth_request("queen", "completed");
+        request.mark_agent_id = Some(WORKER_ID.into());
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T1".into())];
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.into()),
+            headers, Json(request)).await, "mark with incomplete event evidence");
+        assert_eq!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID)[WORKER_ID].status, "completed");
+        let facts = manager.read_node_completion_facts().unwrap();
+        assert_eq!(facts.len(), 2, "accepted mark remains auditable");
+        assert!(facts.iter().all(|fact| !fact.confirmation), "incomplete evidence cannot confirm prior work");
+        let mut saw_mark = false;
+        while let Ok(event) = events.try_recv() {
+            let audit = serde_json::to_string(&event).unwrap();
+            assert!(!audit.contains("private-malformed-marker"));
+            assert!(!audit.contains(&credential));
+            if event.payload["kind"] == "heartbeat_status_requested" {
+                saw_mark = true;
+                assert_eq!(event.payload["confirmation"], false);
+            }
+        }
+        assert!(saw_mark, "accepted mark has a sanitized audit event");
+        let diagnostic = std::fs::read_to_string(log.path()).unwrap();
+        assert!(diagnostic.contains("Incomplete confirmation event evidence"), "{diagnostic}");
+        assert!(!diagnostic.contains("private-malformed-marker"));
+        assert!(!diagnostic.contains(&credential));
+    }
+
+    #[tokio::test]
+    async fn first_finish_confirmation_is_per_node_after_an_agent_resumes() {
+        let fixture = fixture();
+        let manager = write_graph_and_worker_principal(&fixture,
+            TaskGraph::new(vec![work_node("T1", "backend"), work_node("T2", "backend")], vec![]), Some("backend"));
+        let _ = expect_success(heartbeat_with_completed_nodes(Arc::clone(&fixture.state), WORKER_ID,
+            "completed", None, &["T1"]).await, "first node finish");
+        let mut request = auth_request("queen", "completed");
+        request.mark_agent_id = Some(WORKER_ID.into());
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T2".into())];
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.into()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await, "new node mark");
+        assert!(!manager.read_node_completion_facts().unwrap()[1].confirmation,
+            "T2's first completion is not a confirmation of T1");
+        let _ = expect_success(heartbeat(Arc::clone(&fixture.state), WORKER_ID, "working", None).await, "resumed work");
+        let mut request = auth_request("queen", "completed");
+        request.mark_agent_id = Some(WORKER_ID.into());
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T1".into())];
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.into()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await, "prior node confirmation");
+        assert!(manager.read_node_completion_facts().unwrap()[2].confirmation,
+            "resuming the agent does not erase T1's durable finish");
+    }
+
+    #[tokio::test]
+    async fn first_finish_new_claim_fences_confirmation_of_the_predecessor_run() {
+        let fixture = fixture();
+        let graph = TaskGraph::new(vec![work_node("T1", "backend")], vec![]);
+        let manager = write_graph_and_worker_principal(&fixture, graph.clone(), Some("backend"));
+        let _ = expect_success(heartbeat_with_completed_nodes(Arc::clone(&fixture.state), WORKER_ID,
+            "completed", None, &["T1"]).await, "old run finish");
+        fixture.state.event_bus.publish(Event { id: "fixture-new-claim".into(), session_id: SESSION_ID.into(),
+            cell_id: None, agent_id: Some(WORKER_ID.into()), event_type: EventType::WorkerClaimed,
+            timestamp: Utc::now(), payload: serde_json::json!({"task_id":"T1"}), severity: Severity::Info }).await.unwrap();
+        let mut request = auth_request("queen", "completed");
+        request.mark_agent_id = Some(WORKER_ID.into());
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T1".into())];
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.into()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await, "rerun first finish");
+        let facts = manager.read_node_completion_facts().unwrap();
+        assert_eq!(facts.len(), 2);
+        assert!(!facts[1].confirmation, "a rerun has its own first finish");
     }
 
     #[tokio::test]

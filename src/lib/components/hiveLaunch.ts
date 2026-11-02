@@ -148,6 +148,7 @@ export interface BuildHiveLaunchConfigInput<
   TTierPolicy extends LaunchTierPolicyFields = TierPolicy,
 > {
   agentTransports?: AgentTransportOption[];
+  retirementSettings?: HiveLaunchConfig['retirement_settings'];
   name?: string;
   color?: string;
   projectPath: string;
@@ -188,6 +189,7 @@ export function buildHiveLaunchConfig<
 
   return {
     name: input.name,
+    ...(input.retirementSettings ? { retirement_settings: { ...input.retirementSettings } } : {}),
     color: input.color,
     ...(input.agentTransports?.length ? { agent_transports: [...input.agentTransports] } : {}),
     project_path: input.projectPath,

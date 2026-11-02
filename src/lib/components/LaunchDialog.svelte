@@ -180,6 +180,8 @@
   let soloTask = '';
   let codexAppServer = false;
   let claudeStreamJson = false;
+  let autoRetireFinished = true;
+  let onCallPrincipal = '';
   $: agentTransports = [
     ...(codexAppServer ? ['codex_app_server' as const] : []),
     ...(claudeStreamJson ? ['claude_stream_json' as const] : []),
@@ -568,6 +570,8 @@
 
         const config = buildHiveLaunchConfig({
           agentTransports,
+          retirementSettings: !autoRetireFinished || onCallPrincipal
+            ? { enabled: autoRetireFinished, on_call_agent_id: onCallPrincipal || null } : undefined,
           name: sessionName.trim() || undefined,
           color: sessionColor || undefined,
           projectPath,
@@ -713,6 +717,7 @@
     {/if}
     {#if showAdvanced}
 <LaunchAdvanced
+  bind:autoRetireFinished bind:onCallPrincipal
   bind:codexAppServer bind:claudeStreamJson
   {mode} bind:projectPath bind:sessionName
   bind:sessionColor bind:prompt bind:soloTask

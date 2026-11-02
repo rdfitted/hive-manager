@@ -254,3 +254,14 @@ describe('sessions store', () => {
     });
   });
 });
+
+describe('sessionDisplayName', () => {
+  it('prefers a name, then a project folder, then a short id', async () => {
+    const { sessionDisplayName } = await import('./sessions');
+    const session = { id: '12345678-abcd-4000-8000-123456789abc', name: '  Named session  ', project_path: 'C:\\Projects\\sample-project\\' };
+    expect(sessionDisplayName(session)).toBe('Named session');
+    expect(sessionDisplayName({ ...session, name: '' })).toBe('sample-project');
+    expect(sessionDisplayName({ ...session, name: null, project_path: '/repo/sample-project/' })).toBe('sample-project');
+    expect(sessionDisplayName({ ...session, name: '', project_path: '' })).toBe('12345678');
+  });
+});

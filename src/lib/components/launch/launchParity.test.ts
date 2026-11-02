@@ -69,6 +69,30 @@ async function capture(mode: Mode, advanced: boolean, template?: SessionTemplate
 }
 
 describe('G-launch-parity: emitted composer and retained legacy-form payloads', () => {
+  it('retirement defaults on and preserves an on-call selection through the launch request', async () => {
+    const view = openDialog('hive');
+    await fireEvent.click(view.getByRole('button', { name: /Project/ }));
+    await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
+    const toggle = view.getByLabelText('Retire finished agents automatically') as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    await fireEvent.change(view.getByLabelText('Keep a principal on call'), { target: { value: 'worker-1' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Back to composer' }));
+    await fireEvent.click(view.getByRole('button', { name: 'Launch' }));
+    expect(view.launch.mock.calls[0][0].detail.retirement_settings)
+      .toEqual({ enabled: true, on_call_agent_id: 'worker-1' });
+  });
+
+  it('retirement can be disabled for a single launch', async () => {
+    const view = openDialog('hive');
+    await fireEvent.click(view.getByRole('button', { name: /Project/ }));
+    await fireEvent.click(view.getByRole('button', { name: 'Advanced' }));
+    await fireEvent.click(view.getByLabelText('Retire finished agents automatically'));
+    expect((view.getByLabelText('Keep a principal on call') as HTMLSelectElement).disabled).toBe(true);
+    await fireEvent.click(view.getByRole('button', { name: 'Launch' }));
+    expect(view.launch.mock.calls[0][0].detail.retirement_settings)
+      .toEqual({ enabled: false, on_call_agent_id: null });
+  });
+
   it.each(['hive', 'solo'] as const)('%s transport opt-in survives Advanced and emits only the explicit setting', async (mode) => {
     const view = openDialog(mode);
     await fireEvent.click(view.getByRole('button', { name: /Project/ }));

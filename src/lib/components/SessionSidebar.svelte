@@ -3,11 +3,11 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { launch, type LaunchMode } from '$lib/stores/launch';
-  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, activeAgents, serdeEnumVariantName, sessionDisplayName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { layout, COLLAPSED_PANEL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
   import { heartbeatStore } from '$lib/stores/conversations';
-  import { agentActivity, needsAttention } from '$lib/stores/agentActivity';
+  import { agentActivity, needsAttention, workStateFor } from '$lib/stores/agentActivity';
   import { agentDependencies } from '$lib/stores/agentDependencies';
   import { Dialog } from '$lib/components/ui';
   import { shortcutLabel } from '$lib/platform';
@@ -220,10 +220,6 @@
     ui.setSelectedAgent(e.detail);
   }
 
-  function sessionDisplayName(session: SessionSummary): string {
-    return session.project_path.split(/[/\\]/).pop() || session.id.slice(0, 8);
-  }
-
   async function handleResumeSession(session: SessionSummary) {
     const targetSessionId = session.id;
     const requestId = ++resumeReportRequestId;
@@ -292,7 +288,7 @@
 
   function startEdit(session: Session) {
     editingSessionId = session.id;
-    editName = session.name || session.project_path.split(/[/\\]/).pop() || '';
+    editName = sessionDisplayName(session);
     editColor = session.color;
     showColorPicker = false;
   }
@@ -407,7 +403,7 @@
           {/if}
           <ul class="session-list" aria-label={projectGroups.length > 1 ? `Sessions in ${group.path}` : 'Active sessions'}>
             {#each group.items as session (session.id)}
-              {@const attentionAgents = session.agents.filter(agent => needsAttention(agent, $heartbeatStore.staleAgents))}
+              {@const attentionAgents = session.agents.filter(agent => needsAttention(agent, $heartbeatStore.staleAgents, workStateFor(agent, $heartbeatStore.agents[agent.id])))}
               <li class="session-item">
                 <div class="session-row">
                   <div
@@ -477,7 +473,7 @@
                     {:else}
                       <span class="session-path">
                         {#if session.color}<span class="session-color" style:background={session.color} aria-hidden="true"></span>{/if}
-                        {session.name || session.project_path.split(/[/\\]/).pop()}
+                        {sessionDisplayName(session)}
                         <button
                           class="lattice-btn lattice-btn--ghost lattice-btn--icon"
                           onclick={(e) => { e.stopPropagation(); startEdit(session); }}
@@ -582,7 +578,7 @@
                 {#each persistedSessions.slice(0, 5) as session}
                   <li class="session-item recent">
                     <div class="session-info">
-                      <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
+                      <span class="session-path">{sessionDisplayName(session)}</span>
                       <span class="session-meta">
                         {#if session.session_type.startsWith('Solo') || (session.session_type === 'Hive (1)' && session.agent_count === 1)}
                           <span class="type-tag solo">Solo</span>

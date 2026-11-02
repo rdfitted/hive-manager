@@ -28,6 +28,7 @@ vi.mock('$lib/stores/sessions', async () => {
       launchFusion: vi.fn(), launchSolo: vi.fn(), launchDebate: vi.fn(),
     },
     activeSession, activeAgents,
+    sessionDisplayName: (session: Session) => session.name || session.project_path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || session.id.slice(0, 8),
     serdeEnumVariantName: (value: unknown) => typeof value === 'string' ? value : value && typeof value === 'object' ? Object.keys(value)[0] : undefined,
   };
 });

@@ -2170,6 +2170,7 @@ mod tests {
 
     fn evaluator_agent(session_id: &str) -> AgentInfo {
         AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: format!("{session_id}-evaluator"),

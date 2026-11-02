@@ -3,8 +3,10 @@ mod controller;
 mod fusion_judgment;
 mod polling_intervals;
 mod prompt_contract;
+pub mod retirement;
 pub mod slop_gate;
 pub mod transitions;
+pub mod work_state;
 
 #[allow(unused_imports)]
 pub use controller::{

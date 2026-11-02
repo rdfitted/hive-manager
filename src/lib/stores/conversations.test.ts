@@ -5,7 +5,7 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
 }));
 
-import { conversationStore, type ConversationMessage } from './conversations';
+import { conversationStore, heartbeatStore, type ConversationMessage } from './conversations';
 
 const fetchMock = vi.fn();
 
@@ -41,6 +41,59 @@ beforeEach(() => {
   fetchMock.mockReset();
   vi.stubGlobal('fetch', fetchMock);
   conversationStore.setSessionId(`reset-${Math.random()}`);
+});
+
+describe('G31 heartbeat work state', () => {
+  it('G31 confirmed follow-up gets three minutes after input even with an old completed heartbeat', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-01T12:00:00Z'));
+      const latest_input_at = new Date().toISOString();
+      fetchMock.mockResolvedValue({ ok: true, json: async () => ({ sessions: [{ id: 's', agents: [
+        { id: 'confirmed', last_activity: '2026-11-01T11:50:00Z', status: 'completed',
+          work_state: 'working', latest_input_at },
+        { id: 'legacy', last_activity: '2026-11-01T11:50:00Z', work_state: 'working' },
+      ] }] }) });
+      await heartbeatStore.loadHeartbeats('s');
+      expect([...get(heartbeatStore).staleAgents]).toEqual(['legacy']);
+      expect(get(heartbeatStore).agents.confirmed).toHaveProperty('latest_input_at', latest_input_at);
+      vi.advanceTimersByTime(180_000);
+      await heartbeatStore.loadHeartbeats('s');
+      expect(get(heartbeatStore).staleAgents.has('confirmed')).toBe(false);
+      vi.advanceTimersByTime(1);
+      await heartbeatStore.loadHeartbeats('s');
+      expect(get(heartbeatStore).staleAgents.has('confirmed')).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+  it('silences completed work, preserves unknown/missing stale work, and re-arms resumed work', async () => {
+    const old = new Date(Date.now() - 4 * 60_000).toISOString();
+    let seats = [
+      { id: 'finished', work_state: 'finished', status: 'completed', last_activity: old },
+      { id: 'retired', work_state: 'retired', status: 'completed', last_activity: old },
+      { id: 'working', work_state: 'working', status: 'working', last_activity: old },
+      { id: 'unknown', work_state: 'future-state', status: 'completed', last_activity: old },
+      { id: 'missing', status: 'completed', last_activity: old },
+    ];
+    fetchMock.mockImplementation(async () => ({ ok: true, json: async () => ({ sessions: [{ id: 's', agents: seats }] }) }));
+    await heartbeatStore.loadHeartbeats('s');
+    expect([...get(heartbeatStore).staleAgents].sort()).toEqual(['missing', 'unknown', 'working']);
+    expect(get(heartbeatStore).agents.finished.work_state).toBe('finished');
+    seats = [{ id: 'finished', work_state: 'working', status: 'working', last_activity: old }];
+    await heartbeatStore.loadHeartbeats('s');
+    expect(get(heartbeatStore).staleAgents.has('finished')).toBe(true);
+  });
+  it('counts staleness from the later of heartbeat and pending injection', async () => {
+    const old = new Date(Date.now() - 4 * 60_000).toISOString();
+    const recent = new Date(Date.now() - 30_000).toISOString();
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({ sessions: [{ id: 's', agents: [
+      { id: 'injected', last_activity: old, awaiting_injected_turn_at: recent, work_state: 'working' },
+      { id: 'heartbeat', last_activity: recent, awaiting_injected_turn_at: old, work_state: 'working' },
+      { id: 'stalled', last_activity: old, awaiting_injected_turn_at: old, work_state: 'working' },
+      { id: 'no-heartbeat', awaiting_injected_turn_at: old, work_state: 'working' },
+    ] }] }) });
+    await heartbeatStore.loadHeartbeats('s');
+    expect([...get(heartbeatStore).staleAgents].sort()).toEqual(['no-heartbeat', 'stalled']);
+  });
 });
 
 describe('conversationStore conversation selection', () => {

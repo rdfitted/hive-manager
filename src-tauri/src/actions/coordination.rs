@@ -736,7 +736,14 @@ impl std::fmt::Display for PlanMarkdownError {
 impl std::error::Error for PlanMarkdownError {}
 
 pub(crate) fn parse_plan_markdown(content: &str) -> SessionPlan {
-    parse_plan_markdown_with_diagnostics(content).0
+    let mut plan = parse_plan_markdown_with_diagnostics(content).0;
+    // An explicit-ID checklist can contain prose under task-detail headings.
+    // Keep explicit graph nodes, but do not count their rubric bullets as work.
+    // Legacy plans without checkboxes retain their bullet/numbered fallback.
+    if plan.tasks.iter().any(|task| task.checkbox_source && task.explicit_id) {
+        plan.tasks.retain(|task| task.checkbox_source || task.explicit_id);
+    }
+    plan
 }
 
 pub(crate) fn parse_plan_markdown_checked(content: &str) -> Result<SessionPlan, PlanMarkdownError> {
@@ -1107,7 +1114,7 @@ fn normalize_principal_token(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_assignee, extract_priority, parse_plan_markdown_with_diagnostics, parse_task_line,
+        extract_assignee, extract_priority, parse_plan_markdown, parse_plan_markdown_with_diagnostics, parse_task_line,
         run_blocking_injection,
     };
     use crate::coordination::InjectionError;
@@ -1396,6 +1403,29 @@ mod tests {
                 true,
             )
         );
+    }
+
+    #[test]
+    fn smoke_template_plan_count_uses_only_implementation_tasks() {
+        let prompts = crate::session::SessionController::planner_task_line_prompts_for_test();
+        let template = &prompts[4];
+        let (_, plan) = template.split_once("```markdown\n").expect("real smoke plan");
+        let (plan, _) = plan.rsplit_once("\n```\n\nAfter writing the plan").expect("end of smoke plan");
+        let parsed = parse_plan_markdown(plan);
+        assert_eq!(parsed.tasks.len(), 4, "rubric and instructions are not tasks");
+        assert_eq!(parsed.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T1", "T2", "T3", "T4"]);
+        // The checked launch parser keeps its diagnostics contract unchanged.
+        assert!(parse_plan_markdown_with_diagnostics(plan).0.tasks.len() > parsed.tasks.len());
+    }
+
+    #[test]
+    fn display_count_preserves_legacy_bullets_and_explicit_graph_nodes() {
+        for content in ["# Plan\n## Tasks\n- First\n- Second", "# Plan\n## Tasks\n1. First\n2. Second", "# Plan\n## Tasks\n- [ ] First\n2. Second"] {
+            assert_eq!(parse_plan_markdown(content).tasks.len(), 2);
+        }
+        let plan = parse_plan_markdown("# Plan\n## Tasks\n- [ ] T1: First\n- T2: Second\n- Explanation only");
+        assert_eq!(plan.tasks.len(), 2);
+        assert!(plan.tasks.iter().all(|t| t.explicit_id));
     }
 
     #[test]

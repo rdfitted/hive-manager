@@ -10,6 +10,36 @@ use crate::domain::{CellType, SessionMode};
 use crate::runtime::WorktreeManager;
 use crate::session::{Session, SessionType};
 
+/// Git resolves this to the common git directory, so the exclusion intentionally
+/// applies to the main checkout and sibling worktrees as well.
+fn exclude_hive_runtime(worktree_path: &Path) -> Result<(), String> {
+    use fs2::FileExt;
+    use std::io::Write;
+    let resolved = run_git(worktree_path, &["rev-parse", "--git-path", "info/exclude"])?;
+    let path = PathBuf::from(resolved.trim());
+    let path = if path.is_absolute() { path } else { worktree_path.join(path) };
+    let parent = path.parent().ok_or("exclude path has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(parent.join("hive-runtime-exclude.lock")).map_err(|e| e.to_string())?;
+    FileExt::lock_exclusive(&lock).map_err(|e| e.to_string())?;
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.to_string()),
+    };
+    let missing: Vec<String> = HIVE_WORKTREE_ROOTS.iter().map(|root| format!("/{root}/"))
+        .filter(|pattern| !existing.lines().any(|line| line.trim() == pattern)).collect();
+    if !missing.is_empty() {
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)
+            .map_err(|e| e.to_string())?;
+        let prefix = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
+        file.write_all(format!("{prefix}{}\n", missing.join("\n")).as_bytes()).map_err(|e| e.to_string())?;
+    }
+    // Closing the file releases the cross-process lock, including on errors.
+    Ok(())
+}
+
 /// Generate a branch name for a cell based on session mode and cell type.
 ///
 /// # Naming Conventions
@@ -247,6 +277,9 @@ fn worktree_has_eslint_config(worktree_path: &Path) -> bool {
 ///
 /// Best effort by design: never returns an error and never fails a launch.
 pub(crate) fn ensure_worktree_config_boundary(project_path: &Path, worktree_path: &Path) {
+    if let Err(error) = exclude_hive_runtime(worktree_path) {
+        tracing::warn!(path = %worktree_path.display(), %error, "failed to exclude hive runtime files; continuing launch");
+    }
     let Some(root) = worktree_config_boundary_root(project_path, worktree_path) else {
         // Fusion/debate paths round-trip through `to_string_lossy()` -> `PathBuf`,
         // so a lost prefix match should be diagnosable rather than silent.
@@ -494,6 +527,51 @@ mod tests {
             worktree_config_boundary_root(repo, Path::new("/repo/tmp/wt")),
             None
         );
+    }
+
+    #[test]
+    fn runtime_exclude_is_common_idempotent_and_preserves_project_files() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        run_git(repo, &["init"]).unwrap();
+        run_git(repo, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "fixture"]).unwrap();
+        std::fs::write(repo.join(".gitignore"), "project-rule\n").unwrap();
+        let worktree = repo.join(".hive-manager/worktrees/sid/primary");
+        run_git(repo, &["worktree", "add", "-b", "fixture-worktree", worktree.to_str().unwrap()]).unwrap();
+        let exclude = repo.join(".git/info/exclude");
+        std::fs::write(&exclude, "# preserve this without trailing newline").unwrap();
+        ensure_worktree_config_boundary(repo, &worktree);
+        ensure_worktree_config_boundary(repo, &worktree);
+        let text = std::fs::read_to_string(&exclude).unwrap();
+        assert!(text.starts_with("# preserve this without trailing newline\n"));
+        for root in HIVE_WORKTREE_ROOTS {
+            assert_eq!(text.matches(&format!("/{root}/")).count(), 1);
+            std::fs::create_dir_all(worktree.join(root)).unwrap();
+            std::fs::write(worktree.join(root).join("runtime.md"), "runtime").unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(repo.join(".gitignore")).unwrap(), "project-rule\n");
+        std::fs::create_dir_all(worktree.join(".hive-manager/tasks")).unwrap();
+        std::fs::write(worktree.join(".hive-manager/tasks/runtime.md"), "runtime").unwrap();
+        std::fs::create_dir(worktree.join("logs")).unwrap();
+        std::fs::write(worktree.join("logs/project.txt"), "user logs").unwrap();
+        let status = run_git(&worktree, &["status", "--porcelain", "--untracked-files=all"]).unwrap();
+        for root in HIVE_WORKTREE_ROOTS {
+            assert!(!status.contains(root), "{status}");
+        }
+        assert!(status.contains("logs/project.txt"), "project logs must stay visible");
+        let main_status = run_git(repo, &["status", "--porcelain", "--untracked-files=all"]).unwrap();
+        assert!(!main_status.contains(".hive-manager"), "exclude is common by design");
+    }
+
+    #[test]
+    fn runtime_exclude_write_failure_does_not_fail_boundary_or_launch() {
+        let temp = TempDir::new().unwrap();
+        run_git(temp.path(), &["init"]).unwrap();
+        let path = temp.path().join(".git/info/exclude");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(exclude_hive_runtime(temp.path()).is_err());
+        ensure_worktree_config_boundary(temp.path(), temp.path());
     }
 
     /// #177 T2. Content equality is load-bearing: verified against ESLint 8.57.1,

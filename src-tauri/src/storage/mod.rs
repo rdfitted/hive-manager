@@ -498,6 +498,24 @@ impl SessionStorage {
         }
     }
 
+    /// Retirement is additive: legacy session.json files and constructors stay unchanged.
+    pub fn load_retirement_settings(&self, session_id: &str) -> Result<crate::session::retirement::RetirementSettings, StorageError> {
+        match fs::read(self.session_dir(session_id).join("retirement.json")) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save_retirement_settings(&self, session_id: &str, settings: &crate::session::retirement::RetirementSettings) -> Result<(), StorageError> {
+        let dir = self.session_dir(session_id);
+        fs::create_dir_all(&dir)?;
+        let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
+        serde_json::to_writer(&mut temp, settings)?;
+        temp.persist(dir.join("retirement.json")).map_err(|error| StorageError::Io(error.error))?;
+        Ok(())
+    }
+
     /// Create a new session directory structure
     pub fn create_session_dir(&self, session_id: &str) -> Result<PathBuf, StorageError> {
         let session_dir = self.session_dir(session_id);

@@ -12,6 +12,45 @@ use thiserror::Error;
 use crate::adapters::{PtySubmitPolicy, PtySubmitResult};
 
 use super::output_ring::{OutputRing, OutputSnapshot, RECENT_OUTPUT_VIEW_BYTES};
+pub(crate) use super::real_session::ConstructionCleanup;
+
+#[cfg(windows)]
+#[derive(Default)]
+pub(super) struct RealReaderControl {
+    pause: Mutex<bool>,
+    changed: Condvar,
+    pub(super) waiting: AtomicBool,
+    pub(super) reading: AtomicBool,
+}
+
+#[cfg(windows)]
+impl RealReaderControl {
+    pub(super) fn pause(&self) { *self.pause.lock() = true; }
+    pub(super) fn resume(&self) { *self.pause.lock() = false; self.changed.notify_all(); }
+}
+
+#[cfg(windows)]
+struct RealReader {
+    reader: Arc<Mutex<super::real_session::SendReader>>,
+    control: Arc<RealReaderControl>,
+}
+
+#[cfg(windows)]
+impl Read for RealReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut pause = self.control.pause.lock();
+        while *pause {
+            self.control.waiting.store(true, Ordering::Release);
+            self.control.changed.wait(&mut pause);
+        }
+        self.control.waiting.store(false, Ordering::Release);
+        drop(pause);
+        self.control.reading.store(true, Ordering::Release);
+        let result = super::real_session::read_from_reader(&self.reader, buf);
+        self.control.reading.store(false, Ordering::Release);
+        result
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRole {
@@ -308,6 +347,11 @@ fn sanitize_bracketed_paste(data: &[u8]) -> Cow<'_, [u8]> {
 }
 
 pub struct PtySession {
+    reader_finished: Arc<AtomicBool>,
+    #[cfg(windows)]
+    real_session: Option<Arc<super::real_session::PtySession>>,
+    #[cfg(windows)]
+    real_reader_control: Option<Arc<RealReaderControl>>,
     pub role: AgentRole,
     pub status: Arc<parking_lot::RwLock<AgentStatus>>,
     submit_policy: PtySubmitPolicy,
@@ -342,6 +386,7 @@ impl PtySession {
         Ok(())
     }
 
+    #[allow(dead_code)] // Keep the direct constructor alongside the production session.
     pub fn new(
         _id: String,
         role: AgentRole,
@@ -354,9 +399,32 @@ impl PtySession {
         _rows: u16,
         replay_capacity: usize,
     ) -> Result<Self, PtyError> {
+        Self::new_deferred(_id, role, _command, submit_policy, identity_env, args,
+            _cwd, _cols, _rows, replay_capacity, &mut None)
+    }
+
+    pub(crate) fn new_deferred(
+        _id: String,
+        role: AgentRole,
+        _command: &str,
+        submit_policy: PtySubmitPolicy,
+        identity_env: &[(String, String)],
+        args: &[&str],
+        _cwd: Option<&str>,
+        _cols: u16,
+        _rows: u16,
+        replay_capacity: usize,
+        _cleanup: &mut Option<ConstructionCleanup>,
+    ) -> Result<Self, PtyError> {
         let write_records = Arc::new(Mutex::new(Vec::new()));
         let output_ring = Arc::new(Mutex::new(OutputRing::new(replay_capacity)));
-        let session = Self {
+        #[allow(unused_mut)]
+        let mut session = Self {
+            reader_finished: Arc::new(AtomicBool::new(false)),
+            #[cfg(windows)]
+            real_session: None,
+            #[cfg(windows)]
+            real_reader_control: None,
             role,
             status: Arc::new(parking_lot::RwLock::new(AgentStatus::Starting)),
             submit_policy,
@@ -390,6 +458,25 @@ impl PtySession {
                 None
             },
         };
+
+        // G36 opts into an actual ConPTY through the normal manager path. No
+        // process-global switch: unrelated manager fixtures remain synthetic.
+        #[cfg(windows)]
+        if args.contains(&"--real-pty-fixture") {
+            let real_role = serde_json::from_value(serde_json::to_value(&session.role).unwrap()).unwrap();
+            let real_args: Vec<_> = args.iter().copied()
+                .filter(|arg| !["--real-pty-fixture", "--stub-tree-kill-fails-once", "--stub-reader-spawn-fails"].contains(arg)).collect();
+            let real = Arc::new(super::real_session::PtySession::new_deferred(
+                _id, real_role, _command, submit_policy, identity_env,
+                &real_args, _cwd, _cols, _rows, replay_capacity, _cleanup,
+            ).map_err(|error| PtyError::CreateError(error.to_string()))?);
+            let control = Arc::new(RealReaderControl::default());
+            session.reader = Arc::new(Mutex::new(SendReader(Box::new(RealReader {
+                reader: real.get_reader(), control: control.clone(),
+            }))));
+            session.real_reader_control = Some(control);
+            session.real_session = Some(real);
+        }
 
         // #207 test fixture: a flag-borne sentinel is the only way an integration test
         // can produce a spawn that "succeeds" and then dies during startup — the field
@@ -428,6 +515,10 @@ impl PtySession {
 
     pub fn recent_output(&self) -> String {
         self.output_ring.lock().tail_lossy(RECENT_OUTPUT_VIEW_BYTES)
+    }
+
+    pub(crate) fn output_history(&self) -> Arc<Mutex<OutputRing>> {
+        Arc::clone(&self.output_ring)
     }
 
     pub fn snapshot(&self) -> OutputSnapshot {
@@ -564,10 +655,16 @@ impl PtySession {
                 "synthetic partial tree-kill failure",
             )));
         }
+        #[cfg(windows)]
+        if let Some(real) = &self.real_session {
+            return real.kill().map_err(|error| PtyError::CreateError(error.to_string()));
+        }
         Ok(())
     }
 
     pub fn age(&self) -> Duration {
+        #[cfg(windows)]
+        if let Some(real) = &self.real_session { return real.age(); }
         self.spawned_at.lock().elapsed()
     }
 
@@ -576,6 +673,8 @@ impl PtySession {
     }
 
     pub fn unexpected_exit(&self) -> Option<u32> {
+        #[cfg(windows)]
+        if let Some(real) = &self.real_session { return real.unexpected_exit(); }
         if self.kill_requested.load(Ordering::SeqCst) {
             return None;
         }
@@ -592,6 +691,8 @@ impl PtySession {
     /// which is where this crate's tests actually run. Track the stubbed status
     /// instead so those branches are reachable from tests.
     pub fn is_alive(&self) -> bool {
+        #[cfg(windows)]
+        if let Some(real) = &self.real_session { return real.is_alive(); }
         !matches!(
             *self.status.read(),
             AgentStatus::Completed | AgentStatus::Error(_)
@@ -609,6 +710,30 @@ impl PtySession {
 
     pub fn get_reader(&self) -> Arc<Mutex<SendReader>> {
         Arc::clone(&self.reader)
+    }
+
+    pub(crate) fn release_master(&self) {
+        #[cfg(windows)]
+        if let Some(real) = &self.real_session { real.release_master(); }
+    }
+
+    pub(crate) fn mark_reader_spawn_failed(&self) {
+        #[cfg(windows)]
+        if let Some(real) = &self.real_session { real.mark_reader_spawn_failed(); }
+    }
+
+    pub(super) fn reader_finished_for_test(&self) -> Arc<AtomicBool> {
+        self.reader_finished.clone()
+    }
+
+    #[cfg(windows)]
+    pub(super) fn real_session_for_test(&self) -> Arc<super::real_session::PtySession> {
+        self.real_session.as_ref().expect("real PTY fixture").clone()
+    }
+
+    #[cfg(windows)]
+    pub(super) fn real_reader_control_for_test(&self) -> Arc<RealReaderControl> {
+        self.real_reader_control.as_ref().unwrap().clone()
     }
 }
 

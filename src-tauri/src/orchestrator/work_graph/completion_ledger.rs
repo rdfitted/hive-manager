@@ -39,6 +39,9 @@ pub struct NodeCompletionFact {
     pub completed_at: DateTime<Utc>,
     #[serde(default)]
     pub(crate) executed_as: Option<ExecutedAs>,
+    /// A later Queen attestation is retained without replacing the original finish.
+    #[serde(default)]
+    pub confirmation: bool,
 }
 
 impl NodeCompletionFact {
@@ -54,11 +57,17 @@ impl NodeCompletionFact {
             provenance,
             completed_at: Utc::now(),
             executed_as: None,
+            confirmation: false,
         }
     }
 
     pub(crate) fn with_executed_as(mut self, executed_as: ExecutedAs) -> Self {
         self.executed_as = Some(executed_as);
+        self
+    }
+
+    pub(crate) fn with_confirmation(mut self, confirmation: bool) -> Self {
+        self.confirmation = confirmation;
         self
     }
 
@@ -74,6 +83,9 @@ impl NodeCompletionFact {
         });
         if let Some(executed_as) = &self.executed_as {
             payload["executed_as"] = serde_json::json!(executed_as);
+        }
+        if self.confirmation {
+            payload["confirmation"] = serde_json::json!(true);
         }
         Event {
             id: uuid::Uuid::new_v4().to_string(),
@@ -202,6 +214,19 @@ mod tests {
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].id, "legacy-fact");
         assert!(facts[0].executed_as.is_none());
+        assert!(!facts[0].confirmation);
+    }
+
+    #[test]
+    fn first_finish_confirmation_defaults_for_legacy_rows() {
+        let legacy: NodeCompletionFact = serde_json::from_str(
+            r#"{"id":"old","task_id":"T1","agent_id":"s-worker-1","provenance":"heartbeat","completed_at":"2026-01-02T03:04:05Z"}"#,
+        ).unwrap();
+        assert!(!legacy.confirmation);
+        let confirmation = legacy.with_confirmation(true);
+        let parsed: NodeCompletionFact = serde_json::from_value(serde_json::to_value(&confirmation).unwrap()).unwrap();
+        assert!(parsed.confirmation);
+        assert_eq!(parsed.event("s").payload["confirmation"], true);
     }
 
     #[test]

@@ -23,6 +23,20 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('G-attention-predicate', () => {
+  it.each(['finished', 'retired'])('G31: %s work has no stale attention or needs-you count', (work_state) => {
+    const finished = { ...agent('Running'), work_state };
+    const stale = new Set(['a']);
+    expect(attentionReason(finished, stale)).toBe('none');
+    expect([finished].filter(seat => needsAttention(seat, stale))).toHaveLength(0);
+    expect(attentionReason(finished, stale, 'working')).toBe('stale');
+  });
+  it.each([undefined, 'unknown', 'working'])('G31: %s work state keeps the stale rule', (work_state) => {
+    expect(attentionReason({ ...agent('Running'), work_state }, new Set(['a']))).toBe('stale');
+  });
+  it.each([{ Error: 'failed' }, { Error: 'exited_during_startup:101' },
+    { WaitingForInput: 'injected_delivery_failed:test' }] as const)('G31: %o still alarms after finished proof', (status) => {
+    expect(needsAttention({ ...agent(status), work_state: 'finished' }, new Set())).toBe(true);
+  });
   it.each(['awaiting_injected_turn', 'awaiting_injected_turn:2026-10-21', 'other reason', 'injected_delivery_failed'])('does not flag WaitingForInput %s', (reason) => {
     expect(needsAttention(agent({ WaitingForInput: reason }), new Set())).toBe(false);
     expect(attentionReason(agent({ WaitingForInput: reason }), new Set())).toBe('none');
@@ -41,6 +55,26 @@ describe('G-attention-predicate', () => {
 });
 
 describe('activity derivation', () => {
+  it('G31 confirmed follow-up exposes the input time after the awaiting marker is gone', () => {
+    const latest_input_at = '2026-11-01T12:00:00Z';
+    set(heartbeatStore, { agents: { a: { summary: 'Previous completion',
+      timestamp: '2026-11-01T11:50:00Z', latest_input_at, work_state: 'working' } }, staleAgents: new Set() });
+    expect(get(agentActivity).a.lastActivityAt).toBe(Date.parse(latest_input_at));
+    expect(get(agentActivity).a.attention).toBe('none');
+    set(heartbeatStore, { agents: { a: { timestamp: '2026-11-01T12:01:00Z',
+      latest_input_at, work_state: 'working' } }, staleAgents: new Set(['a']) });
+    expect(get(agentActivity).a.lastActivityAt).toBe(Date.parse('2026-11-01T12:01:00Z'));
+    expect(get(agentActivity).a.attention).toBe('stale');
+  });
+  it('G31: fresh backend work state overrides the older roster state', () => {
+    set(activeAgents, [{ ...agent('Running'), work_state: 'finished' }]);
+    set(heartbeatStore, { agents: { a: { work_state: 'working' } }, staleAgents: new Set(['a']) });
+    expect(get(agentActivity).a.attention).toBe('stale');
+    set(heartbeatStore, { agents: { a: { work_state: 'finished' } }, staleAgents: new Set(['a']) });
+    expect(get(agentActivity).a.attention).toBe('none');
+    set(heartbeatStore, { agents: { a: { status: 'completed' } }, staleAgents: new Set(['a']) });
+    expect(get(agentActivity).a.attention, 'missing API work state must not inherit old finished roster proof').toBe('stale');
+  });
   it('normalizes summary and combines newest heartbeat/event time without a request', () => {
     set(heartbeatStore, { agents: { a: { summary: ' Fixing\n  tests ', timestamp: '2026-10-21T12:00:00Z' } }, staleAgents: new Set(['a']) });
     set(events, { events: [

@@ -675,6 +675,8 @@ impl SessionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     #[serde(default)]
+    pub work_state: Option<super::work_state::WorkState>,
+    #[serde(default)]
     pub transcript_spawned_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub transcript_session_id: Option<String>,
@@ -695,6 +697,8 @@ pub struct AgentInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HiveLaunchConfig {
+    #[serde(default)]
+    pub retirement_settings: Option<super::retirement::RetirementSettings>,
     pub project_path: String,
     #[serde(default)]
     pub name: Option<String>,
@@ -1031,6 +1035,11 @@ pub struct SessionController {
     /// Durable run journal + side-effect ledger (#125). Optional so tests/legacy
     /// construction paths can run without a SQLite DB; write-step seams no-op when unset.
     run_journal: Option<crate::storage::RunJournalStore>,
+    queue_repo: Option<Arc<crate::storage::QueueRepo>>,
+    heartbeat_marks: RwLock<HashSet<(String, String)>>,
+    retirement_completions: RwLock<HashMap<(String, String), (Uuid, u64)>>,
+    /// Runtime-only input boundaries; stable seat IDs must never transfer them to a respawn.
+    latest_inputs: RwLock<HashMap<(String, String), (Uuid, DateTime<Utc>)>>,
 }
 
 // Explicitly implement Send + Sync
@@ -1289,10 +1298,12 @@ impl Drop for NewLaunchTransportSettings<'_> {
         self.controller.pty_manager.read().forget_transport_settings(&self.session_id);
         if let Some(storage) = &self.controller.storage {
             // Remove only the newly allocated setting, never its session directory.
-            let path = storage.session_dir(&self.session_id).join("agent-transports.json");
-            if let Err(error) = std::fs::remove_file(path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!("Failed to remove transport settings for failed launch {}: {error}", self.session_id);
+            for name in ["agent-transports.json", "retirement.json"] {
+                let path = storage.session_dir(&self.session_id).join(name);
+                if let Err(error) = std::fs::remove_file(path) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!("Failed to remove {name} for failed launch {}: {error}", self.session_id);
+                    }
                 }
             }
         }
@@ -1316,12 +1327,20 @@ impl SessionController {
             qa_timeout_handles: Mutex::new(HashMap::new()),
             evaluator_respawns_inflight: Mutex::new(HashSet::new()),
             run_journal: None,
+            queue_repo: None,
+            heartbeat_marks: RwLock::new(HashSet::new()),
+            retirement_completions: RwLock::new(HashMap::new()),
+            latest_inputs: RwLock::new(HashMap::new()),
         }
     }
 
     /// Attach the run journal store (#125). Schema must already be ensured by the caller.
     pub fn set_run_journal(&mut self, store: crate::storage::RunJournalStore) {
         self.run_journal = Some(store);
+    }
+
+    pub fn set_queue_repo(&mut self, repo: Arc<crate::storage::QueueRepo>) {
+        self.queue_repo = Some(repo);
     }
 
     /// Record a write-step as `Started`, returning its deterministic id. No-op (returns
@@ -1538,6 +1557,7 @@ impl SessionController {
             };
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(cmd, &queen_args),
                 id: queen_id,
@@ -1600,6 +1620,7 @@ impl SessionController {
                 };
 
                 agents.push(AgentInfo {
+                    work_state: None,
                     transcript_spawned_at,
                     transcript_session_id: Self::transcript_key(cmd, &worker_args),
                     id: worker_id.clone(),
@@ -1668,8 +1689,52 @@ impl SessionController {
 
     pub fn get_session(&self, id: &str) -> Option<Session> {
         self.refresh_session_from_storage_if_clean(id);
-        let sessions = self.sessions.read();
-        sessions.get(id).cloned()
+        let session = self.sessions.read().get(id).cloned()?;
+        Some(self.project_work_states(session))
+    }
+
+    fn project_work_states(&self, session: Session) -> Session {
+        self.session_with_heartbeats(session).0
+    }
+
+    /// Publish heartbeat fields and their derived work state from the same snapshot.
+    pub fn session_with_heartbeats(&self, mut session: Session) -> (Session, HashMap<String, AgentHeartbeatInfo>) {
+        use super::work_state::{work_state_since, verdict_at, WorkEvidence, WorkState};
+        let retired: HashSet<String> = session.agents.iter()
+            .filter(|agent| agent.work_state == Some(WorkState::Retired)
+                && matches!(agent.status, AgentStatus::Completed))
+            .map(|agent| agent.id.clone()).collect();
+        for agent in &mut session.agents { agent.work_state = Some(WorkState::Working); }
+        let evidence = self.agent_heartbeats.try_read().and_then(|heartbeats| {
+            self.heartbeat_marks.try_read().map(|marks|
+                (heartbeats.get(&session.id).cloned().unwrap_or_default(), marks.clone()))
+        });
+        let Some((heartbeats, marks)) = evidence else { return (session, HashMap::new()) };
+        let queue = self.queue_repo.as_ref()
+            .and_then(|repo| repo.rows_for_session(&session.id).ok());
+        let states = session.agents.iter().map(|agent| {
+            let verdict_at = verdict_at(&session, agent, self.storage.as_deref());
+            // Roster reads also occur inside lifecycle operations that already own this
+            // lock. Unavailable runtime evidence must stay working, never deadlock a read.
+            let Some(manager) = self.pty_manager.try_read() else { return WorkState::Working };
+            let instance = manager.instance_id(&agent.id);
+            if retired.contains(&agent.id) && instance.is_none() && !manager.is_alive(&agent.id) {
+                return WorkState::Retired;
+            }
+            let state = work_state_since(&WorkEvidence {
+                agent_id: &agent.id, role: &agent.role, status: &agent.status,
+                alive: manager.is_alive(&agent.id), spawned_at: manager.spawned_at(&agent.id),
+                heartbeat: heartbeats.get(&agent.id).map(|heartbeat|
+                    (heartbeat.status.as_str(), heartbeat.last_activity)),
+                heartbeat_is_self: !marks.contains(&(session.id.clone(), agent.id.clone())),
+                queue: queue.as_deref(), verdict_at,
+            }, self.input_at_for_instance(&session.id, &agent.id, instance));
+            if manager.instance_id(&agent.id) != instance { WorkState::Working } else { state }
+        }).collect::<Vec<_>>();
+        for (agent, state) in session.agents.iter_mut().zip(states) {
+            agent.work_state = Some(state);
+        }
+        (session, heartbeats)
     }
 
     fn refresh_session_from_storage_if_clean(&self, session_id: &str) {
@@ -1971,7 +2036,7 @@ impl SessionController {
     pub fn list_sessions(&self) -> Vec<Session> {
         let sessions = self.sessions.read();
         let heartbeats = self.agent_heartbeats.read();
-        sessions
+        let result = sessions
             .values()
             .cloned()
             .map(|mut session| {
@@ -1991,7 +2056,10 @@ impl SessionController {
                 }
                 session
             })
-            .collect()
+            .collect::<Vec<_>>();
+        drop(heartbeats);
+        drop(sessions);
+        result.into_iter().map(|session| self.project_work_states(session)).collect()
     }
 
     pub(crate) fn session_requires_internal_evaluator(session: &Session) -> bool {
@@ -2080,6 +2148,17 @@ impl SessionController {
         status: &str,
         summary: Option<&str>,
     ) -> Result<(), String> {
+        self.update_heartbeat_with_source(session_id, agent_id, status, summary, false)
+    }
+
+    pub fn update_heartbeat_with_source(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        status: &str,
+        summary: Option<&str>,
+        queen_mark: bool,
+    ) -> Result<(), String> {
         let now = Utc::now();
         let prev_status = {
             let mut heartbeats = self.agent_heartbeats.write();
@@ -2093,6 +2172,15 @@ impl SessionController {
                     summary: summary.map(String::from),
                 },
             );
+            let key = (session_id.to_string(), agent_id.to_string());
+            let mut marks = self.heartbeat_marks.write();
+            let mut completions = self.retirement_completions.write();
+            if status == "completed" {
+                if let Some(fence) = self.pty_manager.read().input_fence(agent_id) {
+                    completions.insert(key.clone(), fence);
+                } else { completions.remove(&key); }
+            } else { completions.remove(&key); }
+            if queen_mark { marks.insert(key); } else { marks.remove(&key); }
             prev
         };
         let session_snapshot = {
@@ -2130,6 +2218,29 @@ impl SessionController {
 
     const AWAITING_INJECTED_TURN_PREFIX: &'static str = "awaiting_injected_turn:";
 
+    fn input_at_for_instance(&self, session_id: &str, agent_id: &str, instance: Option<Uuid>) -> Option<DateTime<Utc>> {
+        let instance = instance?;
+        self.latest_inputs.read().get(&(session_id.to_string(), agent_id.to_string()))
+            .filter(|(owner, _)| *owner == instance).map(|(_, at)| *at)
+    }
+
+    pub fn latest_input_at(&self, session_id: &str, agent_id: &str) -> Option<DateTime<Utc>> {
+        let manager = self.pty_manager.try_read()?;
+        self.input_at_for_instance(session_id, agent_id, manager.instance_id(agent_id))
+    }
+
+    /// Record admitted input even if protocol delivery is queued or a faster heartbeat
+    /// already cleared the delivery marker. Nothing here is persisted.
+    pub fn record_input_time(&self, session_id: &str, agent_id: &str, at: DateTime<Utc>) {
+        let manager = self.pty_manager.read();
+        let Some(instance) = manager.instance_id(agent_id) else { return };
+        if manager.spawned_at(agent_id).is_none_or(|spawned| at < spawned) { return; }
+        let mut inputs = self.latest_inputs.write();
+        let entry = inputs.entry((session_id.to_string(), agent_id.to_string())).or_insert((instance, at));
+        if entry.0 != instance { *entry = (instance, at); }
+        else { entry.1 = entry.1.max(at); }
+    }
+
     fn awaiting_injected_turn_since(status: &AgentStatus) -> Option<DateTime<Utc>> {
         let AgentStatus::WaitingForInput(reason) = status else {
             return None;
@@ -2159,6 +2270,7 @@ impl SessionController {
         if !submit_keystroke_issued {
             return Ok(());
         }
+        self.record_input_time(session_id, agent_id, submitted_at);
         if self
             .agent_heartbeats
             .read()
@@ -2253,6 +2365,10 @@ impl SessionController {
         session_id: &str,
         threshold: Duration,
     ) -> Vec<(String, DateTime<Utc>, AgentStatus)> {
+        let finished: HashSet<String> = self.get_session(session_id).into_iter()
+            .flat_map(|session| session.agents).filter(|agent| matches!(agent.work_state,
+                Some(super::work_state::WorkState::Finished | super::work_state::WorkState::Retired)))
+            .map(|agent| agent.id).collect();
         let now = Utc::now();
         let threshold_secs = threshold.as_secs() as i64;
         let (task_file_updates, agent_statuses) = {
@@ -2298,18 +2414,23 @@ impl SessionController {
                     recovered_after_injection.push((agent_id.clone(), info.status.clone()));
                 }
 
-                // An inject is sender activity, not evidence that the managed agent ran. It can
-                // select the awaiting-injected-turn reason, but must not refresh an already-stale
-                // heartbeat clock. Agents without any heartbeat use the marker below as fallback.
-                let last_relevant_activity = info.last_activity;
+                let input_at = self.input_at_for_instance(session_id, agent_id,
+                    pty_manager.instance_id(agent_id));
+                // Input re-arms monitoring after completion and gives the receiver a full
+                // response window even once confirmation has cleared the pending marker.
+                let last_relevant_activity = input_at.into_iter().chain(awaiting_since)
+                    .fold(info.last_activity, DateTime::max);
+                let resumed_after_completion = input_at.is_some_and(|at| at >= info.last_activity);
                 let elapsed = (now - last_relevant_activity).num_seconds();
                 let reassigned_after_completion = info.status == "completed"
                     && task_file_updates
                         .get(agent_id)
                         .is_some_and(|modified| modified > &info.last_activity);
+                if finished.contains(agent_id) && !reassigned_after_completion { return None; }
                 if elapsed > threshold_secs
                     && (awaiting_since.is_some()
                         || info.status != "completed"
+                        || resumed_after_completion
                         || reassigned_after_completion)
                 {
                     let runtime_status = agent_statuses.get(agent_id);
@@ -2335,10 +2456,13 @@ impl SessionController {
         // A submit can happen before an agent's first heartbeat. The in-memory canonical status
         // still carries enough time information to surface that condition after the threshold.
         for (agent_id, status) in &agent_statuses {
+            if finished.contains(agent_id) { continue; }
             if agents.is_some_and(|agents| agents.contains_key(agent_id)) {
                 continue;
             }
-            if let Some(awaiting_since) = Self::awaiting_injected_turn_since(status) {
+            if let Some(awaiting_since) = self.input_at_for_instance(session_id, agent_id,
+                pty_manager.instance_id(agent_id)).into_iter()
+                .chain(Self::awaiting_injected_turn_since(status)).max() {
                 if (now - awaiting_since).num_seconds() > threshold_secs {
                     let status = if !pty_manager.is_alive(agent_id) {
                         AgentStatus::Error("process_not_alive".to_string())
@@ -2380,7 +2504,139 @@ impl SessionController {
     /// seat is left dead on purpose: nothing here respawns it.
     pub fn sweep_dead_startup_seats(&self, session_id: &str) -> Vec<String> {
         let exits = self.probe_startup_exits(session_id);
-        self.flag_dead_startup_seats(session_id, exits)
+        let flagged = self.flag_dead_startup_seats(session_id, exits);
+        self.retire_finished_agents(session_id);
+        flagged
+    }
+
+    /// Runs on the desktop's five-second monitoring sweep. No elapsed-idle threshold:
+    /// retirement consumes completion proof and never emits AgentCompleted.
+    pub fn retire_finished_agents(&self, session_id: &str) -> Vec<String> {
+        let Some(storage) = self.storage.as_deref() else { return Vec::new() };
+        let Ok(settings) = storage.load_retirement_settings(session_id) else { return Vec::new() };
+        if !settings.enabled { return Vec::new(); }
+        let Some(session) = self.sessions.read().get(session_id).cloned() else { return Vec::new() };
+        let mut retired = Vec::new();
+        for agent in &session.agents {
+            if self.retire_finished_agent(&session, agent, &settings) {
+                retired.push(agent.id.clone());
+            }
+        }
+        if !retired.is_empty() {
+            self.update_session_storage(session_id);
+            self.emit_session_update(session_id);
+        }
+        retired
+    }
+
+    fn retire_finished_agent(
+        &self, session: &Session, agent: &AgentInfo,
+        settings: &super::retirement::RetirementSettings,
+    ) -> bool {
+        use super::{retirement, work_state::WorkEvidence};
+        if !matches!(agent.role, AgentRole::Worker { .. } | AgentRole::QaWorker { .. })
+            || matches!(agent.status, AgentStatus::Completed | AgentStatus::Error(_)) {
+            return false;
+        }
+        let manager = self.pty_manager.read();
+        let Some(instance) = manager.instance_id(&agent.id) else { return false };
+        let Some(spawned_at) = manager.spawned_at(&agent.id) else { return false };
+        // No transport contract currently exposes idle/current-turn state. A heartbeat
+        // is completion evidence, not proof that its process is between turns.
+        let idle = agent.config.cli == "codex" && manager.protocol_agent(&agent.id).is_none()
+            && manager.recent_output(&agent.id).is_some_and(|output|
+                crate::adapters::CodexAdapter::turn_running(&output) == Some(false));
+        if !idle { return false; }
+        // Reject missing/stale completion proof before queue, graph or git I/O.
+        // This is only a precheck; re-read authoritatively under the heartbeat
+        // and mark locks below, since completion/input can change during I/O.
+        {
+            let completions = self.retirement_completions.read();
+            if !completions.get(&(session.id.clone(), agent.id.clone()))
+                .is_some_and(|completed| completed.0 == instance && Some(*completed) == manager.input_fence(&agent.id)) {
+                return false;
+            }
+        }
+        #[cfg(test)]
+        Self::test_sync_hook(&instance.to_string(), "retirement-eligibility", None);
+        let Some(storage) = self.storage.as_deref() else { return false };
+        let root = session.project_path.join(".hive-manager").join(&session.id);
+        let state = crate::coordination::StateManager::new(storage.session_dir(&session.id));
+        let queue = self.queue_repo.as_ref().and_then(|repo| repo.rows_for_session(&session.id).ok());
+        let outputs = (|| {
+            let rows = queue.as_deref()?;
+            let latest = rows.iter().filter(|row| row.worker_id == agent.id)
+                .map(|row| (row.assignment_id, row.created_at)).max();
+            let task_ids = if let Some(latest) = latest {
+                rows.iter().filter(|row| row.worker_id == agent.id
+                    && (row.assignment_id, row.created_at) == latest)
+                    .map(|row| row.task_id.clone()).collect::<Option<Vec<_>>>()?
+            } else {
+                vec![state.get_worker_assignment(&agent.id).ok()??.plan_task_id?]
+            };
+            let graph = match state.read_graph_composition_state().ok()? {
+                Some(composition) => composition.graph,
+                None => state.read_work_graph().ok()??,
+            };
+            let mut outputs = Vec::new();
+            for task_id in task_ids {
+                let node = graph.nodes.iter().find(|node| node.id == task_id)?;
+                if node.contract.outputs.is_empty() { return None; }
+                outputs.extend(node.contract.outputs.iter().cloned());
+            }
+            Some(outputs)
+        })();
+        let committed = !session.no_git && outputs.as_ref().is_some_and(|outputs|
+            manager.spawn_cwd(&agent.id).is_some_and(|cwd|
+                retirement::owned_work_committed(Path::new(&cwd), outputs)));
+        let qa = matches!(agent.role, AgentRole::QaWorker { .. });
+        let final_verdict = qa && matches!(session.state, SessionState::QaPassed | SessionState::Completed)
+            && crate::http::handlers::evaluator::read_qa_verdict_record(&storage.session_dir(&session.id))
+                .ok().flatten().is_some_and(|record| record.session_id == session.id && record.passed
+                    && record.verdict == "PASS" && DateTime::parse_from_rfc3339(&record.timestamp)
+                        .is_ok_and(|at| at.with_timezone(&Utc) >= spawned_at));
+        // Fence follow-up heartbeats and Queen acceptance while proving/killing. The
+        // source map and heartbeat are read in the same order as their writer.
+        let heartbeats = self.agent_heartbeats.read();
+        let marks = self.heartbeat_marks.read();
+        let heartbeat = heartbeats.get(&session.id).and_then(|map| map.get(&agent.id));
+        let Some((completed_instance, input_revision)) = self.retirement_completions.read()
+            .get(&(session.id.clone(), agent.id.clone())).copied() else { return false };
+        if completed_instance != instance { return false; }
+        let accepted = qa && final_verdict || marks.contains(&(session.id.clone(), agent.id.clone()));
+        let evidence = WorkEvidence {
+            agent_id: &agent.id, role: &agent.role, status: &agent.status,
+            alive: manager.is_alive(&agent.id), spawned_at: Some(spawned_at),
+            heartbeat: heartbeat.map(|value| (value.status.as_str(), value.last_activity)),
+            heartbeat_is_self: !marks.contains(&(session.id.clone(), agent.id.clone())),
+            queue: queue.as_deref(), verdict_at: None,
+        };
+        if super::work_state::work_state_since(&evidence,
+            self.input_at_for_instance(&session.id, &agent.id, Some(instance)))
+            != super::work_state::WorkState::Finished { return false; }
+        if !retirement::eligible(settings, &evidence, accepted, idle,
+            retirement::holds_no_locks(&root, &agent.id), committed, final_verdict) {
+            return false;
+        }
+        // Recheck the roster under its lock before killing, so a pending injection or
+        // changed session state cannot be overwritten by a stale candidate snapshot.
+        let mut sessions = self.sessions.write();
+        let Some(current) = sessions.get_mut(&session.id) else { return false };
+        if current.state != session.state { return false; }
+        let Some(current_agent) = current.agents.iter_mut().find(|current| current.id == agent.id) else { return false };
+        if current_agent.status != agent.status || manager.instance_id(&agent.id) != Some(instance) {
+            return false;
+        }
+        // A retired PTY keeps only bounded replay bytes, not its master or reader.
+        if manager.snapshot(&agent.id).is_none() { return false; }
+        match manager.retire_instance(&agent.id, instance, input_revision) {
+            Ok(true) if manager.instance_id(&agent.id).is_none() => {
+                current_agent.status = AgentStatus::Completed;
+                current_agent.work_state = Some(super::work_state::WorkState::Retired);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn probe_startup_exits(&self, session_id: &str) -> Vec<String> {
@@ -2540,7 +2796,7 @@ impl SessionController {
         };
 
         if let (Some(app_handle), Some(session)) = (self.app_handle.as_ref(), session) {
-            let _ = app_handle.emit("session-update", SessionUpdate { session });
+            let _ = app_handle.emit("session-update", SessionUpdate { session: self.project_work_states(session) });
         }
     }
 
@@ -4973,6 +5229,10 @@ Last updated: {timestamp}
         }
     }
 
+    fn queen_retirement_protocol() -> &'static str {
+        "### Finished agent retirement\n\nAutomatic retirement is on by default for accepted workers with committed declared outputs, no held locks and positive idle-screen proof. QA workers additionally need a final passing verdict; remediation keeps them alive. Queens, Master Planners, Evaluators, Princes and Planner/Fusion/Debate seats are never auto-retired. Protocol seats, Claude/Cursor PTYs and any seat without positive idle proof remain alive. Retirement preserves transcripts, bounded terminal history and graph records, and never creates completion evidence.\n\nUse GET or PUT `/api/sessions/<session-id>/retirement` with `{\"enabled\":true,\"on_call_agent_id\":\"<exact-agent-id>\"}` to keep a named principal on call; set enabled false to disable retirement for this session. Mark completion only after independently accepting it, and commit the principal's owned work before that mark.\n\nFor a later review fix, spawn a new principal with the workers tool, give it the exact task or plan_task_id and previous history, then verify and accept its new work. A retired runtime cannot receive input. Do not stop protected seats to recover memory.\n"
+    }
+
     fn queen_required_protocol(session_root: &Path, has_evaluator: bool) -> String {
         let mark_worker_status_path =
             Self::prompt_path(&session_root.join("tools").join("mark-worker-status.md"));
@@ -4985,7 +5245,7 @@ Last updated: {timestamp}
 3. When you independently verify a managed principal, researcher, or Fusion variant is complete, you MUST immediately mark its exact agent ID `completed` using `{mark_worker_status_path}`. The UI completion checkoff and stall monitor depend on it.
 ```"#,
                 mark_worker_status_path = mark_worker_status_path,
-            );
+            ) + "\n\n" + Self::queen_retirement_protocol().trim_end();
         }
 
         let milestone_ready_path =
@@ -5005,7 +5265,7 @@ Last updated: {timestamp}
             milestone_ready_path = milestone_ready_path,
             qa_verdict_path = qa_verdict_path,
             mark_worker_status_path = mark_worker_status_path,
-        )
+        ) + "\n\n" + Self::queen_retirement_protocol().trim_end()
     }
 
     fn evaluator_required_protocol(session_id: &str, session_root: &Path) -> String {
@@ -5194,6 +5454,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
     }
 
     fn build_evaluator_qa_plan(
+        session_id: &str,
         default_config: &AgentConfig,
         qa_workers: &[QaWorkerConfig],
         worker_count: u8,
@@ -5262,7 +5523,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                 .replace('\'', "'\\''");
 
             command_block.push_str(&format!(
-                "   # {}. {} worker\n   {api_curl} -X POST \"{{{{api_base_url}}}}/api/sessions/{{{{session_id}}}}/qa-workers\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{}'\n\n",
+                "   # {}. {} worker\n   {api_curl} -X POST \"http://localhost:18800/api/sessions/{session_id}/qa-workers\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{}'\n\n",
                 index + 1,
                 label,
                 payload,
@@ -5321,7 +5582,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             format!(r#""model": "{}", "#, default_model)
         };
         let (qa_worker_intro, qa_worker_spawn_plan, qa_worker_count, qa_worker_coverage_rule) =
-            Self::build_evaluator_qa_plan(config, qa_workers, worker_count);
+            Self::build_evaluator_qa_plan(session_id, config, qa_workers, worker_count);
         let required_protocol = Self::evaluator_required_protocol(session_id, &Self::session_prompt_root(project_path, session_id, &config.cli),);
 
         let mut variables = HashMap::new();
@@ -5514,7 +5775,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         let (template_name, default_guidance) = match specialization {
             "ui" => (
                 "roles/qa-worker-ui",
-                "Validate the full UI flow, capture screenshot evidence, and report failures only with criterion-numbered proof.",
+                "Validate applicable UI flows with criterion-numbered evidence. For a smoke run with no UI change and no applicable surface, report N/A with scope evidence; true UI failures still fail.",
             ),
             "api" => (
                 "roles/qa-worker-api",
@@ -5522,7 +5783,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             ),
             "a11y" => (
                 "roles/qa-worker-a11y",
-                "Audit accessibility rigorously with tooling and manual keyboard checks, then report criterion-numbered findings with exact defects.",
+                "Audit applicable accessibility surfaces with tooling and keyboard checks and report exact defects. For a smoke run with no UI change and no applicable surface, report N/A with scope evidence; true accessibility failures still fail.",
             ),
             "adversarial" => (
                 "roles/qa-worker-adversarial",
@@ -6049,7 +6310,7 @@ Read tool docs in `{session_root_prompt}/tools/` for:
     }
 
     fn build_qa_milestone_handoff(
-        _session_id: &str,
+        session_id: &str,
         session_root: &Path,
         completion_scope: &str,
         cli: &str,
@@ -6078,7 +6339,7 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
    1. [FUNC] All workers spawned and ran successfully
    2. [FUNC] Heartbeat API exercised by all workers
    3. [FUNC] Conversation API exercised (queen inbox + shared channel)
-   4. [FUNC] All task files transitioned to COMPLETED status
+   4. [FUNC] All implementation task files transitioned to COMPLETED status (exclude QA, Evaluator and Prince task files still active during review)
 
    ## Pass Threshold
    - All pass/fail criteria must PASS
@@ -6097,7 +6358,7 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
 
 3. You MUST then signal the backend that the milestone is ready. This is what opens the QA review window and starts the QA clock — the clock does NOT run before this point, so there is no time pressure on the work above.
    ```bash
-   {api_curl} -sS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/milestone-ready"
+   {api_curl} -sS -X POST "http://localhost:18800/api/sessions/{session_id}/milestone-ready"
    ```
 
 4. You MUST NOT spawn an Evaluator here. The backend already launched it. After this handoff exists, continue with the Post-Workers Protocol and wait for `{qa_verdict_path}`."#,
@@ -6857,7 +7118,7 @@ Workers MUST use curl to exercise the conversation and heartbeat APIs.
 None - this is a smoke test.
 
 ## Notes
-This smoke test validates the inter-agent conversation and heartbeat flow.
+This smoke test validates the inter-agent conversation and heartbeat flow. It makes no UI changes and has no applicable UI surface. UI and accessibility QA keep their seats and report N/A with this scope reason; the API server root is not a UI. Required functional API checks still must PASS.
 Testing all {worker_count} configured workers with real API calls.
 ```
 
@@ -7012,7 +7273,7 @@ An **Evaluator** agent validates work after all planners complete.
 After all planner domains complete, the Evaluator will:
 1. Review all worker outputs across all domains
 2. Coordinate QA workers to validate each domain
-3. Submit verdict via HTTP endpoint: `POST /api/sessions/{{{{session_id}}}}/qa/verdict`
+3. Submit verdict via HTTP endpoint: `POST http://localhost:18800/api/sessions/{session_id}/qa/verdict`
 "#,
                 qa_info = qa_info.trim_end(),
             )
@@ -7025,7 +7286,7 @@ After all planner domains complete, the Evaluator will:
             format!(
                 "\n6. Evaluator reviews all planner outputs\n\
                  7. {} QA worker(s) validate domain results\n\
-                 8. Evaluator submits verdict via POST /api/sessions/{{{{session_id}}}}/qa/verdict",
+                 8. Evaluator submits verdict via POST http://localhost:18800/api/sessions/{session_id}/qa/verdict",
                 qa_count
             )
         } else {
@@ -7103,7 +7364,7 @@ Each Planner spawns their workers sequentially and assigns subtasks:
 None - this is a smoke test.
 
 ## Notes
-Swarm smoke test completed successfully. The planning phase flow is working.
+This Swarm smoke test makes no UI changes and has no applicable UI surface. UI and accessibility QA keep their seats and report N/A with this scope reason; required functional API checks still must PASS.
 Testing {planner_count} planners with {workers_per} workers each = {total_workers} total workers.
 ```
 
@@ -9481,9 +9742,11 @@ Last updated: {timestamp}
         smoke_test: bool,
         execution_policy: HiveExecutionPolicy,
         agent_transports: crate::domain::agent_transport::AgentTransports,
+        retirement_settings: Option<super::retirement::RetirementSettings>,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let settings = self.configure_new_launch_transports(&session_id, agent_transports)?;
+        self.configure_launch_retirement(&session_id, retirement_settings.as_ref())?;
         let base_ref = resolve_fresh_base(&project_path);
         let solo_branch = format!("solo/{}/worker-1", session_id);
         let mut created_cells = Vec::new();
@@ -9568,6 +9831,7 @@ Last updated: {timestamp}
             created_at: Utc::now(),
             last_activity_at: Utc::now(),
             agents: vec![AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: solo_id,
@@ -9687,6 +9951,17 @@ Last updated: {timestamp}
         Ok(settings)
     }
 
+    fn configure_launch_retirement(&self, session_id: &str, settings: Option<&super::retirement::RetirementSettings>) -> Result<(), String> {
+        let Some(settings) = settings else { return Ok(()) };
+        let mut settings = settings.clone();
+        if let Some(id) = settings.on_call_agent_id.as_mut() {
+            crate::http::handlers::validate_agent_id(id).map_err(|error| error.message)?;
+            *id = crate::http::handlers::canonical_agent_id(session_id, id);
+        }
+        let storage = self.storage.as_ref().ok_or("Retirement settings require session storage")?;
+        storage.save_retirement_settings(session_id, &settings).map_err(|error| error.to_string())
+    }
+
     pub fn launch_solo(&self, config: HiveLaunchConfig) -> Result<Session, String> {
         let project_path = PathBuf::from(&config.project_path);
         let task_description = config
@@ -9713,6 +9988,7 @@ Last updated: {timestamp}
             config.smoke_test,
             execution_policy,
             config.agent_transports.clone(),
+            config.retirement_settings.clone(),
         )
     }
 
@@ -9776,6 +10052,7 @@ Last updated: {timestamp}
         }
 
         let settings = self.configure_new_launch_transports(&session_id, config.agent_transports.clone())?;
+        self.configure_launch_retirement(&session_id, config.retirement_settings.as_ref())?;
         // If with_planning is true, spawn Master Planner first
         if config.with_planning {
             let result = self.launch_planning_phase(session_id, config);
@@ -9929,6 +10206,7 @@ Last updated: {timestamp}
         spawned_agent_ids.push(queen_id.clone());
 
         agents.push(AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: queen_id.clone(),
@@ -10125,6 +10403,7 @@ Last updated: {timestamp}
             spawned_agent_ids.push(worker_id.clone());
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: worker_id,
@@ -10273,6 +10552,7 @@ Last updated: {timestamp}
             .collect();
 
         let hive_config = HiveLaunchConfig {
+            retirement_settings: None,
             project_path: config.project_path,
             name: config.name,
             color: config.color,
@@ -10612,6 +10892,7 @@ phases and do EXACTLY this, then stop:
             }
 
             let agent_info = AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: variant.agent_id.clone(),
@@ -11063,6 +11344,7 @@ phases and do EXACTLY this, then stop:
             }
 
             new_agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: agent_id,
@@ -11654,6 +11936,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 })?;
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
@@ -11781,6 +12064,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
@@ -11919,6 +12203,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
@@ -12128,6 +12413,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Fusion Queen: {}", e))?;
 
             new_agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id,
@@ -12258,6 +12544,7 @@ The backend composed and persisted the following authoritative skeleton before l
             }
 
             new_agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: variant.agent_id.clone(),
@@ -12520,6 +12807,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
@@ -12848,6 +13136,7 @@ The backend composed and persisted the following authoritative skeleton before l
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
+                    work_state: None,
                     transcript_spawned_at,
                     transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: worker_id,
@@ -14072,6 +14361,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 }
 
                 {
+                    #[cfg(test)]
+                    SessionController::test_sync_hook(&sid, "qa-resolution-queued", None);
                     let _resolution = SessionController::lock_qa_resolution();
                     // A setting or heartbeat may have arrived while publication
                     // waited for the operator/window lock. Decide again under it.
@@ -14084,6 +14375,14 @@ The backend composed and persisted the following authoritative skeleton before l
                             return;
                         }
                         if matches!(session.state, SessionState::SpawningEvaluator) {
+                            // Release the read guard before a test barrier allows the
+                            // respawn to restore QaInProgress.
+                            #[cfg(test)]
+                            {
+                                drop(sessions);
+                                drop(_resolution);
+                                SessionController::test_sync_hook(&sid, "qa-respawn-preserved", None);
+                            }
                             continue 'watch;
                         }
                         let heartbeats = agent_heartbeats.read();
@@ -14409,6 +14708,7 @@ The backend composed and persisted the following authoritative skeleton before l
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
+                    work_state: None,
                     transcript_spawned_at,
                     transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: judge_id,
@@ -14753,6 +15053,7 @@ The backend composed and persisted the following authoritative skeleton before l
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
+                    work_state: None,
                     transcript_spawned_at,
                     transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: judge_id,
@@ -15172,6 +15473,31 @@ The backend composed and persisted the following authoritative skeleton before l
         }
     }
 
+    /// One-shot, session-scoped synchronization points for concurrency tests.
+    #[cfg(test)]
+    pub(crate) fn test_sync_hook(
+        session_id: &str,
+        point: &'static str,
+        install: Option<Box<dyn FnOnce() + Send>>,
+    ) {
+        type Hook = Box<dyn FnOnce() + Send>;
+        static HOOKS: std::sync::OnceLock<Mutex<HashMap<(String, &'static str), Hook>>> =
+            std::sync::OnceLock::new();
+        let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let key = (session_id.to_owned(), point);
+        let hook = {
+            let mut hooks = hooks.lock();
+            if let Some(hook) = install {
+                assert!(hooks.insert(key, hook).is_none(), "duplicate test hook");
+                return;
+            }
+            hooks.remove(&key)
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     /// Continue a session after planning phase - spawns Queen + Workers/Planners
     pub fn continue_after_planning(&self, session_id: &str) -> Result<Session, String> {
         self.continue_after_planning_checked(session_id)
@@ -15190,6 +15516,12 @@ The backend composed and persisted the following authoritative skeleton before l
         // retry waits, then sees Running and gets WrongState instead of racing a
         // second launch. Nothing inside takes this lock (parking_lot, not reentrant).
         let lifecycle_lock = self.session_lifecycle_lock(session_id);
+        // Observe the real lock without acquiring another guard: this seam must
+        // not serialize callers if the production lifecycle guard is removed.
+        #[cfg(test)]
+        if lifecycle_lock.is_locked() {
+            Self::test_sync_hook(session_id, "continue-contended", None);
+        }
         let _lifecycle_guard = lifecycle_lock.lock();
 
         // Get the session
@@ -15222,6 +15554,8 @@ The backend composed and persisted the following authoritative skeleton before l
         if session.state == SessionState::Planning {
             self.mark_plan_ready_checked(session_id)?;
         }
+        #[cfg(test)]
+        Self::test_sync_hook(session_id, "continue-plan-ready", None);
 
         let session = {
             let sessions = self.sessions.read();
@@ -15393,6 +15727,7 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         new_agents.push(AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: queen_id.clone(),
@@ -16017,6 +16352,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 };
 
                 Some(AgentInfo {
+                    work_state: None,
                     transcript_spawned_at: pa.transcript_spawned_at,
                     transcript_session_id: pa.transcript_session_id.clone(),
                     id: pa.id.clone(),
@@ -16170,6 +16506,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
 
             new_agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id.clone(),
@@ -16321,6 +16658,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
 
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id.clone(),
@@ -17058,6 +17396,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let agent_config = config_with_role;
 
         let agent_info = AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: worker_id.clone(),
@@ -17250,6 +17589,7 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let agent_info = AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: evaluator_id,
@@ -17406,6 +17746,7 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let agent_info = AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: prince_id,
@@ -17533,6 +17874,7 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let agent_info = AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: qa_worker_id,
@@ -17680,6 +18022,7 @@ The backend composed and persisted the following authoritative skeleton before l
         agent_config.label = Some(format!("{} Planner", domain));
 
         let agent_info = AgentInfo {
+            work_state: None,
             transcript_spawned_at,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: planner_id.clone(),
@@ -18428,6 +18771,37 @@ mod tests {
     }
 
     #[test]
+    fn qa_handoff_urls_render_real_values_at_every_site() {
+        let id = "rendered-session";
+        let config = AgentConfig::default();
+        let (_, spawn_plan, _, _) = SessionController::build_evaluator_qa_plan(id, &config, &[], 1);
+        let handoff = SessionController::build_qa_milestone_handoff(id, Path::new("/repo"), "workers", "codex");
+        let qa = [QaWorkerConfig { specialization: "api".into(), cli: "codex".into(), model: None, label: None, flags: None }];
+        let swarm = SessionController::build_swarm_smoke_test_prompt(id, 1, &[config], true, Some(&qa), Path::new("/repo"), "codex");
+        for (text, endpoint) in [(&spawn_plan, "qa-workers"), (&handoff, "milestone-ready"), (&swarm, "qa/verdict")] {
+            assert!(text.contains(&format!("http://localhost:18800/api/sessions/{id}/{endpoint}")), "missing concrete {endpoint}");
+            assert!(!text.contains("{api_base_url}"), "unrendered API URL");
+            assert!(!text.contains("{session_id}"), "unrendered session id");
+        }
+        assert_eq!(swarm.matches(&format!("http://localhost:18800/api/sessions/{id}/qa/verdict")).count(), 2);
+    }
+
+    #[test]
+    fn smoke_contract_scope_excludes_active_qa_task_files() {
+        let handoff = SessionController::build_qa_milestone_handoff("smoke-scope", Path::new("/repo"), "workers", "codex");
+        assert!(handoff.contains("All implementation task files transitioned to COMPLETED"));
+        assert!(handoff.contains("exclude QA, Evaluator and Prince task files still active during review"));
+        let prompt = SessionController::build_smoke_test_prompt("smoke-scope", &[AgentConfig::default()], true, None, Path::new("/repo"), "codex", None);
+        assert!(prompt.contains("no applicable UI surface"));
+        assert!(prompt.contains("report N/A with this scope reason"));
+        assert!(prompt.contains("Required functional API checks still must PASS"));
+        let config = AgentConfig::default();
+        let (_, _, count, coverage) = SessionController::build_evaluator_qa_plan("smoke-scope", &config, &[], 0);
+        assert_eq!(count, "3", "same UI, API and accessibility seats");
+        assert!(coverage.contains("MUST NOT skip any specialization"));
+    }
+
+    #[test]
     fn qa_milestone_handoff_smoke_contract_parses_as_typed() {
         let handoff = SessionController::build_qa_milestone_handoff(
             "typed-contract-test",
@@ -18646,6 +19020,7 @@ mod tests {
         session.worktree_path = Some(project_path.to_string_lossy().to_string());
         session.agents = vec![
             AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{SESSION_ID}-queen"),
@@ -18659,6 +19034,7 @@ mod tests {
                 base_commit_sha: None,
             },
             AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{SESSION_ID}-worker-1"),
@@ -18675,6 +19051,7 @@ mod tests {
                 base_commit_sha: None,
             },
             AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{SESSION_ID}-worker-2"),
@@ -19824,6 +20201,7 @@ mod tests {
         let mut session = waiting_worker_session(session_id, temp.path(), 1);
         session.state = SessionState::PlanReady;
         session.agents = vec![AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: planner_id,
@@ -22126,6 +22504,262 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         (temp_dir, worktree_path)
     }
 
+    fn retirement_fixture(args: &[&str]) -> (TempDir, Arc<crate::http::state::AppState>, String) {
+        use crate::storage::{ApplicationStateDb, QueueRepo};
+        use crate::coordination::{InjectionManager, QueueManager, StateManager};
+        use crate::orchestrator::work_graph::{TaskGraph, WorkNode, NodeKind, NodeContract, BindingRef, NodeStatus};
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        std::fs::write(repo.join("owned.txt"), "committed output").unwrap();
+        run_git(&repo, &["add", "owned.txt"]);
+        run_git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"]);
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir("retire").unwrap();
+        let mut controller = test_controller();
+        controller.set_storage(storage.clone());
+        let mut session = waiting_worker_session("retire", &repo, 1);
+        session.state = SessionState::Running;
+        session.agents[0].config.cli = "codex".into();
+        let id = session.agents[0].id.clone();
+        std::fs::create_dir_all(repo.join(".hive-manager/retire/locks")).unwrap();
+        let manager = controller.pty_manager.clone();
+        manager.read().create_session(id.clone(), session.agents[0].role.clone(), "fixture-shell", args,
+            Some(repo.to_str().unwrap()), 80, 24).unwrap();
+        manager.read().record_output_for_test(&id, b"\x1b]0;Codex ready\x07terminal history");
+        controller.insert_test_session(session);
+        controller.update_heartbeat_with_source("retire", &id, "completed", Some("accepted output"), true).unwrap();
+        let coordination = StateManager::new(storage.session_dir("retire"));
+        coordination.record_assignment(&id, "fixture", Some("T1".into())).unwrap();
+        coordination.write_work_graph(&TaskGraph::new(vec![WorkNode::new("T1", NodeKind::Task, "fixture",
+            NodeContract { outputs: vec!["file:owned.txt".into()], ..Default::default() },
+            BindingRef::Role("backend".into()), NodeStatus::Ready)], vec![])).unwrap();
+        std::fs::write(storage.session_dir("retire").join("transcript.jsonl"), "retained transcript\n").unwrap();
+        let controller = Arc::new(RwLock::new(controller));
+        let injection = Arc::new(RwLock::new(InjectionManager::new(manager.clone(),
+            SessionStorage::new_with_base(storage.base_dir().clone()).unwrap())));
+        let events = crate::events::EventBus::new(storage.base_dir().clone());
+        controller.write().set_event_bus(events.clone());
+        let db = Arc::new(ApplicationStateDb::open_in_memory().unwrap());
+        let queue = Arc::new(QueueRepo::new(db.clone()));
+        queue.ensure_schema().unwrap();
+        let state = Arc::new(crate::http::state::AppState::new(
+            Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap())), manager, controller,
+            injection, storage, events.clone(), db, Arc::new(QueueManager::new(queue, events)), None));
+        (temp, state, id)
+    }
+
+    #[tokio::test]
+    async fn g33_retirement_preserves_http_terminal_transcript_graph_and_commits_without_completion() {
+        use axum::extract::{State, Path as HttpPath};
+        use crate::http::handlers::pty_buffer::{get_pty_buffer, get_pty_snapshot};
+        let (_temp, state, id) = retirement_fixture(&[]);
+        let before = state.pty_manager.read().snapshot(&id).unwrap();
+        let cwd = PathBuf::from(state.pty_manager.read().spawn_cwd(&id).unwrap());
+        let head = current_head(&cwd).unwrap();
+        let root = state.storage.session_dir("retire");
+        let graph = std::fs::read(root.join("state/work-graph.json")).unwrap();
+        let mut events = state.event_bus.subscribe();
+        assert_eq!(state.session_controller.read().retire_finished_agents("retire"), vec![id.clone()]);
+        assert!(!state.pty_manager.read().is_alive(&id));
+        assert_eq!(state.pty_manager.read().instance_id(&id), None);
+        assert_eq!(state.session_controller.read().get_session("retire").unwrap().agents[0].work_state,
+            Some(super::super::work_state::WorkState::Retired));
+        let tail = get_pty_buffer(State(state.clone()), HttpPath(("retire".into(), id.clone()))).await
+            .unwrap_or_else(|e| panic!("tail unavailable: {}", e.message)).0;
+        assert!(tail.output.contains("terminal history"));
+        let snapshot = get_pty_snapshot(State(state.clone()), HttpPath(("retire".into(), id.clone()))).await
+            .unwrap_or_else(|e| panic!("snapshot unavailable: {}", e.message)).0;
+        assert_eq!(snapshot, before);
+        assert_eq!(std::fs::read(root.join("transcript.jsonl")).unwrap(), b"retained transcript\n");
+        assert_eq!(std::fs::read(root.join("state/work-graph.json")).unwrap(), graph);
+        assert!(!root.join("state/work-graph-completions.jsonl").exists());
+        assert_eq!(current_head(&cwd).unwrap(), head);
+        tokio::task::yield_now().await;
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(event.event_type, crate::domain::event::EventType::AgentCompleted,
+                "retirement must never assert graph completion");
+        }
+        state.session_controller.read().close_session("retire").unwrap();
+        assert!(state.pty_manager.read().snapshot(&id).is_none(), "close releases retained bytes");
+    }
+
+    #[test]
+    fn g33_completion_fence_rejects_before_expensive_eligibility() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for fence in ["missing", "stale-instance", "stale-revision", "current-instance"] {
+            let (_temp, state, id) = retirement_fixture(&[]);
+            let controller = state.session_controller.read();
+            let instance = state.pty_manager.read().instance_id(&id).unwrap();
+            let key = ("retire".to_string(), id.clone());
+            match fence {
+                "missing" => { controller.retirement_completions.write().remove(&key); }
+                "stale-instance" => { controller.retirement_completions.write().insert(key, (uuid::Uuid::new_v4(), 0)); }
+                "stale-revision" => {
+                    let before = state.pty_manager.read().input_fence(&id).unwrap();
+                    state.pty_manager.read().submit(&id, b"follow-up").unwrap();
+                    let after = state.pty_manager.read().input_fence(&id).unwrap();
+                    assert_eq!(before.0, after.0);
+                    assert!(after.1 > before.1);
+                }
+                _ => {}
+            }
+            let before = controller.get_session("retire").unwrap().agents[0].clone();
+            let entries = Arc::new(AtomicUsize::new(0));
+            let observed = entries.clone();
+            SessionController::test_sync_hook(&instance.to_string(), "retirement-eligibility", Some(Box::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            })));
+            let retired = controller.retire_finished_agents("retire");
+            let actual_entries = entries.load(Ordering::SeqCst);
+            // Clear an unconsumed observer without leaving a hook for another fixture.
+            SessionController::test_sync_hook(&instance.to_string(), "retirement-eligibility", None);
+            let alive = state.pty_manager.read().is_alive(&id);
+            let after = controller.get_session("retire").unwrap().agents[0].clone();
+            if state.pty_manager.read().is_alive(&id) {
+                state.pty_manager.read().kill(&id).unwrap();
+            }
+            assert_eq!(actual_entries, usize::from(fence == "current-instance"),
+                "{fence}: queue/graph/git eligibility must require a current completion input fence");
+            if fence != "current-instance" {
+                assert!(alive, "{fence}: rejected proof must leave the process alive");
+                assert_eq!(after.work_state, before.work_state, "{fence}: rejected proof must preserve work state");
+                assert_eq!(after.status, before.status, "{fence}: rejected proof must preserve process status");
+            }
+            assert_eq!(retired, if fence == "current-instance" { vec![id] } else { vec![] });
+            assert!(!state.storage.session_dir("retire").join("state/work-graph-completions.jsonl").exists());
+        }
+    }
+
+    #[test]
+    fn g33_completion_fence_precheck_does_not_authorize_later_retirement() {
+        for change in ["heartbeat", "input", "fence"] {
+            let (_temp, state, id) = retirement_fixture(&[]);
+            let instance = state.pty_manager.read().instance_id(&id).unwrap();
+            let changed_state = state.clone();
+            let changed_id = id.clone();
+            SessionController::test_sync_hook(&instance.to_string(), "retirement-eligibility", Some(Box::new(move || {
+                let controller = changed_state.session_controller.read();
+                assert!(controller.retirement_completions.try_write().is_some(),
+                    "precheck guard must be dropped before expensive checks");
+                match change {
+                    "heartbeat" => controller.update_heartbeat("retire", &changed_id, "working", None).unwrap(),
+                    "input" => { changed_state.pty_manager.read().submit(&changed_id, b"follow-up").unwrap(); }
+                    "fence" => { controller.retirement_completions.write()
+                        .insert(("retire".into(), changed_id), (uuid::Uuid::new_v4(), 0)); }
+                    _ => unreachable!(),
+                }
+            })));
+            assert!(state.session_controller.read().retire_finished_agents("retire").is_empty(), "{change}");
+            assert!(state.pty_manager.read().is_alive(&id), "{change}: stale precheck cannot authorize retirement");
+            assert_eq!(state.session_controller.read().get_session("retire").unwrap().agents[0].status, AgentStatus::Running);
+            assert!(!state.storage.session_dir("retire").join("state/work-graph-completions.jsonl").exists());
+            state.pty_manager.read().kill(&id).unwrap();
+        }
+    }
+
+    #[test]
+    fn g33_candidates_require_acceptance_clean_outputs_free_locks_and_idle_screen() {
+        for blocker in ["unaccepted", "dirty", "gate", "running-screen", "on-call", "disabled", "no-paths", "git-failure", "queue-unknown", "input-before-pending-marker"] {
+            let (_temp, state, id) = retirement_fixture(&[]);
+            let cwd = PathBuf::from(state.pty_manager.read().spawn_cwd(&id).unwrap());
+            match blocker {
+                "unaccepted" => state.session_controller.read().update_heartbeat("retire", &id, "completed", None).unwrap(),
+                "dirty" => std::fs::write(cwd.join("owned.txt"), "uncommitted").unwrap(),
+                "gate" => { let gate = cwd.join(".hive-manager/retire/locks/gate"); std::fs::create_dir(&gate).unwrap(); std::fs::write(gate.join("owner"), &id).unwrap(); },
+                "running-screen" => state.pty_manager.read().record_output_for_test(&id, "\x1b]0;⠁Codex running\x07".as_bytes()),
+                "on-call" => state.storage.save_retirement_settings("retire", &super::super::retirement::RetirementSettings { enabled:true,on_call_agent_id:Some(id.clone()) }).unwrap(),
+                "disabled" => state.storage.save_retirement_settings("retire", &super::super::retirement::RetirementSettings { enabled:false,on_call_agent_id:None }).unwrap(),
+                "no-paths" => std::fs::remove_file(state.storage.session_dir("retire").join("state/assignments.json")).unwrap(),
+                "git-failure" => std::fs::remove_dir_all(cwd.join(".git")).unwrap(),
+                "queue-unknown" => { state.session_controller.write().queue_repo = None; },
+                "input-before-pending-marker" => { state.pty_manager.read().submit(&id, b"follow-up").unwrap(); },
+                _ => unreachable!(),
+            }
+            assert!(state.session_controller.read().retire_finished_agents("retire").is_empty(), "{blocker}");
+            assert!(state.pty_manager.read().is_alive(&id), "must survive {blocker}");
+            state.pty_manager.read().kill(&id).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn g33_settings_are_session_scoped_default_on_and_launch_rollback_safe() {
+        use axum::{extract::{State, Path as HttpPath}, Json};
+        use super::super::retirement::RetirementSettings;
+        use crate::http::handlers::agents::{get_retirement_settings, put_retirement_settings};
+        let (_temp, state, id) = retirement_fixture(&[]);
+        let defaults = get_retirement_settings(State(state.clone()), HttpPath("retire".into())).await
+            .unwrap_or_else(|e| panic!("settings: {}", e.message)).0;
+        assert_eq!(defaults, RetirementSettings::default());
+        let settings = put_retirement_settings(State(state.clone()), HttpPath("retire".into()),
+            Json(RetirementSettings { enabled: false, on_call_agent_id: Some("worker-1".into()) })).await
+            .unwrap_or_else(|e| panic!("settings: {}", e.message)).0;
+        assert_eq!(settings.on_call_agent_id.as_deref(), Some(id.as_str()));
+        assert!(!state.storage.load_retirement_settings("retire").unwrap().enabled);
+        assert!(state.storage.load_retirement_settings("other").unwrap().enabled);
+        assert!(put_retirement_settings(State(state.clone()), HttpPath("retire".into()),
+            Json(RetirementSettings { enabled: true, on_call_agent_id: Some("unknown".into()) })).await.is_err());
+        assert!(get_retirement_settings(State(state.clone()), HttpPath("missing".into())).await.is_err());
+        assert!(!state.storage.session_dir("missing").exists());
+        let controller = state.session_controller.read();
+        let guard = controller.configure_new_launch_transports("new-launch", Default::default()).unwrap();
+        controller.configure_launch_retirement("new-launch", Some(&RetirementSettings {
+            enabled: false, on_call_agent_id: Some("worker-1".into()),
+        })).unwrap();
+        assert_eq!(state.storage.load_retirement_settings("new-launch").unwrap().on_call_agent_id.as_deref(), Some("new-launch-worker-1"));
+        drop(guard);
+        assert!(!state.storage.session_dir("new-launch").join("retirement.json").exists());
+        assert!(!state.storage.load_retirement_settings("retire").unwrap().enabled);
+        assert!(SessionController::queen_retirement_protocol().contains("spawn a new principal"));
+        state.pty_manager.read().kill(&id).unwrap();
+    }
+
+    #[test]
+    fn g33_qa_verdict_must_not_reenter_qa_and_owned_file_check_is_waived() {
+        let (_temp, state, id) = retirement_fixture(&[]);
+        state.session_controller.read().sessions.write().get_mut("retire").unwrap().agents[0].role =
+            AgentRole::QaWorker { index: 1, parent: None };
+        state.session_controller.read().update_heartbeat("retire", &id, "completed", None).unwrap();
+        let root = state.storage.session_dir("retire");
+        std::fs::remove_file(root.join("state/assignments.json")).unwrap();
+        let record = serde_json::json!({
+            "schema_version":1,"session_id":"retire","milestone_id":"final","iteration":1,
+            "verdict":"PASS","passed":true,"summary":"verified","timestamp":Utc::now().to_rfc3339(),
+            "contract_path":null,"contract_typed":false,"omission":null,"criteria":[]
+        });
+        std::fs::write(root.join("state/qa-verdict.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+        for session_state in [SessionState::QaInProgress { iteration:Some(1) }, SessionState::QaFailed { iteration:1 },
+            SessionState::PrinceRemediation, SessionState::QaInconclusive] {
+            state.session_controller.read().sessions.write().get_mut("retire").unwrap().state = session_state;
+            assert!(state.session_controller.read().retire_finished_agents("retire").is_empty());
+            assert!(state.pty_manager.read().is_alive(&id));
+        }
+        state.session_controller.read().sessions.write().get_mut("retire").unwrap().state = SessionState::QaPassed;
+        assert_eq!(state.session_controller.read().retire_finished_agents("retire"), vec![id]);
+    }
+
+    #[test]
+    fn g33_failed_retirement_and_same_id_replacement_never_publish_completed() {
+        let (_temp, state, id) = retirement_fixture(&["--stub-tree-kill-fails-once"]);
+        assert!(state.session_controller.read().retire_finished_agents("retire").is_empty());
+        assert!(state.pty_manager.read().is_alive(&id));
+        let session = state.session_controller.read().get_session("retire").unwrap();
+        assert_eq!(session.agents[0].status, AgentStatus::Running);
+        assert_ne!(session.agents[0].work_state, Some(super::super::work_state::WorkState::Retired));
+        let old = state.pty_manager.read().instance_id(&id).unwrap();
+        state.pty_manager.read().kill(&id).unwrap();
+        let cwd = state.pty_manager.read().spawn_cwd(&id).unwrap();
+        state.pty_manager.read().create_session(id.clone(), session.agents[0].role.clone(), "fixture-shell", &[], Some(&cwd), 80, 24).unwrap();
+        state.pty_manager.read().record_output_for_test(&id, b"\x1b]0;Codex ready\x07replacement");
+        assert!(!state.pty_manager.read().retire_instance(&id, old, 0).unwrap());
+        assert!(state.session_controller.read().retire_finished_agents("retire").is_empty());
+        assert!(state.pty_manager.read().is_alive(&id));
+        assert_eq!(state.session_controller.read().get_session("retire").unwrap().agents[0].status, AgentStatus::Running);
+        assert!(!state.storage.session_dir("retire").join("state/work-graph-completions.jsonl").exists());
+        state.pty_manager.read().kill(&id).unwrap();
+    }
+
     fn waiting_worker_session(session_id: &str, repo_path: &Path, worker_id: u8) -> Session {
         let worker_worktree = repo_path
             .join(".hive-manager")
@@ -22142,6 +22776,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             created_at: Utc::now(),
             last_activity_at: Utc::now(),
             agents: vec![AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{session_id}-worker-{worker_id}"),
@@ -22184,6 +22819,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let mut agents = Vec::new();
         if with_evaluator {
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{id}-evaluator"),
@@ -22411,6 +23047,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         with_prince: bool,
     ) -> Session {
         let mut agents = vec![AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: format!("{id}-evaluator"),
@@ -22425,6 +23062,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         }];
         if with_prince {
             agents.push(AgentInfo {
+                work_state: None,
                 transcript_spawned_at: None,
                 transcript_session_id: None,
                 id: format!("{id}-prince"),
@@ -24392,15 +25030,28 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         session.qa_timeout_secs = 0;
         controller.insert_test_session(session);
         let original_timer;
+        let (queued_tx, queued_rx) = std::sync::mpsc::channel();
+        let (preserved_tx, preserved_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        SessionController::test_sync_hook("qa-queued-respawn", "qa-resolution-queued", Some(Box::new(move || {
+            queued_tx.send(()).unwrap();
+        })));
+        SessionController::test_sync_hook("qa-queued-respawn", "qa-respawn-preserved", Some(Box::new(move || {
+            preserved_tx.send(()).unwrap();
+            resume_rx.recv_timeout(std::time::Duration::from_secs(30))
+                .expect("respawn reopened the QA window");
+        })));
         {
             let _resolution = SessionController::lock_qa_resolution();
             controller.start_qa_timeout("qa-queued-respawn", 0);
             original_timer = controller.qa_timeout_handles.lock()["qa-queued-respawn"].id();
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            queued_rx.recv_timeout(std::time::Duration::from_secs(30))
+                .expect("expired timer reached the resolution lock");
             controller.sessions.write().get_mut("qa-queued-respawn").unwrap().state =
                 SessionState::SpawningEvaluator;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        preserved_rx.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("queued resolution recognized the respawn");
         assert!(!controller.qa_timeout_handles.lock()["qa-queued-respawn"].is_finished());
         controller.sessions.write().get_mut("qa-queued-respawn").unwrap().state =
             SessionState::QaInProgress { iteration: Some(1) };
@@ -24410,12 +25061,13 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             original_timer,
             "a queued respawn must retain the original absolute clock"
         );
+        resume_tx.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             while !matches!(
                 controller.get_session("qa-queued-respawn").unwrap().state,
                 SessionState::QaInconclusive
             ) {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await
@@ -25092,6 +25744,139 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let restored = controller.session_from_persisted(&decoded).unwrap();
         assert!(restored.agents.iter().all(|agent| agent.transcript_session_id.is_none()));
         assert!(restored.agents.iter().all(|agent| agent.transcript_spawned_at.is_none()));
+    }
+
+    #[test]
+    fn g31_confirmed_followups_require_new_completion_for_every_seat() {
+        use super::super::work_state::WorkState;
+        for role in [AgentRole::Worker { index: 1, parent: None },
+            AgentRole::QaWorker { index: 1, parent: None }, AgentRole::Queen,
+            AgentRole::Evaluator, AgentRole::Prince] {
+            for delivery in [crate::delivery::Delivery::pending(),
+                crate::delivery::Delivery::confirmed("fixture-turn".into()),
+                crate::delivery::Delivery::protocol_turn_started("protocol-turn".into())] {
+                let (_temp, state, id) = retirement_fixture(&[]);
+                let controller = state.session_controller.read();
+                controller.sessions.write().get_mut("retire").unwrap().agents[0].role = role.clone();
+                controller.update_heartbeat("retire", &id, "completed", None).unwrap();
+                assert_eq!(controller.get_session("retire").unwrap().agents[0].work_state, Some(WorkState::Finished));
+                let submitted = Utc::now();
+                controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+                controller.record_injection_delivery("retire", &id, submitted, &delivery).unwrap();
+                assert_eq!(controller.get_session("retire").unwrap().agents[0].work_state,
+                    Some(WorkState::Working), "{role:?}: {} follow-up needs fresh proof", delivery.basis);
+                controller.update_heartbeat("retire", &id, "completed", None).unwrap();
+                assert_eq!(controller.get_session("retire").unwrap().agents[0].work_state,
+                    Some(WorkState::Finished), "{role:?}: completion after follow-up restores finished");
+            }
+        }
+    }
+
+    #[test]
+    fn g31_fresh_verdict_after_confirmed_input_silences_backend_stall_without_new_heartbeat() {
+        for role in [AgentRole::Evaluator, AgentRole::Prince] {
+            for has_heartbeat in [false, true] {
+                let (_temp, state, id) = retirement_fixture(&[]);
+                let controller = state.session_controller.read();
+                controller.sessions.write().get_mut("retire").unwrap().agents[0].role = role.clone();
+                if has_heartbeat {
+                    controller.agent_heartbeats.write().get_mut("retire").unwrap().get_mut(&id).unwrap()
+                        .last_activity = Utc::now() - Duration::minutes(10);
+                } else { controller.agent_heartbeats.write().get_mut("retire").unwrap().remove(&id); }
+                let submitted = Utc::now();
+                controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+                controller.record_injection_delivery("retire", &id, submitted,
+                    &crate::delivery::Delivery::confirmed("fixture-turn".into())).unwrap();
+                controller.latest_inputs.write().get_mut(&("retire".into(), id.clone())).unwrap().1 =
+                    submitted - Duration::seconds(181);
+                assert_eq!(controller.get_stalled_agents("retire", std::time::Duration::from_secs(180)).len(), 1);
+                let verdict = submitted + Duration::seconds(1);
+                let session = controller.get_session("retire").unwrap();
+                if matches!(role, AgentRole::Evaluator) {
+                    let path = state.storage.session_dir("retire").join("state/qa-verdict.json");
+                    std::fs::write(path, serde_json::to_vec(&serde_json::json!({
+                        "schema_version":1,"session_id":"retire","milestone_id":"fixture","iteration":1,
+                        "verdict":"PASS","passed":true,"summary":"fixture","timestamp":verdict,
+                        "contract_path":null,"contract_typed":false,"omission":null,"criteria":[]
+                    })).unwrap()).unwrap();
+                } else {
+                    let path = session.project_path.join(".hive-manager/retire/peer/prince-verdict.json");
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, serde_json::to_vec(&serde_json::json!({
+                        "kind":"prince-verdict","from":id,"to":"queen","timestamp":verdict,"content":"PASS"
+                    })).unwrap()).unwrap();
+                }
+                assert_eq!(controller.get_session("retire").unwrap().agents[0].work_state,
+                    Some(super::super::work_state::WorkState::Finished), "{role:?} must accept fresh verdict");
+                assert!(controller.get_stalled_agents("retire", std::time::Duration::from_secs(180)).is_empty(),
+                    "{role:?}: finished verdict proof must also silence backend stalled events");
+            }
+        }
+    }
+
+    #[test]
+    fn g31_confirmed_followup_stalls_only_after_three_minutes_without_a_heartbeat() {
+        let (_temp, state, id) = retirement_fixture(&[]);
+        let controller = state.session_controller.read();
+        controller.agent_heartbeats.write().get_mut("retire").unwrap().get_mut(&id).unwrap()
+            .last_activity = Utc::now() - Duration::minutes(10);
+        let submitted = Utc::now();
+        controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+        controller.record_injection_delivery("retire", &id, submitted,
+            &crate::delivery::Delivery::confirmed("fixture-turn".into())).unwrap();
+        assert!(controller.get_stalled_agents("retire", std::time::Duration::from_secs(180)).is_empty(),
+            "confirmed follow-up must get a fresh response window");
+        let elapsed_input = Utc::now() - Duration::seconds(181);
+        controller.latest_inputs.write().get_mut(&("retire".into(), id.clone())).unwrap().1 = elapsed_input;
+        let stalled = controller.get_stalled_agents("retire", std::time::Duration::from_secs(180));
+        assert_eq!(stalled, vec![(id, elapsed_input)], "old completed heartbeat cannot hide a confirmed stall");
+    }
+
+    #[test]
+    fn g31_same_id_respawn_does_not_inherit_followup_input_time() {
+        let (_temp, state, id) = retirement_fixture(&[]);
+        let controller = state.session_controller.read();
+        let submitted = Utc::now();
+        controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+        controller.record_injection_delivery("retire", &id, submitted,
+            &crate::delivery::Delivery::confirmed("fixture-turn".into())).unwrap();
+        assert_eq!(controller.latest_input_at("retire", &id), Some(submitted));
+        let role = controller.get_session("retire").unwrap().agents[0].role.clone();
+        state.pty_manager.read().kill(&id).unwrap();
+        state.pty_manager.read().create_session(id.clone(), role, "fixture-shell", &[], None, 80, 24).unwrap();
+        assert_eq!(controller.latest_input_at("retire", &id), None, "replacement cannot inherit input time");
+        controller.record_input_time("retire", &id, submitted);
+        assert_eq!(controller.latest_input_at("retire", &id), None, "old receipt cannot transfer input time");
+        controller.update_heartbeat("retire", &id, "completed", None).unwrap();
+        assert_eq!(controller.get_session("retire").unwrap().agents[0].work_state,
+            Some(super::super::work_state::WorkState::Finished));
+    }
+
+    #[test]
+    fn g31_input_time_survives_fast_completion_and_older_receipts() {
+        let (_temp, state, id) = retirement_fixture(&[]);
+        let controller = state.session_controller.read();
+        let submitted = Utc::now();
+        controller.update_heartbeat("retire", &id, "completed", None).unwrap();
+        controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+        assert_eq!(controller.latest_input_at("retire", &id), Some(submitted));
+        controller.record_input_time("retire", &id, submitted - Duration::microseconds(1));
+        assert_eq!(controller.latest_input_at("retire", &id), Some(submitted));
+    }
+
+    #[test]
+    fn g31_confirmed_followup_blocks_retirement_without_new_completion() {
+        let (_temp, state, id) = retirement_fixture(&[]);
+        let controller = state.session_controller.read();
+        let submitted = Utc::now();
+        // Bookkeeping alone must protect protocol inputs too, whose terminal revision
+        // does not change. The existing PTY revision fence remains independently tested.
+        controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+        controller.record_injection_delivery("retire", &id, submitted,
+            &crate::delivery::Delivery::confirmed("fixture-turn".into())).unwrap();
+        assert!(controller.retire_finished_agents("retire").is_empty(),
+            "confirmed follow-up must block retirement from the old accepted heartbeat");
+        assert!(state.pty_manager.read().is_alive(&id));
     }
 
     #[test]

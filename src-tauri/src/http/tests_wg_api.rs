@@ -176,6 +176,7 @@ fn running_session_with_agent(session_id: &str, agent_id: &str) -> Session {
         created_at: now,
         last_activity_at: now,
         agents: vec![AgentInfo {
+            work_state: None,
             transcript_spawned_at: None,
             transcript_session_id: None,
             id: agent_id.to_string(),

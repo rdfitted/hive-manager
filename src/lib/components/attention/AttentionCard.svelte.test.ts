@@ -30,14 +30,90 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
 describe('AttentionCard', () => {
+  it('CR-5: retains a receipt warning after attention clears without granting Flush eligibility', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '{"submit_confirmed":false}' }));
+    const view = render(AttentionCard, { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:fixture' }) });
+    await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
+    await waitFor(() => expect(view.getByText('Enter may not have landed. Check the terminal.')).toBeTruthy());
+    await view.rerender({ agent: agent('Running') });
+    expect(view.getByText('Enter may not have landed. Check the terminal.')).toBeTruthy();
+    expect(view.queryByRole('button', { name: 'Flush Enter' })).toBeNull();
+    expect(view.queryByText('Agent needs input. A prompt may only be visible in the terminal.')).toBeNull();
+  });
+  it.each(['agent', 'session'])('CR-4: isolates pending requests and receipts by %s', async (switchBy) => {
+    const resolve: ((response: unknown) => void)[] = [];
+    const fetcher = vi.fn(() => new Promise((done) => { resolve.push(done); }));
+    vi.stubGlobal('fetch', fetcher);
+    const first = { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:first' }) };
+    const second = switchBy === 'agent'
+      ? { ...first, agent: { ...first.agent, id: 'other' } }
+      : { ...first, sessionId: 'other-session' };
+    const view = render(AttentionCard, first);
+    await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
+    await view.rerender(second);
+    const ownFlush = view.getByRole('button', { name: 'Flush Enter' }) as HTMLButtonElement;
+    expect(ownFlush.disabled, 'another owner must not inherit the first request').toBe(false);
+    await fireEvent.click(ownFlush);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    resolve[0]({ ok: true, text: async () => '{"submit_confirmed":false,"owner":"first"}' });
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    expect(view.queryByText('Enter may not have landed. Check the terminal.')).toBeNull();
+    await view.rerender(first);
+    await waitFor(() => expect(view.getByText('Enter may not have landed. Check the terminal.')).toBeTruthy());
+    await view.rerender(second);
+    expect((view.getByRole('button', { name: /^Flushing/ }) as HTMLButtonElement).disabled,
+      'the first completion must not clear the second request').toBe(true);
+    resolve[1]({ ok: true, text: async () => '{"submit_confirmed":false,"owner":"second"}' });
+    await view.rerender(second);
+    await waitFor(() => expect(view.container.querySelector('pre')?.textContent).toContain('"owner":"second"'));
+    expect(view.container.querySelector('pre')?.textContent).not.toContain('"owner":"first"');
+    await view.rerender(first);
+    expect(view.container.querySelector('pre')?.textContent).toContain('"owner":"first"');
+  });
+  it.each(['finished', 'retired'])('G31: hides the stale card and Flush for %s work', (work_state) => {
+    (heartbeatStore as unknown as { set: (value: unknown) => void }).set({
+      agents: { 'worker-5': { work_state } }, staleAgents: new Set(['worker-5']), stalledAgents: new Set() });
+    const view = render(AttentionCard, { sessionId: 's', agent: agent('Running') });
+    expect(view.queryByRole('region')).toBeNull();
+    expect(view.queryByRole('button', { name: 'Flush Enter' })).toBeNull();
+  });
+  it('G31: a stale unfinished agent retains Flush Enter', () => {
+    (heartbeatStore as unknown as { set: (value: unknown) => void }).set({
+      agents: { 'worker-5': { work_state: 'working' } }, staleAgents: new Set(['worker-5']), stalledAgents: new Set() });
+    expect(render(AttentionCard, { sessionId: 's', agent: agent('Running') })
+      .getByRole('button', { name: 'Flush Enter' })).toBeTruthy();
+  });
+  it('G31: missing API work state overrides older finished roster proof', () => {
+    (heartbeatStore as unknown as { set: (value: unknown) => void }).set({
+      agents: { 'worker-5': { status: 'completed' } }, staleAgents: new Set(['worker-5']), stalledAgents: new Set() });
+    expect(render(AttentionCard, { sessionId: 's', agent: { ...agent('Running'), work_state: 'finished' } })
+      .getByRole('button', { name: 'Flush Enter' })).toBeTruthy();
+  });
+  it('G31: a process error remains visible with no Flush Enter even when finished', () => {
+    const view = render(AttentionCard, { sessionId: 's', agent: { ...agent({ Error: 'failed' }), work_state: 'finished' } });
+    expect(view.getByText('This agent reported an error.')).toBeTruthy();
+    expect(view.queryByRole('button', { name: 'Flush Enter' })).toBeNull();
+  });
+  it('G31: delivery failure still alarms when finished, with no Flush Enter', () => {
+    const view = render(AttentionCard, { sessionId: 's', agent: {
+      ...agent({ WaitingForInput: 'injected_delivery_failed:test' }), work_state: 'finished' } });
+    expect(view.getByText('The last message could not be delivered.')).toBeTruthy();
+    expect(view.queryByRole('button', { name: 'Flush Enter' })).toBeNull();
+  });
+  it('G31: finished work does not ask for input from old protocol attention', () => {
+    const view = render(AttentionCard, { sessionId: 's', agent: { ...agent('Running'), work_state: 'finished' },
+      chatAvailable: true, eventAttention: 'Waiting for input', feedError: 'Old feed error' });
+    expect(view.queryByRole('region')).toBeNull();
+  });
   it.each([
     [{ WaitingForInput: 'injected_delivery_failed:transcript:123' }, 'The last message could not be delivered.'],
     [{ Error: 'failed' }, 'This agent reported an error.'],
   ] as const)('explains %o using the shared attention predicate', (status, text) => {
     const view = render(AttentionCard, { sessionId: 's', agent: agent(status) });
     expect(view.getByText(text)).toBeTruthy();
-    expect((view.getByRole('button', { name: 'Resend' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(view.getByText('original message unavailable')).toBeTruthy();
+    expect(view.queryByRole('button', { name: 'Resend' })).toBeNull();
+    expect(view.queryByText('original message unavailable')).toBeNull();
+    if ('Error' in status) expect(view.queryByRole('button', { name: 'Flush Enter' })).toBeNull();
   });
   it('names a startup death without offering to flush or resend into a dead process', () => {
     const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'exited_during_startup:101' }) });
@@ -59,7 +135,7 @@ describe('AttentionCard', () => {
     const receipt = '{"submit_confirmed":null,"submit_bytes_written":1}';
     const fetcher = vi.fn().mockResolvedValue({ ok: true, text: async () => receipt });
     vi.stubGlobal('fetch', fetcher);
-    const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+    const view = render(AttentionCard, { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:test' }) });
     await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
     await waitFor(() => expect(view.getByRole('status').textContent).toBe("Enter sent. Delivery isn't confirmed yet."));
     const details = view.container.querySelector('details')!;
@@ -75,7 +151,7 @@ describe('AttentionCard', () => {
     ['', 'Enter sent.'],
   ])('G21: summarizes %s and dismisses both sentence and raw receipt', async (receipt, sentence) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => receipt }));
-    const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+    const view = render(AttentionCard, { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:test' }) });
     const flush = view.getByRole('button', { name: 'Flush Enter' }); flush.focus();
     await fireEvent.click(flush);
     await waitFor(() => expect(view.getByRole('status').textContent, 'receipt status must be a plain sentence').toBe(sentence));
@@ -89,7 +165,7 @@ describe('AttentionCard', () => {
   it('shows a failed flush without resending', async () => {
     const fetcher = vi.fn().mockRejectedValue(new Error('offline'));
     vi.stubGlobal('fetch', fetcher);
-    const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+    const view = render(AttentionCard, { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:test' }) });
     await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
     await waitFor(() => expect(view.getByRole('alert').textContent).toContain('offline'));
     expect(fetcher).toHaveBeenCalledOnce();
@@ -98,7 +174,7 @@ describe('AttentionCard', () => {
     vi.useFakeTimers();
     try {
       vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline fixture')));
-      const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+      const view = render(AttentionCard, { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:test' }) });
       await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
       await vi.advanceTimersByTimeAsync(60000);
       expect(view.getByRole('alert').textContent).toContain('offline fixture');
@@ -108,7 +184,7 @@ describe('AttentionCard', () => {
     vi.useFakeTimers();
     try {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '{"submit_confirmed":true}' }));
-      const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+      const view = render(AttentionCard, { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:test' }) });
       await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
       await vi.advanceTimersByTimeAsync(0);
       expect(view.getByRole('status').textContent).toBe('Enter delivered.');
@@ -124,7 +200,7 @@ describe('AttentionCard', () => {
     try {
       const receipt = JSON.stringify({ submit_confirmed: confirmed });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => receipt }));
-      const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+      const view = render(AttentionCard, { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:test' }) });
       const flush = view.getByRole('button', { name: 'Flush Enter' }); flush.focus();
       await fireEvent.click(flush);
       await vi.advanceTimersByTimeAsync(0);
@@ -151,7 +227,7 @@ describe('AttentionCard', () => {
     vi.useFakeTimers();
     try {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '{"submit_confirmed":false}' }));
-      const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+      const view = render(AttentionCard, { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:test' }) });
       await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
       await vi.advanceTimersByTimeAsync(60000);
       expect(view.getByRole('status').textContent).toContain('Enter may not have landed.');
@@ -181,7 +257,7 @@ describe('AttentionCard', () => {
     } finally { vi.useRealTimers(); }
   });
   it('opens Focus mode and focuses the same agent', async () => {
-    const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+    const view = render(AttentionCard, { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:test' }) });
     await fireEvent.click(view.getByRole('button', { name: 'Open terminal' }));
     expect(layout.setSessionViewMode).toHaveBeenCalledWith('focus');
     expect(ui.setFocusedAgent).toHaveBeenCalledWith('worker-5');
@@ -189,9 +265,9 @@ describe('AttentionCard', () => {
   it('does not display another agent’s receipt after focus switches during a request', async () => {
     let resolve!: (response: unknown) => void;
     vi.stubGlobal('fetch', vi.fn(() => new Promise((done) => { resolve = done; })));
-    const view = render(AttentionCard, { sessionId: 's', agent: agent({ Error: 'failed' }) });
+    const view = render(AttentionCard, { sessionId: 's', agent: agent({ WaitingForInput: 'injected_delivery_failed:test' }) });
     await fireEvent.click(view.getByRole('button', { name: 'Flush Enter' }));
-    await view.rerender({ sessionId: 's', agent: { ...agent({ Error: 'failed' }), id: 'other' } });
+    await view.rerender({ sessionId: 's', agent: { ...agent({ WaitingForInput: 'injected_delivery_failed:test' }), id: 'other' } });
     resolve({ ok: true, text: async () => 'old receipt' });
     await waitFor(() => expect((view.getByRole('button', { name: 'Flush Enter' }) as HTMLButtonElement).disabled).toBe(false));
     expect(view.queryByText('old receipt')).toBeNull();

@@ -3,6 +3,8 @@ use std::io::{Read, Write};
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+#[cfg(windows)]
+use std::thread;
 use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -10,6 +12,9 @@ use thiserror::Error;
 use crate::adapters::{PtySubmitPolicy, PtySubmitResult};
 
 use super::output_ring::{OutputRing, OutputSnapshot, RECENT_OUTPUT_VIEW_BYTES};
+
+#[cfg(all(test, windows))]
+pub(super) static WINDOWS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRole {
@@ -134,6 +139,53 @@ unsafe impl Sync for SendWriter {}
 pub(crate) struct MasterPtyHandle(Box<dyn portable_pty::MasterPty + Send>);
 unsafe impl Send for MasterPtyHandle {}
 unsafe impl Sync for MasterPtyHandle {}
+
+/// Resources from a failed constructor. The manager declares this before its
+/// lifecycle guard, so even an early return releases that guard before closure.
+pub(crate) struct ConstructionCleanup {
+    #[cfg(test)]
+    pub(crate) before_release: Option<Box<dyn FnOnce() + Send>>,
+    pair: Option<portable_pty::PtyPair>,
+    reader: Option<Box<dyn Read + Send>>,
+    writer: Option<Box<dyn Write + Send>>,
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+}
+
+impl Drop for ConstructionCleanup {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(before_release) = self.before_release.take() { before_release(); }
+        if let Some(mut child) = self.child.take() {
+            #[cfg(windows)]
+            if let Some(pid) = child.process_id() { let _ = kill_windows_tree(pid); }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        // ClosePseudoConsole can wait for output. Its drain must already be
+        // running, including on a constructor that never published a session.
+        #[cfg(windows)]
+        let drain = self.reader.take().map(|mut reader| thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }));
+        #[cfg(not(windows))]
+        drop(self.reader.take());
+        drop(self.writer.take());
+        if let Some(pair) = self.pair.take() {
+            // Both ends share the console; the last owner must go only after
+            // the independent reader is ready to drain.
+            drop(pair.slave);
+            drop(pair.master);
+        }
+        #[cfg(windows)]
+        if let Some(drain) = drain { let _ = drain.join(); }
+    }
+}
 
 fn into_io_error<E: std::fmt::Display>(error: E) -> PtyError {
     PtyError::IoError(std::io::Error::other(error.to_string()))
@@ -359,7 +411,9 @@ pub struct PtySession {
     child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
     #[cfg(windows)]
     child_pid: Option<u32>,
-    master: Arc<Mutex<MasterPtyHandle>>,
+    master: Mutex<Option<Arc<MasterPtyHandle>>>,
+    #[cfg(windows)]
+    needs_drain: AtomicBool,
     /// Bounded, offset-addressed history of everything the child wrote to the PTY.
     ///
     /// A PTY merges stdout and stderr, and before #207 those bytes were forwarded to the
@@ -397,6 +451,7 @@ impl PtySession {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn new(
         _id: String,
         role: AgentRole,
@@ -408,6 +463,23 @@ impl PtySession {
         cols: u16,
         rows: u16,
         replay_capacity: usize,
+    ) -> Result<Self, PtyError> {
+        Self::new_deferred(_id, role, command, submit_policy, identity_env, args,
+            cwd, cols, rows, replay_capacity, &mut None)
+    }
+
+    pub(crate) fn new_deferred(
+        _id: String,
+        role: AgentRole,
+        command: &str,
+        submit_policy: PtySubmitPolicy,
+        identity_env: &[(String, String)],
+        args: &[&str],
+        cwd: Option<&str>,
+        cols: u16,
+        rows: u16,
+        replay_capacity: usize,
+        cleanup: &mut Option<ConstructionCleanup>,
     ) -> Result<Self, PtyError> {
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
@@ -423,12 +495,30 @@ impl PtySession {
                 pixel_height: 0,
             })
             .map_err(|e| PtyError::CreateError(e.to_string()))?;
+        *cleanup = Some(ConstructionCleanup {
+            #[cfg(test)]
+            before_release: None,
+            pair: Some(pty_pair), reader: None, writer: None, child: None,
+        });
+        let pending = cleanup.as_mut().expect("construction cleanup owns the PTY");
+
+        // Acquire the drain before any child can produce output. Errors retain
+        // the pair in the caller's cleanup guard instead of closing under its lock.
+        pending.reader = Some(pending.pair.as_ref().unwrap().master.try_clone_reader().map_err(into_io_error)?);
+        pending.writer = Some(pending.pair.as_ref().unwrap().master.take_writer().map_err(into_io_error)?);
+
+        #[cfg(test)]
+        let launch_args: Vec<_> = args.iter().copied().filter(|arg| !["--real-pty-fail-after-spawn", "--real-pty-output-before-return"].contains(arg)).collect();
+        #[cfg(test)]
+        let command_args = launch_args.as_slice();
+        #[cfg(not(test))]
+        let command_args = args;
 
         // On Windows, create a batch file to avoid shell quoting issues
         // This is the same pattern used by /hive command
         let mut cmd = if cfg!(windows) {
             // Create temp batch file with the full command
-            let batch_content = Self::create_batch_content(command, args);
+            let batch_content = Self::create_batch_content(command, command_args);
             let batch_path = Self::write_temp_batch(&batch_content)?;
 
             tracing::info!("Created batch file: {} with content:\n{}", batch_path.display(), batch_content);
@@ -438,7 +528,7 @@ impl PtySession {
             cmd
         } else {
             let mut cmd = CommandBuilder::new(command);
-            cmd.args(args);
+            cmd.args(command_args);
             cmd
         };
 
@@ -454,38 +544,29 @@ impl PtySession {
             cmd.cwd(dir);
         }
 
-        let mut child = pty_pair
+        let child = pending.pair.as_ref().unwrap()
             .slave
             .spawn_command(cmd)
             .map_err(|e| PtyError::SpawnError(e.to_string()))?;
+        pending.child = Some(child);
+        #[cfg(test)]
+        if args.contains(&"--real-pty-fail-after-spawn") || args.contains(&"--real-pty-output-before-return") {
+            let mut first_output = [0u8; 128];
+            pending.reader.as_mut().unwrap().read(&mut first_output).map_err(into_io_error)?;
+            if args.contains(&"--real-pty-fail-after-spawn") {
+                return Err(PtyError::CreateError("injected failure after real PTY output".into()));
+            }
+        }
+
+        let mut pending = cleanup.take().unwrap();
+        let child = pending.child.take().unwrap();
         #[cfg(windows)]
         let child_pid = child.process_id();
-
-        // #175(d): the child is ALREADY RUNNING at this point. Returning `Err`
-        // from either step below without killing it would leave a live process
-        // that no `PtySession` owns — and the caller, seeing `Err`, releases the
-        // worker's durable queue claim so a retry can spawn a second one. Any
-        // failure past the spawn must therefore reap the child first.
-        let writer = match pty_pair.master.take_writer() {
-            Ok(writer) => writer,
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(into_io_error(e));
-            }
-        };
-
-        let reader = match pty_pair.master.try_clone_reader() {
-            Ok(reader) => reader,
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(into_io_error(e));
-            }
-        };
-
-        // Keep the master alive - dropping it closes the PTY!
+        let reader = pending.reader.take().unwrap();
+        let writer = pending.writer.take().unwrap();
+        let pty_pair = pending.pair.take().unwrap();
         let master = pty_pair.master;
+        drop(pty_pair.slave);
 
         Ok(Self {
             role,
@@ -496,7 +577,9 @@ impl PtySession {
             child: Arc::new(Mutex::new(Some(child))),
             #[cfg(windows)]
             child_pid,
-            master: Arc::new(Mutex::new(MasterPtyHandle(master))),
+            master: Mutex::new(Some(Arc::new(MasterPtyHandle(master)))),
+            #[cfg(windows)]
+            needs_drain: AtomicBool::new(false),
             output_ring: Arc::new(Mutex::new(OutputRing::new(replay_capacity))),
             spawned_at: Instant::now(),
             kill_requested: AtomicBool::new(false),
@@ -517,6 +600,10 @@ impl PtySession {
     }
 
     /// The whole retained history, aligned for a terminal to parse from its first byte.
+    pub(crate) fn output_history(&self) -> Arc<Mutex<OutputRing>> {
+        Arc::clone(&self.output_ring)
+    }
+
     pub fn snapshot(&self) -> OutputSnapshot {
         self.output_ring.lock().snapshot()
     }
@@ -707,11 +794,43 @@ impl PtySession {
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
         let master = self.master.lock();
-        master.resize(cols, rows)
+        master.as_ref().ok_or_else(|| PtyError::CreateError("PTY master already released".into()))?.resize(cols, rows)
     }
 
     pub fn get_reader(&self) -> Arc<Mutex<SendReader>> {
         Arc::clone(&self.reader)
+    }
+
+    #[cfg(test)]
+    pub(super) fn master_weak_for_test(&self) -> std::sync::Weak<MasterPtyHandle> {
+        Arc::downgrade(self.master.lock().as_ref().unwrap())
+    }
+
+    /// Take ownership under the short resize mutex, then close without a lock.
+    /// The manager reader (or failed-construction drain) keeps consuming output.
+    pub(crate) fn release_master(&self) {
+        #[cfg(windows)]
+        let drain = self.needs_drain.swap(false, Ordering::AcqRel).then(|| {
+            let reader = self.get_reader();
+            thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                loop {
+                    match read_from_reader(&reader, &mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            })
+        });
+        let master = self.master.lock().take();
+        drop(master);
+        #[cfg(windows)]
+        if let Some(drain) = drain { let _ = drain.join(); }
+    }
+
+    pub(crate) fn mark_reader_spawn_failed(&self) {
+        #[cfg(windows)]
+        self.needs_drain.store(true, Ordering::Release);
     }
 
     /// Create batch file content for Windows command execution
@@ -772,6 +891,11 @@ impl PtySession {
 impl Drop for PtySession {
     fn drop(&mut self) {
         let _ = self.kill();
+        #[cfg(windows)]
+        if self.master.lock().is_some() {
+            self.mark_reader_spawn_failed();
+            self.release_master();
+        }
     }
 }
 
@@ -834,6 +958,7 @@ mod tests {
 
         #[test]
         fn killing_real_pty_session_reaps_ping_grandchild() {
+            let _fixtures = super::super::WINDOWS_TEST_LOCK.lock();
             let temp = TempDir::new().unwrap();
             let pid_file = temp.path().join("ping.pid");
             let script_file = temp.path().join("spawn-ping.ps1");
@@ -883,6 +1008,7 @@ mod tests {
 
         #[test]
         fn killing_already_exited_real_pty_session_is_idempotent() {
+            let _fixtures = super::super::WINDOWS_TEST_LOCK.lock();
             let temp = TempDir::new().unwrap();
             let session = PtySession::new(
                 "synthetic-exited".to_string(),
@@ -935,6 +1061,7 @@ mod tests {
 
         #[test]
         fn real_pty_reports_a_crash_code_through_the_batch_launcher_but_not_a_clean_exit() {
+            let _fixtures = super::super::WINDOWS_TEST_LOCK.lock();
             let (_temp, crashed) = exited_session("synthetic-crash", &["/c", "exit", "101"]);
             assert_eq!(crashed.unexpected_exit(), Some(101));
             let (_temp, clean) = exited_session("synthetic-clean", &["/c", "exit", "0"]);
@@ -943,6 +1070,7 @@ mod tests {
 
         #[test]
         fn a_deliberately_killed_real_pty_never_reads_as_a_crash() {
+            let _fixtures = super::super::WINDOWS_TEST_LOCK.lock();
             let (_temp, session) = exited_session("synthetic-killed", &["/c", "exit", "101"]);
             session.kill().unwrap();
             assert_eq!(session.unexpected_exit(), None);
@@ -950,6 +1078,7 @@ mod tests {
 
         #[test]
         fn failed_tree_kill_of_exited_root_remains_retryable() {
+            let _fixtures = super::super::WINDOWS_TEST_LOCK.lock();
             let temp = TempDir::new().unwrap();
             let session = PtySession::new(
                 "synthetic-exited-failure".to_string(),

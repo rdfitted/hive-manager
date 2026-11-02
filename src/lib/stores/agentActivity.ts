@@ -1,6 +1,6 @@
 import { derived, readable, type Readable } from 'svelte/store';
 import { activeAgents, activeSession, type AgentInfo } from './sessions';
-import { heartbeatStore } from './conversations';
+import { heartbeatStore, type HeartbeatInfo } from './conversations';
 import { events } from './events';
 
 export type Attention = 'none' | 'delivery_failed' | 'stale' | 'error';
@@ -21,7 +21,15 @@ export interface ProtocolActivityInput {
   latestEventLabel?: string;
 }
 
-export function attentionReason(agent: AgentInfo, stale: Set<string>): Attention {
+export function isFinished(agent: AgentInfo, workState = agent.work_state): boolean {
+  return workState === 'finished' || workState === 'retired';
+}
+
+export function workStateFor(agent: AgentInfo, heartbeat?: Pick<HeartbeatInfo, 'work_state'>): string | undefined {
+  return heartbeat ? heartbeat.work_state ?? 'working' : agent.work_state;
+}
+
+export function attentionReason(agent: AgentInfo, stale: Set<string>, workState = agent.work_state): Attention {
   const status = agent.status;
   if (typeof status === 'object' && status !== null) {
     if ('WaitingForInput' in status && status.WaitingForInput.startsWith('injected_delivery_failed:')) {
@@ -29,6 +37,7 @@ export function attentionReason(agent: AgentInfo, stale: Set<string>): Attention
     }
     if ('Error' in status) return 'error';
   }
+  if (isFinished(agent, workState)) return 'none';
   return stale.has(agent.id) ? 'stale' : 'none';
 }
 
@@ -39,8 +48,8 @@ export function startupExitCode(agent: AgentInfo): string | null {
   return /^exited_during_startup:(\d+)$/.exec(status.Error)?.[1] ?? null;
 }
 
-export function needsAttention(agent: AgentInfo, stale: Set<string>): boolean {
-  return attentionReason(agent, stale) !== 'none';
+export function needsAttention(agent: AgentInfo, stale: Set<string>, workState = agent.work_state): boolean {
+  return attentionReason(agent, stale, workState) !== 'none';
 }
 
 /** Svelte starts this once for all subscribers and stops it after the last leaves. */
@@ -110,13 +119,15 @@ export const agentActivity: Readable<Record<string, AgentActivity>> = derived(
     return Object.fromEntries($agents.map((agent) => {
       const heartbeat = $heartbeats.agents[agent.id];
       const heartbeatAt = timestamp(heartbeat?.timestamp);
+      const inputAt = timestamp(heartbeat?.latest_input_at ?? agent.latest_input_at);
       const event = latest.get(agent.id);
+      const activity = [heartbeatAt, inputAt, event?.at ?? null].filter((at): at is number => at !== null);
       return [agent.id, {
         agentId: agent.id,
         summary: (heartbeat?.summary ?? '').replace(/\s+/g, ' ').trim(),
-        lastActivityAt: heartbeatAt === null ? event?.at ?? null : Math.max(heartbeatAt, event?.at ?? heartbeatAt),
+        lastActivityAt: activity.length ? Math.max(...activity) : null,
         latestEventLabel: event?.label ?? null,
-        attention: attentionReason(agent, $heartbeats.staleAgents),
+        attention: attentionReason(agent, $heartbeats.staleAgents, workStateFor(agent, heartbeat)),
       }];
     }));
   },

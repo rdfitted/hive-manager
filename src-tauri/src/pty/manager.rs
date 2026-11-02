@@ -144,8 +144,8 @@ const EMITTER_QUEUE_CAPACITY: usize = 1024;
 /// Reader-thread → emitter-thread messages. Data and exit travel the same channel so an
 /// agent's final bytes are always emitted before its `Completed` status.
 enum EmitterMessage {
-    Output { id: String, offset: u64, bytes: Vec<u8> },
-    Exited { id: String },
+    Output { id: String, instance: uuid::Uuid, offset: u64, bytes: Vec<u8> },
+    Exited { id: String, instance: uuid::Uuid },
 }
 
 impl EmitterMessage {
@@ -159,20 +159,49 @@ impl EmitterMessage {
 
 #[derive(Debug, PartialEq, Eq)]
 enum CoalescedEvent {
-    Output { id: String, offset: u64, bytes: Vec<u8> },
-    Exited { id: String },
+    Output { id: String, instance: uuid::Uuid, offset: u64, bytes: Vec<u8> },
+    Exited { id: String, instance: uuid::Uuid },
+}
+
+impl CoalescedEvent {
+    fn is_current(&self, instances: &HashMap<String, Instance>) -> bool {
+        let (id, instance) = match self {
+            Self::Output { id, instance, .. } | Self::Exited { id, instance } => (id, instance),
+        };
+        instances.get(id).is_some_and(|current| current.id == *instance)
+    }
+}
+
+/// Keep live backpressure bounded, but never let an obsolete UI queue stop
+/// the independent drain required by ClosePseudoConsole.
+fn send_reader_message(
+    tx: &mpsc::SyncSender<EmitterMessage>,
+    mut message: EmitterMessage,
+    id: &str,
+    instance: uuid::Uuid,
+    instances: &RwLock<HashMap<String, Instance>>,
+) {
+    loop {
+        if !instances.read().get(id).is_some_and(|current| current.id == instance) { return; }
+        match tx.try_send(message) {
+            Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => return,
+            Err(mpsc::TrySendError::Full(pending)) => message = pending,
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
 }
 
 /// Merge a batch of reader messages into at most one output event per contiguous run
 /// per agent, preserving per-agent order and keeping data ahead of its exit marker.
 fn coalesce(messages: Vec<EmitterMessage>) -> Vec<CoalescedEvent> {
     let mut events: Vec<CoalescedEvent> = Vec::new();
-    let mut open: HashMap<String, usize> = HashMap::new();
+    let mut open: HashMap<(String, uuid::Uuid), usize> = HashMap::new();
 
     for message in messages {
         match message {
-            EmitterMessage::Output { id, offset, bytes } => {
-                if let Some(&index) = open.get(&id) {
+            EmitterMessage::Output { id, instance, offset, bytes } => {
+                let key = (id.clone(), instance);
+                if let Some(&index) = open.get(&key) {
                     if let CoalescedEvent::Output {
                         offset: start,
                         bytes: buffer,
@@ -185,12 +214,12 @@ fn coalesce(messages: Vec<EmitterMessage>) -> Vec<CoalescedEvent> {
                         }
                     }
                 }
-                open.insert(id.clone(), events.len());
-                events.push(CoalescedEvent::Output { id, offset, bytes });
+                open.insert(key, events.len());
+                events.push(CoalescedEvent::Output { id, instance, offset, bytes });
             }
-            EmitterMessage::Exited { id } => {
-                open.remove(&id);
-                events.push(CoalescedEvent::Exited { id });
+            EmitterMessage::Exited { id, instance } => {
+                open.remove(&(id.clone(), instance));
+                events.push(CoalescedEvent::Exited { id, instance });
             }
         }
     }
@@ -223,6 +252,7 @@ fn spawn_emitter(
     app_handle: AppHandle,
     receiver: mpsc::Receiver<EmitterMessage>,
     stats: Arc<EmitterStats>,
+    instances: Arc<RwLock<HashMap<String, Instance>>>,
 ) {
     let spawned = thread::Builder::new()
         .name("pty-emitter".to_string())
@@ -261,8 +291,12 @@ fn spawn_emitter(
                 }
 
                 for event in coalesce(std::mem::take(&mut pending)) {
+                    // Fence at emission too: old data/Completed can have waited
+                    // in the queue while a same-ID replacement was published.
+                    let current = instances.read();
+                    if !event.is_current(&current) { continue; }
                     match event {
-                        CoalescedEvent::Output { id, offset, bytes } => {
+                        CoalescedEvent::Output { id, offset, bytes, .. } => {
                             stats.events.fetch_add(1, Ordering::Relaxed);
                             stats.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
                             window_events += 1;
@@ -272,7 +306,7 @@ fn spawn_emitter(
                                 tracing::error!("Failed to emit pty output for {id}: {e}");
                             }
                         }
-                        CoalescedEvent::Exited { id } => {
+                        CoalescedEvent::Exited { id, .. } => {
                             let _ = app_handle.emit(
                                 PTY_STATUS_EVENT,
                                 PtyStatusChange {
@@ -331,8 +365,82 @@ struct HeartbeatCredential {
     queen: bool,
 }
 
+/// Digest-only snapshot: long scans need neither the manager nor credential locks.
+pub(crate) struct HeartbeatCredentialMatcher {
+    digests: std::collections::HashSet<[u8; 32]>,
+}
+
+impl HeartbeatCredentialMatcher {
+    pub(crate) fn contains(&self, text: &str) -> bool {
+        if self.digests.is_empty() { return false; }
+        let contains = |text: &str| text.as_bytes()
+            .split(|byte| !byte.is_ascii_hexdigit())
+            .any(|run| {
+                let mut previous: Option<&[u8]> = None;
+                // Every distinct window still counts, including embedded tokens.
+                run.windows(64).any(|candidate| {
+                    if previous == Some(candidate) { return false; }
+                    previous = Some(candidate);
+                    let digest: [u8; 32] = Sha256::digest(candidate).into();
+                    self.digests.contains(&digest)
+                })
+            });
+        // Removing controls preserves every raw hex window and additionally joins
+        // split credentials, so a second scan of the original text is redundant.
+        if text.chars().any(char::is_control) {
+            let normalized: String = text.chars().filter(|ch| !ch.is_control()).collect();
+            contains(&normalized)
+        } else { contains(text) }
+    }
+
+    pub(crate) fn redact(&self, value: &str, token: Option<&str>) -> String {
+        let supplied = token.is_some_and(|token| !token.is_empty()
+            && (value.contains(token) || value.chars().filter(|ch| !ch.is_control())
+                .collect::<String>().contains(token)));
+        if supplied || self.contains(value) { "redacted-credential".to_string() }
+        else { value.to_string() }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Instance {
+    id: uuid::Uuid,
+    spawned_at: chrono::DateTime<chrono::Utc>,
+    input_revision: u64,
+    input_active: u64,
+}
+
+impl Instance {
+    fn new() -> Self {
+        Self { id: uuid::Uuid::new_v4(), spawned_at: chrono::Utc::now(), input_revision: 0, input_active: 0 }
+    }
+}
+
+// Holds only input admission metadata. Blocking I/O must never own lifecycle,
+// so a manual kill can still terminate a child whose input pipe is full.
+struct InputAdmission {
+    instances: Arc<RwLock<HashMap<String, Instance>>>,
+    id: String,
+    instance: uuid::Uuid,
+}
+
+impl Drop for InputAdmission {
+    fn drop(&mut self) {
+        if let Some(current) = self.instances.write().get_mut(&self.id) {
+            if current.id == self.instance {
+                current.input_active = current.input_active.saturating_sub(1);
+            }
+        }
+    }
+}
+
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
+    /// Runtime generations, including protocol startup reservations. All changes
+    /// share lifecycle with publication/kill; history must never stand in for a seat.
+    instances: Arc<RwLock<HashMap<String, Instance>>>,
+    /// Bounded bytes only: retired terminals retain no process, reader or master.
+    retired_output: RwLock<HashMap<String, Arc<Mutex<super::output_ring::OutputRing>>>>,
     /// Actual spawn arguments, retained after close for transcript attribution.
     spawn_cwds: RwLock<HashMap<String, String>>,
     transports: RwLock<Option<Arc<crate::transport::TransportRegistry>>>,
@@ -346,6 +454,8 @@ pub struct PtyManager {
     lifecycle: Mutex<()>,
     #[cfg(test)]
     before_protocol_publish: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    before_master_release: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// When the most recent codex spawn happened. Held on its own mutex so a spawn
     /// waiting out the stagger gap does not block kill/status/list.
     last_codex_spawn: Mutex<Option<std::time::Instant>>,
@@ -367,6 +477,8 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            instances: Arc::new(RwLock::new(HashMap::new())),
+            retired_output: RwLock::new(HashMap::new()),
             spawn_cwds: RwLock::new(HashMap::new()),
             transports: RwLock::new(None),
             agent_transports: RwLock::new(HashMap::new()),
@@ -377,6 +489,8 @@ impl PtyManager {
             lifecycle: Mutex::new(()),
             #[cfg(test)]
             before_protocol_publish: Mutex::new(None),
+            #[cfg(test)]
+            before_master_release: Mutex::new(None),
             last_codex_spawn: Mutex::new(None),
             app_handle: None,
             emit_tx: None,
@@ -418,6 +532,7 @@ impl PtyManager {
         transport: Arc<dyn crate::transport::AgentTransport>,
         registry: &crate::transport::TransportRegistry,
     ) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock();
         let mut starting = self.starting_transports.write();
         if self.transport_shutdown.load(Ordering::Acquire) {
             return Err("Transport manager is shutting down".into());
@@ -429,6 +544,7 @@ impl PtyManager {
             return Err(format!("Agent runtime already exists: {id}"));
         }
         starting.insert(id.into(), transport);
+        self.instances.write().insert(id.into(), Instance::new());
         Ok(())
     }
 
@@ -496,6 +612,7 @@ impl PtyManager {
         if starting.get(id).is_some_and(|held| Arc::ptr_eq(held, &transport)) {
             starting.remove(id);
             self.heartbeat_credentials.write().remove(id);
+            self.instances.write().remove(id);
         }
         Ok(())
     }
@@ -522,9 +639,10 @@ impl PtyManager {
         // A startup's final publication/bind and kill use this same short guard.
         let _lifecycle = self.lifecycle.lock();
         if let Some(registry) = self.transport_registry() {
-            let credential_ids: Vec<_> =
+            let mut instance_ids: Vec<_> =
                 self.heartbeat_credentials.read().keys().cloned().collect();
-            let protocol_ids: Vec<_> = credential_ids
+            instance_ids.extend(self.instances.read().keys().cloned());
+            let protocol_ids: Vec<_> = instance_ids
                 .into_iter()
                 .filter(|id| registry.get_agent(id).is_some())
                 .collect();
@@ -532,6 +650,7 @@ impl PtyManager {
             for id in protocol_ids {
                 if registry.get_agent(&id).is_none() {
                     self.heartbeat_credentials.write().remove(&id);
+                    self.instances.write().remove(&id);
                 }
             }
         }
@@ -543,6 +662,7 @@ impl PtyManager {
             {
                 pending.remove(&id);
                 self.heartbeat_credentials.write().remove(&id);
+                self.instances.write().remove(&id);
             }
         }
         errors
@@ -689,7 +809,7 @@ impl PtyManager {
     pub fn set_app_handle(&mut self, handle: AppHandle) {
         if self.emit_tx.is_none() {
             let (sender, receiver) = mpsc::sync_channel(EMITTER_QUEUE_CAPACITY);
-            spawn_emitter(handle.clone(), receiver, Arc::clone(&self.emitter_stats));
+            spawn_emitter(handle.clone(), receiver, Arc::clone(&self.emitter_stats), Arc::clone(&self.instances));
             self.emit_tx = Some(sender);
         }
         self.app_handle = Some(handle);
@@ -747,6 +867,18 @@ impl PtyManager {
         })
     }
 
+    /// Recognize live spawn credentials in text without retaining their plaintext.
+    /// Include every session: a rejected caller can paste somebody else's credential.
+    #[cfg(test)]
+    pub(crate) fn contains_heartbeat_credential(&self, text: &str) -> bool {
+        self.heartbeat_credential_matcher().contains(text)
+    }
+
+    pub(crate) fn heartbeat_credential_matcher(&self) -> HeartbeatCredentialMatcher {
+        HeartbeatCredentialMatcher { digests: self.heartbeat_credentials
+            .read().values().map(|credential| credential.digest).collect() }
+    }
+
     #[cfg(test)]
     pub(crate) fn mint_heartbeat_token_for_test(&self, id: &str, session_id: &str, queen: bool) -> String {
         let token = Self::new_heartbeat_token();
@@ -767,6 +899,7 @@ impl PtyManager {
     }
 
     fn record_spawn_cwd(&self, id: &str, cwd: Option<&str>) {
+        self.retired_output.write().remove(id);
         // Keep the exact argument, and publish under the runtime's lifecycle guard
         // so a rejected duplicate cannot overwrite the existing seat's attribution.
         if let Some(cwd) = cwd {
@@ -818,9 +951,16 @@ impl PtyManager {
             *last = Some(std::time::Instant::now());
         }
 
-        let _lifecycle_guard = self.lifecycle.lock();
-        let existing = { self.sessions.read().get(&id).cloned() };
-        if let Some(existing) = existing {
+        // Reverse local drop order is intentional: failed construction must
+        // release lifecycle before its unpublished console and drain are closed.
+        let mut construction_cleanup = None;
+        let mut lifecycle_guard = self.lifecycle.lock();
+        loop {
+            if self.starting_transports.read().contains_key(&id) || self.protocol_agent(&id).is_some() {
+                return Err(PtyError::CreateError(format!("Agent runtime already exists: {id}")));
+            }
+            let existing = { self.sessions.read().get(&id).cloned() };
+            let Some(existing) = existing else { break; };
             if existing.is_alive() {
                 return Err(PtyError::CreateError(format!(
                     "PTY session already exists: {id}"
@@ -830,14 +970,20 @@ impl PtyManager {
             // Evaluator/prince respawns intentionally reuse their stable ID after exit.
             // Reap that dead handle, while still rejecting a live same-ID replacement.
             existing.kill()?;
-            let mut sessions = self.sessions.write();
-            if sessions
-                .get(&id)
-                .is_some_and(|current| Arc::ptr_eq(current, &existing))
             {
-                sessions.remove(&id);
-                self.heartbeat_credentials.write().remove(&id);
+                let mut sessions = self.sessions.write();
+                if sessions.get(&id).is_some_and(|current| Arc::ptr_eq(current, &existing)) {
+                    sessions.remove(&id);
+                    self.heartbeat_credentials.write().remove(&id);
+                    self.instances.write().remove(&id);
+                }
             }
+            drop(lifecycle_guard);
+            self.release_session_master(&existing);
+            drop(existing);
+            lifecycle_guard = self.lifecycle.lock();
+            // A concurrent creator may have published while the old reader
+            // drained. Recheck admission rather than overwriting its instance.
         }
 
         // #207: give this agent its own CLI state store before spawning. Codex keeps its
@@ -888,7 +1034,8 @@ impl PtyManager {
         if args.contains(&"--stub-create-fails") {
             return Err(PtyError::CreateError("injected PTY constructor failure".to_string()));
         }
-        let session = Arc::new(PtySession::new(
+        let instance = Instance::new();
+        let constructed = PtySession::new_deferred(
             id.clone(),
             role,
             command,
@@ -899,7 +1046,13 @@ impl PtyManager {
             cols,
             rows,
             self.replay_capacity,
-        )?);
+            &mut construction_cleanup,
+        );
+        #[cfg(test)]
+        if let Some(cleanup) = &mut construction_cleanup {
+            cleanup.before_release = self.before_master_release.lock().take();
+        }
+        let session = Arc::new(constructed?);
 
         // Install only after spawn succeeds. A duplicate live spawn must not rotate its token.
         if let Some((session_id, queen, token)) = credential {
@@ -910,6 +1063,7 @@ impl PtyManager {
         {
             let mut sessions = self.sessions.write();
             sessions.insert(id.clone(), Arc::clone(&session));
+            self.instances.write().insert(id.clone(), instance);
             self.record_spawn_cwd(&id, cwd);
         }
 
@@ -925,23 +1079,19 @@ impl PtyManager {
             let emit_tx = self.emit_tx.clone();
             let stats = Arc::clone(&self.emitter_stats);
             let id_clone = id.clone();
-            let sessions_ref = Arc::clone(&self.sessions);
+            let instances_ref = Arc::clone(&self.instances);
 
-            let spawned = thread::Builder::new()
-                .name(format!("pty-reader-{id}"))
-                .spawn(move || {
+            let reader_task = move || {
                     let reader = session_clone.get_reader();
                     let mut buf = [0u8; 4096];
 
                     loop {
-                        // Check if session still exists
-                        {
-                            let sessions_read = sessions_ref.read();
-                            if !sessions_read.contains_key(&id_clone) {
-                                break;
-                            }
+                        #[cfg(not(windows))]
+                        if !instances_ref.read().get(&id_clone).is_some_and(|current| current.id == instance.id) {
+                            break;
                         }
-
+                        // Drain through EOF even after map removal. The retiring
+                        // instance owns this ring; UI forwarding is fenced below.
                         let bytes_read = match read_from_reader(&reader, &mut buf) {
                             Ok(0) => {
                                 // EOF - process exited
@@ -965,11 +1115,12 @@ impl PtyManager {
                             // Blocks while the bounded queue is full: backpressure reaches
                             // the child through the PTY pipe rather than growing memory.
                             if let Some(tx) = &emit_tx {
-                                let _ = tx.send(EmitterMessage::Output {
+                                send_reader_message(tx, EmitterMessage::Output {
                                     id: id_clone.clone(),
+                                    instance: instance.id,
                                     offset,
                                     bytes: buf[..bytes_read].to_vec(),
-                                });
+                                }, &id_clone, instance.id, &instances_ref);
                             }
                         }
                     }
@@ -977,12 +1128,34 @@ impl PtyManager {
                     // Session ended. The exit marker rides the same channel as the data so
                     // the emitter reports Completed only after the final bytes went out.
                     if let Some(tx) = &emit_tx {
-                        let _ = tx.send(EmitterMessage::Exited { id: id_clone });
+                        send_reader_message(tx, EmitterMessage::Exited { id: id_clone.clone(), instance: instance.id },
+                            &id_clone, instance.id, &instances_ref);
                     }
-                });
+                    #[cfg(test)]
+                    session_clone.reader_finished_for_test().store(true, Ordering::Release);
+                };
+
+            #[cfg(test)]
+            let fail_reader_spawn = args.contains(&"--stub-reader-spawn-fails");
+            #[cfg(not(test))]
+            let fail_reader_spawn = false;
+            let spawned = if fail_reader_spawn {
+                Err(std::io::Error::other("injected reader thread creation failure"))
+            } else {
+                thread::Builder::new().name(format!("pty-reader-{id}")).spawn(reader_task)
+            };
 
             if let Err(e) = spawned {
                 tracing::error!("Failed to spawn the pty reader thread for {id}: {e}");
+                session.mark_reader_spawn_failed();
+                drop(lifecycle_guard);
+                // There is no manager reader. The session supplies a temporary
+                // Windows drain, and failed tree cleanup keeps its retry handle.
+                let cleanup = self.kill_instance(&id, instance.id);
+                return Err(PtyError::CreateError(match cleanup {
+                    Ok(_) => format!("Failed to start PTY reader: {e}"),
+                    Err(cleanup) => format!("Failed to start PTY reader: {e}; cleanup needs retry: {cleanup}"),
+                }));
             }
         }
 
@@ -998,36 +1171,35 @@ impl PtyManager {
         Ok(id)
     }
 
+    fn admit_input(&self, id: &str) -> Result<(Arc<PtySession>, InputAdmission), PtyError> {
+        let _lifecycle = self.lifecycle.lock();
+        if self.protocol_agent(id).is_some() {
+            return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));
+        }
+        let session = self.sessions.read().get(id).cloned()
+            .ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        let mut instances = self.instances.write();
+        let current = instances.get_mut(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        current.input_revision = current.input_revision.saturating_add(1);
+        current.input_active = current.input_active.saturating_add(1);
+        let admission = InputAdmission { instances: Arc::clone(&self.instances), id: id.to_string(), instance: current.id };
+        Ok((session, admission))
+    }
+
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
-        if self.protocol_agent(id).is_some() {return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));}
-        tracing::debug!("PtyManager::write called for session: {}", id);
-        let sessions = self.sessions.read();
-        tracing::debug!("Available sessions: {:?}", sessions.keys().collect::<Vec<_>>());
-        let session = sessions.get(id).ok_or_else(|| {
-            tracing::error!("PTY session not found: {}", id);
-            PtyError::NotFound(id.to_string())
-        })?;
-        tracing::debug!("Found session {}, calling write", id);
+        let (session, _admission) = self.admit_input(id)?;
         session.write(data)
     }
 
     /// Deliver a payload as a bracketed paste and then a discrete bare Enter to submit it.
     pub fn submit(&self, id: &str, data: &[u8]) -> Result<PtySubmitResult, PtyError> {
-        if self.protocol_agent(id).is_some() {return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));}
-        tracing::debug!("PtyManager::submit called for session: {}", id);
-        let sessions = self.sessions.read();
-        let session = sessions
-            .get(id)
-            .ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        let (session, _admission) = self.admit_input(id)?;
         session.submit(data)
     }
 
-    /// Write with bracketed paste mode wrapping for large pastes
+    /// Write with bracketed paste mode wrapping for large pastes.
     pub fn write_bracketed(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
-        if self.protocol_agent(id).is_some() {return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));}
-        tracing::debug!("PtyManager::write_bracketed called for session: {} ({} bytes)", id, data.len());
-        let sessions = self.sessions.read();
-        let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        let (session, _admission) = self.admit_input(id)?;
         session.write_bracketed(data)
     }
 
@@ -1038,12 +1210,69 @@ impl PtyManager {
         session.resize(cols, rows)
     }
 
+    /// Identity of the current runtime, including a protocol seat still starting.
+    /// A same-ID respawn always gets a new identity; removed seats return None.
+    pub fn instance_id(&self, id: &str) -> Option<uuid::Uuid> {
+        self.instances.read().get(id).map(|instance| instance.id)
+    }
+
+    /// Wall-clock spawn boundary for the current instance. Protocol seats use
+    /// startup admission, before initialize/first input, so early facts belong to it.
+    pub fn spawned_at(&self, id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.instances.read().get(id).map(|instance| instance.spawned_at)
+    }
+
+    /// Input admission and retirement share lifecycle. This fence binds completion
+    /// to the last submitted input even before HTTP records its pending marker.
+    pub fn input_fence(&self, id: &str) -> Option<(uuid::Uuid, u64)> {
+        self.instances.read().get(id).filter(|instance| instance.input_active == 0)
+            .map(|instance| (instance.id, instance.input_revision))
+    }
+
+    /// Kill only this generation. False means absent/replaced, without touching
+    /// its replacement. Failed cleanup keeps the identity and handle for retry.
+    pub fn kill_instance(&self, id: &str, instance_id: uuid::Uuid) -> Result<bool, PtyError> {
+        self.kill_inner(id, Some(instance_id), false, None)
+    }
+
+    /// Exact-instance retirement preserves just its bounded terminal replay bytes.
+    /// Failure/replacement never publishes history or removes the replacement.
+    pub fn retire_instance(&self, id: &str, instance_id: uuid::Uuid, input_revision: u64) -> Result<bool, PtyError> {
+        self.kill_inner(id, Some(instance_id), true, Some(input_revision))
+    }
+
     pub fn kill(&self, id: &str) -> Result<(), PtyError> {
+        self.kill_inner(id, None, false, None).map(|_| ())
+    }
+
+    fn release_session_master(&self, session: &PtySession) {
+        #[cfg(test)]
+        {
+            let before_release = self.before_master_release.lock().take();
+            if let Some(before_release) = before_release { before_release(); }
+        }
+        session.release_master();
+    }
+
+    fn kill_inner(&self, id: &str, expected: Option<uuid::Uuid>, retain_output: bool, expected_input: Option<u64>) -> Result<bool, PtyError> {
         // Cancellation reaches a starting server without waiting for startup's
         // publication guard. The same guard then orders token cleanup.
-        let starting=self.starting_transports.read().get(id).cloned();
+        let starting = {
+            let _lifecycle = self.lifecycle.lock();
+            if expected.is_some_and(|instance| self.instance_id(id) != Some(instance))
+                || expected_input.is_some_and(|revision| self.input_fence(id).is_none_or(|(_, current)| current != revision)) {
+                return Ok(false);
+            }
+            self.starting_transports.read().get(id).cloned()
+        };
         if let Some(starting) = &starting { starting.stop_sync().map_err(PtyError::CreateError)?; }
         let _lifecycle_guard = self.lifecycle.lock();
+        // A cancelled startup may finish cleanup and a replacement may publish
+        // while stop_sync runs. Never apply old-instance cleanup to that runtime.
+        if expected.is_some_and(|instance| self.instance_id(id) != Some(instance))
+                || expected_input.is_some_and(|revision| self.input_fence(id).is_none_or(|(_, current)| current != revision)) {
+            return Ok(false);
+        }
         if let Some(registry)=self.transport_registry() {
             if let Some((session_id,_))=registry.get_agent(id) {
                 registry.stop_agent_sync(&session_id,id).map_err(PtyError::CreateError)?;
@@ -1051,23 +1280,27 @@ impl PtyManager {
             }
         }
         let session = self.sessions.read().get(id).cloned();
-        if let Some(session) = session {
+        if let Some(session) = &session {
             // Direct-child liveness cannot prove that its descendants were reaped.
             // Retain the exact session on any failed tree cleanup for a later retry.
             session.kill()?;
+            if retain_output {
+                self.retired_output.write().insert(id.to_string(), session.output_history());
+            }
 
             // Remove only the exact session we killed. This avoids retaining its process
             // handle without deleting a same-id replacement created concurrently.
             let mut sessions = self.sessions.write();
             if sessions
                 .get(id)
-                .is_some_and(|current| Arc::ptr_eq(current, &session))
+                .is_some_and(|current| Arc::ptr_eq(current, session))
             {
                 sessions.remove(id);
                 self.heartbeat_credentials.write().remove(id);
             }
         }
         self.heartbeat_credentials.write().remove(id);
+        if !retain_output { self.retired_output.write().remove(id); }
         // A successful cancellation releases only the reservation it stopped.
         // The old startup's final decision and cleanup both check this identity.
         if let Some(stopped) = starting {
@@ -1076,7 +1309,10 @@ impl PtyManager {
                 pending.remove(id);
             }
         }
-        Ok(())
+        self.instances.write().remove(id);
+        drop(_lifecycle_guard);
+        if let Some(session) = session { self.release_session_master(&session); }
+        Ok(true)
     }
 
     pub fn get_status(&self, id: &str) -> Option<AgentStatus> {
@@ -1120,7 +1356,10 @@ impl PtyManager {
     /// into "database is locked".
     pub fn recent_output(&self, id: &str) -> Option<String> {
         let sessions = self.sessions.read();
-        sessions.get(id).map(|session| session.recent_output())
+        sessions.get(id).map(|session| session.recent_output()).or_else(|| {
+            self.retired_output.read().get(id).map(|ring|
+                ring.lock().tail_lossy(super::output_ring::RECENT_OUTPUT_VIEW_BYTES))
+        })
     }
 
     /// The whole retained history of an agent's PTY, for a freshly mounted pane (#287).
@@ -1130,6 +1369,8 @@ impl PtyManager {
         sessions
             .get(id)
             .map(|session| PtySnapshot::from_snapshot(id, session.snapshot()))
+            .or_else(|| self.retired_output.read().get(id).cloned()
+                .map(|ring| PtySnapshot::from_snapshot(id, ring.lock().snapshot())))
     }
 
     /// Test hook: the argv a session was actually spawned with, so store isolation can be
@@ -1163,7 +1404,7 @@ impl PtyManager {
     /// Test hook: append synthetic child output to a session's diagnostic ring, so the
     /// post-submit confirmation observer (#256) can be exercised against a stub PTY that
     /// has no real child to produce output.
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub fn record_output_for_test(&self, id: &str, bytes: &[u8]) {
         let sessions = self.sessions.read();
         if let Some(session) = sessions.get(id) {
@@ -2238,6 +2479,7 @@ mod transport_tests {
     fn output(id: &str, offset: u64, bytes: &[u8]) -> EmitterMessage {
         EmitterMessage::Output {
             id: id.to_string(),
+            instance: uuid::Uuid::nil(),
             offset,
             bytes: bytes.to_vec(),
         }
@@ -2251,6 +2493,7 @@ mod transport_tests {
             output("a", 3, b"lo"),
             EmitterMessage::Exited {
                 id: "a".to_string(),
+                instance: uuid::Uuid::nil(),
             },
             output("b", 105, b" agent"),
         ]);
@@ -2260,16 +2503,19 @@ mod transport_tests {
             vec![
                 CoalescedEvent::Output {
                     id: "a".to_string(),
+                    instance: uuid::Uuid::nil(),
                     offset: 0,
                     bytes: b"hello".to_vec(),
                 },
                 CoalescedEvent::Output {
                     id: "b".to_string(),
+                    instance: uuid::Uuid::nil(),
                     offset: 100,
                     bytes: b"other agent".to_vec(),
                 },
                 CoalescedEvent::Exited {
                     id: "a".to_string(),
+                    instance: uuid::Uuid::nil(),
                 },
             ]
         );
@@ -2288,11 +2534,47 @@ mod transport_tests {
             output("a", 0, b"abc"),
             EmitterMessage::Exited {
                 id: "a".to_string(),
+                instance: uuid::Uuid::nil(),
             },
             output("a", 3, b"def"),
         ]);
         assert_eq!(events.len(), 3);
         assert!(matches!(&events[2], CoalescedEvent::Output { offset: 3, .. }));
+    }
+
+    #[test]
+    fn queued_output_and_exit_are_fenced_against_same_id_replacement() {
+        let old = Instance::new();
+        let new = Instance::new();
+        let events = coalesce(vec![
+            EmitterMessage::Output { id: "seat".into(), instance: old.id, offset: 0, bytes: b"old".to_vec() },
+            EmitterMessage::Output { id: "seat".into(), instance: new.id, offset: 3, bytes: b"new".to_vec() },
+            EmitterMessage::Exited { id: "seat".into(), instance: old.id },
+        ]);
+        assert_eq!(events.len(), 3, "same-ID generations must never coalesce together");
+        let instances = HashMap::from([("seat".into(), new)]);
+        assert!(!events[0].is_current(&instances));
+        assert!(events[1].is_current(&instances));
+        assert!(!events[2].is_current(&instances), "old exit must not complete the replacement");
+    }
+
+    #[test]
+    fn removal_unblocks_a_reader_waiting_on_a_full_emitter_queue() {
+        let instance = Instance::new();
+        let instances = Arc::new(RwLock::new(HashMap::from([("seat".into(), instance)])));
+        let (tx, _receiver) = mpsc::sync_channel(1);
+        tx.send(output("busy", 0, b"full")).unwrap();
+        let (done, completed) = mpsc::channel();
+        let current = instances.clone();
+        let reader = thread::spawn(move || {
+            send_reader_message(&tx, EmitterMessage::Exited { id: "seat".into(), instance: instance.id },
+                "seat", instance.id, &current);
+            done.send(()).unwrap();
+        });
+        assert!(completed.recv_timeout(Duration::from_millis(30)).is_err());
+        instances.write().remove("seat");
+        completed.recv_timeout(Duration::from_secs(2)).expect("obsolete UI backpressure must release the drain");
+        reader.join().unwrap();
     }
 
     #[test]
@@ -2339,6 +2621,25 @@ mod transport_tests {
         assert_eq!(manager.replay_capacity(), super::super::output_ring::MIN_REPLAY_CAPACITY);
         manager.set_replay_capacity(usize::MAX);
         assert_eq!(manager.replay_capacity(), super::super::output_ring::MAX_REPLAY_CAPACITY);
+    }
+
+    #[test]
+    fn credential_matcher_preserves_embedded_and_control_split_windows() {
+        let manager = PtyManager::new();
+        let secret = manager.mint_heartbeat_token_for_test("fixture-worker", "fixture", false);
+        assert!(manager.contains_heartbeat_credential(&secret));
+        let matcher = manager.heartbeat_credential_matcher();
+        for text in [secret.clone(), format!("a{secret}b"),
+            format!("{}\t{}", &secret[..32], &secret[32..]),
+            format!("a{}\u{0085}{}b", &secret[..17], &secret[17..]),
+            format!("{}{secret}{}", "a".repeat(4096), "b".repeat(4096))] {
+            assert!(matcher.contains(&text), "all embedded credential windows must match");
+        }
+        // A digest-only snapshot remains usable without holding either manager lock.
+        let _credentials = manager.heartbeat_credentials.write();
+        assert!(matcher.contains(&secret));
+        assert!(!matcher.contains(&"a".repeat(1_000_000)), "repetitive ordinary hex is not a credential");
+        assert!(!matcher.contains("ordinary summary with\ta tab"));
     }
 
     #[cfg(windows)]
@@ -2402,6 +2703,547 @@ mod transport_tests {
         manager.kill(&id).unwrap();
     }
 
+}
+
+#[cfg(test)]
+mod instance_tests {
+    use super::*;
+    use crate::{delivery::Delivery, transport::{AgentEvent, AgentTransport, Capabilities, TransportRegistry}};
+    use std::sync::atomic::AtomicUsize;
+
+    fn spawn_pty(manager: &PtyManager, id: &str, args: &[&str]) -> Result<String, PtyError> {
+        manager.create_session(id.into(), AgentRole::Worker { index: 1, parent: None },
+            "fixture-shell", args, None, 80, 24)
+    }
+
+    #[test]
+    fn old_instance_kill_preserves_same_id_pty_replacement() {
+        let manager = PtyManager::new();
+        let before = chrono::Utc::now();
+        spawn_pty(&manager, "worker", &["--stub-clean-exit"]).unwrap();
+        let old = manager.instance_id("worker").unwrap();
+        let spawned = manager.spawned_at("worker").unwrap();
+        assert!(spawned >= before && spawned <= chrono::Utc::now());
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        let current = manager.instance_id("worker").unwrap();
+        assert_ne!(old, current);
+        assert!(!manager.kill_instance("worker", old).unwrap());
+        assert_eq!(manager.instance_id("worker"), Some(current));
+        assert!(manager.is_alive("worker"));
+        assert!(manager.kill_instance("worker", current).unwrap());
+        assert_eq!(manager.instance_id("worker"), None);
+        assert_eq!(manager.spawned_at("worker"), None);
+        assert!(!manager.kill_instance("worker", current).unwrap());
+        manager.kill("worker").unwrap();
+    }
+
+    #[test]
+    fn g33_retired_history_contains_only_bytes_and_respawn_clears_it() {
+        let mut manager = PtyManager::new();
+        manager.set_replay_capacity(super::super::output_ring::MIN_REPLAY_CAPACITY);
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        let weak = Arc::downgrade(manager.sessions.read().get("worker").unwrap());
+        let draining_history = manager.sessions.read()["worker"].output_history();
+        manager.record_output_for_test("worker", &vec![b'x'; 20_000]);
+        let before = manager.snapshot("worker").unwrap();
+        let old = manager.instance_id("worker").unwrap();
+        assert!(manager.retire_instance("worker", old, 0).unwrap());
+        assert_eq!(manager.snapshot("worker"), Some(before));
+        assert!(manager.recent_output("worker").unwrap().len() <= super::super::output_ring::RECENT_OUTPUT_VIEW_BYTES);
+        assert!(manager.retired_output.read()["worker"].lock().len() <= super::super::output_ring::MIN_REPLAY_CAPACITY);
+        let until = Instant::now() + Duration::from_secs(1);
+        while weak.strong_count() != 0 && Instant::now() < until { thread::yield_now(); }
+        assert_eq!(weak.strong_count(), 0, "history must not retain the PTY wrapper");
+        // A reader can drain more bytes after the runtime has been removed. Only
+        // this bounded ring survives; retaining it must preserve those final bytes.
+        draining_history.lock().record(b"late EOF drain");
+        assert!(manager.recent_output("worker").unwrap().ends_with("late EOF drain"));
+        let final_snapshot = manager.snapshot("worker").unwrap();
+        assert!(base64::engine::general_purpose::STANDARD.decode(&final_snapshot.data).unwrap()
+            .ends_with(b"late EOF drain"));
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        assert!(manager.retired_output.read().is_empty());
+        let current = manager.instance_id("worker").unwrap();
+        assert!(!manager.retire_instance("worker", old, 0).unwrap());
+        assert_eq!(manager.instance_id("worker"), Some(current));
+        assert!(manager.snapshot("worker").unwrap().data.is_empty());
+        manager.kill("worker").unwrap();
+    }
+
+    #[test]
+    fn g33_input_admission_fences_retirement_before_pending_marker_exists() {
+        let manager = PtyManager::new();
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        let (instance, completed_revision) = manager.input_fence("worker").unwrap();
+        manager.submit("worker", b"follow-up").unwrap();
+        assert!(!manager.retire_instance("worker", instance, completed_revision).unwrap());
+        assert!(manager.is_alive("worker"));
+        let (_, accepted_revision) = manager.input_fence("worker").unwrap();
+        assert!(manager.retire_instance("worker", instance, accepted_revision).unwrap());
+        assert!(manager.write("worker", b"too late").is_err(), "a retirement that wins admission must reject input");
+    }
+
+    #[test]
+    fn g33_inflight_input_does_not_hold_lifecycle_or_prevent_manual_kill() {
+        let manager = PtyManager::new();
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        let (instance, revision) = manager.input_fence("worker").unwrap();
+        let (_writer, admitted) = manager.admit_input("worker").unwrap();
+        assert!(manager.input_fence("worker").is_none(), "in-flight I/O supplies no completion fence");
+        assert!(manager.lifecycle.try_lock().is_some(), "blocked I/O must not hold lifecycle");
+        assert!(!manager.retire_instance("worker", instance, revision).unwrap());
+        assert!(manager.kill_instance("worker", instance).unwrap(), "manual cancellation remains available");
+        spawn_pty(&manager, "worker", &[]).unwrap();
+        let replacement = manager.input_fence("worker").unwrap();
+        drop(admitted);
+        assert_eq!(manager.input_fence("worker"), Some(replacement), "late writer cleanup must not affect replacement");
+        manager.kill("worker").unwrap();
+    }
+
+    #[test]
+    fn failed_pty_cleanup_retains_instance_until_exact_retry_succeeds() {
+        let manager = PtyManager::new();
+        spawn_pty(&manager, "worker", &["--stub-tree-kill-fails-once"]).unwrap();
+        let instance = manager.instance_id("worker").unwrap();
+        let spawned = manager.spawned_at("worker");
+        assert!(spawn_pty(&manager, "worker", &[]).is_err());
+        assert!(manager.kill_instance("worker", instance).is_err());
+        assert_eq!(manager.instance_id("worker"), Some(instance));
+        assert_eq!(manager.spawned_at("worker"), spawned);
+        assert!(manager.kill_instance("worker", instance).unwrap());
+        spawn_pty(&manager, "worker", &["--stub-clean-exit"]).unwrap();
+        assert!(spawn_pty(&manager, "worker", &["--stub-create-fails"]).is_err());
+        assert_eq!(manager.instance_id("worker"), None);
+        assert_eq!(manager.spawned_at("worker"), None);
+    }
+
+    #[test]
+    fn failed_reader_launch_retains_a_failed_tree_cleanup_for_exact_retry() {
+        let manager = PtyManager::new();
+        assert!(spawn_pty(&manager, "worker", &["--stub-reader-spawn-fails", "--stub-tree-kill-fails-once"]).is_err());
+        let instance = manager.instance_id("worker").expect("failed cleanup retains retry identity");
+        assert!(manager.kill_instance("worker", instance).unwrap());
+        assert_eq!(manager.instance_id("worker"), None);
+    }
+
+    #[derive(Default)]
+    struct TestTransport {
+        stops: AtomicUsize,
+        fail_stop: AtomicBool,
+        on_stop: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentTransport for TestTransport {
+        async fn start(&self) -> Result<(), String> { Ok(()) }
+        async fn send(&self, _: &str) -> Result<Delivery, String> { Ok(Delivery::protocol_pending()) }
+        async fn interrupt(&self) -> Result<(), String> { Ok(()) }
+        async fn stop(&self) -> Result<(), String> { self.stop_sync() }
+        fn stop_sync(&self) -> Result<(), String> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            if self.fail_stop.swap(false, Ordering::SeqCst) { return Err("fixture stop failure".into()); }
+            let callback = self.on_stop.lock().take();
+            if let Some(callback) = callback { callback(); }
+            Ok(())
+        }
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AgentEvent> {
+            tokio::sync::broadcast::channel(1).1
+        }
+        fn capabilities(&self) -> Capabilities { Capabilities::pty(false) }
+    }
+
+    fn registry(manager: &PtyManager, root: &std::path::Path) -> Arc<TransportRegistry> {
+        let registry = Arc::new(TransportRegistry::new(root.join("feeds"), None));
+        manager.attach_transports(registry.clone());
+        registry
+    }
+
+    fn publish(manager: &PtyManager, registry: &TransportRegistry, transport: Arc<TestTransport>) {
+        {
+            let _lifecycle = manager.lifecycle.lock();
+            manager.register_started_transport(registry, "session", "worker", None, transport.clone()).unwrap();
+        }
+        manager.finish_transport_start(registry, "worker", transport, None).unwrap();
+    }
+
+    #[test]
+    fn protocol_instance_spans_start_and_publication_then_rotates() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = PtyManager::new();
+        let registry = registry(&manager, temp.path());
+        let transport = Arc::new(TestTransport::default());
+        let before = chrono::Utc::now();
+        manager.begin_transport_start("worker", transport.clone(), &registry).unwrap();
+        let old = manager.instance_id("worker").unwrap();
+        let spawned = manager.spawned_at("worker").unwrap();
+        assert!(spawned >= before && spawned <= chrono::Utc::now());
+        assert!(spawn_pty(&manager, "worker", &[]).is_err());
+        publish(&manager, &registry, transport.clone());
+        assert_eq!(manager.instance_id("worker"), Some(old));
+        assert_eq!(manager.spawned_at("worker"), Some(spawned));
+        assert!(spawn_pty(&manager, "worker", &[]).is_err());
+        transport.fail_stop.store(true, Ordering::SeqCst);
+        assert!(manager.kill_instance("worker", old).is_err());
+        assert_eq!(manager.instance_id("worker"), Some(old));
+        assert!(manager.protocol_agent("worker").is_some());
+        assert!(manager.kill_instance("worker", old).unwrap());
+        let replacement = Arc::new(TestTransport::default());
+        manager.begin_transport_start("worker", replacement.clone(), &registry).unwrap();
+        publish(&manager, &registry, replacement.clone());
+        let current = manager.instance_id("worker").unwrap();
+        assert_ne!(old, current);
+        assert!(!manager.kill_instance("worker", old).unwrap());
+        assert_eq!(replacement.stops.load(Ordering::SeqCst), 0);
+        assert!(manager.kill_instance("worker", current).unwrap());
+        assert_eq!(manager.spawned_at("worker"), None);
+        assert!(!manager.kill_instance("worker", current).unwrap());
+    }
+
+    #[test]
+    fn starting_instance_kill_rechecks_after_replacement_during_stop() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Arc::new(PtyManager::new());
+        let registry = registry(&manager, temp.path());
+        let old_transport = Arc::new(TestTransport::default());
+        manager.begin_transport_start("worker", old_transport.clone(), &registry).unwrap();
+        let old = manager.instance_id("worker").unwrap();
+        // Deterministic interleaving: old startup finishes cleanup and a new seat
+        // is admitted while the old instance's blocking cancellation runs.
+        let owner = manager.clone();
+        let registered = registry.clone();
+        let old_runtime = old_transport.clone();
+        let replacement = Arc::new(TestTransport::default());
+        let new_runtime = replacement.clone();
+        *old_transport.on_stop.lock() = Some(Box::new(move || {
+            assert!(owner.lifecycle.try_lock().is_some(), "startup stop must not hold lifecycle");
+            owner.cleanup_transport_start(&registered, "session", "worker", old_runtime).unwrap();
+            owner.begin_transport_start("worker", new_runtime, &registered).unwrap();
+        }));
+        assert!(!manager.kill_instance("worker", old).unwrap());
+        let current = manager.instance_id("worker").unwrap();
+        assert_ne!(old, current);
+        assert_eq!(replacement.stops.load(Ordering::SeqCst), 0);
+        assert!(manager.kill_instance("worker", current).unwrap());
+        assert_eq!(replacement.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_start_cleanup_and_shutdown_preserve_only_retryable_instances() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = PtyManager::new();
+        let registry = registry(&manager, temp.path());
+        let transport = Arc::new(TestTransport::default());
+        manager.begin_transport_start("worker", transport.clone(), &registry).unwrap();
+        let instance = manager.instance_id("worker").unwrap();
+        transport.fail_stop.store(true, Ordering::SeqCst);
+        assert!(manager.cleanup_transport_start(&registry, "session", "worker", transport.clone()).is_err());
+        assert_eq!(manager.instance_id("worker"), Some(instance));
+        manager.cleanup_transport_start(&registry, "session", "worker", transport).unwrap();
+        assert_eq!(manager.spawned_at("worker"), None);
+        let transport = Arc::new(TestTransport::default());
+        manager.begin_transport_start("worker", transport.clone(), &registry).unwrap();
+        publish(&manager, &registry, transport);
+        assert!(manager.shutdown_transports().is_empty());
+        assert_eq!(manager.instance_id("worker"), None);
+        assert_eq!(manager.spawned_at("worker"), None);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_manager_tests {
+    use super::*;
+    use std::{fs, os::windows::process::CommandExt, process::{Command, Stdio}};
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    fn conhosts() -> Vec<u32> {
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(format!("Get-CimInstance Win32_Process -Filter \"Name='conhost.exe' AND ParentProcessId={}\" | ForEach-Object {{ $_.ProcessId }}", std::process::id()))
+            .creation_flags(CREATE_NO_WINDOW).output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).lines()
+            .filter_map(|line| line.trim().parse().ok()).collect()
+    }
+
+    fn pid_is_live(pid: u32) -> bool {
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(format!("if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"))
+            .creation_flags(CREATE_NO_WINDOW).stdin(Stdio::null())
+            .stdout(Stdio::null()).stderr(Stdio::null()).status()
+            .is_ok_and(|status| status.success())
+    }
+
+    struct HostCleanup(u32);
+    impl Drop for HostCleanup {
+        fn drop(&mut self) {
+            // Only a newly created host owned by this fixture's test process.
+            let _ = Command::new("taskkill")
+                .args(["/PID", &self.0.to_string(), "/T", "/F"])
+                .creation_flags(CREATE_NO_WINDOW).stdin(Stdio::null())
+                .stdout(Stdio::null()).stderr(Stdio::null()).status();
+        }
+    }
+
+    struct ResumeReader(Arc<crate::pty::session::RealReaderControl>);
+    impl Drop for ResumeReader {
+        fn drop(&mut self) { self.0.resume(); }
+    }
+
+    fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while !condition() {
+            if Instant::now() >= deadline { return false; }
+            thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
+    fn quiet_fixture(manager: &PtyManager, temp: &std::path::Path, extra: &[&str]) -> HostCleanup {
+        let before = conhosts();
+        let script = temp.join("quiet.ps1");
+        fs::write(&script, "[Console]::Out.WriteLine('PTY-READY'); Start-Sleep -Seconds 300").unwrap();
+        let mut args = vec!["--real-pty-fixture", "-NoProfile", "-NonInteractive", "-File", script.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        manager.create_session("g36-worker".into(), AgentRole::Worker { index: 1, parent: None },
+            "powershell.exe", &args, temp.to_str(), 80, 24).unwrap();
+        let hosts: Vec<_> = conhosts().into_iter().filter(|pid| !before.contains(pid)).collect();
+        assert_eq!(hosts.len(), 1, "one owned fixture host: {hosts:?}");
+        let cleanup = HostCleanup(hosts[0]);
+        assert!(wait_until(Duration::from_secs(10), || manager.recent_output("g36-worker")
+            .is_some_and(|output| output.contains("PTY-READY"))));
+        cleanup
+    }
+
+    fn assert_release_unlocked(manager: &PtyManager) {
+        assert!(manager.lifecycle.try_lock().is_some(), "master release must not hold lifecycle");
+        assert!(manager.sessions.try_write().is_some(), "master release must not hold sessions.write");
+    }
+
+    #[test]
+    fn g36_failed_reader_launch_closes_pending_output_with_a_fallback_drain() {
+        let _fixtures = crate::pty::real_session::WINDOWS_TEST_LOCK.lock();
+        let before = conhosts();
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("unread-output.ps1");
+        fs::write(&script, "while ($true) { [Console]::Out.WriteLine(('x' * 8192)) }").unwrap();
+        let manager = Arc::new(PtyManager::new());
+        let current = manager.clone();
+        let (closing, close_started) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        *manager.before_master_release.lock() = Some(Box::new(move || {
+            assert_release_unlocked(&current);
+            closing.send(()).unwrap();
+            let _ = resumed.recv_timeout(Duration::from_secs(10));
+        }));
+        let owner = manager.clone();
+        let cwd = temp.path().to_path_buf();
+        let (done, completed) = mpsc::channel();
+        let constructor = thread::spawn(move || {
+            let result = owner.create_session("g36-worker".into(), AgentRole::Worker { index: 1, parent: None },
+                "powershell.exe", &["--real-pty-fixture", "--real-pty-output-before-return", "--stub-reader-spawn-fails", "-NoProfile", "-NonInteractive", "-File", script.to_str().unwrap()],
+                cwd.to_str(), 80, 24);
+            let _ = done.send(result);
+        });
+        let entered_cleanup = close_started.recv_timeout(Duration::from_secs(5)).is_ok();
+        let hosts: Vec<_> = conhosts().into_iter().filter(|pid| !before.contains(pid)).collect();
+        let cleanup: Vec<_> = hosts.iter().copied().map(HostCleanup).collect();
+        // Tree cleanup already stopped the child. Its output remains unread:
+        // only the fallback drain can let ClosePseudoConsole finish.
+        let _ = resume.send(());
+        let result = completed.recv_timeout(Duration::from_secs(5));
+        let hosts_exited = hosts.iter().all(|pid| !pid_is_live(*pid));
+        drop(cleanup);
+        assert!(entered_cleanup && hosts.len() == 1);
+        assert!(result.is_ok(), "reader-spawn failure must close its host within the bound");
+        assert!(result.unwrap().is_err());
+        constructor.join().unwrap();
+        assert!(hosts_exited);
+        assert_eq!(manager.instance_id("g36-worker"), None);
+        assert!(manager.sessions.read().is_empty());
+    }
+
+    #[test]
+    fn g36_real_retry_retains_master_and_late_close_preserves_replacement() {
+        let _fixtures = crate::pty::real_session::WINDOWS_TEST_LOCK.lock();
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Arc::new(PtyManager::new());
+        let cleanup = quiet_fixture(&manager, temp.path(), &["--stub-tree-kill-fails-once"]);
+        let session = manager.sessions.read().get("g36-worker").unwrap().clone();
+        let reader_finished = session.reader_finished_for_test();
+        let weak_wrapper = Arc::downgrade(&session);
+        let real = session.real_session_for_test();
+        let weak_session = Arc::downgrade(&real);
+        let weak_master = real.master_weak_for_test();
+        drop(real);
+        drop(session);
+        let old = manager.instance_id("g36-worker").unwrap();
+        assert!(manager.kill_instance("g36-worker", old).is_err());
+        assert_eq!(manager.instance_id("g36-worker"), Some(old));
+        assert!(weak_master.strong_count() > 0 && pid_is_live(cleanup.0), "failed tree cleanup retains its real console target");
+        let current = manager.clone();
+        *manager.before_master_release.lock() = Some(Box::new(move || {
+            assert_release_unlocked(&current);
+            current.create_session("g36-worker".into(), AgentRole::Worker { index: 1, parent: None },
+                "fixture-shell", &[], None, 80, 24).unwrap();
+        }));
+        let owner = manager.clone();
+        let (done, completed) = mpsc::channel();
+        let killer = thread::spawn(move || { let _ = done.send(owner.kill_instance("g36-worker", old)); });
+        let killed = completed.recv_timeout(Duration::from_secs(5));
+        let released = wait_until(Duration::from_secs(3), || reader_finished.load(Ordering::Acquire)
+            && weak_wrapper.strong_count() == 0 && weak_session.strong_count() == 0 && weak_master.strong_count() == 0);
+        let host_exited = !pid_is_live(cleanup.0);
+        drop(cleanup);
+        assert!(killed.is_ok(), "retry close must finish within its bound");
+        assert!(killed.unwrap().unwrap());
+        killer.join().unwrap();
+        assert!(released && host_exited);
+        let replacement = manager.instance_id("g36-worker").unwrap();
+        assert_ne!(old, replacement);
+        assert!(manager.is_alive("g36-worker"));
+        assert!(!manager.kill_instance("g36-worker", old).unwrap());
+        assert_eq!(manager.instance_id("g36-worker"), Some(replacement));
+        assert!(manager.kill_instance("g36-worker", replacement).unwrap());
+        assert!(!manager.kill_instance("g36-worker", replacement).unwrap());
+        manager.kill("g36-worker").unwrap();
+    }
+
+    #[test]
+    fn g36_dead_replacement_and_failed_construction_close_outside_manager_locks() {
+        let _fixtures = crate::pty::real_session::WINDOWS_TEST_LOCK.lock();
+        let before = conhosts();
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Arc::new(PtyManager::new());
+        let old_host = quiet_fixture(&manager, temp.path(), &[]);
+        let session = manager.sessions.read().get("g36-worker").unwrap().clone();
+        let weak_wrapper = Arc::downgrade(&session);
+        let real = session.real_session_for_test();
+        let weak_session = Arc::downgrade(&real);
+        let weak_master = real.master_weak_for_test();
+        real.kill().unwrap();
+        drop(real);
+        drop(session);
+        assert!(wait_until(Duration::from_secs(2), || !manager.is_alive("g36-worker")));
+        let script = temp.path().join("failing.ps1");
+        fs::write(&script, "while ($true) { [Console]::Out.WriteLine(('x' * 8192)) }").unwrap();
+        let releases = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (closing, close_started) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let current = manager.clone();
+        let counts = releases.clone();
+        *manager.before_master_release.lock() = Some(Box::new(move || {
+            assert_release_unlocked(&current);
+            counts.fetch_add(1, Ordering::SeqCst);
+            let next = current.clone();
+            *current.before_master_release.lock() = Some(Box::new(move || {
+                assert_release_unlocked(&next);
+                counts.fetch_add(1, Ordering::SeqCst);
+                closing.send(()).unwrap();
+                let _ = resumed.recv_timeout(Duration::from_secs(10));
+            }));
+        }));
+        let owner = manager.clone();
+        let cwd = temp.path().to_path_buf();
+        let (done, completed) = mpsc::channel();
+        let constructor = thread::spawn(move || {
+            let result = owner.create_session("g36-worker".into(), AgentRole::Worker { index: 1, parent: None },
+                "powershell.exe", &["--real-pty-fixture", "--real-pty-fail-after-spawn", "-NoProfile", "-NonInteractive", "-File", script.to_str().unwrap()],
+                cwd.to_str(), 80, 24);
+            let _ = done.send(result);
+        });
+        let entered_cleanup = close_started.recv_timeout(Duration::from_secs(5)).is_ok();
+        let hosts: Vec<_> = conhosts().into_iter().filter(|pid| !before.contains(pid) && *pid != old_host.0).collect();
+        let cleanup: Vec<_> = hosts.iter().copied().map(HostCleanup).collect();
+        let _ = resume.send(());
+        let result = completed.recv_timeout(Duration::from_secs(5));
+        let hosts_exited = hosts.iter().all(|pid| !pid_is_live(*pid));
+        drop(cleanup);
+        drop(old_host);
+        assert!(entered_cleanup && hosts.len() == 1, "observe the failed constructor's own console before releasing it");
+        assert!(result.is_ok(), "failed construction close must finish within its bound");
+        assert!(result.unwrap().is_err());
+        constructor.join().unwrap();
+        assert_eq!(releases.load(Ordering::SeqCst), 2, "dead replacement and failed construction both release outside locks");
+        assert!(hosts_exited);
+        assert!(wait_until(Duration::from_secs(3), || weak_wrapper.strong_count() == 0 && weak_session.strong_count() == 0 && weak_master.strong_count() == 0));
+        assert_eq!(manager.instance_id("g36-worker"), None);
+        assert_eq!(manager.spawned_at("g36-worker"), None);
+        assert!(manager.sessions.read().is_empty());
+    }
+
+    #[test]
+    fn g36_real_manager_kill_releases_reader_session_master_and_owned_conhost() {
+        let _fixtures = crate::pty::real_session::WINDOWS_TEST_LOCK.lock();
+        for pending_output in [false, true] {
+            let before = conhosts();
+            let temp = tempfile::tempdir().unwrap();
+            let script = temp.path().join("output.ps1");
+            fs::write(&script, if pending_output {
+                "[Console]::Out.WriteLine('PTY-READY'); while (!(Test-Path 'flood-go')) { Start-Sleep -Milliseconds 10 }; while ($true) { [Console]::Out.WriteLine(('x' * 8192)) }"
+            } else {
+                "[Console]::Out.WriteLine('PTY-READY'); Start-Sleep -Seconds 300"
+            }).unwrap();
+            let manager = Arc::new(PtyManager::new());
+            manager.create_session("g36-worker".into(), AgentRole::Worker { index: 1, parent: None },
+                "powershell.exe", &["--real-pty-fixture", "-NoProfile", "-NonInteractive", "-File", script.to_str().unwrap()],
+                temp.path().to_str(), 80, 24).unwrap();
+            let hosts: Vec<_> = conhosts().into_iter().filter(|pid| !before.contains(pid)).collect();
+            assert_eq!(hosts.len(), 1, "one owned fixture host: {hosts:?}");
+            let cleanup = HostCleanup(hosts[0]);
+            assert!(wait_until(Duration::from_secs(10), || manager.recent_output("g36-worker")
+                .is_some_and(|output| output.contains("PTY-READY") || (pending_output && output.contains("xxxx")))));
+            let session = manager.sessions.read().get("g36-worker").unwrap().clone();
+            let weak_wrapper = Arc::downgrade(&session);
+            let reader_finished = session.reader_finished_for_test();
+            let reader_control = session.real_reader_control_for_test();
+            let _resume = ResumeReader(reader_control.clone());
+            assert!(wait_until(Duration::from_secs(2), || reader_control.reading.load(Ordering::Acquire)),
+                "fixture must enter the actual blocking read");
+            if pending_output {
+                reader_control.pause();
+                fs::write(temp.path().join("flood-go"), b"go").unwrap();
+                assert!(wait_until(Duration::from_secs(2), || reader_control.waiting.load(Ordering::Acquire)),
+                    "pause the actual drain while the child fills the console output");
+                thread::sleep(Duration::from_millis(50));
+            }
+            let real = session.real_session_for_test();
+            let weak_session = Arc::downgrade(&real);
+            let weak_master = real.master_weak_for_test();
+            drop(real);
+            drop(session);
+            let instance = manager.instance_id("g36-worker").unwrap();
+            let (closing, close_started) = mpsc::channel();
+            let current = manager.clone();
+            *manager.before_master_release.lock() = Some(Box::new(move || {
+                assert!(current.lifecycle.try_lock().is_some(), "master release must not hold lifecycle");
+                assert!(current.sessions.try_write().is_some(), "master release must not hold sessions.write");
+                closing.send(()).unwrap();
+            }));
+            let owner = manager.clone();
+            let (done, completed) = mpsc::channel();
+            let killer = thread::spawn(move || { let _ = done.send(owner.kill_instance("g36-worker", instance)); });
+            let closing_started = close_started.recv_timeout(Duration::from_secs(3)).is_ok();
+            reader_control.resume();
+            let killed = completed.recv_timeout(Duration::from_secs(5));
+            let released = wait_until(Duration::from_secs(3), || reader_finished.load(Ordering::Acquire)
+                && weak_wrapper.strong_count() == 0 && weak_session.strong_count() == 0
+                && weak_master.strong_count() == 0);
+            let host_exited = !pid_is_live(hosts[0]);
+            let reader_exited = reader_finished.load(Ordering::Acquire);
+            let retained = (weak_wrapper.strong_count(), weak_session.strong_count(), weak_master.strong_count());
+            // Recover only this test's host even on a failing regression.
+            drop(cleanup);
+            assert!(closing_started, "G36 manager must reach master release after removing the exact instance");
+            assert!(killed.is_ok(), "G36 ClosePseudoConsole must finish within five seconds while the reader drains");
+            assert!(killed.unwrap().unwrap());
+            killer.join().unwrap();
+            assert!(released, "G36 master release must end the actual manager reader and release wrapper/session/master: pending={pending_output}, reader_exited={}, wrapper={}, session={}, master={}",
+                reader_exited, retained.0, retained.1, retained.2);
+            assert!(host_exited, "G36 owned conhost must exit within the cleanup bound");
+        }
+    }
 }
 
 #[cfg(test)]
