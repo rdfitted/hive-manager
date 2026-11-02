@@ -1468,6 +1468,13 @@ fn journal_outcome_status(status: StepStatus) -> RuntimeOutcomeStatus {
     }
 }
 
+fn record_first_finish(outcome: &mut RuntimeOutcome, at: DateTime<Utc>) {
+    outcome.finished_at = Some(if matches!(outcome.status,
+        RuntimeOutcomeStatus::Completed | RuntimeOutcomeStatus::Finalized) {
+        outcome.finished_at.map_or(at, |first| first.min(at))
+    } else { at });
+}
+
 fn update_mutation_outcomes(
     outcomes: &mut BTreeMap<String, RuntimeOutcome>,
     delta: &GraphMutationDelta,
@@ -1512,12 +1519,22 @@ fn update_mutation_outcomes(
                 source_refs: Vec::new(),
                 completion_evidence: None,
             });
-        outcome.status = status;
-        if status == RuntimeOutcomeStatus::Running {
+        let reopened = matches!(prior_status,
+            Some(NodeStatus::Completed | NodeStatus::Failed | NodeStatus::Cancelled))
+            && !matches!(node.status, NodeStatus::Completed | NodeStatus::Failed | NodeStatus::Cancelled);
+        if reopened {
+            outcome.started_at = Some(delta.observed_at);
+            outcome.finished_at = None;
+            outcome.completion_evidence = None;
+            outcome.executed_as = None;
+        } else if status == RuntimeOutcomeStatus::Running {
             outcome.started_at.get_or_insert(delta.observed_at);
-        } else {
+        } else if status == RuntimeOutcomeStatus::Completed {
+            record_first_finish(outcome, delta.observed_at);
+        } else if matches!(status, RuntimeOutcomeStatus::Failed | RuntimeOutcomeStatus::Interrupted) {
             outcome.finished_at = Some(delta.observed_at);
         }
+        outcome.status = status;
         outcome
             .source_refs
             .push(format!("mutation:delta:{}", delta.sequence));
@@ -1565,13 +1582,19 @@ fn update_event_outcome(
     if outcome.task_id.is_none() {
         outcome.task_id = task_id;
     }
+    outcome.source_refs.push(format!("event:{}", event.id));
+    if outcome.started_at.is_some_and(|start| event.timestamp < start) {
+        if matches!(kind, RuntimeObservationKind::Claim | RuntimeObservationKind::ClaimFailed | RuntimeObservationKind::Retry) {
+            outcome.attempt_count = outcome.attempt_count.saturating_add(1);
+        }
+        return;
+    }
     if event.event_type == EventType::WorkNodeCompleted && outcome.executed_as.is_none() {
         outcome.executed_as = event
             .payload
             .get("executed_as")
             .and_then(|value| serde_json::from_value(value.clone()).ok());
     }
-    outcome.source_refs.push(format!("event:{}", event.id));
     if matches!(
         kind,
         RuntimeObservationKind::Completion | RuntimeObservationKind::Finalization
@@ -1581,6 +1604,10 @@ fn update_event_outcome(
     match kind {
         RuntimeObservationKind::Claim => {
             outcome.attempt_count = outcome.attempt_count.saturating_add(1);
+            outcome.started_at = Some(event.timestamp);
+            outcome.finished_at = None;
+            outcome.completion_evidence = None;
+            outcome.executed_as = None;
             outcome.status = RuntimeOutcomeStatus::Running;
         }
         RuntimeObservationKind::ClaimFailed => {
@@ -1593,19 +1620,23 @@ fn update_event_outcome(
         }
         RuntimeObservationKind::Retry => {
             outcome.attempt_count = outcome.attempt_count.saturating_add(1);
+            outcome.started_at = Some(event.timestamp);
+            outcome.finished_at = None;
+            outcome.completion_evidence = None;
+            outcome.executed_as = None;
             outcome.status = RuntimeOutcomeStatus::Running;
         }
         RuntimeObservationKind::Completion => {
+            record_first_finish(outcome, event.timestamp);
             outcome.status = RuntimeOutcomeStatus::Completed;
-            outcome.finished_at = Some(event.timestamp);
         }
         RuntimeObservationKind::Failure => {
             outcome.status = RuntimeOutcomeStatus::Failed;
             outcome.finished_at = Some(event.timestamp);
         }
         RuntimeObservationKind::Finalization => {
+            record_first_finish(outcome, event.timestamp);
             outcome.status = RuntimeOutcomeStatus::Finalized;
-            outcome.finished_at = Some(event.timestamp);
         }
         RuntimeObservationKind::Artifact => {
             outcome.effects.push(RuntimeEffect {
@@ -1664,6 +1695,12 @@ fn update_lane_completion_outcomes(
                 source_refs: Vec::new(),
                 completion_evidence: None,
             });
+        if !outcome.source_refs.iter().any(|known| known == &source_ref) {
+            outcome.source_refs.push(source_ref.clone());
+        }
+        if outcome.started_at.is_some_and(|start| event.timestamp < start) {
+            continue;
+        }
         merge_completion_evidence(
             outcome,
             if anchor_task_id == Some(node.id.as_str()) {
@@ -1676,15 +1713,12 @@ fn update_lane_completion_outcomes(
             outcome.agent_ids.push(agent_id.to_string());
         }
         outcome.task_id.get_or_insert_with(|| node.id.clone());
+        record_first_finish(outcome, event.timestamp);
         if outcome.status != RuntimeOutcomeStatus::Finalized {
             outcome.status = RuntimeOutcomeStatus::Completed;
         }
-        outcome.finished_at = Some(event.timestamp);
         if outcome.attempt_count == 0 {
             outcome.attempt_count = 1;
-        }
-        if !outcome.source_refs.iter().any(|known| known == &source_ref) {
-            outcome.source_refs.push(source_ref.clone());
         }
     }
     if matched {
@@ -1713,6 +1747,13 @@ fn update_declared_completion_outcome(
             source_refs: Vec::new(),
             completion_evidence: None,
         });
+    let source_ref = fact.source_ref();
+    if !outcome.source_refs.iter().any(|known| known == &source_ref) {
+        outcome.source_refs.push(source_ref);
+    }
+    if outcome.started_at.is_some_and(|start| fact.completed_at < start) {
+        return;
+    }
     outcome.task_id = Some(fact.task_id.clone());
     if !outcome
         .agent_ids
@@ -1721,17 +1762,13 @@ fn update_declared_completion_outcome(
     {
         outcome.agent_ids.push(fact.agent_id.clone());
     }
-    if fact.executed_as.is_some() {
+    if fact.executed_as.is_some() && (!fact.confirmation || outcome.executed_as.is_none()) {
         outcome.executed_as = fact.executed_as.clone();
     }
+    record_first_finish(outcome, fact.completed_at);
     outcome.status = RuntimeOutcomeStatus::Completed;
-    outcome.finished_at = Some(fact.completed_at);
     if outcome.attempt_count == 0 {
         outcome.attempt_count = 1;
-    }
-    let source_ref = fact.source_ref();
-    if !outcome.source_refs.iter().any(|known| known == &source_ref) {
-        outcome.source_refs.push(source_ref);
     }
     merge_completion_evidence(outcome, CompletionEvidenceClass::Observed);
 }
@@ -1784,6 +1821,123 @@ fn project_outcome_statuses(
             }
             RuntimeOutcomeStatus::Unknown => continue,
         };
+    }
+}
+
+#[cfg(test)]
+mod first_finish_tests {
+    use super::*;
+    use crate::domain::event::Severity;
+    use crate::orchestrator::work_graph::completion_ledger::{
+        append_node_completion_facts, read_node_completion_facts, NodeCompletionProvenance,
+    };
+
+    fn at(seconds: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000 + seconds, 0).unwrap()
+    }
+
+    fn graph(status: NodeStatus) -> TaskGraph {
+        TaskGraph::new(vec![WorkNode::new("T1", NodeKind::Task, "Fixture work",
+            NodeContract::default(), BindingRef::Role("backend".into()), status)], vec![])
+    }
+
+    fn fact(seconds: i64, confirmation: bool) -> NodeCompletionFact {
+        let mut fact = NodeCompletionFact::new("T1", "s-worker-1", NodeCompletionProvenance::Heartbeat)
+            .with_confirmation(confirmation);
+        fact.completed_at = at(seconds);
+        fact
+    }
+
+    fn event(kind: EventType, seconds: i64) -> Event {
+        Event { id: format!("fixture-{seconds}"), session_id: "s".into(), cell_id: None,
+            agent_id: Some("s-worker-1".into()), event_type: kind, timestamp: at(seconds),
+            payload: serde_json::json!({"task_id":"T1"}), severity: Severity::Info }
+    }
+
+    fn project(events: &[Event], deltas: &[GraphMutationDelta], facts: &[NodeCompletionFact]) -> RuntimeDerivation {
+        derive_runtime_graph_with_completion_facts(Some(&graph(NodeStatus::Ready)), events,
+            &[], &[], deltas, facts, &BTreeMap::new())
+    }
+
+    fn task(result: &RuntimeDerivation) -> &RuntimeOutcome {
+        result.outcomes.iter().find(|outcome| outcome.subject_id == "T1").unwrap()
+    }
+
+    #[test]
+    fn first_finish_worker_time_survives_queen_confirmation_and_all_rows_remain() {
+        let directory = tempfile::tempdir().unwrap();
+        let facts = vec![fact(1, false), fact(25, true)];
+        append_node_completion_facts(directory.path(), &facts).unwrap();
+        let stored = read_node_completion_facts(directory.path()).unwrap();
+        assert_eq!(stored, facts);
+        let result = project(&[event(EventType::WorkerClaimed, 0)], &[], &stored);
+        assert_eq!(task(&result).finished_at, Some(at(1)), "G32 keeps the worker's first finish");
+        for fact in &facts { assert!(task(&result).source_refs.contains(&fact.source_ref())); }
+        assert!(stored[1].confirmation);
+    }
+
+    #[test]
+    fn first_finish_is_earliest_valid_time_even_when_facts_are_out_of_order() {
+        let result = project(&[event(EventType::WorkerClaimed, 0)], &[],
+            &[fact(25, true), fact(1, false), fact(10, false)]);
+        assert_eq!(task(&result).finished_at, Some(at(1)));
+    }
+
+    #[test]
+    fn first_finish_fact_provenance_wins_over_event_and_later_confirmation() {
+        let provenance = |provider: &str| serde_json::json!({"provider":provider, "tier":"high",
+            "model":"fixture-model", "flags":[], "channel":"hive", "source":"node"});
+        let mut completion = event(EventType::WorkNodeCompleted, 1);
+        completion.payload["executed_as"] = provenance("event-provider");
+        let first = fact(1, false).with_executed_as(serde_json::from_value(provenance("fact-provider")).unwrap());
+        let later = fact(25, true).with_executed_as(serde_json::from_value(provenance("confirmation-provider")).unwrap());
+        let result = project(&[event(EventType::WorkerClaimed, 0), completion], &[], &[first, later]);
+        assert_eq!(task(&result).finished_at, Some(at(1)));
+        assert_eq!(task(&result).executed_as.as_ref().unwrap().provider, "fact-provider");
+    }
+
+    fn reopened() -> GraphMutationDelta {
+        GraphMutationDelta { sequence: 1, observed_at: at(30), mutation_type: GraphMutationType::Other,
+            before: graph(NodeStatus::Completed), after: graph(NodeStatus::Ready), source_refs: vec!["fixture:qa-rerun".into()] }
+    }
+
+    #[test]
+    fn first_finish_reopened_node_takes_the_new_finish_and_keeps_old_audit() {
+        let facts = vec![fact(1, false), fact(40, false), fact(60, true)];
+        let result = project(&[event(EventType::WorkerClaimed, 0)], &[reopened()], &facts);
+        assert_eq!(task(&result).started_at, Some(at(30)));
+        assert_eq!(task(&result).finished_at, Some(at(40)), "G32 uses the rerun's first finish");
+        assert!(task(&result).source_refs.contains(&facts[0].source_ref()));
+    }
+
+    #[test]
+    fn first_finish_old_rows_do_not_complete_a_reopened_node() {
+        let result = project(&[event(EventType::WorkerClaimed, 0)], &[reopened()], &[fact(1, false)]);
+        assert_eq!(task(&result).finished_at, None);
+        assert_eq!(result.runtime_graph.nodes.iter().find(|node| node.id == "T1").unwrap().status, NodeStatus::Ready);
+    }
+
+    #[test]
+    fn first_finish_new_claim_fences_old_facts_without_an_in_memory_delta() {
+        let events = [event(EventType::WorkerClaimed, 0), event(EventType::WorkerReclaimed, 30),
+            event(EventType::WorkerClaimed, 31)];
+        let result = project(&events, &[], &[fact(1, false), fact(40, false), fact(60, true)]);
+        assert_eq!(task(&result).started_at, Some(at(31)));
+        assert_eq!(task(&result).finished_at, Some(at(40)));
+    }
+
+    #[test]
+    fn first_finish_event_is_not_replaced_by_later_finalization() {
+        let result = project(&[event(EventType::WorkerClaimed, 0), event(EventType::AgentCompleted, 1),
+            event(EventType::WorkerFinalized, 25)], &[], &[]);
+        assert_eq!(task(&result).finished_at, Some(at(1)));
+    }
+
+    #[test]
+    fn first_finish_failure_does_not_invent_completion() {
+        let result = project(&[event(EventType::WorkerClaimed, 0), event(EventType::AgentFailed, 1)], &[], &[]);
+        assert_eq!(task(&result).status, RuntimeOutcomeStatus::Failed);
+        assert_eq!(result.runtime_graph.nodes.iter().find(|node| node.id == "T1").unwrap().status, NodeStatus::Failed);
     }
 }
 

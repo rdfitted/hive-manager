@@ -355,8 +355,8 @@ pub async fn post_heartbeat(
     // Validate the whole declared set before the queue or controller is mutated. Exact ids are
     // deliberate: aliases and labels are not node identity, and a mixed valid/invalid request
     // must apply none of its declarations.
-    let (completed_nodes, external_completion_ids) = if req.completed_nodes.is_empty() {
-        (Vec::new(), Vec::new())
+    let (completed_nodes, external_completion_ids, confirmation_nodes) = if req.completed_nodes.is_empty() {
+        (Vec::new(), Vec::new(), BTreeSet::new())
     } else {
         if req.status != "completed" {
             return Err(ApiError::bad_request(
@@ -480,7 +480,11 @@ pub async fn post_heartbeat(
             })
             .map(|node| node.id.clone())
             .collect::<Vec<_>>();
-        (normalized.into_iter().collect::<Vec<_>>(), external_completion_ids)
+        let confirmation_nodes = if req.mark_agent_id.is_some() {
+            prior_finished_nodes(&state, &session_id, graph.as_ref().expect("validated node ids require graph"), &hierarchy)?
+                .into_iter().filter(|node_id| normalized.contains_key(node_id)).collect()
+        } else { BTreeSet::new() };
+        (normalized.into_iter().collect::<Vec<_>>(), external_completion_ids, confirmation_nodes)
     };
 
     if authenticated.is_none() {
@@ -492,6 +496,9 @@ pub async fn post_heartbeat(
     // Persist before changing status so a failed audit write cannot silently erase evidence.
     let previous = state.session_controller.read().get_heartbeat_info(&session_id)
         .get(&agent_id).cloned();
+    let confirmation = req.mark_agent_id.is_some() && req.status == "completed"
+        && (!confirmation_nodes.is_empty() || (req.completed_nodes.is_empty()
+            && previous.as_ref().is_some_and(|heartbeat| heartbeat.status == "completed")));
     if req.mark_agent_id.is_some() || req.status == "completed"
         || previous.as_ref().is_some_and(|heartbeat| heartbeat.status == "completed")
     {
@@ -507,6 +514,7 @@ pub async fn post_heartbeat(
                 "actor_agent_id": authenticated.as_ref().map(|(id, _)| id.as_str()),
                 "target_agent_id": agent_id,
                 "queen_mark": req.mark_agent_id.is_some(),
+                "confirmation": confirmation,
                 "status": req.status,
                 "summary": req.summary,
                 "completed_nodes": req.completed_nodes,
@@ -566,11 +574,12 @@ pub async fn post_heartbeat(
         let facts = completed_nodes
             .into_iter()
             .map(|(task_id, executed_as)| {
+                let confirmation = confirmation_nodes.contains(&task_id);
                 let fact = NodeCompletionFact::new(
                     task_id,
                     agent_id.clone(),
                     NodeCompletionProvenance::Heartbeat,
-                );
+                ).with_confirmation(confirmation);
                 match executed_as {
                     Some(executed_as) => fact.with_executed_as(executed_as),
                     None => fact,
@@ -623,6 +632,40 @@ pub async fn post_heartbeat(
             message: "Heartbeat recorded".to_string(),
         }),
     ))
+}
+
+/// Determine node-level confirmation before this request mutates the queue or ledger.
+/// Replaying claims and mutation resets avoids confirming a predecessor run's completion.
+fn prior_finished_nodes(
+    state: &AppState,
+    session_id: &str,
+    graph: &crate::orchestrator::work_graph::TaskGraph,
+    hierarchy: &[crate::coordination::HierarchyNode],
+) -> Result<BTreeSet<String>, ApiError> {
+    use crate::orchestrator::work_graph::runtime::{
+        derive_runtime_graph_with_completion_facts, mutation_log_snapshot, RuntimeOutcomeStatus,
+    };
+    let facts = StateManager::new(state.storage.session_dir(session_id))
+        .read_node_completion_facts()
+        .map_err(|_| ApiError::internal("Failed to read completion confirmation evidence"))?;
+    let path = state.event_bus.data_dir().join(session_id).join("events.jsonl");
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return Err(ApiError::internal("Failed to read confirmation event evidence")),
+    };
+    let events = contents.lines().filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<Event>).collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ApiError::internal("Invalid confirmation event evidence"))?;
+    let events = events.into_iter().filter(|event| event.session_id == session_id).collect::<Vec<_>>();
+    let principals = hierarchy.iter().filter_map(|node|
+        node.principal.as_ref().map(|principal| (node.id.clone(), principal.clone()))).collect();
+    let mutations = mutation_log_snapshot(session_id);
+    let projection = derive_runtime_graph_with_completion_facts(Some(graph), &events,
+        &[], &[], &mutations.deltas, &facts, &principals);
+    Ok(projection.outcomes.into_iter().filter(|outcome| matches!(outcome.status,
+        RuntimeOutcomeStatus::Completed | RuntimeOutcomeStatus::Finalized))
+        .filter_map(|outcome| outcome.task_id).collect())
 }
 
 /// Rebind incomplete, row-less work. Queue-backed transfers require their assignment lifecycle,
@@ -1944,6 +1987,74 @@ mod tests {
         assert_eq!(audit["payload"]["target_agent_id"], WORKER_ID);
         assert_eq!(audit["payload"]["queen_mark"], true);
         assert_eq!(audit["payload"]["summary"], "verified gate evidence");
+    }
+
+    #[tokio::test]
+    async fn first_finish_queen_mark_records_confirmation_without_replacing_worker_time() {
+        let fixture = fixture();
+        let graph = TaskGraph::new(vec![work_node("T1", "backend")], vec![]);
+        let manager = write_graph_and_worker_principal(&fixture, graph.clone(), Some("backend"));
+        let _ = expect_success(heartbeat_with_completed_nodes(Arc::clone(&fixture.state), WORKER_ID,
+            "completed", None, &["T1"]).await, "worker first finish");
+        let mut request = auth_request("queen", "completed");
+        request.mark_agent_id = Some(WORKER_ID.into());
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T1".into())];
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.into()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await, "Queen confirmation");
+        let facts = manager.read_node_completion_facts().unwrap();
+        assert_eq!(facts.len(), 2, "keep both auditable rows");
+        assert!(!facts[0].confirmation);
+        assert!(facts[1].confirmation);
+        let result = crate::orchestrator::work_graph::runtime::derive_runtime_graph_with_completion_facts(
+            Some(&graph), &[], &[], &[], &[], &facts, &BTreeMap::new());
+        assert_eq!(result.outcomes.iter().find(|outcome| outcome.subject_id == "T1").unwrap().finished_at,
+            Some(facts[0].completed_at));
+        assert!(security_events(&fixture).iter().any(|event|
+            event["payload"]["queen_mark"] == true && event["payload"]["confirmation"] == true));
+    }
+
+    #[tokio::test]
+    async fn first_finish_confirmation_is_per_node_after_an_agent_resumes() {
+        let fixture = fixture();
+        let manager = write_graph_and_worker_principal(&fixture,
+            TaskGraph::new(vec![work_node("T1", "backend"), work_node("T2", "backend")], vec![]), Some("backend"));
+        let _ = expect_success(heartbeat_with_completed_nodes(Arc::clone(&fixture.state), WORKER_ID,
+            "completed", None, &["T1"]).await, "first node finish");
+        let mut request = auth_request("queen", "completed");
+        request.mark_agent_id = Some(WORKER_ID.into());
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T2".into())];
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.into()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await, "new node mark");
+        assert!(!manager.read_node_completion_facts().unwrap()[1].confirmation,
+            "T2's first completion is not a confirmation of T1");
+        let _ = expect_success(heartbeat(Arc::clone(&fixture.state), WORKER_ID, "working", None).await, "resumed work");
+        let mut request = auth_request("queen", "completed");
+        request.mark_agent_id = Some(WORKER_ID.into());
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T1".into())];
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.into()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await, "prior node confirmation");
+        assert!(manager.read_node_completion_facts().unwrap()[2].confirmation,
+            "resuming the agent does not erase T1's durable finish");
+    }
+
+    #[tokio::test]
+    async fn first_finish_new_claim_fences_confirmation_of_the_predecessor_run() {
+        let fixture = fixture();
+        let graph = TaskGraph::new(vec![work_node("T1", "backend")], vec![]);
+        let manager = write_graph_and_worker_principal(&fixture, graph.clone(), Some("backend"));
+        let _ = expect_success(heartbeat_with_completed_nodes(Arc::clone(&fixture.state), WORKER_ID,
+            "completed", None, &["T1"]).await, "old run finish");
+        fixture.state.event_bus.publish(Event { id: "fixture-new-claim".into(), session_id: SESSION_ID.into(),
+            cell_id: None, agent_id: Some(WORKER_ID.into()), event_type: EventType::WorkerClaimed,
+            timestamp: Utc::now(), payload: serde_json::json!({"task_id":"T1"}), severity: Severity::Info }).await.unwrap();
+        let mut request = auth_request("queen", "completed");
+        request.mark_agent_id = Some(WORKER_ID.into());
+        request.completed_nodes = vec![CompletedNodeEntry::Legacy("T1".into())];
+        let _ = expect_success(post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.into()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await, "rerun first finish");
+        let facts = manager.read_node_completion_facts().unwrap();
+        assert_eq!(facts.len(), 2);
+        assert!(!facts[1].confirmation, "a rerun has its own first finish");
     }
 
     #[tokio::test]
