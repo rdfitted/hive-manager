@@ -116,7 +116,9 @@ fn seeded_output_loads_through_real_storage_and_isolated_controller() {
             PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR").unwrap()),
         ] {
             settings.contains(&path).unwrap();
-            assert!(path.starts_with(settings.root.join("home")));
+            assert!(crate::instance::resolved_path(&path)
+                .unwrap()
+                .starts_with(crate::instance::resolved_path(&settings.root.join("home")).unwrap()));
         }
         return;
     }

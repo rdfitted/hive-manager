@@ -134,7 +134,7 @@ fn environment_path(path: &Path) -> Result<String, String> {
 }
 
 // Resolve existing ancestors too, so a missing descendant cannot disguise a junction.
-fn resolved_path(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn resolved_path(path: &Path) -> Result<PathBuf, String> {
     absolute(path)?;
     if path.exists() {
         return path.canonicalize().map_err(|e| e.to_string());
