@@ -21,7 +21,13 @@ export function assertSynthetic(text, { root, userNames = [] } = {}) {
     collect(JSON.parse(text));
     decoded = strings.join('\n');
   } catch { /* Markdown and journal fragments are plain text. */ }
-  const value = root ? decoded.replaceAll(root, '<instance>') : decoded;
+  // Rust's canonical Windows cwd has a verbatim prefix. Only this known root alias is allowed.
+  const canonicalRoot = root && /^[a-z]:[\\/]/i.test(root) ? `\\\\?\\${root}` : root;
+  let value = decoded;
+  if (root) for (const alias of [...new Set([canonicalRoot, root])]) {
+    const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    value = value.replace(new RegExp(`${escaped}(?=[\\\\/\\r\\n]|$)`, 'g'), '<instance>');
+  }
   const forbidden = [
     /\b[a-z]:[\\/]/i, /\/(?:Users|home|mnt|var|tmp)\//i, /\\\\[^\s\\]+\\/,
     /\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b/,
@@ -38,6 +44,7 @@ export async function seed(root, now = new Date()) {
   }
   const instant = new Date(now);
   if (!Number.isFinite(instant.getTime())) throw new Error('Invalid seed time');
+  const canonicalRoot = process.platform === 'win32' && !root.startsWith('\\\\?\\') ? `\\\\?\\${root}` : root;
   const at = seconds => new Date(instant.getTime() - seconds * 1000).toISOString();
   await mkdir(root, { recursive: true });
   if ((await readdir(root)).length) throw new Error('Fixture root must be empty');
@@ -70,9 +77,18 @@ export async function seed(root, now = new Date()) {
     GIT_AUTHOR_DATE: instant.toISOString(), GIT_COMMITTER_DATE: instant.toISOString(),
     HOME: path.join(root, 'home'), USERPROFILE: path.join(root, 'home'),
   });
+  const gitAt = (cwd, args) => execFileSync('git', ['-c', 'core.hooksPath=disabled-hooks', ...args], { cwd, env: gitEnv, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  // The app's cwd is the instance root; Recent is scoped to that exact project.
+  // Give the completed fixture a real synthetic base repo while its worktree stays nested.
+  gitAt(root, ['init', '--initial-branch=main', '--template=']);
+  await write('.gitignore', '*\n!.gitignore\n!synthetic-base.txt\n');
+  await write('synthetic-base.txt', 'Synthetic render base project\n');
+  gitAt(root, ['add', '--', '.gitignore', 'synthetic-base.txt']);
+  gitAt(root, ['-c', 'commit.gpgsign=false', 'commit', '-m', 'Synthetic base project']);
   const overlay = { version: 1, sessions: [] };
   for (const session of manifest.sessions) {
     const project = path.join(root, 'projects', session.project);
+    const projectPath = session.projectScope === 'instance-root' ? (process.platform === 'win32' ? canonicalRoot : root) : project;
     await mkdir(project, { recursive: true });
     const git = args => execFileSync('git', ['-c', 'core.hooksPath=disabled-hooks', ...args], { cwd: project, env: gitEnv, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     git(['init', '--initial-branch=main', '--template=']);
@@ -90,12 +106,14 @@ export async function seed(root, now = new Date()) {
     }));
     await json(`${relative}/session.json`, {
       id: session.id, name: session.name, session_type: { Hive: { worker_count: agents.length - 1 } },
-      project_path: project, worktree_path: project, worktree_branch: 'main',
+      project_path: projectPath, worktree_path: project, worktree_branch: 'main',
       created_at: at(manifest.timing.createdSeconds), last_activity_at: at(manifest.timing.recentActivitySeconds),
       agents, state: session.state, default_cli: 'codex', auth_strategy: 'none',
       execution_policy: { workspace_strategy: 'shared_cell' }, qa_workers: [],
     });
     await json(`${relative}/retirement.json`, { enabled: false, on_call_agent_id: null });
+    // The UI polls the typed runtime graph even when no scheduling nodes are needed.
+    await json(`${relative}/state/work-graph.json`, { nodes: [], edges: [], omissions: [] });
     const projected = [];
     for (const [index, agent] of session.agents.entries()) {
       const old = ['finished', 'stalled'].includes(agent.state);

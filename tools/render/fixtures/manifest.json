@@ -23,6 +23,7 @@
       "name": "Synthetic Beacon",
       "state": "Completed",
       "project": "beacon",
+      "projectScope": "instance-root",
       "agents": [
         { "id": "fixture-beacon-queen", "role": "Queen", "state": "finished", "label": "Beacon coordinator" }
       ]
@@ -35,7 +36,7 @@
     "kanban": { "sessionIds": ["fixture-orbit", "fixture-beacon"] },
     "sidebar": { "sessionIds": ["fixture-orbit", "fixture-beacon"] },
     "review": { "sessionId": "fixture-orbit", "cellId": "primary", "agentId": "fixture-orbit-worker-7", "file": "navigation.txt" },
-    "dialog": { "action": "open Settings without saving" }
+    "dialog": { "action": "open Keyboard Shortcuts with Ctrl+/ without changing settings" }
   },
   "chat": {
     "sessionId": "fixture-orbit",

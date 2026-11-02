@@ -21,6 +21,10 @@ test('denylist rejects path, user name, and credential mutations without exposin
     assert.throws(() => assertSynthetic(JSON.stringify({ value: planted }), { userNames: ['sample-person'] }), /forbidden/);
   }
   assertSynthetic('Synthetic Fixture https://example.com/synthetic-orbit');
+  const ownRoot = String.raw`Z:\synthetic-fixture`;
+  assertSynthetic(JSON.stringify({ path: `${ownRoot}\\project` }), { root: ownRoot });
+  assertSynthetic(JSON.stringify({ path: `\\\\?\\${ownRoot}\\project` }), { root: ownRoot });
+  for (const other of [`${ownRoot}-other\\private`, `\\\\?\\${ownRoot}-other\\private`, String.raw`\\?\Y:\other\private`]) assert.throws(() => assertSynthetic(JSON.stringify({ path: other }), { root: ownRoot }), /forbidden/);
 });
 
 test('seeded schema, feeds, review repo, and relative timestamps cover every manifest state', async () => {
@@ -44,10 +48,16 @@ test('seeded schema, feeds, review repo, and relative timestamps cover every man
       assert.equal(persisted.id, session.id);
       assert.equal(persisted.state, session.state);
       assert.equal(persisted.created_at, new Date(Date.parse(now) - manifest.timing.createdSeconds * 1000).toISOString());
-      assert.ok(persisted.project_path.startsWith(root + path.sep));
+      const expectedProject = session.projectScope === 'instance-root' ? (process.platform === 'win32' ? `\\\\?\\${root}` : root) : path.join(root, 'projects', session.project);
+      assert.equal(persisted.project_path, expectedProject);
+      assert.equal(persisted.worktree_path, path.join(root, 'projects', session.project));
       assert.deepEqual(JSON.parse(await readFile(path.join(directory, 'retirement.json'), 'utf8')), { enabled: false, on_call_agent_id: null });
-      const diff = execFileSync('git', ['diff', '--', 'navigation.txt'], { cwd: persisted.project_path, encoding: 'utf8', windowsHide: true });
+      assert.deepEqual(JSON.parse(await readFile(path.join(directory, 'state/work-graph.json'), 'utf8')), { nodes: [], edges: [], omissions: [] });
+      const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/i.test(key)));
+      Object.assign(gitEnv, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(root, 'home/.gitconfig'), GIT_CONFIG_SYSTEM: path.join(root, 'home/.gitconfig-system'), HOME: path.join(root, 'home'), USERPROFILE: path.join(root, 'home') });
+      const diff = execFileSync('git', ['diff', '--', 'navigation.txt'], { cwd: persisted.worktree_path, env: gitEnv, encoding: 'utf8', windowsHide: true });
       assert.match(diff, /\+Course: violet/);
+      assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: root, env: gitEnv, encoding: 'utf8', windowsHide: true }).trim(), '');
       for (const agent of session.agents) {
         const stored = persisted.agents.find(item => item.id === agent.id);
         assert.ok(stored.transcript_cwd.startsWith(root + path.sep));
