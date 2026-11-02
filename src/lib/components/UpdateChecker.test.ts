@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import UpdateChecker from './UpdateChecker.svelte';
@@ -161,4 +162,12 @@ describe('UpdateChecker', () => {
     expect(view.queryByText('Update available: v0.55.0')).toBeNull();
     expect(view.getByRole('button', { name: 'Restart to finish update' })).toBeTruthy();
   });
+});
+
+it('anchors update controls away from the center seam without a fractional transform', () => {
+  const source = readFileSync('src/lib/components/UpdateChecker.svelte', 'utf8');
+  const actions = source.match(/\.update-check-actions\s*\{([^}]+)\}/)?.[1] || '';
+  expect(actions).toContain('position: fixed');
+  expect(actions).toContain('right: 16px');
+  expect(actions).not.toMatch(/transform:|left:/);
 });

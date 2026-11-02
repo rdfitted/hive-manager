@@ -50,7 +50,7 @@ vi.mock('$lib/stores/sessions', async () => {
   const { writable } = await import('svelte/store');
   const activeSession = writable<Session | null>(null);
   storeMocks.setActiveSession = activeSession.set;
-  return { activeSession, serdeEnumVariantName: actual.serdeEnumVariantName };
+  return { activeSession, serdeEnumVariantName: actual.serdeEnumVariantName, sessionDisplayName: actual.sessionDisplayName };
 });
 
 function fakeSession(id: string): Session {
@@ -382,4 +382,11 @@ describe('SessionHeader preview action freshness', () => {
     await flush();
     expect(dockButton()!.disabled).toBe(false);
   });
+});
+
+it('uses the project folder when an unnamed session has a UUID', async () => {
+  const session = { ...fakeSession('12345678-abcd-4000-8000-123456789abc'), name: '', project_path: 'C:\\Projects\\sample-project\\' };
+  const view = render(SessionHeader);
+  storeMocks.setActiveSession?.(session);
+  await waitFor(() => expect(view.getByRole('heading', { level: 1 }).textContent).toBe('sample-project'));
 });

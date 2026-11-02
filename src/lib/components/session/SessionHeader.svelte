@@ -4,7 +4,7 @@
     import { writeText } from '@tauri-apps/plugin-clipboard-manager';
     import { onDestroy, onMount, tick } from 'svelte';
     import { ArrowClockwise, ArrowSquareOut, Browser, Columns, Copy, GitBranch, X } from 'phosphor-svelte';
-    import { activeSession, serdeEnumVariantName } from '../../stores/sessions';
+    import { activeSession, serdeEnumVariantName, sessionDisplayName } from '../../stores/sessions';
     import Skeleton from '../Skeleton.svelte';
     import SkelBar from '../SkelBar.svelte';
 
@@ -297,7 +297,7 @@
         <div class="main-info">
             <div class="top-row">
                 <span class="mode-badge lattice-forced-colors-boundary {mode}">{mode}</span>
-                <h1 class="session-name">{session.name || session.id}</h1>
+                <h1 class="session-name">{sessionDisplayName(session)}</h1>
                 <span class="status-badge {getStatusClass(status)}">{status.replaceAll('_', ' ')}</span>
                 {#if showWorktreeChip}
                     <span class="worktree-chip lattice-forced-colors-boundary" title={worktreeTooltip}>

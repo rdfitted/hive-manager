@@ -17,6 +17,7 @@ vi.mock('$lib/stores/sessions', async () => {
     sessions: { ...writable({ sessions: [] }), setActiveSession: vi.fn(), closeSession: launchMocks.closeSession },
     activeSession: writable(null),
     activeAgents: writable([]),
+    sessionDisplayName: (session: Session) => session.name || session.project_path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || session.id.slice(0, 8),
     serdeEnumVariantName: (value: unknown) => typeof value === 'string' ? value : value && typeof value === 'object' ? Object.keys(value)[0] : undefined,
   };
 });

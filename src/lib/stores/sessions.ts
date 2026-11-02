@@ -6,6 +6,13 @@ import type { TaskTier } from '$lib/workgraph/types';
 import { applicationState } from './applicationState';
 import { ui } from './ui';
 
+/** One title for live and persisted sessions, including unnamed Windows projects. */
+export function sessionDisplayName(session: { name?: string | null; project_path: string; id: string }): string {
+  const name = session.name?.trim();
+  const folder = session.project_path.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+  return name || folder || session.id.slice(0, 8);
+}
+
 export type AgentRole =
   | 'MasterPlanner'
   | 'Queen'
