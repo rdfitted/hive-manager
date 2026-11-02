@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import UpdateChecker from './UpdateChecker.svelte';
+
+const { readFileSync } = await vi.importActual<{
+  readFileSync(path: string, encoding: 'utf8'): string;
+}>('node:fs');
 
 const mocks = vi.hoisted(() => ({
   check: vi.fn(),
