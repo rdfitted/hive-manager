@@ -76,10 +76,10 @@ jobs:
       - name: Driver and fixture tests
         run: node --test tools/render/fixtures.test.mjs tools/render/lifecycle.test.mjs tools/render/findings.test.mjs
 
-      # Measured locally: cached custom-protocol rebuild 181s, capture/proof
-      # pass about two minutes. A cold cache may need a rerun after warming.
+      # Measured hosted cold run: render step 14.6 minutes, job 15.9 minutes.
+      # Leave build variance within the 25-minute job budget.
       - name: Render check
-        timeout-minutes: 15
+        timeout-minutes: 20
         run: npm run render:check
 
       # Reports and PNGs intentionally remain private runner-local artifacts.

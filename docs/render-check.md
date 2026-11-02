@@ -26,7 +26,8 @@ Recorded local timings were 352.7 seconds for the first debug build and about
 103–109 seconds, including roughly 66 seconds for the stall loop and sweep.
 Allow about eight minutes for a build plus captures on the measured machine,
 plus any gate wait. A completely empty dependency cache has not been timed.
-Hosted Windows CI timing has not yet been measured.
+A hosted Windows run from a cold cache took 14.6 minutes for the render step
+and 15.9 minutes for the job. The step allows 20 minutes within a 25-minute job.
 
 In a managed worktree the command joins the session FIFO gate and releases it in
 cleanup. Otherwise it takes an identity-checked local render lock. Do not wrap it
@@ -54,9 +55,18 @@ data or the webview profile, contain the real home, or use unsafe paths or linke
 trees. The bootstrap redirects app data, home, transcript/configuration roots,
 temporary files, Git configuration, and the webview profile into the instance.
 It clears inherited agent identity and related environment overrides. Path-bearing
-operations are contained; mutating actions, real agent spawns, preview launch,
-and updater/process plugin operations are refused. Autostart writes are guarded
-against in source tests. These guards are application boundaries, not an OS sandbox.
+operations have application containment guards. Mutating command actions, real
+agent spawns and preview launch are refused. Native completion and verdict event
+listeners are not registered in isolated mode. The updater and process plugins
+are omitted. Autostart writes are guarded against in source tests. These guards
+are application boundaries, not an OS sandbox.
+
+The app redirects its environment after startup. The resolver rejects a launch
+whose home is already inside the instance, so the driver cannot pre-root it.
+The console host can therefore inherit the original profile and temporary roots.
+The environment assertion records this named exception, its roots and its command
+line, and checks that the command line has no profile path argument. No external
+read or write by that console host was observed; this is not an IO sandbox claim.
 
 The command seeds fresh synthetic sessions and a small local Git fixture, picks
 free loopback ports, and attaches Playwright over CDP. The app opens unfocused,
@@ -72,18 +82,18 @@ means every assertion was accepted, including explicitly recorded known findings
 
 | Assertion group | What it checks |
 | --- | --- |
-| Origin, API and environment | Custom-protocol origin, isolated API marker, and nine observed process environment roots inside the instance. |
+| Origin, API and environment | Custom-protocol origin, isolated API marker, nine observed app environment roots inside the instance, and a named console-host exception. |
 | Viewports | Renderer CSS dimensions of 1440×900 and 800×900; the report also records pixel ratio. |
-| Screen and PNG content | Expected fixture text in a visible target, decoded nonuniform pixels, correct PNG dimensions, and all required captures. |
-| Grid panes | Eight visible panes. |
-| Grid composers | Composer boxes inside their named panes, with and without an attention card, at load and after the stall/sweep wait. |
+| Screen and PNG content | Viewport intersection and expected fixture text in the visible part of each target, decoded nonuniform pixels, correct PNG dimensions, and all required captures. |
+| Grid panes | Eight panes with text intersecting the viewport. |
+| Grid composers | Composer boxes inside their named panes, with and without an attention card, at the first measurement for each width and after the stall/sweep wait. |
 | Attention | Finished seats have no card or per-agent “needs you” badge; stalled and exited-during-startup seats have both, before and after the wait. |
-| Version badge | Hit testing at its centre and computed visibility, opacity and line-through styles on normal screens where it mounts. Dashboard absence and modal backdrop interception are recorded separately. |
-| Chat | Fixture table and code render; fixture inline HTML remains literal text and creates no matching HTML element. |
+| Version badge | Centre hit testing, computed visibility, opacity and line-through styles, and a central painted-line probe on normal screens where it mounts. Dashboard absence and modal backdrop interception are recorded separately. |
+| Chat | The table contains its fixture header and body cell, and the code block contains its fixture code; fixture inline HTML remains literal text and creates no matching HTML element. |
 | Kanban and sidebar | Named synthetic cards and sidebar entries are present. |
-| Updater | The actual updater IPC invocation rejects in isolated mode. |
+| Updater | The actual updater IPC invocation rejects with the specific omitted-plugin error in isolated mode. |
 | Network and console | No observed request/resource uses live port 18800; no browser console error or page error occurs during observation. |
-| Mutation coverage | All 23 required render predicates have before/mutant/restored proof; both network observers detect a locally fulfilled synthetic request. |
+| Mutation coverage | Every required named render proof has before/mutant/restored evidence; both network observers detect a locally fulfilled synthetic request. |
 | Cleanup and live app | No owned process/profile remains; live health, PID, executable and start identity are unchanged, or port 18800 remains unused when no live app exists. |
 | Desktop | Input desktop remains unchanged; foreground identity is compared only when observable. |
 
@@ -121,8 +131,11 @@ The current entries are both Grid composer containment checks for
 
 The assertion still runs and records its actual boxes and card state. Matching
 overflow is `passed: false`, `accepted: true`, `status: "known-finding"`. It must
-have nonzero composer dimensions, actual overflow, `contained: false`, and the
-expected attention-card state. A different failure shape fails the gate. A missing
+have finite positive rectangles, `contained: false`, and the expected attention-card
+state. The composer must overlap its pane, remain horizontally inside it within
+one CSS pixel, and extend only past its bottom by more than one and at most
+120 CSS pixels. Recorded overflow was 5.61–103.61 CSS pixels across both widths;
+the bound allows some font and layout variance. A different failure shape fails the gate. A missing
 issue number fails it too. If the assertion starts passing, `unexpected-pass`
 fails the command until the issue and recorded finding are reconciled. The shape
 check does not pin exact pixel values, so the report's numbers still need review.
@@ -137,6 +150,15 @@ Foreground preservation cannot be measured while the input desktop is not
 `Default`. Recorded runs used `Screen-saver`, returned a zero foreground handle,
 and stored `foregroundPreserved: null`. That is unavailable evidence, not a pass;
 an unchanged input desktop does not prove preserved focus.
+
+Mutation proofs are deduplicated by name and run in one context, rather than
+repeating every mutation on every screen, width and stage. The badge paint proof
+runs at both widths. The narrow width is measured after the 66-second wait:
+its stage named `load` is a first measurement at that width, not a fresh startup.
+
+The badge pixel probe looks only for a uniform full-width central horizontal run
+distinct from the adjacent rows, inside the badge clip. It catches the tested
+pointer-transparent one-pixel line. Other paint artifacts can escape it.
 
 Geometry assertions cover the boxes and points they name, not the whole UI.
 Nonuniform PNG pixels do not establish visual correctness. There is no pixel

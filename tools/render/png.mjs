@@ -1,6 +1,6 @@
 import { inflateSync } from 'node:zlib';
 // Playwright emits non-interlaced 8-bit RGB/RGBA PNGs. Decode pixels, not file size.
-export function pngPixels(bytes) {
+export function decodePng(bytes, retainRows = true) {
   if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('Screenshot is not a PNG');
   let width, height, channels;
   const chunks = [];
@@ -22,6 +22,7 @@ export function pngPixels(bytes) {
   if (data.length !== height * (stride + 1)) throw new Error('Screenshot pixel length mismatch');
   let previous = new Uint8Array(stride);
   const colors = new Set();
+  const rows = [];
   const paeth = (a, b, c) => { const p = a + b - c, x = Math.abs(p - a), y = Math.abs(p - b), z = Math.abs(p - c); return x <= y && x <= z ? a : y <= z ? b : c; };
   for (let y = 0; y < height; y++) {
     const filter = data[y * (stride + 1)], row = new Uint8Array(stride);
@@ -33,6 +34,31 @@ export function pngPixels(bytes) {
     }
     if (colors.size < 8192) for (let x = 0; x < stride; x += channels) colors.add((row[x] << 24) | (row[x + 1] << 16) | (row[x + 2] << 8) | (channels === 4 ? row[x + 3] : 255));
     previous = row;
+    if (retainRows) rows.push(row);
   }
-  return { width, height, colors: colors.size, colorCountCapped: colors.size >= 8192, hasPixels: colors.size >= 32 };
+  return { width, height, channels, rows, colors: colors.size, colorCountCapped: colors.size >= 8192, hasPixels: colors.size >= 32 };
+}
+
+export function pngPixels(bytes) {
+  const { rows, channels, ...summary } = decodePng(bytes, false);
+  return summary;
+}
+
+// A narrow paint probe, not a reference-image comparison. Ignore the rounded
+// border and require a uniform central run distinct from both adjacent rows.
+export function badgePaint(bytes) {
+  const { width, height, channels, rows } = decodePng(bytes);
+  const color = (y, x) => rows[y].subarray(x * channels, (x + 1) * channels).toString();
+  const runs = [];
+  for (let y = Math.max(1, Math.floor(height * 0.3)); y < Math.min(height - 1, Math.ceil(height * 0.7)); y++) {
+    const ink = color(y, 2);
+    let uniform = true, differentAbove = 0, differentBelow = 0;
+    for (let x = 2; x < width - 2; x++) {
+      uniform &&= color(y, x) === ink;
+      differentAbove += Number(color(y - 1, x) !== ink);
+      differentBelow += Number(color(y + 1, x) !== ink);
+    }
+    if (uniform && differentAbove > (width - 4) / 4 && differentBelow > (width - 4) / 4) runs.push(y);
+  }
+  return { width, height, centralHorizontalRuns: runs, clear: runs.length === 0 };
 }

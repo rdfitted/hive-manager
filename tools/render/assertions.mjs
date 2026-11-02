@@ -1,8 +1,8 @@
 import path from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
-import { pngPixels } from './png.mjs';
-import { mutationProver, styleChange, removeNode, textChange, appendNode } from './mutations.mjs';
+import { pngPixels, badgePaint } from './png.mjs';
+import { mutationProver, styleChange, removeNode, textChange, appendNode, offscreenTarget, emptyContents, duplicateIndicators, updaterResponse } from './mutations.mjs';
 import { updaterState } from './updater.mjs';
+import { classifyFinding } from './findings.mjs';
 
 const attention = 'section[aria-label="Agent needs attention"]';
 const composer = '.composer-wrap[aria-label="Message composer"]';
@@ -65,13 +65,47 @@ export async function badgeGeometry(page) {
 }
 export async function attentionState(page, agent) {
   const pane = paneFor(page, agent), row = page.locator(`.tree-row[data-agent-id=${JSON.stringify(agent.id)}]`);
-  const card = await pane.locator(attention).isVisible().catch(() => false);
-  return { paneExists: await pane.count() === 1, rowExists: await row.count() === 1, card, badge: await row.locator('.attention-badge').isVisible().catch(() => false), reason: card && await pane.locator(`${attention} .reason`).count() ? await pane.locator(`${attention} .reason`).textContent() : null };
+  const cardCount = await pane.locator(`${attention}:visible`).count(), badgeCount = await row.locator('.attention-badge:visible').count();
+  return { paneExists: await pane.count() === 1, rowExists: await row.count() === 1, card: cardCount > 0, badge: badgeCount > 0, cardCount, badgeCount, reason: await pane.locator(`${attention}:visible .reason`).allTextContents() };
 }
 export async function chatState(pane, manifest) {
   const chat = pane.locator(`${chatSelector}:visible`).first();
   const text = await chat.textContent();
-  return { table: await chat.locator('[aria-label="Markdown table"] table').count() > 0 && text.includes(manifest.chat.tableText), code: await chat.locator('pre[aria-label^="Code block"] code').allTextContents().then(items => items.some(item => item.includes(manifest.chat.codeText))), literal: text.includes(manifest.chat.literalHtml) && await chat.locator('[data-fixture="literal"]').count() === 0 };
+  const table = await chat.locator('[aria-label="Markdown table"] table').evaluateAll((tables, expected) => tables.some(node => [...node.querySelectorAll('th')].some(cell => cell.textContent.trim() === expected.header) && [...node.querySelectorAll('tbody td')].some(cell => cell.textContent.trim() === expected.cell)), { header: manifest.chat.tableHeader, cell: manifest.chat.tableCell });
+  return { table, code: await chat.locator('pre[aria-label^="Code block"] code').allTextContents().then(items => items.some(item => item.includes(manifest.chat.codeText))), literal: text.includes(manifest.chat.literalHtml) && await chat.locator('[data-fixture="literal"]').count() === 0 };
+}
+
+export async function visibleTargetState(target) {
+  const visible = await target.isVisible();
+  if (!visible) return { visible: false, text: '', visibleText: '' };
+  return target.evaluate(node => {
+    const box = node.getBoundingClientRect();
+    const intersects = (rect, clip) => rect.right > clip.left && rect.left < clip.right && rect.bottom > clip.top && rect.top < clip.bottom;
+    const viewport = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT), texts = [];
+    while (walker.nextNode()) {
+      const leaf = walker.currentNode;
+      if (!leaf.textContent.trim()) continue;
+      const range = document.createRange();
+      const clip = { left: Math.max(0, box.left), top: Math.max(0, box.top), right: Math.min(innerWidth, box.right), bottom: Math.min(innerHeight, box.bottom) };
+      let shown = true;
+      for (let parent = leaf.parentElement; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0) { shown = false; break; }
+        const bounds = parent.getBoundingClientRect();
+        if (/(auto|scroll|hidden|clip)/.test(style.overflowX)) { clip.left = Math.max(clip.left, bounds.left); clip.right = Math.min(clip.right, bounds.right); }
+        if (/(auto|scroll|hidden|clip)/.test(style.overflowY)) { clip.top = Math.max(clip.top, bounds.top); clip.bottom = Math.min(clip.bottom, bounds.bottom); }
+      }
+      if (!shown || clip.right <= clip.left || clip.bottom <= clip.top) continue;
+      // Measure each word; one visible line must not make the rest of a long
+      // text node count as visible expected content below a scroll boundary.
+      for (const word of leaf.textContent.matchAll(/\S+/g)) {
+        range.setStart(leaf, word.index); range.setEnd(leaf, word.index + word[0].length);
+        if ([...range.getClientRects()].some(rect => intersects(rect, clip))) texts.push(word[0]);
+      }
+    }
+    return { visible: intersects(box, viewport) && texts.length > 0, text: node.innerText, visibleText: texts.join(' '), rect: { x: box.x, y: box.y, width: box.width, height: box.height } };
+  });
 }
 export async function diagnoseReview({ page, manifest, report, out }) {
   const session = manifest.sessions.find(item => item.id === manifest.screens.review.sessionId);
@@ -94,13 +128,14 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   const capture = async (screen, viewport, target, expected, variant) => {
     console.log(`render:check capture ${screen} ${viewport.width}x${viewport.height}`);
     const context = { screen, viewport: `${viewport.width}x${viewport.height}`, ...(variant ? { variant } : {}) };
-    const visible = await target.isVisible().catch(() => false);
-    const text = visible ? await target.innerText() : '';
-    assert('screen-not-empty', visible && expected(text), { text: text.slice(0, 1500), visible }, context);
-    await prove('screen-not-empty', async () => {
-      const visible = await target.isVisible().catch(() => false);
-      return { passed: visible && expected(await target.innerText()), details: { visible } };
-    }, () => styleChange(target, { display: 'none' }), context);
+    const screenMeasure = async () => {
+      const details = await visibleTargetState(target);
+      return { passed: details.visible && expected(details.text) && expected(details.visibleText), details };
+    };
+    await probe('screen-not-empty', screenMeasure, context);
+    await prove('screen-not-empty', screenMeasure, () => styleChange(target, { display: 'none' }), context);
+    await prove('screen-target-offscreen', screenMeasure, () => offscreenTarget(target), context);
+    if (screen === 'grid') await prove('grid-target-offscreen', screenMeasure, () => offscreenTarget(target), context);
     const file = path.join(out, `${screen}-${viewport.width}${variant ? `-${variant}` : ''}.png`);
     const bytes = await page.screenshot({ path: file });
     const pixels = pngPixels(bytes);
@@ -115,15 +150,30 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       const measure = async () => { const details = await badgeGeometry(page); return { passed: details.unobscured, details }; };
       await probe('version-badge-unobscured', measure, context);
       await prove('version-badge-unobscured', measure, () => styleChange(page.locator('.app-version[title="Installed version"]'), { 'text-decoration': 'line-through' }), context);
+      const badge = page.locator('.app-version[title="Installed version"]');
+      const paintMeasure = async () => {
+        const rect = await badge.boundingBox();
+        if (!rect) return { passed: false, details: 'Badge has no clip' };
+        // page clip preserves pointer-transparent overlays; locator screenshots
+        // can scroll the target before painting.
+        const details = badgePaint(await page.screenshot({ clip: rect }));
+        return { passed: details.clear, details };
+      };
+      await probe('version-badge-no-painted-line', paintMeasure, context);
+      await prove(`badge-painted-line-${viewport.width}`, paintMeasure, async () => {
+        const rect = await badge.boundingBox();
+        return appendNode(page.locator('body'), { attributes: { style: `position:fixed;left:${rect.x}px;top:${Math.floor(rect.y + rect.height / 2)}px;width:${rect.width}px;height:1px;background:black;pointer-events:none;z-index:2147483647` } });
+      }, context);
     }
     else report.modalBadgeObservation = { ...(await badgeGeometry(page)), scope: 'Modal backdrop intentionally interdicts background controls; normal-screen badge checks remain gating.' };
   };
   const gridChecks = async (viewport, stage) => {
     const context = { screen: 'grid', viewport: `${viewport.width}x${viewport.height}`, stage };
     const panes = page.locator('.terminal-panel:not(.hidden) .terminal-grid .terminal-item');
-    const visible = (await Promise.all((await panes.all()).map(pane => pane.isVisible()))).filter(Boolean).length;
+    const visiblePaneCount = async () => (await Promise.all((await panes.all()).map(pane => visibleTargetState(pane)))).filter(item => item.visible).length;
+    const visible = await visiblePaneCount();
     assert('grid-eight-panes', visible === manifest.screens.grid.paneCount, { visible, expected: manifest.screens.grid.paneCount }, context);
-    await prove('grid-eight-panes', async () => ({ passed: (await Promise.all((await panes.all()).map(pane => pane.isVisible()))).filter(Boolean).length === manifest.screens.grid.paneCount }), () => styleChange(panes.first(), { display: 'none' }), context);
+    await prove('grid-eight-panes', async () => ({ passed: await visiblePaneCount() === manifest.screens.grid.paneCount }), () => styleChange(panes.first(), { display: 'none' }), context);
     for (const [agent, needs] of [[byState('finished'), false], [stalled, true], [byState('exited_during_startup'), true]]) {
       await probe(`${agent.state}-attention-card`, async () => { const details = await attentionState(page, agent); return { passed: details.paneExists && details.card === needs, details }; }, context);
       await probe(`${agent.state}-needs-you-count`, async () => { const details = await attentionState(page, agent); return { passed: details.rowExists && details.badge === needs, details }; }, context);
@@ -135,13 +185,19 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
         const parent = kind === 'attention-card' ? paneFor(page, agent) : page.locator(`.tree-row[data-agent-id=${JSON.stringify(agent.id)}]`);
         const selector = kind === 'attention-card' ? attention : '.attention-badge';
         await prove(`${agent.state}-${kind}`, measure, () => needs ? styleChange(parent.locator(selector), { display: 'none' }) : appendNode(parent, { tag: kind === 'attention-card' ? 'section' : 'span', attributes: kind === 'attention-card' ? { 'aria-label': 'Agent needs attention' } : { class: 'attention-badge' }, text: 'Mutation needs attention' }), context);
+        if (!needs) await prove(`finished-duplicate-${kind}`, measure, () => duplicateIndicators(parent, { tag: kind === 'attention-card' ? 'section' : 'span', attributes: kind === 'attention-card' ? { 'aria-label': 'Agent needs attention' } : { class: 'attention-badge' }, text: 'Duplicate mutation needs attention' }), context);
       }
     }
     for (const [agent, hasAttention] of [[normal, false], [stalled, true]]) {
       const pane = paneFor(page, agent);
       await showChat(pane);
-      await probe(`grid-composer-${hasAttention ? 'with' : 'without'}-attention`, async () => { const details = await composerGeometry(pane); const card = await pane.locator(attention).isVisible().catch(() => false); return { passed: details.contained && card === hasAttention, details: { ...details, card } }; }, context);
+      await probe(`grid-composer-${hasAttention ? 'with' : 'without'}-attention`, async () => { const details = await composerGeometry(pane); const card = (await pane.locator(`${attention}:visible`).count()) > 0; return { passed: details.contained && card === hasAttention, details: { ...details, card } }; }, context);
       const name = `grid-composer-${hasAttention ? 'with' : 'without'}-attention`;
+      if (!hasAttention) await prove('composer-offscreen-not-known', async () => {
+        const details = { ...await composerGeometry(pane), card: false };
+        const classified = classifyFinding(name, details.contained, details, { [name]: { issue: 414 } });
+        return { passed: classified.accepted, details: { ...details, classified } };
+      }, () => styleChange(pane.locator(`${composer}:visible`).first(), { position: 'fixed', left: '-10000px' }), context);
       // #414 already overflows. Establish a temporary contained control, prove
       // the exact geometry predicate rejects overflow, then restore the bug.
       if (!report.mutations.some(item => item.name === name)) {
@@ -172,6 +228,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     const chat = await chatState(focused, manifest);
     for (const key of ['table', 'code', 'literal']) assert(`chat-${key}`, chat[key], chat, { screen: 'focus', viewport: `${viewport.width}x${viewport.height}` });
     for (const key of ['table', 'code', 'literal']) await prove(`chat-${key}`, async () => { const details = await chatState(focused, manifest); return { passed: details[key], details }; }, () => key === 'table' ? removeNode(focused.locator('[aria-label="Markdown table"] table').first()) : key === 'code' ? textChange(focused.locator('pre[aria-label^="Code block"] code').first(), 'mutated code') : appendNode(focused.locator(`${chatSelector}:visible`).first(), { attributes: { 'data-fixture': 'literal' } }), { screen: 'focus' });
+    for (const key of ['table', 'code']) await prove(`chat-empty-${key}`, async () => { const details = await chatState(focused, manifest); return { passed: details[key], details }; }, () => emptyContents(focused.locator(key === 'table' ? '[aria-label="Markdown table"] table' : 'pre[aria-label^="Code block"] code').first()), { screen: 'focus' });
     await capture('focus', viewport, focused, text => text.includes(manifest.chat.tableText) && text.includes(manifest.chat.codeText));
     const toggle = page.locator('#title-bar-panel-toggle');
     if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
@@ -224,25 +281,14 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   }
   const updater = await updaterState(page);
   assert('updater-invoke-rejected', updater.rejected, updater);
-  await prove('updater-invoke-rejected', async () => {
+  const updaterMeasure = async () => {
     const probe = await import(`./updater.mjs?proof=${Date.now()}-${Math.random()}`);
     const details = await probe.updaterState(page);
     return { passed: details.rejected, details };
-  }, async () => {
-    // Tauri freezes its invoke bridge. Mutate our owned adapter at the call
-    // boundary instead, reload it, and restore its exact bytes under the gate.
-    const file = new URL('./updater.mjs', import.meta.url);
-    const original = await readFile(file);
-    const source = original.toString('utf8');
-    const call = "await window.__TAURI_INTERNALS__.invoke('plugin:updater|check');";
-    if (source.split(call).length !== 2) throw new Error('Updater mutation target is ambiguous');
-    try { await writeFile(file, source.replace(call, 'await Promise.resolve(null);')); }
-    catch (error) { await writeFile(file, original); throw error; }
-    return async () => {
-      await writeFile(file, original);
-      if (!(await readFile(file)).equals(original)) throw new Error('Updater adapter source was not restored exactly');
-    };
-  }, { file: 'tools/render/updater.mjs', mutation: 'Replace rejected IPC call with resolved response; restore exact source bytes in finally' });
+  };
+  // The frozen Tauri bridge requires mutating the owned adapter call boundary.
+  await prove('updater-invoke-rejected', updaterMeasure, () => updaterResponse('await Promise.resolve(null);'), { file: 'tools/render/updater.mjs' });
+  await prove('updater-network-rejection', updaterMeasure, () => updaterResponse("await Promise.reject(new Error('network failed after updater HTTP request'));"), { file: 'tools/render/updater.mjs' });
   assert('all-screens-captured', Object.keys(manifest.screens).every(screen => [1440, 800].every(width => report.screenshots.some(item => item.screen === screen && item.viewport.width === width))), { captures: report.screenshots.map(item => `${item.screen}-${item.viewport.width}`) });
   const complete = () => Object.keys(manifest.screens).every(screen => [1440, 800].every(width => report.screenshots.some(item => item.screen === screen && item.viewport.width === width)));
   await prove('all-screens-captured', async () => ({ passed: complete(), details: report.screenshots.map(item => `${item.screen}-${item.viewport.width}`) }), async () => { const removed = report.screenshots.pop(); return async () => { report.screenshots.push(removed); }; });

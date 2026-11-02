@@ -9,7 +9,7 @@ import { repo, target, ensureBuild } from './build.mjs';
 import { acquireGate } from './gate.mjs';
 import { runRenderAssertions, diagnoseReview } from './assertions.mjs';
 import { classifyFinding } from './findings.mjs';
-import { mutationProver } from './mutations.mjs';
+import { mutationProver, reviewProofNames } from './mutations.mjs';
 import { ps, quote, identity, sameProcess, tree, killOwned, liveState, liveUnchanged, desktopState, environment, inside, plainPath, sleep } from './windows.mjs';
 
 if (process.platform !== 'win32') throw new Error('render:check requires Windows WebView2');
@@ -144,7 +144,13 @@ try {
   const marker = await page.evaluate(() => window.__HIVE_INSTANCE__);
   assertion('isolated-api-base', marker?.isolated && marker.apiBase === `http://127.0.0.1:${api}`, marker);
   const roots = environment(state.app, repo);
-  assertion('environment-contained', Object.values(roots).length === 9 && Object.values(roots).every(value => inside(root, value)), roots);
+  const consoleHosts = state.processes.filter(child => path.basename(child.exe ?? '').toLowerCase() === 'conhost.exe');
+  const exceptions = consoleHosts.map(child => ({ name: 'console-host-inherited-environment', process: child, roots: environment(child, repo), reason: 'Bootstrap redirects the app after startup; pre-rooted HOME is refused by resolve. Console host has no profile path argument; no external read or write was observed.' }));
+  for (const exception of exceptions) {
+    const command = (exception.process.commandLine ?? exception.process.CommandLine ?? '').toLowerCase();
+    exception.noProfilePathArgument = !!command && Object.values(exception.roots).every(value => !command.includes(value.toLowerCase()));
+  }
+  assertion('environment-contained', Object.values(roots).length === 9 && Object.values(roots).every(value => inside(root, value)) && exceptions.every(item => item.noProfilePathArgument), { appRoots: roots, exceptions });
   report.environmentNonVerbatim = Object.values(roots).every(value => !value.startsWith('\\\\?\\'));
   report.profileDirectoryAfterBootstrap = !!(await lstat(path.join(root, 'home/AppData/Local')).catch(() => null));
   if (process.argv.includes('--force-failure')) throw new Error('forced-mid-run-failure');
@@ -200,6 +206,7 @@ try {
     });
     assertion('network-mutation-both-observers', report.blockedNetworkMutation?.fulfilledInsideDriver && report.blockedNetworkMutation.requests.length > 0 && report.blockedNetworkMutation.resources.length > 0, report.blockedNetworkMutation);
     const required = ['screen-not-empty', 'screenshot-has-pixels', 'version-badge-unobscured', 'grid-eight-panes', 'grid-composer-with-attention', 'grid-composer-without-attention', 'finished-attention-card', 'finished-needs-you-count', 'stalled-attention-card', 'stalled-needs-you-count', 'exited_during_startup-attention-card', 'exited_during_startup-needs-you-count', 'chat-table', 'chat-code', 'chat-literal', 'kanban-fixture-present', 'sidebar-fixture-present', 'viewport-1440', 'viewport-800', 'updater-invoke-rejected', 'all-screens-captured', 'no-live-api-request', 'no-console-errors'];
+    required.push(...reviewProofNames);
     assertion('all-required-mutations-proved', required.every(name => report.mutations.some(item => item.name === name && item.passed)), { required, proved: report.mutations.filter(item => item.passed).map(item => item.name) });
   }
 } catch (error) {

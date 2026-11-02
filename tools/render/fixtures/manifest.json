@@ -43,6 +43,8 @@
     "agentId": "fixture-orbit-queen",
     "file": "chat.md",
     "tableText": "Orbital checks",
+    "tableHeader": "Station",
+    "tableCell": "Amber",
     "codeText": "const syntheticOrbit = true;",
     "link": "https://example.com/synthetic-orbit",
     "literalHtml": "<span data-fixture=\"literal\">synthetic inline HTML</span>"
