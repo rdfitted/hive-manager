@@ -281,6 +281,8 @@ pub fn bootstrap() -> &'static Instance {
                     "appdata",
                     "localappdata",
                     "home",
+                    // WebView2 needs this profile folder to open its CDP listener.
+                    "home/AppData/Local",
                     "temp",
                     "webview",
                     "projects",
@@ -760,6 +762,10 @@ mod tests {
                     "{key}"
                 );
             }
+            let profile_local =
+                PathBuf::from(std::env::var("USERPROFILE").unwrap()).join("AppData/Local");
+            assert!(profile_local.is_dir(), "WebView2 profile local directory");
+            settings.contains(&profile_local).unwrap();
             for path in [
                 std::env::temp_dir(),
                 crate::cli::agent_store::store_root(),
