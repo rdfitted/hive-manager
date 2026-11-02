@@ -1607,12 +1607,17 @@ mod tests {
         if !boundary_child("instance_fusion_selection_is_disabled") {
             return;
         }
-        assert!(boundary_state()
-            .session_controller
-            .read()
-            .select_fusion_winner("synthetic", "synthetic")
-            .unwrap_err()
-            .contains("Isolated instance"));
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(crate::http::handlers::sessions::select_fusion_winner(
+                axum::extract::State(boundary_state()),
+                axum::extract::Path("synthetic".into()),
+                axum::Json(crate::http::handlers::sessions::SelectFusionWinnerRequest {
+                    variant: "synthetic".into(),
+                }),
+            ))
+            .unwrap_err();
+        assert!(error.message.contains("Isolated instance"));
     }
 
     #[test]
