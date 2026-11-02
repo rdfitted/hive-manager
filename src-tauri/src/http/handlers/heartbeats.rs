@@ -90,6 +90,7 @@ pub struct ActiveAgentInfo {
     pub id: String,
     pub work_state: crate::session::work_state::WorkState,
     pub awaiting_injected_turn_at: Option<String>,
+    pub latest_input_at: Option<String>,
     pub role: String,
     pub last_activity: Option<String>,
     pub status: Option<String>,
@@ -920,6 +921,8 @@ pub async fn get_active_sessions(
                     ActiveAgentInfo {
                         id: a.id.clone(),
                         work_state: a.work_state.unwrap_or_default(),
+                        latest_input_at: controller.latest_input_at(&session.id, &a.id)
+                            .map(|at| at.to_rfc3339()),
                         awaiting_injected_turn_at: crate::session::work_state::awaiting_injected_turn_since(&a.status)
                             .map(|at| at.to_rfc3339()),
                         role: format!("{:?}", a.role),
@@ -1080,6 +1083,29 @@ mod tests {
         });
 
         HeartbeatFixture { _temp: temp, state }
+    }
+
+    #[tokio::test]
+    async fn g31_active_sessions_keep_confirmed_followup_working_and_expose_input_time() {
+        let fixture = fixture();
+        fixture.state.pty_manager.read().create_session(WORKER_ID.into(),
+            AgentRole::Worker { index: 1, parent: None }, "fixture-cli", &[], None, 80, 24).unwrap();
+        let submitted = chrono::Utc::now();
+        {
+            let controller = fixture.state.session_controller.read();
+            controller.update_heartbeat(SESSION_ID, WORKER_ID, "completed", None).unwrap();
+            let submitted = submitted + chrono::Duration::seconds(1);
+            controller.record_injection_submission(SESSION_ID, WORKER_ID, submitted, true).unwrap();
+            controller.record_injection_delivery(SESSION_ID, WORKER_ID, submitted,
+                &crate::delivery::Delivery::protocol_turn_started("fixture-turn".into())).unwrap();
+        }
+        let value = serde_json::to_value(get_active_sessions(State(fixture.state.clone())).await
+            .unwrap_or_else(|error| panic!("active sessions failed: {}", error.message)).0).unwrap();
+        let agent = value["sessions"][0]["agents"].as_array().unwrap().iter()
+            .find(|agent| agent["id"] == WORKER_ID).unwrap();
+        assert_eq!(agent["work_state"], "working");
+        assert_eq!(agent["latest_input_at"], (submitted + chrono::Duration::seconds(1)).to_rfc3339());
+        assert!(agent["awaiting_injected_turn_at"].is_null(), "confirmation cleared only the marker");
     }
 
     #[tokio::test]

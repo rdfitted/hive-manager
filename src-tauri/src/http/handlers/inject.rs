@@ -673,6 +673,10 @@ fn record_injection_submission(
     agent_id: &str,
     receipt: &InjectionReceipt,
 ) {
+    if receipt.submit_keystroke_issued
+        || (receipt.protocol_submission_requested && receipt.payload_bytes_written > 0) {
+        state.session_controller.read().record_input_time(session_id, agent_id, receipt.submitted_at);
+    }
     // A queued protocol receipt has no exact delayed-delivery watcher. Leave the
     // current status alone rather than creating an awaiting marker that cannot
     // be reconciled. Confirmed/failed protocol receipts and PTY keep their path.
@@ -1457,6 +1461,27 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }).await.expect("bounded watch status transition");
+    }
+
+    #[test]
+    fn g31_admitted_pending_protocol_input_rearms_completed_work_without_a_marker() {
+        let (_temp, _app, state) = setup_test_app();
+        let mut receipt = state.injection_manager.read().write_to_agent(AGENT_ID, "fixture input", true).unwrap();
+        receipt.protocol_delivery = Some(Delivery::protocol_pending());
+        receipt.protocol_submission_requested = true;
+        receipt.submit_keystroke_issued = false;
+        state.session_controller.read().update_heartbeat(SESSION_ID, AGENT_ID, "completed", None).unwrap();
+        // The protocol admission precedes this test heartbeat, so make the old proof
+        // explicit without sleeps or changing the runtime's admission timestamp.
+        state.session_controller.read().set_heartbeat_last_activity_for_test(
+            SESSION_ID, AGENT_ID, receipt.submitted_at - ChronoDuration::seconds(1));
+        record_injection_submission(&state, SESSION_ID, AGENT_ID, &receipt);
+        let controller = state.session_controller.read();
+        assert_eq!(controller.latest_input_at(SESSION_ID, AGENT_ID), Some(receipt.submitted_at));
+        let agent = controller.get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).unwrap();
+        assert!(!matches!(agent.status, AgentStatus::WaitingForInput(_)), "queued protocol keeps its existing status");
+        assert_eq!(agent.work_state, Some(crate::session::work_state::WorkState::Working));
     }
 
     #[tokio::test]

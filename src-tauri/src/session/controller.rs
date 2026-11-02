@@ -1038,6 +1038,8 @@ pub struct SessionController {
     queue_repo: Option<Arc<crate::storage::QueueRepo>>,
     heartbeat_marks: RwLock<HashSet<(String, String)>>,
     retirement_completions: RwLock<HashMap<(String, String), (Uuid, u64)>>,
+    /// Runtime-only input boundaries; stable seat IDs must never transfer them to a respawn.
+    latest_inputs: RwLock<HashMap<(String, String), (Uuid, DateTime<Utc>)>>,
 }
 
 // Explicitly implement Send + Sync
@@ -1328,6 +1330,7 @@ impl SessionController {
             queue_repo: None,
             heartbeat_marks: RwLock::new(HashSet::new()),
             retirement_completions: RwLock::new(HashMap::new()),
+            latest_inputs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -1696,7 +1699,7 @@ impl SessionController {
 
     /// Publish heartbeat fields and their derived work state from the same snapshot.
     pub fn session_with_heartbeats(&self, mut session: Session) -> (Session, HashMap<String, AgentHeartbeatInfo>) {
-        use super::work_state::{work_state, verdict_at, WorkEvidence, WorkState};
+        use super::work_state::{work_state_since, verdict_at, WorkEvidence, WorkState};
         let retired: HashSet<String> = session.agents.iter()
             .filter(|agent| agent.work_state == Some(WorkState::Retired)
                 && matches!(agent.status, AgentStatus::Completed))
@@ -1718,14 +1721,14 @@ impl SessionController {
             if retired.contains(&agent.id) && instance.is_none() && !manager.is_alive(&agent.id) {
                 return WorkState::Retired;
             }
-            let state = work_state(&WorkEvidence {
+            let state = work_state_since(&WorkEvidence {
                 agent_id: &agent.id, role: &agent.role, status: &agent.status,
                 alive: manager.is_alive(&agent.id), spawned_at: manager.spawned_at(&agent.id),
                 heartbeat: heartbeats.get(&agent.id).map(|heartbeat|
                     (heartbeat.status.as_str(), heartbeat.last_activity)),
                 heartbeat_is_self: !marks.contains(&(session.id.clone(), agent.id.clone())),
                 queue: queue.as_deref(), verdict_at,
-            });
+            }, self.input_at_for_instance(&session.id, &agent.id, instance));
             if manager.instance_id(&agent.id) != instance { WorkState::Working } else { state }
         }).collect::<Vec<_>>();
         for (agent, state) in session.agents.iter_mut().zip(states) {
@@ -2215,6 +2218,29 @@ impl SessionController {
 
     const AWAITING_INJECTED_TURN_PREFIX: &'static str = "awaiting_injected_turn:";
 
+    fn input_at_for_instance(&self, session_id: &str, agent_id: &str, instance: Option<Uuid>) -> Option<DateTime<Utc>> {
+        let instance = instance?;
+        self.latest_inputs.read().get(&(session_id.to_string(), agent_id.to_string()))
+            .filter(|(owner, _)| *owner == instance).map(|(_, at)| *at)
+    }
+
+    pub fn latest_input_at(&self, session_id: &str, agent_id: &str) -> Option<DateTime<Utc>> {
+        let manager = self.pty_manager.try_read()?;
+        self.input_at_for_instance(session_id, agent_id, manager.instance_id(agent_id))
+    }
+
+    /// Record admitted input even if protocol delivery is queued or a faster heartbeat
+    /// already cleared the delivery marker. Nothing here is persisted.
+    pub fn record_input_time(&self, session_id: &str, agent_id: &str, at: DateTime<Utc>) {
+        let manager = self.pty_manager.read();
+        let Some(instance) = manager.instance_id(agent_id) else { return };
+        if manager.spawned_at(agent_id).is_none_or(|spawned| at < spawned) { return; }
+        let mut inputs = self.latest_inputs.write();
+        let entry = inputs.entry((session_id.to_string(), agent_id.to_string())).or_insert((instance, at));
+        if entry.0 != instance { *entry = (instance, at); }
+        else { entry.1 = entry.1.max(at); }
+    }
+
     fn awaiting_injected_turn_since(status: &AgentStatus) -> Option<DateTime<Utc>> {
         let AgentStatus::WaitingForInput(reason) = status else {
             return None;
@@ -2244,6 +2270,7 @@ impl SessionController {
         if !submit_keystroke_issued {
             return Ok(());
         }
+        self.record_input_time(session_id, agent_id, submitted_at);
         if self
             .agent_heartbeats
             .read()
@@ -2338,6 +2365,10 @@ impl SessionController {
         session_id: &str,
         threshold: Duration,
     ) -> Vec<(String, DateTime<Utc>, AgentStatus)> {
+        let finished: HashSet<String> = self.get_session(session_id).into_iter()
+            .flat_map(|session| session.agents).filter(|agent| matches!(agent.work_state,
+                Some(super::work_state::WorkState::Finished | super::work_state::WorkState::Retired)))
+            .map(|agent| agent.id).collect();
         let now = Utc::now();
         let threshold_secs = threshold.as_secs() as i64;
         let (task_file_updates, agent_statuses) = {
@@ -2383,18 +2414,23 @@ impl SessionController {
                     recovered_after_injection.push((agent_id.clone(), info.status.clone()));
                 }
 
-                // An inject is sender activity, not evidence that the managed agent ran. It can
-                // select the awaiting-injected-turn reason, but must not refresh an already-stale
-                // heartbeat clock. Agents without any heartbeat use the marker below as fallback.
-                let last_relevant_activity = info.last_activity;
+                let input_at = self.input_at_for_instance(session_id, agent_id,
+                    pty_manager.instance_id(agent_id));
+                // Input re-arms monitoring after completion and gives the receiver a full
+                // response window even once confirmation has cleared the pending marker.
+                let last_relevant_activity = input_at.into_iter().chain(awaiting_since)
+                    .fold(info.last_activity, DateTime::max);
+                let resumed_after_completion = input_at.is_some_and(|at| at >= info.last_activity);
                 let elapsed = (now - last_relevant_activity).num_seconds();
                 let reassigned_after_completion = info.status == "completed"
                     && task_file_updates
                         .get(agent_id)
                         .is_some_and(|modified| modified > &info.last_activity);
+                if finished.contains(agent_id) && !reassigned_after_completion { return None; }
                 if elapsed > threshold_secs
                     && (awaiting_since.is_some()
                         || info.status != "completed"
+                        || resumed_after_completion
                         || reassigned_after_completion)
                 {
                     let runtime_status = agent_statuses.get(agent_id);
@@ -2420,10 +2456,13 @@ impl SessionController {
         // A submit can happen before an agent's first heartbeat. The in-memory canonical status
         // still carries enough time information to surface that condition after the threshold.
         for (agent_id, status) in &agent_statuses {
+            if finished.contains(agent_id) { continue; }
             if agents.is_some_and(|agents| agents.contains_key(agent_id)) {
                 continue;
             }
-            if let Some(awaiting_since) = Self::awaiting_injected_turn_since(status) {
+            if let Some(awaiting_since) = self.input_at_for_instance(session_id, agent_id,
+                pty_manager.instance_id(agent_id)).into_iter()
+                .chain(Self::awaiting_injected_turn_since(status)).max() {
                 if (now - awaiting_since).num_seconds() > threshold_secs {
                     let status = if !pty_manager.is_alive(agent_id) {
                         AgentStatus::Error("process_not_alive".to_string())
@@ -2560,6 +2599,9 @@ impl SessionController {
             heartbeat_is_self: !marks.contains(&(session.id.clone(), agent.id.clone())),
             queue: queue.as_deref(), verdict_at: None,
         };
+        if super::work_state::work_state_since(&evidence,
+            self.input_at_for_instance(&session.id, &agent.id, Some(instance)))
+            != super::work_state::WorkState::Finished { return false; }
         if !retirement::eligible(settings, &evidence, accepted, idle,
             retirement::holds_no_locks(&root, &agent.id), committed, final_verdict) {
             return false;
@@ -25612,6 +25654,139 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let restored = controller.session_from_persisted(&decoded).unwrap();
         assert!(restored.agents.iter().all(|agent| agent.transcript_session_id.is_none()));
         assert!(restored.agents.iter().all(|agent| agent.transcript_spawned_at.is_none()));
+    }
+
+    #[test]
+    fn g31_confirmed_followups_require_new_completion_for_every_seat() {
+        use super::super::work_state::WorkState;
+        for role in [AgentRole::Worker { index: 1, parent: None },
+            AgentRole::QaWorker { index: 1, parent: None }, AgentRole::Queen,
+            AgentRole::Evaluator, AgentRole::Prince] {
+            for delivery in [crate::delivery::Delivery::pending(),
+                crate::delivery::Delivery::confirmed("fixture-turn".into()),
+                crate::delivery::Delivery::protocol_turn_started("protocol-turn".into())] {
+                let (_temp, state, id) = retirement_fixture(&[]);
+                let controller = state.session_controller.read();
+                controller.sessions.write().get_mut("retire").unwrap().agents[0].role = role.clone();
+                controller.update_heartbeat("retire", &id, "completed", None).unwrap();
+                assert_eq!(controller.get_session("retire").unwrap().agents[0].work_state, Some(WorkState::Finished));
+                let submitted = Utc::now();
+                controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+                controller.record_injection_delivery("retire", &id, submitted, &delivery).unwrap();
+                assert_eq!(controller.get_session("retire").unwrap().agents[0].work_state,
+                    Some(WorkState::Working), "{role:?}: {} follow-up needs fresh proof", delivery.basis);
+                controller.update_heartbeat("retire", &id, "completed", None).unwrap();
+                assert_eq!(controller.get_session("retire").unwrap().agents[0].work_state,
+                    Some(WorkState::Finished), "{role:?}: completion after follow-up restores finished");
+            }
+        }
+    }
+
+    #[test]
+    fn g31_fresh_verdict_after_confirmed_input_silences_backend_stall_without_new_heartbeat() {
+        for role in [AgentRole::Evaluator, AgentRole::Prince] {
+            for has_heartbeat in [false, true] {
+                let (_temp, state, id) = retirement_fixture(&[]);
+                let controller = state.session_controller.read();
+                controller.sessions.write().get_mut("retire").unwrap().agents[0].role = role.clone();
+                if has_heartbeat {
+                    controller.agent_heartbeats.write().get_mut("retire").unwrap().get_mut(&id).unwrap()
+                        .last_activity = Utc::now() - Duration::minutes(10);
+                } else { controller.agent_heartbeats.write().get_mut("retire").unwrap().remove(&id); }
+                let submitted = Utc::now();
+                controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+                controller.record_injection_delivery("retire", &id, submitted,
+                    &crate::delivery::Delivery::confirmed("fixture-turn".into())).unwrap();
+                controller.latest_inputs.write().get_mut(&("retire".into(), id.clone())).unwrap().1 =
+                    submitted - Duration::seconds(181);
+                assert_eq!(controller.get_stalled_agents("retire", std::time::Duration::from_secs(180)).len(), 1);
+                let verdict = submitted + Duration::seconds(1);
+                let session = controller.get_session("retire").unwrap();
+                if role == AgentRole::Evaluator {
+                    let path = state.storage.session_dir("retire").join("state/qa-verdict.json");
+                    std::fs::write(path, serde_json::to_vec(&serde_json::json!({
+                        "schema_version":1,"session_id":"retire","milestone_id":"fixture","iteration":1,
+                        "verdict":"PASS","passed":true,"summary":"fixture","timestamp":verdict,
+                        "contract_path":null,"contract_typed":false,"omission":null,"criteria":[]
+                    })).unwrap()).unwrap();
+                } else {
+                    let path = session.project_path.join(".hive-manager/retire/peer/prince-verdict.json");
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, serde_json::to_vec(&serde_json::json!({
+                        "kind":"prince-verdict","from":id,"to":"queen","timestamp":verdict,"content":"PASS"
+                    })).unwrap()).unwrap();
+                }
+                assert_eq!(controller.get_session("retire").unwrap().agents[0].work_state,
+                    Some(super::super::work_state::WorkState::Finished), "{role:?} must accept fresh verdict");
+                assert!(controller.get_stalled_agents("retire", std::time::Duration::from_secs(180)).is_empty(),
+                    "{role:?}: finished verdict proof must also silence backend stalled events");
+            }
+        }
+    }
+
+    #[test]
+    fn g31_confirmed_followup_stalls_only_after_three_minutes_without_a_heartbeat() {
+        let (_temp, state, id) = retirement_fixture(&[]);
+        let controller = state.session_controller.read();
+        controller.agent_heartbeats.write().get_mut("retire").unwrap().get_mut(&id).unwrap()
+            .last_activity = Utc::now() - Duration::minutes(10);
+        let submitted = Utc::now();
+        controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+        controller.record_injection_delivery("retire", &id, submitted,
+            &crate::delivery::Delivery::confirmed("fixture-turn".into())).unwrap();
+        assert!(controller.get_stalled_agents("retire", std::time::Duration::from_secs(180)).is_empty(),
+            "confirmed follow-up must get a fresh response window");
+        let elapsed_input = Utc::now() - Duration::seconds(181);
+        controller.latest_inputs.write().get_mut(&("retire".into(), id.clone())).unwrap().1 = elapsed_input;
+        let stalled = controller.get_stalled_agents("retire", std::time::Duration::from_secs(180));
+        assert_eq!(stalled, vec![(id, elapsed_input)], "old completed heartbeat cannot hide a confirmed stall");
+    }
+
+    #[test]
+    fn g31_same_id_respawn_does_not_inherit_followup_input_time() {
+        let (_temp, state, id) = retirement_fixture(&[]);
+        let controller = state.session_controller.read();
+        let submitted = Utc::now();
+        controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+        controller.record_injection_delivery("retire", &id, submitted,
+            &crate::delivery::Delivery::confirmed("fixture-turn".into())).unwrap();
+        assert_eq!(controller.latest_input_at("retire", &id), Some(submitted));
+        let role = controller.get_session("retire").unwrap().agents[0].role.clone();
+        state.pty_manager.read().kill(&id).unwrap();
+        state.pty_manager.read().create_session(id.clone(), role, "fixture-shell", &[], None, 80, 24).unwrap();
+        assert_eq!(controller.latest_input_at("retire", &id), None, "replacement cannot inherit input time");
+        controller.record_input_time("retire", &id, submitted);
+        assert_eq!(controller.latest_input_at("retire", &id), None, "old receipt cannot transfer input time");
+        controller.update_heartbeat("retire", &id, "completed", None).unwrap();
+        assert_eq!(controller.get_session("retire").unwrap().agents[0].work_state,
+            Some(super::super::work_state::WorkState::Finished));
+    }
+
+    #[test]
+    fn g31_input_time_survives_fast_completion_and_older_receipts() {
+        let (_temp, state, id) = retirement_fixture(&[]);
+        let controller = state.session_controller.read();
+        let submitted = Utc::now();
+        controller.update_heartbeat("retire", &id, "completed", None).unwrap();
+        controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+        assert_eq!(controller.latest_input_at("retire", &id), Some(submitted));
+        controller.record_input_time("retire", &id, submitted - Duration::microseconds(1));
+        assert_eq!(controller.latest_input_at("retire", &id), Some(submitted));
+    }
+
+    #[test]
+    fn g31_confirmed_followup_blocks_retirement_without_new_completion() {
+        let (_temp, state, id) = retirement_fixture(&[]);
+        let controller = state.session_controller.read();
+        let submitted = Utc::now();
+        // Bookkeeping alone must protect protocol inputs too, whose terminal revision
+        // does not change. The existing PTY revision fence remains independently tested.
+        controller.record_injection_submission("retire", &id, submitted, true).unwrap();
+        controller.record_injection_delivery("retire", &id, submitted,
+            &crate::delivery::Delivery::confirmed("fixture-turn".into())).unwrap();
+        assert!(controller.retire_finished_agents("retire").is_empty(),
+            "confirmed follow-up must block retirement from the old accepted heartbeat");
+        assert!(state.pty_manager.read().is_alive(&id));
     }
 
     #[test]

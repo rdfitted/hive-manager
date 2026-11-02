@@ -40,6 +40,12 @@ pub fn awaiting_injected_turn_since(status: &AgentStatus) -> Option<DateTime<Utc
 /// Shared by API/roster projections and retirement eligibility. This function never stops
 /// a process or changes queue state. Retirement can layer its proven state over this result.
 pub fn work_state(evidence: &WorkEvidence<'_>) -> WorkState {
+    work_state_since(evidence, None)
+}
+
+/// Input belongs to the current runtime instance, independently of its transient
+/// delivery status. Confirmation proves receipt, never completion of the new turn.
+pub fn work_state_since(evidence: &WorkEvidence<'_>, latest_input_at: Option<DateTime<Utc>>) -> WorkState {
     if matches!(evidence.status, AgentStatus::Error(_))
         || matches!(evidence.status, AgentStatus::WaitingForInput(reason)
             if reason.starts_with("injected_delivery_failed:"))
@@ -52,28 +58,27 @@ pub fn work_state(evidence: &WorkEvidence<'_>) -> WorkState {
     {
         return WorkState::Working;
     }
-    if let Some(injected_at) = awaiting_injected_turn_since(evidence.status) {
-        if evidence.heartbeat.is_none_or(|(_, at)| injected_at > at) {
-            return WorkState::Working;
-        }
-    }
-    if matches!(evidence.status, AgentStatus::Completed) && !evidence.alive {
+    let latest_input_at = latest_input_at.into_iter()
+        .chain(awaiting_injected_turn_since(evidence.status)).max();
+    if matches!(evidence.status, AgentStatus::Completed) && !evidence.alive && latest_input_at.is_none() {
         return WorkState::Finished;
     }
     let Some(spawned_at) = evidence.spawned_at else {
         return WorkState::Working;
     };
+    let current_proof = |at: DateTime<Utc>| at >= spawned_at
+        && latest_input_at.is_none_or(|input| at > input);
     let completed = evidence
         .heartbeat
-        .is_some_and(|(status, at)| status == "completed" && at >= spawned_at);
-    let verdict = evidence.verdict_at.is_some_and(|at| at >= spawned_at);
+        .is_some_and(|(status, at)| status == "completed" && current_proof(at));
+    let verdict = evidence.verdict_at.is_some_and(current_proof);
     let finished = match evidence.role {
         AgentRole::Queen => completed && evidence.heartbeat_is_self,
         AgentRole::Evaluator | AgentRole::Prince => {
             // A follow-up after the verdict re-arms the current instance as well.
             let latest_proof = evidence
                 .verdict_at
-                .filter(|at| *at >= spawned_at)
+                .filter(|at| current_proof(*at))
                 .into_iter()
                 .chain(
                     evidence
@@ -81,7 +86,7 @@ pub fn work_state(evidence: &WorkEvidence<'_>) -> WorkState {
                         .filter(|(status, at)| {
                             evidence.heartbeat_is_self
                                 && *status == "completed"
-                                && *at >= spawned_at
+                                && current_proof(*at)
                         })
                         .map(|(_, at)| at),
                 )
@@ -91,8 +96,6 @@ pub fn work_state(evidence: &WorkEvidence<'_>) -> WorkState {
             });
             ((completed && evidence.heartbeat_is_self) || verdict)
                 && !resumed
-                && !awaiting_injected_turn_since(evidence.status)
-                    .is_some_and(|injected_at| latest_proof.is_none_or(|at| injected_at > at))
         }
         AgentRole::MasterPlanner | AgentRole::ScratchShell => false,
         _ => {
@@ -174,6 +177,37 @@ mod tests {
             queue: Some(&[]),
             verdict_at,
         })
+    }
+
+    #[test]
+    fn g31_verdict_and_heartbeat_proofs_must_follow_the_input_boundary() {
+        let spawn = Utc::now();
+        let old = spawn + chrono::Duration::seconds(1);
+        let input = old + chrono::Duration::seconds(1);
+        let fresh = input + chrono::Duration::seconds(1);
+        for role in [AgentRole::Evaluator, AgentRole::Prince] {
+            for status in [AgentStatus::Running, AgentStatus::WaitingForInput(format!(
+                "awaiting_injected_turn:{}", input.to_rfc3339()))] {
+                let mut evidence = WorkEvidence {
+                    agent_id: "seat", role: &role, status: &status, alive: true,
+                    spawned_at: Some(spawn), heartbeat: None, heartbeat_is_self: true,
+                    queue: Some(&[]), verdict_at: Some(old),
+                };
+                assert_eq!(work_state_since(&evidence, Some(input)), WorkState::Working,
+                    "{role:?}: old verdict cannot finish the follow-up");
+                evidence.verdict_at = Some(input);
+                assert_eq!(work_state_since(&evidence, Some(input)), WorkState::Working,
+                    "a completion equal to input time is not newer");
+                evidence.verdict_at = Some(fresh);
+                assert_eq!(work_state_since(&evidence, Some(input)), WorkState::Finished,
+                    "{role:?}: newer verdict finishes the follow-up without a heartbeat");
+                evidence.verdict_at = None;
+                evidence.heartbeat = Some(("completed", old));
+                assert_eq!(work_state_since(&evidence, Some(input)), WorkState::Working);
+                evidence.heartbeat = Some(("completed", fresh));
+                assert_eq!(work_state_since(&evidence, Some(input)), WorkState::Finished);
+            }
+        }
     }
 
     #[test]
