@@ -6361,6 +6361,19 @@ async fn test_short_and_full_conversation_keys_share_canonical_history_and_live_
         .insert_test_session(make_test_session(&session_id, project_dir.path().to_str().unwrap()));
     let mut events = state.event_bus.subscribe_session(session_id.clone());
 
+    macro_rules! next_conversation_event {
+        () => {
+            async {
+                loop {
+                    let event = events.recv().await.unwrap();
+                    if event.event_type == crate::domain::event::EventType::ConversationMessage {
+                        break event;
+                    }
+                }
+            }
+        };
+    }
+
     let body = serde_json::json!({
         "from": "worker-1",
         "content": "Message sent through the short prompt-style key"
@@ -6382,10 +6395,9 @@ async fn test_short_and_full_conversation_keys_share_canonical_history_and_live_
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), next_conversation_event!())
         .await
-        .expect("timed out waiting for the short-key conversation event")
-        .expect("conversation event channel closed");
+        .expect("timed out waiting for the short-key conversation event");
     assert_eq!(event.agent_id.as_deref(), Some(full_agent_id.as_str()));
     assert_eq!(event.payload["data"]["agent_id"], full_agent_id);
 
@@ -6430,10 +6442,9 @@ async fn test_short_and_full_conversation_keys_share_canonical_history_and_live_
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
-    let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), next_conversation_event!())
         .await
-        .expect("timed out waiting for the full-key conversation event")
-        .expect("conversation event channel closed");
+        .expect("timed out waiting for the full-key conversation event");
     assert_eq!(event.payload["data"]["agent_id"], full_agent_id);
 
     let response = app
@@ -6486,10 +6497,9 @@ async fn test_short_and_full_conversation_keys_share_canonical_history_and_live_
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
-    let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), next_conversation_event!())
         .await
-        .expect("timed out waiting for the shared conversation event")
-        .expect("conversation event channel closed");
+        .expect("timed out waiting for the shared conversation event");
     assert_eq!(event.agent_id.as_deref(), Some("shared"));
     assert_eq!(event.payload["data"]["agent_id"], "shared");
     assert!(storage

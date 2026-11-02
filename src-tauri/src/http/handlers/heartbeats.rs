@@ -132,12 +132,24 @@ async fn heartbeat_security_event(
     state: &AppState, session_id: &str, caller_id: Option<&str>, claimed_id: &str,
     resolved_id: Option<&str>, token: Option<&str>, reason: &'static str, rejected: bool,
 ) -> Result<(), ApiError> {
+    local_api_security_event(state, session_id, caller_id, claimed_id, resolved_id,
+        token, reason, rejected, "heartbeat").await
+}
+
+/// Shared neutral audit for local API identity checks. Never persist credentials.
+pub(super) async fn local_api_security_event(
+    state: &AppState, session_id: &str, caller_id: Option<&str>, claimed_id: &str,
+    resolved_id: Option<&str>, token: Option<&str>, reason: &'static str, rejected: bool,
+    surface: &'static str,
+) -> Result<(), ApiError> {
     let safe = |value: &str| {
         if token.is_some_and(|token| !token.is_empty() && value.contains(token)) {
             "redacted-credential".to_string()
         } else { value.to_string() }
     };
-    let known_session = state.session_controller.read().get_session(session_id).is_some();
+    // Preserve heartbeat audit scope; conversations also support persisted history.
+    let known_session = state.session_controller.read().get_session(session_id).is_some()
+        || (surface == "conversation" && state.storage.session_dir(session_id).join("session.json").is_file());
     let safe_session_id = safe(session_id);
     let may_persist = known_session && safe_session_id == session_id;
     let session_id = if may_persist { safe_session_id } else { "unattributed-session".to_string() };
@@ -146,7 +158,7 @@ async fn heartbeat_security_event(
     let resolved_id = resolved_id.map(safe);
     tracing::warn!(session_id = %session_id, caller_agent_id = ?caller_id,
         claimed_agent_id = %claimed_id, resolved_agent_id = ?resolved_id, reason,
-        rejected, "heartbeat authorization audit");
+        rejected, surface, "local API authorization audit");
     // Unknown or credential-bearing session paths must never create a token-named directory.
     if !may_persist { return Ok(()); }
     state.event_bus.publish(Event {
@@ -154,11 +166,11 @@ async fn heartbeat_security_event(
         agent_id: caller_id.clone(), event_type: EventType::ArtifactUpdated,
         timestamp: chrono::Utc::now(), severity: Severity::Warning,
         payload: serde_json::json!({
-            "kind": if rejected { "heartbeat_rejected" } else { "heartbeat_unauthenticated" },
+            "kind": format!("{surface}_{}", if rejected { "rejected" } else { "unauthenticated" }),
             "caller_agent_id": caller_id, "claimed_agent_id": claimed_id,
             "resolved_agent_id": resolved_id, "reason": reason,
         }),
-    }).await.map_err(|_| ApiError::internal("Failed to persist heartbeat authorization audit"))
+    }).await.map_err(|_| ApiError::internal(format!("Failed to persist {surface} authorization audit")))
 }
 
 async fn reject_heartbeat(

@@ -268,6 +268,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/sessions/{id}/heartbeats",
             get(heartbeat_history::get_heartbeats),
         )
+        .route(
+            "/api/sessions/{id}/retirement",
+            get(agents::get_retirement_settings).put(agents::put_retirement_settings),
+        )
         // Conversation routes
         .route(
             "/api/sessions/{id}/conversations/{agent}",
