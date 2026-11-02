@@ -2547,6 +2547,18 @@ impl SessionController {
             && manager.recent_output(&agent.id).is_some_and(|output|
                 crate::adapters::CodexAdapter::turn_running(&output) == Some(false));
         if !idle { return false; }
+        // Reject missing/stale completion proof before queue, graph or git I/O.
+        // This is only a precheck; re-read authoritatively under the heartbeat
+        // and mark locks below, since completion/input can change during I/O.
+        {
+            let completions = self.retirement_completions.read();
+            if !completions.get(&(session.id.clone(), agent.id.clone()))
+                .is_some_and(|(completed_instance, _)| *completed_instance == instance) {
+                return false;
+            }
+        }
+        #[cfg(test)]
+        Self::test_sync_hook(&instance.to_string(), "retirement-eligibility", None);
         let Some(storage) = self.storage.as_deref() else { return false };
         let root = session.project_path.join(".hive-manager").join(&session.id);
         let state = crate::coordination::StateManager::new(storage.session_dir(&session.id));
@@ -22567,6 +22579,65 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         }
         state.session_controller.read().close_session("retire").unwrap();
         assert!(state.pty_manager.read().snapshot(&id).is_none(), "close releases retained bytes");
+    }
+
+    #[test]
+    fn g33_completion_fence_rejects_before_expensive_eligibility() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for fence in ["missing", "stale-instance", "current-instance"] {
+            let (_temp, state, id) = retirement_fixture(&[]);
+            let controller = state.session_controller.read();
+            let instance = state.pty_manager.read().instance_id(&id).unwrap();
+            let key = ("retire".to_string(), id.clone());
+            match fence {
+                "missing" => { controller.retirement_completions.write().remove(&key); }
+                "stale-instance" => { controller.retirement_completions.write().insert(key, (uuid::Uuid::new_v4(), 0)); }
+                _ => {}
+            }
+            let entries = Arc::new(AtomicUsize::new(0));
+            let observed = entries.clone();
+            SessionController::test_sync_hook(&instance.to_string(), "retirement-eligibility", Some(Box::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            })));
+            let retired = controller.retire_finished_agents("retire");
+            let actual_entries = entries.load(Ordering::SeqCst);
+            // Clear an unconsumed observer without leaving a hook for another fixture.
+            SessionController::test_sync_hook(&instance.to_string(), "retirement-eligibility", None);
+            if state.pty_manager.read().is_alive(&id) {
+                state.pty_manager.read().kill(&id).unwrap();
+            }
+            assert_eq!(actual_entries, usize::from(fence == "current-instance"),
+                "{fence}: queue/graph/git eligibility must require a current-instance completion fence");
+            assert_eq!(retired, if fence == "current-instance" { vec![id] } else { vec![] });
+            assert!(!state.storage.session_dir("retire").join("state/work-graph-completions.jsonl").exists());
+        }
+    }
+
+    #[test]
+    fn g33_completion_fence_precheck_does_not_authorize_later_retirement() {
+        for change in ["heartbeat", "input", "fence"] {
+            let (_temp, state, id) = retirement_fixture(&[]);
+            let instance = state.pty_manager.read().instance_id(&id).unwrap();
+            let changed_state = state.clone();
+            let changed_id = id.clone();
+            SessionController::test_sync_hook(&instance.to_string(), "retirement-eligibility", Some(Box::new(move || {
+                let controller = changed_state.session_controller.read();
+                assert!(controller.retirement_completions.try_write().is_some(),
+                    "precheck guard must be dropped before expensive checks");
+                match change {
+                    "heartbeat" => controller.update_heartbeat("retire", &changed_id, "working", None).unwrap(),
+                    "input" => { changed_state.pty_manager.read().submit(&changed_id, b"follow-up").unwrap(); }
+                    "fence" => { controller.retirement_completions.write()
+                        .insert(("retire".into(), changed_id), (uuid::Uuid::new_v4(), 0)); }
+                    _ => unreachable!(),
+                }
+            })));
+            assert!(state.session_controller.read().retire_finished_agents("retire").is_empty(), "{change}");
+            assert!(state.pty_manager.read().is_alive(&id), "{change}: stale precheck cannot authorize retirement");
+            assert_eq!(state.session_controller.read().get_session("retire").unwrap().agents[0].status, AgentStatus::Running);
+            assert!(!state.storage.session_dir("retire").join("state/work-graph-completions.jsonl").exists());
+            state.pty_manager.read().kill(&id).unwrap();
+        }
     }
 
     #[test]
