@@ -5260,6 +5260,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
     }
 
     fn build_evaluator_qa_plan(
+        session_id: &str,
         default_config: &AgentConfig,
         qa_workers: &[QaWorkerConfig],
         worker_count: u8,
@@ -5328,7 +5329,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                 .replace('\'', "'\\''");
 
             command_block.push_str(&format!(
-                "   # {}. {} worker\n   {api_curl} -X POST \"{{{{api_base_url}}}}/api/sessions/{{{{session_id}}}}/qa-workers\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{}'\n\n",
+                "   # {}. {} worker\n   {api_curl} -X POST \"http://localhost:18800/api/sessions/{session_id}/qa-workers\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{}'\n\n",
                 index + 1,
                 label,
                 payload,
@@ -5387,7 +5388,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             format!(r#""model": "{}", "#, default_model)
         };
         let (qa_worker_intro, qa_worker_spawn_plan, qa_worker_count, qa_worker_coverage_rule) =
-            Self::build_evaluator_qa_plan(config, qa_workers, worker_count);
+            Self::build_evaluator_qa_plan(session_id, config, qa_workers, worker_count);
         let required_protocol = Self::evaluator_required_protocol(session_id, &Self::session_prompt_root(project_path, session_id, &config.cli),);
 
         let mut variables = HashMap::new();
@@ -6115,7 +6116,7 @@ Read tool docs in `{session_root_prompt}/tools/` for:
     }
 
     fn build_qa_milestone_handoff(
-        _session_id: &str,
+        session_id: &str,
         session_root: &Path,
         completion_scope: &str,
         cli: &str,
@@ -6163,7 +6164,7 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
 
 3. You MUST then signal the backend that the milestone is ready. This is what opens the QA review window and starts the QA clock — the clock does NOT run before this point, so there is no time pressure on the work above.
    ```bash
-   {api_curl} -sS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/milestone-ready"
+   {api_curl} -sS -X POST "http://localhost:18800/api/sessions/{session_id}/milestone-ready"
    ```
 
 4. You MUST NOT spawn an Evaluator here. The backend already launched it. After this handoff exists, continue with the Post-Workers Protocol and wait for `{qa_verdict_path}`."#,
@@ -7078,7 +7079,7 @@ An **Evaluator** agent validates work after all planners complete.
 After all planner domains complete, the Evaluator will:
 1. Review all worker outputs across all domains
 2. Coordinate QA workers to validate each domain
-3. Submit verdict via HTTP endpoint: `POST /api/sessions/{{{{session_id}}}}/qa/verdict`
+3. Submit verdict via HTTP endpoint: `POST http://localhost:18800/api/sessions/{session_id}/qa/verdict`
 "#,
                 qa_info = qa_info.trim_end(),
             )
@@ -7091,7 +7092,7 @@ After all planner domains complete, the Evaluator will:
             format!(
                 "\n6. Evaluator reviews all planner outputs\n\
                  7. {} QA worker(s) validate domain results\n\
-                 8. Evaluator submits verdict via POST /api/sessions/{{{{session_id}}}}/qa/verdict",
+                 8. Evaluator submits verdict via POST http://localhost:18800/api/sessions/{session_id}/qa/verdict",
                 qa_count
             )
         } else {
@@ -18553,6 +18554,22 @@ mod tests {
             },
             reviews: ReviewExpansionSidecar::default(),
         }
+    }
+
+    #[test]
+    fn qa_handoff_urls_render_real_values_at_every_site() {
+        let id = "rendered-session";
+        let config = AgentConfig::default();
+        let (_, spawn_plan, _, _) = SessionController::build_evaluator_qa_plan(id, &config, &[], 1);
+        let handoff = SessionController::build_qa_milestone_handoff(id, Path::new("/repo"), "workers", "codex");
+        let qa = [QaWorkerConfig { specialization: "api".into(), cli: "codex".into(), model: None, label: None, flags: None }];
+        let swarm = SessionController::build_swarm_smoke_test_prompt(id, 1, &[config], true, Some(&qa), Path::new("/repo"), "codex");
+        for (text, endpoint) in [(&spawn_plan, "qa-workers"), (&handoff, "milestone-ready"), (&swarm, "qa/verdict")] {
+            assert!(text.contains(&format!("http://localhost:18800/api/sessions/{id}/{endpoint}")), "missing concrete {endpoint}");
+            assert!(!text.contains("{api_base_url}"), "unrendered API URL");
+            assert!(!text.contains("{session_id}"), "unrendered session id");
+        }
+        assert_eq!(swarm.matches(&format!("http://localhost:18800/api/sessions/{id}/qa/verdict")).count(), 2);
     }
 
     #[test]
