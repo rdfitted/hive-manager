@@ -72,4 +72,46 @@ Chosen driver: Playwright CDP. Chosen viewport method: CDP emulation via `page.s
 
 The confirmed bootstrap fix was rebuilt with `tauri build --debug --no-bundle` under the FIFO lock in 165.75 seconds. The unmodified seed had no `home/AppData/Local` before launch; it existed after bootstrap. The driver did not create it. Real attach, hydrated page, both measured viewports at DPR1, instance marker, contained process environment, no port-18800 requests, process/profile cleanup and unchanged live health/PID all passed again. Input desktop remained `Screen-saver`; foreground inspection remains explicitly unavailable. Scratch folder and compiled control host absence were verified after the Queen's cleanup.
 
-T9 is proved with that recorded foreground limitation. T11-T13 and the complete G41/G43 mutation gate remain pending.
+T9 is proved with that recorded foreground limitation. T11-T13 results follow.
+
+## Complete driver and assertion proofs
+
+`npm run render:check` acquires the FIFO gate in a managed session, or an identity-checked local lock otherwise. It fingerprints the build inputs and executable, builds only when required, seeds a fresh short marked root, and launches only the guarded custom-protocol executable. The three instance settings are the only driver-supplied overrides. All browser flags, profile and home roots still come from Rust. The report preserves owned executable/PID/start identities and WebView descendants for cleanup review. Every run stops its exact owned tree and removes its instance profile in `finally`, including navigation failures and the deliberate mid-run failure.
+
+The confirmed environment-normalization fix was rebuilt in 181.313 seconds. CDP and Review both passed afterwards; all nine actual child environment roots were contained and non-verbatim. The profile scaffold was absent before launch and present after bootstrap. The latest complete assertion/mutation pass reused that build and took 104.910 seconds, including 66.631 seconds observing the stall loop and sweep. A previously observed blank startup target is now guarded by waiting for the custom-protocol navigation before reload; failures preserve their URL, ready state and text for diagnosis.
+
+Seven manifest screens are captured at both 1440x900 and 800x900: Launch, Focus, Grid, Kanban, expanded Sidebar, Review and Keyboard Shortcuts. Kanban captures each synthetic card after scrolling it into view, giving 16 PNGs in total. Private visual review confirmed the launch form, Markdown table/code, eight Grid panes, both Running/Completed cards, expanded agents and Recent entry, actual Review diff, and the real keyboard dialog. Narrow Grid clips composers, matching the recorded finding below. A blank terminal itself is expected without a PTY. PNG decoding checks actual pixels; no image or JSON output is committed or uploaded.
+
+The installed-version badge is measured with `elementsFromPoint` and computed styles on the route that mounts it. No line-through or overlapping element was observed on normal screens at either width. Dashboard has no UpdateChecker component, so its absence is recorded rather than asserted. The modal backdrop intentionally interdicts the background badge; its observation is recorded separately under the approved scope ruling.
+
+The Grid composer containment failures remain raw failures against [#414](https://github.com/rdfitted/hive-manager/issues/414), at load and after the timed observation. At 1440px, the normal composer's bottom is 460.797 versus pane bottom 407.188; the attention composer's bottom is 412.797. At 800px, the corresponding bottoms are 538.797 and 490.797 versus pane bottom 435.188. Known-finding acceptance requires a positive issue number, the expected card state and actual nonzero-box overflow. A changed failure, missing issue or unexpected pass blocks the command. No app layout was changed.
+
+## Mutation and failure coverage
+
+All 23 required render predicates have recorded before/mutant/restored results and fail by their assertion name. Mutate-test-restore stays inside the gate. The mutations are:
+
+| Assertions | Mutation |
+| --- | --- |
+| `screen-not-empty` | Hide the expected screen container |
+| `screenshot-has-pixels` | Cover the viewport with a solid white DOM layer |
+| `viewport-1440`, `viewport-800` | Change the measured CSS width |
+| `version-badge-unobscured` | Apply a computed line-through |
+| `grid-eight-panes` | Hide one actual pane |
+| Finished, stalled and exited-during-startup card/count checks (six) | Insert an unwanted card/badge or hide a required one |
+| Both Grid composer containment checks | Establish a temporary contained DOM control, move it outside the pane, restore the real #414 layout |
+| `chat-table`, `chat-code`, `chat-literal` | Remove the table, replace code text, inject an interpreted literal-HTML element |
+| `kanban-fixture-present`, `sidebar-fixture-present` | Hide a real card or temporarily remove its actual sidebar node |
+| `updater-invoke-rejected` | Replace the owned adapter's IPC call with a resolved response, reload it, restore exact source bytes |
+| `all-screens-captured` | Remove a required capture record and restore it |
+| `no-console-errors` | Emit a deliberate uniquely named browser console error |
+| `no-live-api-request` | Fulfill a synthetic port-18800 URL locally inside Playwright; both observers detect it, no live service is contacted |
+
+The ResourceTiming mutation initially exposed its default 250-entry buffer filling during the 66-second observation. The driver now allows 20,000 entries and emits a gating console error on buffer overflow. The corrected pass retained 458 normal resource entries, and both the request listener and ResourceTiming detected the locally fulfilled mutation. Normal console errors are never filtered to obtain a pass. Tauri freezes its invoke bridge, so the updater mutation targets the owned adapter instead of weakening the real bridge.
+
+`--force-failure` exited 1 at the named deliberate failure after attach and environment verification. Cleanup, no-live-request and console checks passed; independent checks found no instance profile or owned WebView process, no process using the guarded executable, and a clean full `git status` against the committed driver. Every normal and forced run preserved the live app's health, executable identity, start time and PID. Foreground preservation remains unavailable on the Screen-saver input desktop and is never claimed as proved.
+
+Validation: `npm run check` reports zero errors/warnings; full `npm test` passes 912 tests across 85 files in 124.33 seconds, without a flake rerun; the ten Node fixture/lifecycle/finding tests pass; `cargo check` and `cargo check --tests` pass. The stricter fixture change also passes the real Rust storage/controller loader test. G41 has named assertions and 23 restored mutation proofs; G42 preserves the live app; G43 has normal and forced-failure cleanup plus ignored output and clean git evidence.
+
+## Windows CI decision
+
+The measured cached rebuild plus the complete capture/proof run is about five minutes, within the approximately 15-minute render budget. A `windows-latest` workflow uses the existing pinned setup/cache actions, the same isolated target path, a 15-minute render step, and a missing-runtime bootstrap only on its disposable runner. Its YAML and every PowerShell step were parsed locally, and the relative Rust-cache target mapping was verified. The hosted job itself has not run yet; cold-cache duration is unmeasured. There is no artifact-upload step. Microsoft documents the [runtime detection and silent bootstrap procedure](https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution); the [official deployment sample](https://github.com/MicrosoftEdge/WebView2Samples/blob/main/SampleApps/WebView2APISample/AppWindow.cpp) supplies the bootstrap link.

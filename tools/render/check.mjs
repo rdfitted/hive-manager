@@ -101,6 +101,7 @@ try {
   let spawnError;
   app.on('error', error => { spawnError = error; });
   state.app = identity(app.pid);
+  report.ownedApp = state.app;
   await writeFile(stateFile(root), JSON.stringify(state, null, 2));
   let ready = false;
   for (let i = 0; i < 120; i++) {
@@ -110,6 +111,7 @@ try {
   }
   if (!ready) throw new Error('Guarded CDP endpoint did not become ready');
   state.processes = tree(app.pid);
+  report.ownedProcesses = state.processes;
   await writeFile(stateFile(root), JSON.stringify(state, null, 2));
   browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdp}`, { timeout: 15000 });
   const context = browser.contexts()[0];
@@ -220,7 +222,7 @@ finally {
   try {
     if (state) await stopRecord(state);
     if (root) await removeProfile(root);
-    assertion('cleanup-no-process-or-profile', true);
+    assertion('cleanup-no-process-or-profile', true, { app: state?.app, recordedPids: state?.processes.map(item => item.pid), instanceRemoved: !!root, remainingOwnedProcesses: [] });
   } catch (error) { assertion('cleanup-no-process-or-profile', false, error.message); }
   try {
     report.liveAfter = await liveState();
