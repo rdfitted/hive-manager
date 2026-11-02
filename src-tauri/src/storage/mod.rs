@@ -437,7 +437,7 @@ impl SessionStorage {
 
     /// Get the app data directory path
     #[cfg_attr(test, allow(dead_code))]
-    fn get_app_data_dir() -> Result<PathBuf, StorageError> {
+    pub(crate) fn get_app_data_dir() -> Result<PathBuf, StorageError> {
         #[cfg(windows)]
         {
             std::env::var("APPDATA")

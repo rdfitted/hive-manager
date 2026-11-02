@@ -17,6 +17,7 @@ pub mod transport;
 pub mod domain;
 pub mod events;
 mod http;
+mod instance;
 mod judgment;
 pub mod orchestrator;
 mod preview;
@@ -83,6 +84,7 @@ use events::EventBus;
 #[cfg(not(test))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    instance::bootstrap();
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
@@ -102,7 +104,11 @@ pub fn run() {
             .expect("Failed to initialize application_state db"),
     );
 
-    let config = storage.load_config().expect("Failed to load config");
+    let mut config = storage.load_config().expect("Failed to load config");
+    if let Some(settings) = instance::settings() {
+        config.api.enabled = true;
+        config.api.port = settings.port;
+    }
     let pty_replay_buffer_bytes = config.pty_replay_buffer_bytes;
     let shared_config = Arc::new(tokio::sync::RwLock::new(config));
     let event_bus = EventBus::new(storage.base_dir().clone());
@@ -162,6 +168,17 @@ pub fn run() {
     // Unified action registry — the single registration point shared by the
     // Tauri #[command] wrappers (caller=Frontend) and the HTTP layer (caller=Http).
     let action_registry: Arc<ActionRegistry> = Arc::new(crate::actions::build_registry());
+
+    let mut context = tauri::generate_context!();
+    if let Some(settings) = instance::settings() {
+        for window in &mut context.config_mut().app.windows {
+            window.data_directory = Some(settings.root.join("webview"));
+            window.focus = false;
+            window.skip_taskbar = true;
+            window.x = Some(-20000.0);
+            window.y = Some(-20000.0);
+        }
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -435,6 +452,9 @@ pub fn run() {
                     tracing::info!("Starting HTTP API on port {}", port);
                     if let Err(e) = http::serve(http_state, port).await {
                         tracing::error!("HTTP server error: {}", e);
+                        if instance::is_isolated() {
+                            std::process::exit(78);
+                        }
                     }
                 }
             });
@@ -714,7 +734,7 @@ pub fn run() {
             get_run_journal,
             list_session_files,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
