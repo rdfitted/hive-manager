@@ -396,6 +396,8 @@
       {@const showAttention = pane.kind === 'agent' && (attentionVisible(pane.agent, $heartbeatStore.staleAgents,
         workStateFor(pane.agent, $heartbeatStore.agents[pane.id]), { chatAvailable: chatEligible, eventAttention, feedError })
         || !!$flushState[flushKey(session.id, pane.id)])}
+      {@const gridAttention = !focusMode && visible && showAttention && pane.kind === 'agent'
+        && (chatEligible || startupExitCode(pane.agent) !== null || !!$flushState[flushKey(session.id, pane.id)])}
       <!-- Container click is a convenience; the dedicated header button carries
            accessible focus semantics without wrapping the terminal or other controls. -->
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
@@ -485,8 +487,8 @@
               onOpen={chatEligible ? () => { paneModes[pane.id] = hasTerminal ? 'terminal' : 'raw'; } : undefined} />
           </div>
         {/if}
-        <div class="terminal-container">
-          {#if !focusMode && visible && showAttention && pane.kind === 'agent' && (chatEligible || startupExitCode(pane.agent) !== null)}
+        <div class="terminal-container" class:non-chat-attention={gridAttention && !chatEligible && hasTerminal}>
+          {#if gridAttention && pane.kind === 'agent'}
             <div class="agent-info">
               <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} {flushState} chatAvailable={chatEligible}
                 {eventAttention} {feedError}
@@ -743,6 +745,16 @@
   }
 
   .terminal-layer, .chat-layer { grid-area: 1 / 1; min-width: 0; min-height: 0; }
+  /* Non-chat PTYs have no composer: reserve notice height above their live output. */
+  .terminal-container.non-chat-attention {
+    grid-template-rows: minmax(0, min(7rem, 35%)) minmax(0, 1fr);
+  }
+  .non-chat-attention > .agent-info {
+    grid-area: 1 / 1;
+    align-self: stretch;
+    max-height: none;
+  }
+  .non-chat-attention > .terminal-layer { grid-area: 2 / 1; }
   /* Keep xterm's initial fit measurable and move its native drop rectangle offscreen. */
   .terminal-layer.chat-hidden { visibility: hidden; pointer-events: none; transform: translateX(-200vw); }
   .chat-layer.pane-hidden { visibility: hidden; pointer-events: none; }

@@ -6,7 +6,7 @@ import type { AgentEventsState } from '$lib/stores/agentEvents';
 
 const fixture = vi.hoisted(() => ({
   terminals: [] as { buffer: string; disposed: boolean; textarea: HTMLTextAreaElement; keyHandler: (event: KeyboardEvent) => boolean }[],
-  webglCreated: 0, webglDisposed: 0, focuses: 0,
+  webglCreated: 0, webglDisposed: 0, terminalsDisposed: 0, focuses: 0,
   setAgentEvents: null as ((value: AgentEventsState) => void) | null,
   invoke: vi.fn(async (command: string, args: { id: string }) => command === 'get_pty_snapshot'
     ? { id: args.id, offset_start: 0, offset_end: 17, data: btoa('fixture scrollback') } : undefined),
@@ -32,7 +32,7 @@ vi.mock('@xterm/xterm', () => ({ Terminal: class {
   attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) { this.keyHandler = handler; }
   getSelection() { return ''; }
   scrollToBottom() {}
-  dispose() { this.disposed = true; }
+  dispose() { this.disposed = true; fixture.terminalsDisposed++; }
 } }));
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } } }));
 vi.mock('@xterm/addon-search', () => ({ SearchAddon: class { onDidChangeResults() { return { dispose() {} }; } clearDecorations() {} } }));
@@ -75,7 +75,7 @@ import { layout } from '$lib/stores/layout';
 const { readFileSync } = await vi.importActual<{ readFileSync(path: string, encoding: 'utf8'): string }>('node:fs');
 
 beforeEach(() => {
-  fixture.terminals.length = 0; fixture.webglCreated = 0; fixture.webglDisposed = 0; fixture.focuses = 0;
+  fixture.terminals.length = 0; fixture.webglCreated = 0; fixture.webglDisposed = 0; fixture.terminalsDisposed = 0; fixture.focuses = 0;
   localStorage.clear(); layout.setMaximizedTerminalId(null);
   publishFeed();
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
@@ -97,6 +97,89 @@ const session: Session = {
 };
 
 describe('attention across pane modes (real Terminal, renderer doubles)', () => {
+  it.each(['receipt', 'error'] as const)('CR-9: non-chat PTY retains pending and %s in Grid without granting Flush', async (result) => {
+    layout.setSessionViewMode('focus');
+    let resolve!: (response: unknown) => void;
+    let reject!: (reason: Error) => void;
+    const fetcher = vi.fn(() => new Promise((done, fail) => { resolve = done; reject = fail; }));
+    vi.stubGlobal('fetch', fetcher);
+    const waiting = { ...session, agents: session.agents.map((agent) => agent.id === 'codex'
+      ? { ...agent, status: { WaitingForInput: 'injected_delivery_failed:fixture' } } : agent) };
+    const view = render(TerminalGrid, { session: waiting, focusedAgentId: 'codex', onSelect: vi.fn() });
+    await waitFor(() => expect(fixture.terminals).toHaveLength(2));
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    const original = [...fixture.terminals];
+    const textareas = original.map((term) => term.textarea);
+    const pane = view.getByText('Codex PTY', { selector: '.role-label' }).closest('.terminal-item') as HTMLElement;
+    const terminalLayer = pane.querySelector('.terminal-layer');
+    const other = view.getByText('Claude agent', { selector: '.role-label' }).closest('.terminal-item')!;
+    await fireEvent.click(within(pane).getByRole('button', { name: 'Flush Enter' }));
+    layout.setSessionViewMode('grid'); await tick();
+    const pending = within(pane).getByRole('button', { name: /^Flushing/ }) as HTMLButtonElement;
+    expect(pending.disabled, 'CR-9: retained pending Flush must be accessible in non-chat Grid').toBe(true);
+    expect(pane.querySelector('.terminal-container')?.classList.contains('non-chat-attention')).toBe(true);
+    // Explicit view switches focus the selected non-chat PTY by its existing
+    // layout contract. Receipt and attention updates must not focus it again.
+    let focusesAfterLayout = fixture.focuses;
+    await fireEvent.click(pending);
+    expect(fetcher).toHaveBeenCalledOnce();
+    const message = result === 'receipt' ? 'Enter may not have landed. Check the terminal.' : 'Error: fixture Flush failed';
+    if (result === 'receipt') resolve({ ok: true, text: async () => '{"submit_confirmed":false,"target":"codex"}' });
+    else reject(new Error('fixture Flush failed'));
+    await waitFor(() => expect(within(pane).getByText(message)).toBeTruthy());
+    expect(fixture.focuses, 'settling Flush must not steal focus').toBe(focusesAfterLayout);
+    if (result === 'receipt') {
+      await fireEvent.click(within(pane).getByText('Details'));
+      expect(within(pane).getByLabelText('Inject receipt').textContent).toContain('"target":"codex"');
+    }
+    // A retained result must never become permission to Flush after eligibility clears.
+    for (const control of [
+      { status: 'Running' as const },
+      { status: 'Running' as const, work_state: 'finished' as const },
+      { status: { Error: 'fixture agent failure' } },
+      { status: { Error: 'exited_during_startup:7' } },
+    ]) {
+      const controlled = { ...session, agents: session.agents.map((agent) => agent.id === 'codex' ? { ...agent, ...control } : agent) };
+      await view.rerender({ session: controlled });
+      expect(fixture.focuses, 'attention changes must not steal focus').toBe(focusesAfterLayout);
+      for (const mode of ['focus', 'grid'] as const) {
+        layout.setSessionViewMode(mode); await tick();
+        focusesAfterLayout = fixture.focuses;
+        expect(pane.querySelector('.terminal-container')?.classList.contains('non-chat-attention')).toBe(mode === 'grid');
+        expect(within(pane).getByText(message)).toBeTruthy();
+        expect(within(pane).queryByRole('button', { name: 'Flush Enter' })).toBeNull();
+        expect(other.textContent).not.toContain(message);
+        expect(pane.querySelector('.terminal-layer')).toBe(terminalLayer);
+        original.forEach((term, index) => {
+          expect(fixture.terminals[index]).toBe(term);
+          expect(term.textarea).toBe(textareas[index]);
+          expect(term.disposed).toBe(false);
+        });
+        expect(fixture.terminals).toHaveLength(original.length);
+        expect(fixture.terminalsDisposed).toBe(0);
+      }
+    }
+    await view.rerender({ session: { ...session, id: 'other' } });
+    expect(view.queryByText(message), 'receipts are scoped to the session').toBeNull();
+    await view.rerender({ session });
+    expect(within(pane).getByText(message)).toBeTruthy();
+    if (result === 'receipt') {
+      await fireEvent.click(within(pane).getByRole('button', { name: 'Dismiss Enter receipt' }));
+      expect(within(pane).queryByRole('region', { name: 'Agent needs attention' })).toBeNull();
+      expect(pane.querySelector('.agent-info')).toBeNull();
+      expect(pane.querySelector('.terminal-container')?.classList.contains('non-chat-attention')).toBe(false);
+    }
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fixture.terminalsDisposed).toBe(0);
+    expect(fixture.terminals).toHaveLength(original.length);
+    original.forEach((term, index) => {
+      expect(fixture.terminals[index]).toBe(term);
+      expect(term.textarea).toBe(textareas[index]);
+      expect(term.buffer).toContain('fixture scrollback');
+    });
+    expect(fixture.focuses).toBe(focusesAfterLayout);
+  });
+
   it('CR-4: owns one pending Flush across Grid and Focus and retains the warning', async () => {
     layout.setSessionViewMode('grid');
     let resolve!: (response: unknown) => void;
@@ -139,6 +222,7 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     const original = [...fixture.terminals];
     const composer = pane.querySelector('.chat-composer [role="textbox"]');
     expect(composer).toBeTruthy();
+    expect(content.classList.contains('non-chat-attention'), 'chat panes retain their composer layout').toBe(false);
     expect(content.querySelector('.agent-info'), 'no opaque wrapper or padding without attention').toBeNull();
     expect(pane.querySelector('.terminal-header .activity-line'), 'activity belongs in the existing header').toBeTruthy();
     expect(content.querySelector('.activity-line')).toBeNull();
@@ -147,6 +231,7 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     await view.rerender({ session: waiting });
     const warning = within(pane as HTMLElement).getByRole('region', { name: 'Agent needs attention' });
     expect(warning.closest('.agent-info')).toBeTruthy();
+    expect(content.classList.contains('non-chat-attention')).toBe(false);
     expect(within(warning).getByRole('button', { name: 'Open terminal' })).toBeTruthy();
     for (const next of ['focus', 'grid'] as const) {
       layout.setSessionViewMode(next); await tick();
