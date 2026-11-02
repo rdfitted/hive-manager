@@ -9,8 +9,19 @@ export const manifest = JSON.parse(await readFile(new URL('manifest.json', fixtu
 // Check source text and generated text after replacing the explicitly allowed instance root.
 // Never include the rejected value in diagnostics (it could be a credential).
 export function assertSynthetic(text, { root, userNames = [] } = {}) {
-  let value = root ? text.replaceAll(root, '<instance>').replaceAll(JSON.stringify(root).slice(1, -1), '<instance>') : text;
-  value = value.replaceAll('\\\\', '\\');
+  // Decode JSON strings before checking paths so escaped separators are not mistaken for UNC roots.
+  let decoded = text;
+  try {
+    const strings = [];
+    const collect = value => {
+      if (typeof value === 'string') strings.push(value);
+      else if (Array.isArray(value)) value.forEach(collect);
+      else if (value && typeof value === 'object') Object.entries(value).forEach(([key, item]) => { strings.push(key); collect(item); });
+    };
+    collect(JSON.parse(text));
+    decoded = strings.join('\n');
+  } catch { /* Markdown and journal fragments are plain text. */ }
+  const value = root ? decoded.replaceAll(root, '<instance>') : decoded;
   const forbidden = [
     /\b[a-z]:[\\/]/i, /\/(?:Users|home|mnt|var|tmp)\//i, /\\\\[^\s\\]+\\/,
     /\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b/,
