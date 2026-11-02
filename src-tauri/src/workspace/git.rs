@@ -28,11 +28,13 @@ fn exclude_hive_runtime(worktree_path: &Path) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.to_string()),
     };
-    if !existing.lines().any(|line| line.trim() == "/.hive-manager/") {
+    let missing: Vec<String> = HIVE_WORKTREE_ROOTS.iter().map(|root| format!("/{root}/"))
+        .filter(|pattern| !existing.lines().any(|line| line.trim() == pattern)).collect();
+    if !missing.is_empty() {
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)
             .map_err(|e| e.to_string())?;
         let prefix = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
-        file.write_all(format!("{prefix}/.hive-manager/\n").as_bytes()).map_err(|e| e.to_string())?;
+        file.write_all(format!("{prefix}{}\n", missing.join("\n")).as_bytes()).map_err(|e| e.to_string())?;
     }
     // Closing the file releases the cross-process lock, including on errors.
     Ok(())
@@ -542,14 +544,20 @@ mod tests {
         ensure_worktree_config_boundary(repo, &worktree);
         let text = std::fs::read_to_string(&exclude).unwrap();
         assert!(text.starts_with("# preserve this without trailing newline\n"));
-        assert_eq!(text.matches("/.hive-manager/").count(), 1);
+        for root in HIVE_WORKTREE_ROOTS {
+            assert_eq!(text.matches(&format!("/{root}/")).count(), 1);
+            std::fs::create_dir_all(worktree.join(root)).unwrap();
+            std::fs::write(worktree.join(root).join("runtime.md"), "runtime").unwrap();
+        }
         assert_eq!(std::fs::read_to_string(repo.join(".gitignore")).unwrap(), "project-rule\n");
         std::fs::create_dir_all(worktree.join(".hive-manager/tasks")).unwrap();
         std::fs::write(worktree.join(".hive-manager/tasks/runtime.md"), "runtime").unwrap();
         std::fs::create_dir(worktree.join("logs")).unwrap();
         std::fs::write(worktree.join("logs/project.txt"), "user logs").unwrap();
         let status = run_git(&worktree, &["status", "--porcelain", "--untracked-files=all"]).unwrap();
-        assert!(!status.contains(".hive-manager"), "{status}");
+        for root in HIVE_WORKTREE_ROOTS {
+            assert!(!status.contains(root), "{status}");
+        }
         assert!(status.contains("logs/project.txt"), "project logs must stay visible");
         let main_status = run_git(repo, &["status", "--porcelain", "--untracked-files=all"]).unwrap();
         assert!(!main_status.contains(".hive-manager"), "exclude is common by design");
