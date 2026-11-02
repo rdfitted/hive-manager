@@ -1355,7 +1355,7 @@ impl PtyManager {
     /// Test hook: append synthetic child output to a session's diagnostic ring, so the
     /// post-submit confirmation observer (#256) can be exercised against a stub PTY that
     /// has no real child to produce output.
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub fn record_output_for_test(&self, id: &str, bytes: &[u8]) {
         let sessions = self.sessions.read();
         if let Some(session) = sessions.get(id) {
