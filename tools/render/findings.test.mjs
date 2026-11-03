@@ -4,12 +4,28 @@ import { classifyFinding } from './findings.mjs';
 import { runInNewContext } from 'node:vm';
 import { updaterState } from './updater.mjs';
 import { scrubDiagnostic, failureDiagnostic } from './diagnostics.mjs';
-import { mutationProver, reviewProofNames } from './mutations.mjs';
+import { mutationProver, reviewProofNames, consoleProofMessage } from './mutations.mjs';
 
 const diagnosticOptions = {
   instanceRoot: String.raw`Z:\scratch\instance`, home: '/synthetic-home',
   env: { HOME: '/synthetic-home', USERPROFILE: String.raw`Z:\Users\sample-person`, USERNAME: 'sample-person', HIVE_AGENT_TOKEN: 'synthetic-environment-secret' },
 };
+
+test('console proof marker remains readable while adjacent credentials stay scrubbed', () => {
+  const message = consoleProofMessage('2026-11-03T02-00-00.121Z-5690');
+  const opaque = 'aB12'.repeat(12), credential = 'sk-' + 'c'.repeat(32);
+  const details = [message, opaque, credential];
+  for (const output of [
+    scrubDiagnostic(details, diagnosticOptions),
+    failureDiagnostic({ name: 'mutation-proof', status: 'fail', details: { name: 'no-console-errors', before: { passed: true }, mutant: { passed: false, details }, restored: { passed: true } } }, diagnosticOptions),
+  ]) {
+    assert.ok(output.includes(message), output);
+    assert.equal(output.includes(opaque), false);
+    assert.equal(output.includes(credential), false);
+    assert.match(output, /\[opaque-token\]/);
+    assert.match(output, /\[token\]/);
+  }
+});
 
 test('CI diagnostics scrub instance, home, user paths and credential shapes before bounding', () => {
   const root = diagnosticOptions.instanceRoot;

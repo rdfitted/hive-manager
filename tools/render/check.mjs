@@ -11,7 +11,8 @@ import { acquireGate } from './gate.mjs';
 import { runRenderAssertions, diagnoseReview } from './assertions.mjs';
 import { classifyFinding } from './findings.mjs';
 import { failureDiagnostic } from './diagnostics.mjs';
-import { mutationProver, reviewProofNames } from './mutations.mjs';
+import { mutationProver, reviewProofNames, consoleProofMessage } from './mutations.mjs';
+import { keyboardProofNames } from './keyboard.mjs';
 import { ps, quote, identity, sameProcess, tree, killOwned, liveState, liveUnchanged, desktopState, environment, inside, plainPath, sleep } from './windows.mjs';
 
 if (process.platform !== 'win32') throw new Error('render:check requires Windows WebView2');
@@ -157,7 +158,11 @@ try {
   report.environmentNonVerbatim = Object.values(roots).every(value => !value.startsWith('\\\\?\\'));
   report.profileDirectoryAfterBootstrap = !!(await lstat(path.join(root, 'home/AppData/Local')).catch(() => null));
   if (process.argv.includes('--force-failure')) throw new Error('forced-mid-run-failure');
-  if (process.argv.includes('--diagnose-review')) {
+  if (process.argv.includes('--verify-terminal-input-fix')) {
+    report.phase = 'diagnostic';
+    const { verifyTerminalInputFix } = await import('./terminal-input.mjs');
+    await verifyTerminalInputFix({ page, manifest, report, consoleErrors, assert: assertion });
+  } else if (process.argv.includes('--diagnose-review')) {
     report.phase = 'diagnostic';
     await diagnoseReview({ page, manifest, report, out: captureOut });
   } else {
@@ -170,7 +175,7 @@ try {
   assertion('no-console-errors', consoleErrors.length === 0, [...consoleErrors]);
   if (report.phase === 'render') {
     const prove = mutationProver(report, assertion);
-    const message = `render-mutation-console-${runId}`;
+    const message = consoleProofMessage(runId);
     await prove('no-console-errors', async () => ({ passed: consoleErrors.length === 0, details: [...consoleErrors] }), async () => {
       await page.evaluate(value => console.error(value), message);
       await page.waitForTimeout(100);
@@ -209,7 +214,7 @@ try {
     });
     assertion('network-mutation-both-observers', report.blockedNetworkMutation?.fulfilledInsideDriver && report.blockedNetworkMutation.requests.length > 0 && report.blockedNetworkMutation.resources.length > 0, report.blockedNetworkMutation);
     const required = ['screen-not-empty', 'screenshot-has-pixels', 'version-badge-unobscured', 'grid-eight-panes', 'grid-composer-with-attention', 'grid-composer-without-attention', 'finished-attention-card', 'finished-needs-you-count', 'stalled-attention-card', 'stalled-needs-you-count', 'exited_during_startup-attention-card', 'exited_during_startup-needs-you-count', 'chat-table', 'chat-code', 'chat-literal', 'kanban-fixture-present', 'sidebar-fixture-present', 'viewport-1440', 'viewport-800', 'updater-invoke-rejected', 'all-screens-captured', 'no-live-api-request', 'no-console-errors'];
-    required.push(...reviewProofNames);
+    required.push(...reviewProofNames, ...keyboardProofNames);
     required.push('launch-project-verbatim-prefix');
     assertion('all-required-mutations-proved', required.every(name => report.mutations.some(item => item.name === name && item.passed)), { required, proved: report.mutations.filter(item => item.passed).map(item => item.name) });
   }

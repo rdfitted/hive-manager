@@ -3,6 +3,7 @@ import { pngPixels, badgePaint } from './png.mjs';
 import { mutationProver, styleChange, removeNode, textChange, appendNode, offscreenTarget, emptyContents, duplicateIndicators } from './mutations.mjs';
 import { updaterState, classifyUpdater } from './updater.mjs';
 import { classifyFinding } from './findings.mjs';
+import { pressOutsideTerminal, proveTerminalFocus } from './keyboard.mjs';
 
 const attention = 'section[aria-label="Agent needs attention"]';
 const composer = '.composer-wrap[aria-label="Message composer"]';
@@ -22,8 +23,11 @@ export async function expandAgents(page, session) {
 export async function selectSession(page, session) {
   if (new URL(page.url()).pathname !== '/') await page.getByRole('link', { name: 'Sessions', exact: true }).click();
   const row = page.locator('.session-button').filter({ hasText: session.name }).first();
-  await row.focus();
-  await row.press('Enter');
+  // Enter can reach xterm if terminal startup moves focus between Playwright's
+  // locator focus and key dispatch. Activate the shipped click handler directly.
+  // The row centre can hit its nested Rename button. Timestamp text bubbles to
+  // the row's click handler without activating a nested control.
+  await row.locator('.session-meta').click();
   await expandAgents(page, session);
 }
 export async function viewMode(page, mode) {
@@ -228,7 +232,20 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await probe('launch-project-ordinary-path', projectMeasure, { screen: 'launch', viewport: `${viewport.width}x${viewport.height}` });
     await prove('launch-project-verbatim-prefix', projectMeasure, async () => textChange(projectField, `\\\\?\\${await projectField.textContent()}`), { screen: 'launch' });
     await capture('launch', viewport, page.locator('.launch-inline'), text => text.includes('What would you like to work on?'));
-    await selectSession(page, session);
+    // Hold capabilities only for the focus mutation. This exposes the real
+    // pre-roster xterm mount without changing app source or fixture data.
+    if (!report.mutations.some(item => item.name === 'keyboard-focus-terminal')) {
+      let release;
+      const ready = new Promise(resolve => { release = resolve; });
+      const hold = async route => { await ready; await route.continue().catch(() => {}); };
+      await page.route('**/agent-feeds', hold);
+      try {
+        await selectSession(page, session);
+        const terminal = page.locator('.terminal-panel:not(.hidden) .xterm-helper-textarea').first();
+        await terminal.waitFor({ state: 'attached' });
+        await proveTerminalFocus({ page, target: page.locator('.session-button').filter({ hasText: session.name }).first(), terminal, prove });
+      } finally { release(); await page.unroute('**/agent-feeds', hold); }
+    } else await selectSession(page, session);
     await viewMode(page, 'Focus');
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(manifest.screens.focus.agentId)}]`).click();
     const focused = paneFor(page, normal);
@@ -288,7 +305,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await page.locator(`.file-review[aria-label=${JSON.stringify(manifest.screens.review.file)}]`).waitFor();
     await capture('review', viewport, page.locator('.review-view'), text => text.includes(manifest.screens.review.file));
     if (!manifest.screens.dialog.action.includes('Keyboard Shortcuts')) throw new Error('Manifest dialog does not name the shipped Keyboard Shortcuts dialog');
-    await page.keyboard.press('Control+/');
+    await pressOutsideTerminal(page, page.getByRole('link', { name: 'Sessions', exact: true }), 'Control+/', assert);
     const dialog = page.getByRole('dialog', { name: 'Keyboard shortcuts', exact: true });
     await dialog.waitFor();
     await capture('dialog', viewport, dialog, text => text.includes('Keyboard Shortcuts'));

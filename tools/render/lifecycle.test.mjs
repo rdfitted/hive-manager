@@ -2,6 +2,47 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pendingRequests } from './gate.mjs';
 import { sameProcess, inside, liveUnchanged } from './windows.mjs';
+import { JSDOM } from 'jsdom';
+import { runInContext } from 'node:vm';
+import { pressOutsideTerminal } from './keyboard.mjs';
+
+test('keyboard guard fails by name and blocks terminal input when focus changes before or during dispatch', async () => {
+  for (const phase of ['safe', 'before', 'dispatch']) {
+    const dom = new JSDOM('<button>Target</button><div class="xterm"><textarea class="xterm-helper-textarea"></textarea></div>', { runScripts: 'outside-only' });
+    const context = dom.getInternalVMContext(), target = dom.window.document.querySelector('button'), terminal = dom.window.document.querySelector('textarea');
+    let writes = 0, presses = 0, disposed = false;
+    terminal.addEventListener('keydown', () => writes++);
+    const evaluate = (fn, value, arg) => {
+      dom.window.guardValue = value; dom.window.guardArg = arg;
+      return runInContext(`(${fn.toString()})(guardValue, guardArg)`, context);
+    };
+    const locator = {
+      focus: async () => (phase === 'before' ? terminal : target).focus(),
+      evaluateHandle: async fn => {
+        const value = evaluate(fn, target);
+        return { evaluate: async (callback, arg) => evaluate(callback, value, arg), dispose: async () => { disposed = true; } };
+      },
+    };
+    const page = { keyboard: { press: async () => {
+      presses++;
+      if (phase === 'dispatch') terminal.focus();
+      dom.window.document.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    } } };
+    const rows = [];
+    try {
+      const action = () => pressOutsideTerminal(page, locator, 'Enter', (name, passed) => rows.push({ name, passed }));
+      if (phase === 'safe') await action();
+      else await assert.rejects(action, new RegExp(phase === 'before' ? 'keyboard-focus-outside-terminal' : 'keyboard-target-outside-terminal'));
+      assert.equal(writes, 0, phase);
+      assert.equal(presses, phase === 'before' ? 0 : 1);
+      assert.equal(rows.every(row => row.passed), phase === 'safe');
+      assert.equal(disposed, true);
+      // A failed driver key must not leave a listener suppressing later app input.
+      terminal.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      assert.equal(writes, 1);
+    } finally { dom.window.close(); }
+  }
+});
 test('FIFO honors older lanes and supports existing release-time rows', () => {
   assert.deepEqual(pendingRequests('REQUEST a t1\nREQUEST b t2\nRELEASE a t3\n'), [{ lane: 'b', stamp: 't2' }]);
   assert.deepEqual(pendingRequests('REQUEST a t1\nREQUEST a t2\nRELEASE a t2\n'), [{ lane: 'a', stamp: 't1' }]);

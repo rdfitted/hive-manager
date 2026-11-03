@@ -108,6 +108,7 @@ means every assertion was accepted, including explicitly recorded known findings
 | Kanban and sidebar | Named synthetic cards and sidebar entries are present. |
 | Updater | The actual updater IPC invocation rejects with the specific omitted-plugin error in isolated mode. |
 | Network and console | No observed request/resource uses live port 18800; no browser console error or page error occurs during observation. |
+| Keyboard input | Session activation clicks the row's timestamp text. The dialog shortcut deliberately focuses the Sessions link; both active-element and capture-phase key-target checks reject terminal input. Real-xterm focus and dispatch mutations fail by name and restore. |
 | Mutation coverage | Every required named render proof has before/mutant/restored evidence; both network observers detect a locally fulfilled synthetic request. |
 | Cleanup and live app | No owned process/profile remains; live health, PID, executable and start identity are unchanged, or port 18800 remains unused when no live app exists. |
 | Desktop | Input desktop remains unchanged; foreground identity is compared only when observable. |
@@ -195,6 +196,22 @@ diffing. Presence of Review content does not exercise a real delivery. The netwo
 checks cover the observed webview requests, not a general network sandbox.
 
 ## Troubleshooting
+
+To verify the terminal-focus race fix, run
+`npm run render:check -- --verify-terminal-input-fix`. This diagnostic holds the
+real agent-feed roster response to expose the transient xterm mount, schedules a
+terminal focus change during session activation, and runs the driver's click and
+guarded shortcut paths. It must open Keyboard Shortcuts with no console error or
+focus-guard failure, then pass the usual cleanup and live-app checks. It does not
+replace a complete render run.
+
+An isolated WebView reproduction showed that the old session-row Enter could
+reach xterm after a scheduled focus change and produce the exact disabled
+`pty.write` console error. Focused Ctrl+/ opened the overlay without writing in
+that reproduction. This proves a possible Enter race; the original hosted
+failure's event trace was unavailable. The driver now avoids session-row Enter.
+The console proof marker uses a delimiter before the run ID so it stays readable
+under the unchanged credential scrubber.
 
 - **No CDP listener with a renderer running:** WebView2 failed to open its listener
   when `USERPROFILE\AppData\Local` was missing below the re-rooted home. Bootstrap
