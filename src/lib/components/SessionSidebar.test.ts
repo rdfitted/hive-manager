@@ -312,11 +312,22 @@ describe('sidebar project grouping and header navigation', () => {
   it('groups by full project_path and keeps sessions in the correct project', () => {
     load([session('A1', 'D:/one/project'), session('B1', 'D:/two/project'), session('A2', 'D:/one/project')]);
     const view = render(SessionSidebar);
-    expect(view.getAllByRole('heading', { level: 4 }).map((heading) => heading.textContent)).toEqual(['D:/one/project', 'D:/two/project']);
+    const headings = view.getAllByRole('heading', { level: 4 });
+    expect(headings.map(heading => heading.textContent)).toEqual(['project', 'project']);
+    expect(headings.map(heading => heading.title)).toEqual(['D:/one/project', 'D:/two/project']);
     const one = within(view.getByRole('list', { name: 'Sessions in D:/one/project' }));
     expect(one.getByText('A1')).toBeTruthy(); expect(one.getByText('A2')).toBeTruthy();
     expect(one.queryByText('B1')).toBeNull();
     expect(within(view.getByRole('list', { name: 'Sessions in D:/two/project' })).getByText('B1')).toBeTruthy();
+  });
+
+  it('shows only the folder name for Windows paths while preserving the full hover path', () => {
+    const path = 'D:\\workspace\\cedar\\';
+    load([session('Cedar', path), session('Other', 'D:/other')]);
+    const view = render(SessionSidebar);
+    const heading = view.getByRole('heading', { level: 4, name: 'cedar' });
+    expect(heading.title).toBe(path);
+    expect(within(view.getByRole('list', { name: 'Sessions in ' + path })).getByText('Cedar')).toBeTruthy();
   });
 
   it('keeps one project flat and excludes inactive sessions in other projects', () => {

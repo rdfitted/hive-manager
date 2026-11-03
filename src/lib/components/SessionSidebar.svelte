@@ -202,6 +202,10 @@
     return true;
   }
 
+  function projectFolder(path: string): string {
+    return path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
+  }
+
   function selectSession(sessionId: string) {
     launch.close();
     sessions.setActiveSession(sessionId);
@@ -405,7 +409,7 @@
           {#each projectGroups as group (group.path)}
           <div class="project-group">
           {#if projectGroups.length > 1}
-            <h4 class="project-heading" title={group.path}>{group.path}</h4>
+            <h4 class="project-heading" title={group.path}>{projectFolder(group.path)}</h4>
           {/if}
           <ul class="session-list" aria-label={projectGroups.length > 1 ? `Sessions in ${group.path}` : 'Active sessions'}>
             {#each group.items as session (session.id)}
@@ -479,7 +483,7 @@
                     {:else}
                       <span class="session-path">
                         {#if session.color}<span class="session-color" style:background={session.color} aria-hidden="true"></span>{/if}
-                        {sessionDisplayName(session)}
+                        <span class="session-name" title={sessionDisplayName(session)}>{sessionDisplayName(session)}</span>
                         <button
                           class="lattice-btn lattice-btn--ghost lattice-btn--icon"
                           onclick={(e) => { e.stopPropagation(); startEdit(session); }}
@@ -500,7 +504,7 @@
                     </div>
                   </div>
                   {#if attentionAgents.length > 0}
-                    <button type="button" class="lattice-btn lattice-btn--secondary"
+                    <button type="button" class="session-attention lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--chip"
                       aria-label={`${attentionAgents.length} need attention in ${session.name || session.id}`}
                       onclick={() => { selectSession(session.id); handleAgentSelect(new CustomEvent('select', { detail: attentionAgents[0].id })); }}
                     >{attentionAgents.length} need you</button>
@@ -819,6 +823,37 @@
     display: flex;
     align-items: stretch;
     gap: 6px;
+  }
+
+  .session-button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .session-attention {
+    align-self: center;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .session-row .session-path {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    width: 100%;
+    min-width: 0;
+  }
+
+  .session-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .session-row .session-path > button {
+    flex-shrink: 0;
   }
 
   .session-path {
