@@ -21,6 +21,7 @@ use crate::orchestrator::work_graph::knowledge_ack::{
     append_knowledge_ack, is_valid_knowledge_ack_tag,
 };
 use crate::orchestrator::work_graph::{BindingRef, NodeStatus};
+use crate::storage::queue::{QueueHeartbeatResult, QueueReassignment, QueueReassignmentError, QueueStatus};
 
 use super::workers::ExecutedAs;
 
@@ -561,49 +562,33 @@ pub async fn post_heartbeat(
         }).await.map_err(ApiError::internal)?;
     }
 
-    // A supplied assignment identity is an exact durable fence. Check it before
-    // mutating controller liveness so a stale worker cannot report a completion
-    // that the queue rejected. Assignment-free callers remain fail-open below:
-    // the Queen has no queue row, and legacy worker prompts omit this field.
-    if let Some(assignment_id) = req.assignment_id {
-        let recorded = state
-            .queue_manager
-            .record_heartbeat_for_assignment(
-                &session_id,
-                &agent_id,
-                Some(assignment_id),
-                &req.status,
-            )
-            .await
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-        if !recorded {
+    // Exact IDs never fall back. Legacy row-less callers remain valid, but durable
+    // reassignment history must reject an old owner before controller liveness changes.
+    let recorded = state.queue_manager.record_heartbeat_checked(
+        &session_id, &agent_id, req.assignment_id, &req.status,
+    ).await.map_err(|error| ApiError::internal(error.to_string()))?;
+    match recorded {
+        QueueHeartbeatResult::Superseded => return Err(ApiError::new(
+            StatusCode::CONFLICT, "Agent's queue assignment has been reassigned")),
+        QueueHeartbeatResult::NoAssignment if req.assignment_id.is_some() => {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
                 format!(
                     "Assignment {} is stale or does not belong to agent {}",
-                    assignment_id, agent_id
+                    req.assignment_id.unwrap(), agent_id
                 ),
             ));
         }
+        _ => {}
     }
 
-    // Scope the (non-Send) parking_lot guard so it is dropped before the no-ID await below.
+    // Scope the non-Send controller guard before subsequent event publication.
     {
         let controller = state.session_controller.read();
         controller
             .update_heartbeat_with_source(&session_id, &agent_id, &req.status,
                 req.summary.as_deref(), req.mark_agent_id.is_some())
             .map_err(ApiError::internal)?;
-    }
-
-    // #126: without an explicit fence, retain the legacy deterministic fallback.
-    // A caller with no matching queue row (notably the Queen) is intentionally a no-op.
-    if req.assignment_id.is_none() {
-        state
-            .queue_manager
-            .record_heartbeat_for_assignment(&session_id, &agent_id, None, &req.status)
-            .await
-            .map_err(|e| ApiError::internal(e.to_string()))?;
     }
 
     if !completed_nodes.is_empty() {
@@ -719,8 +704,7 @@ fn prior_finished_nodes(
         .filter_map(|outcome| outcome.task_id).collect()))
 }
 
-/// Rebind incomplete, row-less work. Queue-backed transfers require their assignment lifecycle,
-/// rather than silently retaining an old worker's durable fence.
+/// Rebind incomplete work and transfer active queue assignments with fresh durable fences.
 async fn reassign_nodes(
     state: &AppState,
     session_id: &str,
@@ -820,6 +804,7 @@ async fn reassign_nodes_with_persistence(
     let manager = StateManager::new(state.storage.session_dir(session_id));
     let mut composition = manager.read_graph_composition_state()
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    let original_composition = composition.clone();
     let original = manager.read_work_graph().map_err(|error| ApiError::internal(error.to_string()))?;
     let mut graph = composition.as_ref().map(|value| value.graph.clone()).or_else(|| original.clone())
         .ok_or_else(|| ApiError::not_found("No work graph to reassign"))?;
@@ -833,6 +818,7 @@ async fn reassign_nodes_with_persistence(
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
     let mut seen = BTreeSet::new();
     let mut changes = Vec::new();
+    let mut transfers = Vec::new();
     // Validate the whole set before touching either graph representation or the audit log.
     for request in requests {
         validate_agent_id(&request.agent_id)?;
@@ -846,9 +832,11 @@ async fn reassign_nodes_with_persistence(
         {
             return Err(ApiError::new(StatusCode::CONFLICT, "Reassignment does not reopen completed work"));
         }
-        if rows.iter().any(|row| row.task_id.as_deref() == Some(node.id.as_str())) {
-            return Err(ApiError::new(StatusCode::CONFLICT,
-                "Queue-backed reassignment must transfer its durable assignment before rebinding"));
+        for row in rows.iter().filter(|row| row.task_id.as_deref() == Some(node.id.as_str())) {
+            if !matches!(row.status, QueueStatus::Queued | QueueStatus::Running) {
+                return Err(ApiError::new(StatusCode::CONFLICT,
+                    format!("Queue-backed reassignment rejects {} rows", row.status.as_tag())));
+            }
         }
         let target_id = if roster.agents.iter().any(|agent| agent.id == request.agent_id) {
             request.agent_id.clone()
@@ -863,6 +851,18 @@ async fn reassign_nodes_with_persistence(
             .filter(|principal| !principal.is_empty())
             .ok_or_else(|| ApiError::bad_request("Reassignment target has no current principal binding"))?;
         let previous = node.binding.clone();
+        let previous_principal = match &previous {
+            BindingRef::Role(principal) | BindingRef::Zone(principal) => principal.trim(),
+        };
+        for row in rows.iter().filter(|row| row.task_id.as_deref() == Some(node.id.as_str())) {
+            let mut transfer = QueueReassignment::new(row.clone(), target_id.clone());
+            // A never-claimed queued row has only pending:<id> identities. Its prior
+            // graph principal still needs a durable legacy-heartbeat fence.
+            transfer.retired_worker_ids = hierarchy.iter().filter(|agent|
+                agent.principal.as_deref().map(str::trim) == Some(previous_principal))
+                .map(|agent| agent.id.clone()).collect();
+            transfers.push(transfer);
+        }
         node.binding = match &previous {
             BindingRef::Role(_) => BindingRef::Role(principal.to_string()),
             BindingRef::Zone(_) => BindingRef::Zone(principal.to_string()),
@@ -876,21 +876,36 @@ async fn reassign_nodes_with_persistence(
         timestamp: chrono::Utc::now(), severity: Severity::Info,
         payload: serde_json::json!({"kind": "node_reassignment_requested", "actor_agent_id": caller_id, "changes": changes}),
     }).await.map_err(ApiError::internal)?;
-    if let Err(error) = manager.write_work_graph(&graph) {
-        audit_reassignment_outcome(state, persistence, session_id, caller_id, &changes, false, true).await;
-        return Err(ApiError::internal(error.to_string()));
-    }
     if let Some(composition) = composition.as_mut() {
-        composition.graph = graph;
-        if let Err(error) = persistence.write_composition(&manager, composition) {
-            let rollback = persistence.restore_graph(&manager,
+        composition.graph = graph.clone();
+    }
+    let result = state.queue_manager.reassign_with_preparation(session_id, &transfers,
+        || {
+            manager.write_work_graph(&graph).map_err(|error| error.to_string())?;
+            if let Some(composition) = composition.as_ref() {
+                persistence.write_composition(&manager, composition)?;
+            }
+            Ok(())
+        },
+        || {
+            let standalone = persistence.restore_graph(&manager,
                 &state.storage.session_dir(session_id).join("state/work-graph.json"), original.as_ref());
-            audit_reassignment_outcome(state, persistence, session_id, caller_id, &changes, false, rollback.is_ok()).await;
-            return Err(ApiError::internal(match rollback {
-                Ok(()) => format!("Reassignment failed: {error}; graph rolled back"),
-                Err(rollback) => format!("Reassignment failed: {error}; graph rollback failed: {rollback}"),
-            }));
-        }
+            let composed = original_composition.as_ref().map(|composition|
+                manager.write_graph_composition_state(composition).map_err(|error| error.to_string()))
+                .unwrap_or(Ok(()));
+            match (standalone, composed) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                (Err(first), Err(second)) => Err(format!("{first}; {second}")),
+            }
+        });
+    if let Err(error) = result {
+        let rolled_back = !matches!(&error, QueueReassignmentError::Persistence { rolled_back: false, .. });
+        audit_reassignment_outcome(state, persistence, session_id, caller_id, &changes, false, rolled_back).await;
+        let status = if matches!(&error, QueueReassignmentError::Conflict(_)) {
+            StatusCode::CONFLICT
+        } else { StatusCode::INTERNAL_SERVER_ERROR };
+        return Err(ApiError::new(status, error.to_string()));
     }
     audit_reassignment_outcome(state, persistence, session_id, caller_id, &changes, true, false).await;
     Ok(())
@@ -2358,22 +2373,154 @@ test "$with_header" = 200 && test "$without_header" = 200 && test "$wrong_token"
     }
 
 
-    #[tokio::test]
-    async fn queen_queue_backed_reassignment_is_explicit_conflict_without_mutation() {
+    fn queue_reassignment_fixture(status: QueueStatus) -> (HeartbeatFixture, StateManager, String) {
         let fixture = fixture();
-        fixture.state.queue_manager.repo().enqueue(&running_row()).unwrap();
+        let mut row = running_row();
+        row.status = status;
+        fixture.state.queue_manager.repo().enqueue(&row).unwrap();
         let manager = write_graph_and_worker_principal(&fixture,
             TaskGraph::new(vec![work_node("T-review-3", "P3")], Vec::new()), Some("P3"));
-        let before = manager.read_work_graph().unwrap();
+        let new_id = format!("{SESSION_ID}-worker-2");
+        manager.update_hierarchy(&[
+            HierarchyNode { id: WORKER_ID.into(), role: "Worker-1".into(), principal: Some("P3".into()),
+                parent_id: Some(QUEEN_ID.into()), children: vec![] },
+            HierarchyNode { id: new_id.clone(), role: "Worker-2".into(), principal: Some("P1".into()),
+                parent_id: Some(QUEEN_ID.into()), children: vec![] },
+        ]).unwrap();
+        let controller = fixture.state.session_controller.read();
+        let mut session = controller.get_session(SESSION_ID).unwrap();
+        session.agents.push(agent(&new_id, AgentRole::Worker { index: 2, parent: Some(QUEEN_ID.into()) }, Some(QUEEN_ID)));
+        controller.insert_test_session(session);
+        drop(controller);
+        (fixture, manager, new_id)
+    }
+
+    async fn transfer_queue_node(fixture: &HeartbeatFixture, target: &str)
+        -> Result<(StatusCode, Json<PostHeartbeatResponse>), ApiError>
+    {
         let mut request = auth_request(QUEEN_ID, "working");
-        request.reassign_nodes.push(NodeReassignment { node_id: "T-review-3".to_string(), agent_id: WORKER_ID.to_string() });
-        let result = post_heartbeat(State(Arc::clone(&fixture.state)), Path(SESSION_ID.to_string()),
-            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await;
-        let error = result.err().expect("queue-backed transfer must retain its assignment fence");
+        request.reassign_nodes.push(NodeReassignment { node_id: "T-review-3".into(), agent_id: target.into() });
+        post_heartbeat(State(fixture.state.clone()), Path(SESSION_ID.into()),
+            authenticated_headers(&fixture.state, QUEEN_ID), Json(request)).await
+    }
+
+    #[tokio::test]
+    async fn queen_queue_backed_reassignment_accepts_new_principal_and_fences_old_reports() {
+        for status in [QueueStatus::Queued, QueueStatus::Running] {
+            for explicit in [false, true] {
+                let (fixture, manager, new_id) = queue_reassignment_fixture(status);
+                let before = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
+                let _ = expect_success(transfer_queue_node(&fixture, &new_id).await, "queue-backed transfer");
+                let transferred = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
+                assert_eq!(transferred.worker_id, new_id);
+                assert_eq!(transferred.status, QueueStatus::Running);
+                assert_eq!(transferred.attempts, before.attempts + 1, "transfer invalidates the spawn epoch");
+                assert!(transferred.assignment_id > before.assignment_id, "transfer mints an assignment identity");
+                assert_eq!(manager.read_work_graph().unwrap().unwrap().nodes[0].binding, BindingRef::Role("P1".into()));
+                let stale_new = heartbeat(fixture.state.clone(), &new_id, "completed", Some(before.assignment_id))
+                    .await.err().expect("new principal still needs its current assignment identity");
+                assert_eq!(stale_new.status, StatusCode::CONFLICT);
+                for assignment in [None, Some(before.assignment_id), Some(transferred.assignment_id)] {
+                    for stale_status in ["working", "completed"] {
+                        let error = heartbeat(fixture.state.clone(), WORKER_ID, stale_status, assignment)
+                            .await.err().expect("old report must be rejected even without completed_nodes");
+                        assert_eq!(error.status, StatusCode::CONFLICT, "old owner cannot reach legacy fallback");
+                        assert_eq!(fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap(), transferred);
+                        assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+                        assert!(manager.read_node_completion_facts().unwrap().is_empty());
+                    }
+                }
+                let _ = expect_success(heartbeat_with_completed_nodes(fixture.state.clone(), &new_id,
+                    "completed", explicit.then_some(transferred.assignment_id), &["T-review-3"]).await,
+                    "new principal completes transferred node");
+                assert_eq!(fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap().status, QueueStatus::Finalized);
+                assert!(manager.read_node_completion_facts().unwrap().iter().all(|fact| fact.agent_id == new_id));
+                let kinds: Vec<_> = security_events(&fixture).into_iter().filter_map(|event|
+                    event["payload"]["kind"].as_str().filter(|kind| kind.starts_with("node_reassignment_"))
+                        .map(str::to_string)).collect();
+                assert_eq!(kinds, ["node_reassignment_requested", "node_reassignment_applied"]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn queen_queue_backed_reassignment_is_explicit_conflict_without_mutation() {
+        for status in [QueueStatus::Finalized, QueueStatus::Failed, QueueStatus::Blocked] {
+            let (fixture, manager, new_id) = queue_reassignment_fixture(status);
+            let graph = manager.read_work_graph().unwrap();
+            let row = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap();
+            let error = transfer_queue_node(&fixture, &new_id).await.err().expect("terminal row cannot transfer");
+            assert_eq!(error.status, StatusCode::CONFLICT);
+            assert!(error.message.contains(status.as_tag()));
+            assert_eq!(manager.read_work_graph().unwrap(), graph);
+            assert_eq!(fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap(), row);
+            assert!(security_events(&fixture).is_empty(), "validation precedes requested audit");
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_reassignment_retires_graph_principal_of_never_claimed_pending_row() {
+        let (fixture, manager, new_id) = queue_reassignment_fixture(QueueStatus::Queued);
+        // Durable enqueue uses a pending sentinel before any worker has claimed the row.
+        fixture.state.app_state_db.with_conn(|conn| {
+            conn.execute("UPDATE agent_run_queue SET worker_id = 'pending:run', spawned_worker_id = 'pending:run'
+                WHERE id = ?1", rusqlite::params![ROW_ID])?;
+            Ok(())
+        }).unwrap();
+        let _ = expect_success(transfer_queue_node(&fixture, &new_id).await, "pending-row transfer");
+        let row = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
+        let error = heartbeat(fixture.state.clone(), WORKER_ID, "completed", None)
+            .await.err().expect("prior graph principal must not reach the legacy fallback");
         assert_eq!(error.status, StatusCode::CONFLICT);
-        assert!(error.message.contains("durable assignment"));
-        assert_eq!(manager.read_work_graph().unwrap(), before);
+        assert_eq!(fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap(), row);
+        assert!(manager.read_node_completion_facts().unwrap().is_empty());
+        let _ = expect_success(heartbeat_with_completed_nodes(fixture.state.clone(), &new_id,
+            "completed", Some(row.assignment_id), &["T-review-3"]).await, "pending-row new owner completion");
+    }
+
+    #[tokio::test]
+    async fn queue_reassignment_old_principal_cannot_use_new_assignment_id() {
+        let (fixture, _, new_id) = queue_reassignment_fixture(QueueStatus::Running);
+        let _ = expect_success(transfer_queue_node(&fixture, &new_id).await, "transfer");
+        let row = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
+        let error = heartbeat(fixture.state.clone(), WORKER_ID, "completed", Some(row.assignment_id))
+            .await.err().expect("new assignment ID alone cannot authorize the old principal");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap(), row);
         assert!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).is_empty());
+    }
+
+    #[tokio::test]
+    async fn queue_reassignment_failed_commit_restores_both_graphs_and_queue() {
+        let (fixture, manager, new_id) = queue_reassignment_fixture(QueueStatus::Running);
+        let composition = serde_json::from_value::<crate::orchestrator::work_graph::runtime::GraphCompositionState>(serde_json::json!({
+            "graph": manager.read_work_graph().unwrap().unwrap(),
+            "codegraph": {"available": false, "touches": {}, "unresolved_task_ids": [], "module_node_count": 0, "touch_edge_count": 0},
+            "context": {"gotchas": [], "hub_lints": [], "source_fingerprints": [], "knowledge_available": false, "touches_available": false, "knowledge_edge_count": 0},
+            "reviews": crate::orchestrator::work_graph::review::ReviewExpansionSidecar::default(),
+        })).unwrap();
+        manager.write_graph_composition_state(&composition).unwrap();
+        let graph = manager.read_work_graph().unwrap();
+        let row = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap();
+        // A deferred constraint fails COMMIT only after both graph writes succeeded.
+        fixture.state.app_state_db.with_conn(|conn| conn.execute_batch(
+            "CREATE TABLE reassignment_parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE reassignment_probe (parent_id INTEGER REFERENCES reassignment_parent(id)
+                 DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER reject_reassignment AFTER UPDATE OF worker_id ON agent_run_queue
+             BEGIN INSERT INTO reassignment_probe VALUES (1); END;"
+        )).unwrap();
+        let error = transfer_queue_node(&fixture, &new_id).await.err().expect("commit must fail");
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(error.message.contains("FOREIGN KEY"));
+        assert_eq!(fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap(), row);
+        assert_eq!(manager.read_work_graph().unwrap(), graph, "standalone graph rolls back");
+        assert_eq!(manager.read_graph_composition_state().unwrap().unwrap().graph, composition.graph,
+            "composition graph rolls back after a failed queue commit");
+        let kinds: Vec<_> = security_events(&fixture).into_iter().map(|event| event["payload"].clone()).collect();
+        assert_eq!(kinds[0]["kind"], "node_reassignment_requested");
+        assert_eq!(kinds[1]["kind"], "node_reassignment_failed");
+        assert_eq!(kinds[1]["rolled_back"], true);
     }
 
 
@@ -2684,11 +2831,16 @@ test "$with_header" = 200 && test "$without_header" = 200 && test "$wrong_token"
     #[tokio::test]
     async fn reassignment_composition_failure_restores_prior_graph_and_audits_failure() {
         let (fixture, manager) = reassignment_persistence_fixture(true);
+        let mut queue = running_row();
+        queue.task_id = Some("T-transfer".into());
+        fixture.state.queue_manager.repo().enqueue(&queue).unwrap();
         let original = manager.read_work_graph().unwrap();
         let path = fixture.state.storage.session_dir(SESSION_ID).join("state/work-graph-composition.json");
         let before = std::fs::read(&path).unwrap();
         let persistence = ReassignmentPersistence { fail_composition: true, ..Default::default() };
         assert!(run_reassignment(&fixture, &persistence).await.is_err());
+        assert_eq!(fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap(), queue,
+            "composition write failure must roll back the durable queue transfer");
         assert_eq!(manager.read_work_graph().unwrap(), original);
         assert_eq!(std::fs::read(path).unwrap(), before);
         let events = security_events(&fixture);

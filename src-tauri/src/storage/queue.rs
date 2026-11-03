@@ -183,6 +183,43 @@ pub enum SpawnFailureRelease {
     NotHeld,
 }
 
+/// A legacy heartbeat must distinguish an unqueued agent from a superseded owner.
+#[derive(Debug, PartialEq, Eq)]
+pub enum QueueHeartbeatResult {
+    Recorded(String),
+    NoAssignment,
+    Superseded,
+}
+
+/// A graph-authorized transfer, including prior principals of a never-claimed queued row.
+pub struct QueueReassignment {
+    pub expected: QueueRow,
+    pub worker_id: String,
+    pub retired_worker_ids: Vec<String>,
+}
+
+impl QueueReassignment {
+    pub fn new(expected: QueueRow, worker_id: String) -> Self {
+        Self { expected, worker_id, retired_worker_ids: Vec::new() }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum QueueReassignmentError {
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    Storage(#[from] StorageError),
+    #[error("{message}")]
+    Persistence { message: String, rolled_back: bool },
+}
+
+impl From<rusqlite::Error> for QueueReassignmentError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
 /// Create the `agent_run_queue` table (+ indexes) if absent.
 ///
 /// Additive-only and idempotent: safe to call at every startup. The fresh DDL is followed by
@@ -1182,6 +1219,121 @@ impl QueueRepo {
         })
     }
 
+    /// Transfer a validated batch while its graph writes are still reversible.
+    ///
+    /// The caller holds the spawn-reservation mutex. SQLite owns the row changes until both
+    /// synchronous graph writes succeed; restoration runs before releasing the DB mutex.
+    /// This provides error rollback, not crash atomicity across the database and graph files.
+    pub fn reassign_with_preparation<F, R>(
+        &self,
+        session_id: &str,
+        transfers: &[QueueReassignment],
+        now_ms: i64,
+        prepare: F,
+        restore: R,
+    ) -> Result<(), QueueReassignmentError>
+    where
+        F: FnOnce() -> Result<(), String>,
+        R: FnOnce() -> Result<(), String>,
+    {
+        let handle = self.db.handle();
+        let conn = handle.lock();
+        let tx = conn.unchecked_transaction()?;
+        for transfer in transfers {
+            let expected = &transfer.expected;
+            let target = &transfer.worker_id;
+            let assignment_id = next_assignment_id_for_row(&tx, &expected.id)?;
+            let spawned: Option<String> = tx.query_row(
+                "SELECT spawned_worker_id FROM agent_run_queue WHERE id = ?1",
+                params![expected.id], |row| row.get(0),
+            ).optional()?.flatten();
+            // The epoch/status predicates below also protect this payload snapshot.
+            let mut payload = expected.payload.clone();
+            let object = payload.as_object_mut().ok_or_else(||
+                QueueReassignmentError::Conflict("Queue payload must be an object".into()))?;
+            let mut retired = object.get("reassigned_from").cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            let retired_ids = retired.as_array_mut().ok_or_else(||
+                QueueReassignmentError::Conflict("Invalid reassigned_from history".into()))?;
+            for previous in std::iter::once(expected.worker_id.as_str()).chain(spawned.as_deref())
+                .chain(transfer.retired_worker_ids.iter().map(String::as_str))
+            {
+                if previous != target && !previous.starts_with("pending:")
+                {
+                    retired_ids.retain(|entry| entry["worker_id"].as_str() != Some(previous));
+                    // Retirement has its own immutable epoch: recovery may advance the
+                    // containing row's assignment without revoking a later grant elsewhere.
+                    retired_ids.push(serde_json::json!({"worker_id": previous, "assignment_id": assignment_id}));
+                }
+            }
+            object.insert("reassigned_from".into(), retired);
+            // executed_as describes the old launch, not the new principal's execution.
+            object.remove("executed_as");
+            let changed = tx.execute(
+                "UPDATE agent_run_queue
+                 SET worker_id = ?2, spawned_worker_id = ?2, status = 'running',
+                     attempts = attempts + 1, assignment_id = ?3, payload = ?4,
+                     heartbeat_at = ?5, updated_at = ?5, last_status = NULL,
+                     continuation_count = 0, no_progress_count = 0
+                 WHERE id = ?1 AND session_id = ?6 AND task_id = ?7
+                   AND status IN ('queued', 'running') AND status = ?8
+                   AND attempts = ?9 AND assignment_id = ?10 AND worker_id = ?11
+                   AND payload = ?12
+                   AND NOT EXISTS (
+                       SELECT 1 FROM agent_run_queue AS active
+                       WHERE active.session_id = ?6 AND active.worker_id = ?2
+                         AND active.status = 'running' AND active.id <> ?1)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM agent_run_queue_resolution WHERE queue_id = ?1)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM agent_run_queue_deps AS dep
+                       WHERE dep.session_id = ?6 AND dep.task_id = ?7
+                         AND NOT EXISTS (
+                             SELECT 1 FROM agent_run_queue AS prerequisite
+                             WHERE prerequisite.session_id = ?6
+                               AND prerequisite.task_id = dep.prerequisite_task_id
+                               AND prerequisite.status = 'finalized')
+                         AND NOT EXISTS (
+                             SELECT 1 FROM agent_run_queue_external_completions AS external
+                             WHERE external.session_id = ?6
+                               AND external.task_id = dep.prerequisite_task_id
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM agent_run_queue AS queued_prerequisite
+                                   WHERE queued_prerequisite.session_id = ?6
+                                     AND queued_prerequisite.task_id = dep.prerequisite_task_id)))
+                   AND NOT EXISTS (
+                       SELECT 1 FROM agent_run_queue_conflicts AS conflict
+                       JOIN agent_run_queue AS peer ON peer.session_id = conflict.session_id
+                         AND peer.task_id = conflict.conflicting_task_id AND peer.status = 'running'
+                       WHERE conflict.session_id = ?6 AND conflict.task_id = ?7
+                         AND conflict.action = 'serialize')",
+                params![expected.id, target, assignment_id, payload.to_string(), now_ms,
+                    session_id, expected.task_id, expected.status.as_tag(), expected.attempts,
+                    expected.assignment_id, expected.worker_id, expected.payload.to_string()],
+            )?;
+            if changed != 1 {
+                return Err(QueueReassignmentError::Conflict(format!(
+                    "Queue assignment {} changed, is terminal, has an occupied target, or is not ready",
+                    expected.id)));
+            }
+        }
+        let error = match prepare() {
+            Err(error) => { drop(tx); Some(error) }
+            Ok(()) => tx.commit().err().map(|error| error.to_string()),
+        };
+        if let Some(error) = error {
+            let rollback = restore();
+            return Err(QueueReassignmentError::Persistence {
+                rolled_back: rollback.is_ok(),
+                message: match rollback {
+                    Ok(()) => format!("Reassignment failed: {error}; graph rolled back"),
+                    Err(rollback) => format!("Reassignment failed: {error}; graph rollback failed: {rollback}"),
+                },
+            });
+        }
+        Ok(())
+    }
+
     /// Record a heartbeat for an active or finalized row, advancing progress only while active.
     ///
     /// State machine: if the incoming `status` equals the stored `last_status`, the worker
@@ -1223,7 +1375,43 @@ impl QueueRepo {
         status: &str,
         now_ms: i64,
     ) -> Result<Option<String>, StorageError> {
+        Ok(match self.record_heartbeat_checked(session_id, worker_id, assignment_id, status, now_ms)? {
+            QueueHeartbeatResult::Recorded(id) => Some(id),
+            QueueHeartbeatResult::NoAssignment | QueueHeartbeatResult::Superseded => None,
+        })
+    }
+
+    pub fn record_heartbeat_checked(
+        &self,
+        session_id: &str,
+        worker_id: &str,
+        assignment_id: Option<i64>,
+        status: &str,
+        now_ms: i64,
+    ) -> Result<QueueHeartbeatResult, StorageError> {
         self.db.with_conn(|conn| {
+            // Reassignment history survives restart and ordinary release. A new active
+            // assignment wins over history (A -> B -> A), but an old finalized row must
+            // not hide the supersession of a different task's current assignment.
+            let superseded: bool = conn.query_row(
+                "SELECT COALESCE((
+                    SELECT MAX(json_extract(retired.value, '$.assignment_id')) FROM agent_run_queue,
+                        json_each(payload, '$.reassigned_from') AS retired
+                    WHERE session_id = ?1 AND json_extract(retired.value, '$.worker_id') = ?2
+                ), -1) > COALESCE((
+                    SELECT MAX(assignment_id) FROM agent_run_queue WHERE session_id = ?1
+                      AND (worker_id = ?2 OR spawned_worker_id = ?2)
+                      AND status IN ('queued', 'running', 'finalized')
+                ), -1) AND NOT EXISTS (
+                    SELECT 1 FROM agent_run_queue WHERE session_id = ?1
+                      AND (worker_id = ?2 OR spawned_worker_id = ?2)
+                      AND status IN ('queued', 'running'))",
+                params![session_id, worker_id], |row| row.get(0),
+            )?;
+            // An explicit current finalized assignment remains addressable for liveness.
+            if assignment_id.is_none() && superseded {
+                return Ok(QueueHeartbeatResult::Superseded);
+            }
             let target: Option<(String, i64)> = conn
                 .query_row(
                     "SELECT id, assignment_id
@@ -1242,7 +1430,7 @@ impl QueueRepo {
                 )
                 .optional()?;
             let Some((id, resolved_assignment_id)) = target else {
-                return Ok(None);
+                return Ok(QueueHeartbeatResult::NoAssignment);
             };
             conn.execute(
                 "UPDATE agent_run_queue
@@ -1268,7 +1456,8 @@ impl QueueRepo {
                    AND status IN ('queued', 'running', 'finalized')",
                 params![id, resolved_assignment_id, now_ms, status],
             )?;
-            Ok((conn.changes() == 1).then_some(id))
+            Ok(if conn.changes() == 1 { QueueHeartbeatResult::Recorded(id) }
+                else { QueueHeartbeatResult::NoAssignment })
         })
     }
 

@@ -26,7 +26,8 @@ use crate::orchestrator::work_graph::{
 };
 use crate::storage::queue::{
     QueueConflictCoverage, QueueConflictRow, QueueConflictWait, QueueRepo, QueueResolutionUpdate,
-    QueueRow, QueueSnapshot, QueueStatus, SpawnFailureRelease,
+    QueueRow, QueueSnapshot, QueueStatus, SpawnFailureRelease, QueueHeartbeatResult,
+    QueueReassignment, QueueReassignmentError,
 };
 use crate::storage::StorageError;
 
@@ -862,6 +863,27 @@ impl QueueManager {
         Ok(outcome)
     }
 
+    /// Serialize explicit transfers with claim/reservation publication and manual stop.
+    pub fn reassign_with_preparation<F, R>(
+        &self,
+        session_id: &str,
+        transfers: &[QueueReassignment],
+        prepare: F,
+        restore: R,
+    ) -> Result<(), QueueReassignmentError>
+    where
+        F: FnOnce() -> Result<(), String>,
+        R: FnOnce() -> Result<(), String>,
+    {
+        let reservations = self.spawn_in_flight.lock();
+        if transfers.iter().any(|transfer| reservations.contains_key(&transfer.expected.id)
+            || reservations.values().any(|reservation| reservation.worker_id == transfer.worker_id))
+        {
+            return Err(QueueReassignmentError::Conflict("Queue assignment has a spawn in flight".into()));
+        }
+        self.repo.reassign_with_preparation(session_id, transfers, Self::now_ms(), prepare, restore)
+    }
+
     /// Record a heartbeat against the queue row, advancing continuation / no-progress
     /// counters. A completed heartbeat atomically finalizes the row and emits the matching
     /// lifecycle event. Returns `true` if a row was updated.
@@ -895,16 +917,31 @@ impl QueueManager {
         assignment_id: Option<i64>,
         status: &str,
     ) -> Result<bool, StorageError> {
+        Ok(matches!(self.record_heartbeat_checked(session_id, worker_id, assignment_id, status).await?,
+            QueueHeartbeatResult::Recorded(_)))
+    }
+
+    pub async fn record_heartbeat_checked(
+        &self,
+        session_id: &str,
+        worker_id: &str,
+        assignment_id: Option<i64>,
+        status: &str,
+    ) -> Result<QueueHeartbeatResult, StorageError> {
         let now = Self::now_ms();
-        let updated_row_id = self.repo.record_heartbeat_for_assignment(
+        let result = self.repo.record_heartbeat_checked(
             session_id,
             worker_id,
             assignment_id,
             status,
             now,
         )?;
+        let updated_row_id = match &result {
+            QueueHeartbeatResult::Recorded(id) => Some(id.as_str()),
+            _ => None,
+        };
         if status == "completed" {
-            if let Some(row_id) = updated_row_id.as_deref() {
+            if let Some(row_id) = updated_row_id {
                 let completion = self.repo.get_row(row_id)?.and_then(|row| {
                     let executed_as = row.payload.get("executed_as").and_then(|value| {
                         match serde_json::from_value::<ExecutedAs>(value.clone()) {
@@ -961,7 +998,7 @@ impl QueueManager {
                 }
             }
         }
-        Ok(updated_row_id.is_some())
+        Ok(result)
     }
 
     /// Maintenance: flip stale `running` rows back to `queued`. Emits `WorkerReclaimed`
@@ -1304,6 +1341,45 @@ mod tests {
         repo.ensure_schema().unwrap();
         let event_bus = EventBus::new(dir.path().to_path_buf());
         (dir, QueueManager::new(repo, event_bus))
+    }
+
+    #[tokio::test]
+    async fn reassignment_rejects_in_flight_spawn_before_graph_or_queue_writes() {
+        let (_dir, mgr) = manager();
+        mgr.enqueue_worker("run", "s1", "old", "backend", "codex", json!({}), Some("T1".into()))
+            .await.unwrap();
+        let ClaimOutcome::Claimed { epoch } = mgr.claim_and_reserve_spawn("run", "s1", "old", None).await.unwrap()
+            else { panic!("fixture claim must win") };
+        let before = mgr.repo.get_row("run").unwrap().unwrap();
+        assert!(matches!(mgr.reassign_with_preparation("s1", &[QueueReassignment::new(before.clone(), "new".into())],
+            || panic!("in-flight transfer must not write graphs"), || Ok(())),
+            Err(QueueReassignmentError::Conflict(_))));
+        assert_eq!(mgr.repo.get_row("run").unwrap().unwrap(), before);
+        assert!(mgr.complete_spawn_handoff("run", epoch, "old").unwrap());
+        mgr.reassign_with_preparation("s1", &[QueueReassignment::new(before, "new".into())], || Ok(()), || Ok(())).unwrap();
+        assert!(mgr.record_heartbeat("s1", "new", "completed").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reassignment_of_stopped_row_preserves_durable_fence_after_restart() {
+        let (dir, mgr) = manager();
+        mgr.enqueue_worker("run", "s1", "old", "backend", "codex", json!({}), Some("T1".into()))
+            .await.unwrap();
+        let ClaimOutcome::Claimed { epoch } = mgr.claim_and_reserve_spawn("run", "s1", "old", None).await.unwrap()
+            else { panic!("fixture claim must win") };
+        assert!(mgr.complete_spawn_handoff("run", epoch, "old").unwrap());
+        mgr.release_claim_with_preparation("s1", "old", || Ok::<_, ()>(())).await.unwrap();
+        let stopped = mgr.repo.get_row("run").unwrap().unwrap();
+        assert_eq!(stopped.status, QueueStatus::Queued);
+        assert!(stopped.worker_id.starts_with("pending:"));
+        mgr.reassign_with_preparation("s1", &[QueueReassignment::new(stopped, "new".into())], || Ok(()), || Ok(())).unwrap();
+        drop(mgr);
+        let db = Arc::new(ApplicationStateDb::open(dir.path()).unwrap());
+        let repo = QueueRepo::new(db);
+        repo.ensure_schema().unwrap();
+        assert_eq!(repo.record_heartbeat_checked("s1", "old", None, "completed", 100).unwrap(),
+            QueueHeartbeatResult::Superseded, "manual stop retained spawn identity must be retired durably");
+        assert!(repo.record_heartbeat("s1", "new", "completed", 100).unwrap());
     }
 
     #[tokio::test]

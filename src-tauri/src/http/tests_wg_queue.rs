@@ -51,7 +51,7 @@ use crate::session::{
 };
 use crate::storage::queue::{
     QueueConflictAction, QueueConflictCoverage, QueueConflictRow, QueueResolutionUpdate, QueueRow,
-    QueueStatus,
+    QueueStatus, QueueReassignment,
 };
 use crate::storage::{ApplicationStateDb, QueueRepo, SessionStorage};
 
@@ -114,6 +114,130 @@ fn enqueue_diamond(repo: &QueueRepo) {
         &["B".to_string(), "C".to_string()],
     )
     .unwrap();
+}
+
+#[test]
+fn reassignment_invalidates_spawn_epoch_and_both_heartbeat_identities() {
+    use crate::storage::queue::QueueHeartbeatResult;
+    let repo = queue_repo();
+    repo.enqueue(&queued_row("transfer", "old-worker", Some("T1"), 1)).unwrap();
+    let epoch = repo.try_claim("transfer", 0, 10).unwrap().unwrap();
+    let before = repo.get_row("transfer").unwrap().unwrap();
+    repo.reassign_with_preparation(SESSION_ID, &[QueueReassignment::new(before.clone(), "new-worker".into())], 20,
+        || Ok(()), || Ok(())).unwrap();
+    let after = repo.get_row("transfer").unwrap().unwrap();
+    assert_eq!(after.attempts, epoch + 1);
+    assert!(after.assignment_id > before.assignment_id);
+    assert!(!repo.refresh_claimed_spawn("transfer", epoch, "old-worker", 30).unwrap());
+    assert!(!repo.requeue_claimed("transfer", epoch, 30).unwrap(), "old epoch cannot release transfer");
+    assert!(!repo.fail_claimed("transfer", epoch, 30).unwrap(), "old epoch cannot fail transfer");
+    assert_eq!(repo.release_failed_spawn("transfer", epoch, "old-worker", 3, 30).unwrap(),
+        crate::storage::queue::SpawnFailureRelease::NotHeld);
+    assert_eq!(repo.record_heartbeat_checked(SESSION_ID, "old-worker", None, "completed", 30).unwrap(),
+        QueueHeartbeatResult::Superseded, "old spawned_worker_id must be replaced too");
+    assert!(repo.record_heartbeat_for_assignment(SESSION_ID, "old-worker",
+        Some(before.assignment_id), "completed", 30).unwrap().is_none());
+    assert_eq!(repo.get_row("transfer").unwrap().unwrap(), after);
+    assert_eq!(repo.try_claim_for_worker("transfer", Some("third-worker"), 0, 30).unwrap(), None,
+        "a transferred queued assignment must not be dispatched again");
+    assert!(repo.record_heartbeat(SESSION_ID, "new-worker", "completed", 40).unwrap());
+    assert_eq!(repo.get_row("transfer").unwrap().unwrap().status, QueueStatus::Finalized);
+}
+
+#[test]
+fn reassignment_retains_history_and_allows_return_to_a_previous_owner() {
+    use crate::storage::queue::QueueHeartbeatResult;
+    let repo = queue_repo();
+    repo.enqueue(&queued_row("transfer", "worker-a", Some("T1"), 1)).unwrap();
+    // Historical finalized ownership must not mask supersession of the active task.
+    repo.enqueue(&queue_row("history", "worker-a", Some("OLD"), QueueStatus::Finalized, 0)).unwrap();
+    for (index, target) in ["worker-b", "worker-c", "worker-a"].iter().enumerate() {
+        let before = repo.get_row("transfer").unwrap().unwrap();
+        repo.reassign_with_preparation(SESSION_ID, &[QueueReassignment::new(before, (*target).into())], 20 + index as i64,
+            || Ok(()), || Ok(())).unwrap();
+        assert!(repo.record_heartbeat(SESSION_ID, target, "working", 30 + index as i64).unwrap());
+        for retired in ["worker-a", "worker-b"].iter().filter(|id| *id != target) {
+            let result = repo.record_heartbeat_checked(SESSION_ID, retired, None, "completed", 40).unwrap();
+            if repo.get_row("transfer").unwrap().unwrap().payload["reassigned_from"]
+                .as_array().unwrap().iter().any(|entry| entry["worker_id"].as_str() == Some(*retired))
+            {
+                assert_eq!(result, QueueHeartbeatResult::Superseded, "all prior owners remain fenced");
+            }
+        }
+    }
+    assert!(repo.record_heartbeat(SESSION_ID, "worker-a", "completed", 50).unwrap());
+    assert!(repo.record_heartbeat(SESSION_ID, "worker-a", "working", 60).unwrap(),
+        "returning owner keeps finalized liveness without an assignment ID");
+    assert_eq!(repo.record_heartbeat_checked(SESSION_ID, "queen", None, "working", 60).unwrap(),
+        QueueHeartbeatResult::NoAssignment, "row-less compatibility remains intact");
+}
+
+#[test]
+fn reassignment_retirement_epoch_does_not_advance_during_other_tasks_recovery() {
+    let repo = queue_repo();
+    repo.enqueue(&queued_row("transfer", "worker-a", Some("T1"), 1)).unwrap();
+    repo.try_claim("transfer", 0, 10).unwrap().unwrap();
+    let before = repo.get_row("transfer").unwrap().unwrap();
+    repo.reassign_with_preparation(SESSION_ID, &[QueueReassignment::new(before, "worker-b".into())], 20,
+        || Ok(()), || Ok(())).unwrap();
+    repo.enqueue(&queued_row("later", "worker-a", Some("T2"), 2)).unwrap();
+    repo.try_claim("later", 0, 30).unwrap().unwrap();
+    assert!(repo.record_heartbeat(SESSION_ID, "worker-a", "completed", 40).unwrap());
+    let later = repo.get_row("later").unwrap().unwrap();
+    // Recovery advances T1's current assignment, but must not revoke A's later T2 grant.
+    repo.requeue_running("transfer", 50).unwrap();
+    assert!(repo.get_row("transfer").unwrap().unwrap().assignment_id > later.assignment_id);
+    assert!(repo.record_heartbeat(SESSION_ID, "worker-a", "working", 60).unwrap(),
+        "a retired row's recovery must not revoke a newer finalized assignment");
+    assert_eq!(repo.get_row("later").unwrap().unwrap().heartbeat_at, Some(60));
+}
+
+#[test]
+fn reassignment_storage_revalidates_terminal_rows_epochs_and_batch_atomicity() {
+    for status in [QueueStatus::Finalized, QueueStatus::Failed, QueueStatus::Blocked] {
+        let repo = queue_repo();
+        let valid = queued_row("first", "old-first", Some("T1"), 1);
+        let terminal = queue_row("second", "old-second", Some("T2"), status, 2);
+        repo.enqueue(&valid).unwrap();
+        repo.enqueue(&terminal).unwrap();
+        let writes = AtomicUsize::new(0);
+        assert!(repo.reassign_with_preparation(SESSION_ID,
+            &[QueueReassignment::new(valid.clone(), "new-first".into()), QueueReassignment::new(terminal.clone(), "new-second".into())], 10,
+            || { writes.fetch_add(1, Ordering::SeqCst); Ok(()) }, || Ok(())).is_err());
+        assert_eq!(writes.load(Ordering::SeqCst), 0, "validate whole batch before writing graphs");
+        assert_eq!(repo.get_row("first").unwrap().unwrap(), valid, "partial SQL changes roll back");
+        assert_eq!(repo.get_row("second").unwrap().unwrap(), terminal);
+    }
+    let repo = queue_repo();
+    repo.enqueue(&queued_row("epoch", "old", Some("T1"), 1)).unwrap();
+    let stale = repo.get_row("epoch").unwrap().unwrap();
+    repo.try_claim("epoch", 0, 10).unwrap();
+    assert!(repo.reassign_with_preparation(SESSION_ID, &[QueueReassignment::new(stale, "new".into())], 20,
+        || panic!("stale snapshot must not write graphs"), || Ok(())).is_err());
+}
+
+#[test]
+fn reassignment_preserves_dependency_resolution_conflict_and_slot_guards() {
+    for guard in ["dependency", "resolution", "conflict", "slot"] {
+        let repo = queue_repo();
+        let row = queued_row("transfer", "old", Some("T1"), 1);
+        let deps = if guard == "dependency" { vec!["PREREQUISITE".into()] } else { vec![] };
+        let resolution = if guard == "resolution" {
+            QueueResolutionUpdate::ResolutionIncomplete { task_id: "T1".into(), reason: "unknown".into() }
+        } else { QueueResolutionUpdate::Resolved };
+        let conflicts = if guard == "conflict" { vec![QueueConflictRow {
+            session_id: SESSION_ID.into(), task_id: "T1".into(), conflicting_task_id: "PEER".into(),
+            action: QueueConflictAction::Serialize, reason: "shared fixture path".into(),
+        }] } else { vec![] };
+        repo.enqueue_with_scheduling(&row, &deps, &resolution, &conflicts, None, None).unwrap();
+        if guard == "slot" || guard == "conflict" {
+            repo.enqueue(&queue_row("peer", if guard == "slot" { "new" } else { "peer-worker" },
+                Some("PEER"), QueueStatus::Running, 2)).unwrap();
+        }
+        assert!(repo.reassign_with_preparation(SESSION_ID, &[QueueReassignment::new(row.clone(), "new".into())], 20,
+            || panic!("{guard} guard must precede graph writes"), || Ok(())).is_err(), "{guard}");
+        assert_eq!(repo.get_row("transfer").unwrap().unwrap(), row, "{guard} guard leaves row unchanged");
+    }
 }
 
 fn race_claims(repo: &QueueRepo, ids: &[&str], now_ms: i64) -> Vec<Option<i64>> {
