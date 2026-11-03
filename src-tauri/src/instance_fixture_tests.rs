@@ -17,6 +17,7 @@ fn manifest() -> serde_json::Value {
 }
 
 #[test]
+#[ignore = "process-heavy fixture proof; run serially by CI"]
 fn seeded_output_loads_through_real_storage_and_isolated_controller() {
     // Re-exec keeps bootstrap's process environment and OnceLocks away from other tests.
     if std::env::var_os("HM_SEEDED_FIXTURE_CHILD").is_some() {
@@ -135,7 +136,7 @@ fn seeded_output_loads_through_real_storage_and_isolated_controller() {
         String::from_utf8_lossy(&output.stderr)
     );
     let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "instance_fixture_tests::seeded_output_loads_through_real_storage_and_isolated_controller", "--nocapture"])
+        .args(["--ignored", "--exact", "instance_fixture_tests::seeded_output_loads_through_real_storage_and_isolated_controller", "--nocapture"])
         .env("HM_SEEDED_FIXTURE_CHILD", "1")
         .env(instance::DIR, temp.path()).env(instance::PORT, "18897")
         .env_remove(instance::CDP_PORT)
@@ -146,5 +147,43 @@ fn seeded_output_loads_through_real_storage_and_isolated_controller() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
+        "fixture child must run and pass exactly one test:\n{stdout}"
+    );
     assert!(!instance::is_isolated(), "test parent remains normal");
+}
+
+#[test]
+fn seeded_output_remains_in_serial_ci_step() {
+    let workflow = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/rust-tests.yml"),
+    )
+    .unwrap();
+    let serial_step = workflow
+        .split("      - name:")
+        .find(|step| {
+            step.starts_with(" Overhead benchmarks (isolated)\n")
+                || step.starts_with(" Overhead benchmarks (isolated)\r\n")
+        })
+        .expect("isolated serial CI step must exist");
+    let command = serial_step
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("run: "))
+        .expect("serial step must run cargo test");
+    assert!(command.starts_with("cargo test --lib -- "));
+    for required in [
+        "--ignored",
+        "--exact",
+        "--test-threads=1",
+        "instance_fixture_tests::seeded_output_loads_through_real_storage_and_isolated_controller",
+    ] {
+        assert!(
+            command.split_whitespace().any(|arg| arg == required),
+            "serial CI command must contain {required}"
+        );
+    }
 }

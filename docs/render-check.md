@@ -10,6 +10,21 @@ Use Windows with WebView2, Node.js/npm, installed project dependencies (includin
 `playwright-core`), Git, Rust, and the MSVC Windows build tools required by Tauri.
 Playwright uses the installed WebView2 runtime. It does not download a browser.
 
+The storage/controller fixture proof starts Node and several Git processes, so
+plain `cargo test` skips it. CI runs it in the serial ignored-test step. Run the
+same proof locally from the repository root in PowerShell:
+
+```powershell
+Push-Location src-tauri
+$env:CARGO_BUILD_JOBS = '1'
+$env:CARGO_TARGET_DIR = "$env:LOCALAPPDATA\hive-manager-target\loop1"
+cargo test --lib -- --ignored --exact --test-threads=1 --nocapture instance_fixture_tests::seeded_output_loads_through_real_storage_and_isolated_controller
+Pop-Location
+```
+
+The parent requires its isolated child to report exactly one passing test. A
+source guard also checks that CI still includes the proof in its serial command.
+
 The command builds a debug executable with bundled frontend assets and the Tauri
 custom protocol. It does not use a Vite dev server or install the app. The build
 wrapper uses one Cargo job and a shared target under
