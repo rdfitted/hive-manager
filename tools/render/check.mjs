@@ -209,6 +209,7 @@ try {
     assertion('network-mutation-both-observers', report.blockedNetworkMutation?.fulfilledInsideDriver && report.blockedNetworkMutation.requests.length > 0 && report.blockedNetworkMutation.resources.length > 0, report.blockedNetworkMutation);
     const required = ['screen-not-empty', 'screenshot-has-pixels', 'version-badge-unobscured', 'grid-eight-panes', 'grid-composer-with-attention', 'grid-composer-without-attention', 'finished-attention-card', 'finished-needs-you-count', 'stalled-attention-card', 'stalled-needs-you-count', 'exited_during_startup-attention-card', 'exited_during_startup-needs-you-count', 'chat-table', 'chat-code', 'chat-literal', 'kanban-fixture-present', 'sidebar-fixture-present', 'viewport-1440', 'viewport-800', 'updater-invoke-rejected', 'all-screens-captured', 'no-live-api-request', 'no-console-errors'];
     required.push(...reviewProofNames);
+    required.push('launch-project-verbatim-prefix');
     assertion('all-required-mutations-proved', required.every(name => report.mutations.some(item => item.name === name && item.passed)), { required, proved: report.mutations.filter(item => item.passed).map(item => item.name) });
   }
 } catch (error) {

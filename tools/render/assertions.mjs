@@ -220,6 +220,13 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     assert(`viewport-${viewport.width}`, dimensions.width === viewport.width && dimensions.height === viewport.height, dimensions);
     await prove(`viewport-${viewport.width}`, async () => { const details = await page.evaluate(() => ({ width: innerWidth, height: innerHeight })); return { passed: details.width === viewport.width && details.height === viewport.height, details }; }, async () => { await page.setViewportSize({ ...viewport, width: viewport.width - 10 }); return () => page.setViewportSize(viewport); });
     await page.getByRole('button', { name: 'New Session', exact: true }).click();
+    const projectField = page.locator('#launch-project-value');
+    const projectMeasure = async () => {
+      const value = await projectField.textContent();
+      return { passed: path.isAbsolute(value) && !value.startsWith('\\\\?\\') && value === report.root, details: { value, expected: report.root } };
+    };
+    await probe('launch-project-ordinary-path', projectMeasure, { screen: 'launch', viewport: `${viewport.width}x${viewport.height}` });
+    await prove('launch-project-verbatim-prefix', projectMeasure, async () => textChange(projectField, `\\\\?\\${await projectField.textContent()}`), { screen: 'launch' });
     await capture('launch', viewport, page.locator('.launch-inline'), text => text.includes('What would you like to work on?'));
     await selectSession(page, session);
     await viewMode(page, 'Focus');
@@ -267,7 +274,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     if (await recent.getAttribute('aria-expanded') === 'false') await recent.click();
     for (const id of manifest.screens.sidebar.sessionIds) {
       const item = manifest.sessions.find(session => session.id === id);
-      const rows = page.locator('.session-button,.session-item.recent').filter({ hasText: item.name });
+      const rows = page.locator(item.state === 'Completed' ? '.session-item.recent' : '.session-button').filter({ hasText: item.name });
       assert('sidebar-fixture-present', await rows.count() > 0, { sessionId: id }, { screen: 'sidebar', viewport: `${viewport.width}x${viewport.height}` });
       await prove('sidebar-fixture-present', async () => ({ passed: await rows.count() > 0 }), () => removeNode(rows.first()));
     }

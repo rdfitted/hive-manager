@@ -21,7 +21,7 @@ export function assertSynthetic(text, { root, userNames = [] } = {}) {
     collect(JSON.parse(text));
     decoded = strings.join('\n');
   } catch { /* Markdown and journal fragments are plain text. */ }
-  // Rust's canonical Windows cwd has a verbatim prefix. Only this known root alias is allowed.
+  // Canonical containment paths may carry a verbatim prefix. Only this known root alias is allowed.
   const canonicalRoot = root && /^[a-z]:[\\/]/i.test(root) ? `\\\\?\\${root}` : root;
   let value = decoded;
   if (root) for (const alias of [...new Set([canonicalRoot, root])]) {
@@ -44,7 +44,6 @@ export async function seed(root, now = new Date()) {
   }
   const instant = new Date(now);
   if (!Number.isFinite(instant.getTime())) throw new Error('Invalid seed time');
-  const canonicalRoot = process.platform === 'win32' && !root.startsWith('\\\\?\\') ? `\\\\?\\${root}` : root;
   const at = seconds => new Date(instant.getTime() - seconds * 1000).toISOString();
   await mkdir(root, { recursive: true });
   if ((await readdir(root)).length) throw new Error('Fixture root must be empty');
@@ -88,7 +87,7 @@ export async function seed(root, now = new Date()) {
   const overlay = { version: 1, sessions: [] };
   for (const session of manifest.sessions) {
     const project = path.join(root, 'projects', session.project);
-    const projectPath = session.projectScope === 'instance-root' ? (process.platform === 'win32' ? canonicalRoot : root) : project;
+    const projectPath = session.projectScope === 'instance-root' ? root : project;
     await mkdir(project, { recursive: true });
     const git = args => execFileSync('git', ['-c', 'core.hooksPath=disabled-hooks', ...args], { cwd: project, env: gitEnv, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     git(['init', '--initial-branch=main', '--template=']);

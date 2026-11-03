@@ -361,7 +361,8 @@ pub fn bootstrap() -> &'static Instance {
                 for (key, value) in settings.environment()? {
                     std::env::set_var(key, value);
                 }
-                std::env::set_current_dir(&settings.root).map_err(|e| e.to_string())?;
+                std::env::set_current_dir(environment_path(&settings.root)?)
+                    .map_err(|e| e.to_string())?;
                 let data_dir = crate::storage::SessionStorage::get_app_data_dir()
                     .map_err(|e| e.to_string())?;
                 settings.contains(&data_dir)?;
@@ -1002,6 +1003,12 @@ mod tests {
         if std::env::var_os("HM_INSTANCE_TEST_CHILD").is_some() {
             bootstrap();
             let settings = settings().expect("child isolation");
+            let cwd = std::env::current_dir().unwrap();
+            assert!(
+                !cwd.to_str().unwrap().starts_with(r"\\?\"),
+                "instance-cwd-non-verbatim"
+            );
+            settings.contains(&cwd).expect("instance-cwd-contained");
             let base = crate::storage::SessionStorage::get_app_data_dir().unwrap();
             let storage = crate::storage::SessionStorage::new_with_base(base).unwrap();
             assert_eq!(
@@ -1560,7 +1567,7 @@ mod tests {
         assert!(bootstrap.contains("for (key, value) in settings.environment()?"));
         assert!(bootstrap.contains("std::env::set_var(key, value)"));
         assert!(bootstrap.contains("std::env::remove_var(key)"));
-        assert!(bootstrap.contains("std::env::set_current_dir(&settings.root)"));
+        assert!(bootstrap.contains("std::env::set_current_dir(environment_path(&settings.root)?)"));
         let scrub = first_statement(&text, "scrub_key")
             .split_once("\nfn reject_links(")
             .unwrap()

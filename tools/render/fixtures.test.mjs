@@ -48,8 +48,9 @@ test('seeded schema, feeds, review repo, and relative timestamps cover every man
       assert.equal(persisted.id, session.id);
       assert.equal(persisted.state, session.state);
       assert.equal(persisted.created_at, new Date(Date.parse(now) - manifest.timing.createdSeconds * 1000).toISOString());
-      const expectedProject = session.projectScope === 'instance-root' ? (process.platform === 'win32' ? `\\\\?\\${root}` : root) : path.join(root, 'projects', session.project);
+      const expectedProject = session.projectScope === 'instance-root' ? root : path.join(root, 'projects', session.project);
       assert.equal(persisted.project_path, expectedProject);
+      assert.equal(persisted.project_path.startsWith('\\\\?\\'), false);
       assert.equal(persisted.worktree_path, path.join(root, 'projects', session.project));
       assert.deepEqual(JSON.parse(await readFile(path.join(directory, 'retirement.json'), 'utf8')), { enabled: false, on_call_agent_id: null });
       assert.deepEqual(JSON.parse(await readFile(path.join(directory, 'state/work-graph.json'), 'utf8')), { nodes: [], edges: [], omissions: [] });
