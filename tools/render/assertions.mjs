@@ -298,6 +298,30 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await capture('sidebar', viewport, page.locator('.session-agents[aria-label="Session agents"]'),
       text => session.agents.every(agent => text.includes(agent.label)), undefined,
       text => text.includes(normal.label) && text.includes(`Agents (${session.agents.length})`));
+    const staleSession = manifest.sessions.find(item => item.id === manifest.screens.sidebar.staleSessionId);
+    const staleBadge = page.getByRole('button', { name: `1 need attention in ${staleSession.name}`, exact: true });
+    await staleBadge.scrollIntoViewIfNeeded();
+    const staleMeasure = async () => {
+      const count = await staleBadge.count();
+      const visible = count === 1 && (await visibleTargetState(staleBadge)).visible;
+      return { passed: visible, details: { sessionId: staleSession.id, count, visible } };
+    };
+    await probe('sidebar-inactive-stale-only', staleMeasure, { screen: 'sidebar', viewport: `${viewport.width}x${viewport.height}` });
+    await prove('sidebar-inactive-stale-only', staleMeasure, () => removeNode(staleBadge));
+    await capture('sidebar', viewport, page.locator('.session-row').filter({ has: staleBadge }),
+      text => text.includes(staleSession.name) && text.includes('1'), 'inactive-stale');
+    const agentsDisclosure = page.getByRole('button', { name: `Agents (${session.agents.length})`, exact: true });
+    await agentsDisclosure.click();
+    const recentRows = page.locator('.session-item.recent');
+    const recentMeasure = async () => ({ passed: await recentRows.count() === manifest.sessions.length && await recentRows.count() >= manifest.screens.sidebar.recentMinimum,
+      details: { count: await recentRows.count(), expected: manifest.sessions.length } });
+    await probe('sidebar-all-recent-sessions', recentMeasure, { screen: 'sidebar', viewport: `${viewport.width}x${viewport.height}` });
+    await prove('sidebar-all-recent-sessions', recentMeasure, () => removeNode(recentRows.nth(5)));
+    await recentRows.last().scrollIntoViewIfNeeded();
+    await capture('sidebar', viewport, page.getByRole('list', { name: 'Recent sessions' }),
+      text => manifest.sessions.every(item => text.includes(item.name)), 'recent',
+      text => manifest.sessions.filter(item => text.includes(item.name)).length > 5);
+    await agentsDisclosure.click();
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(manifest.screens.review.agentId)}]`).click();
     await openReview(page);
     await cellSelect(page).selectOption(manifest.screens.review.cellId);

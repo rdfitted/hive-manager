@@ -24,17 +24,24 @@
       "state": "Completed",
       "project": "beacon",
       "projectScope": "instance-root",
+      "lastActivitySeconds": 1,
       "agents": [
         { "id": "fixture-beacon-queen", "role": "Queen", "state": "finished", "label": "Beacon coordinator" }
       ]
-    }
+    },
+    {"id": "fixture-cedar", "name": "Synthetic Cedar", "state": "Running", "project": "cedar", "agents": [{"id": "fixture-cedar-queen", "role": "Queen", "state": "stalled", "label": "Cedar coordinator"}]},
+    {"id": "fixture-delta", "name": "Synthetic Delta", "state": "Completed", "project": "delta", "agents": [{"id": "fixture-delta-queen", "role": "Queen", "state": "finished", "label": "Delta coordinator"}]},
+    {"id": "fixture-ember", "name": "Synthetic Ember", "state": "Completed", "project": "ember", "agents": [{"id": "fixture-ember-queen", "role": "Queen", "state": "finished", "label": "Ember coordinator"}]},
+    {"id": "fixture-fjord", "name": "Synthetic Fjord", "state": "Completed", "project": "fjord", "agents": [{"id": "fixture-fjord-queen", "role": "Queen", "state": "finished", "label": "Fjord coordinator"}]},
+    {"id": "fixture-grove", "name": "Synthetic Grove", "state": "Completed", "project": "grove", "agents": [{"id": "fixture-grove-queen", "role": "Queen", "state": "finished", "label": "Grove coordinator"}]},
+    {"id": "fixture-harbor", "name": "Synthetic Harbor", "state": "Completed", "project": "harbor", "agents": [{"id": "fixture-harbor-queen", "role": "Queen", "state": "finished", "label": "Harbor coordinator"}]}
   ],
   "screens": {
     "launch": { "action": "open launch form without submitting" },
     "focus": { "sessionId": "fixture-orbit", "agentId": "fixture-orbit-queen" },
     "grid": { "sessionId": "fixture-orbit", "paneCount": 8 },
     "kanban": { "sessionIds": ["fixture-orbit", "fixture-beacon"] },
-    "sidebar": { "sessionIds": ["fixture-orbit", "fixture-beacon"] },
+    "sidebar": { "sessionIds": ["fixture-orbit", "fixture-beacon"], "staleSessionId": "fixture-cedar", "recentMinimum": 6 },
     "review": { "sessionId": "fixture-orbit", "cellId": "primary", "agentId": "fixture-orbit-worker-7", "file": "navigation.txt" },
     "dialog": { "action": "open Keyboard Shortcuts with Ctrl+/ without changing settings" }
   },
