@@ -357,6 +357,24 @@ impl FeedStore {
         Ok(())
     }
 
+    /// Recover a pre-resume snapshot's exact Codex identity without migrating it.
+    /// The sidecar must belong to the saved prompt key and spawn incarnation.
+    pub fn codex_provider_id(
+        &self, session: &str, agent: &str, key: Option<&str>,
+        spawned_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Option<String> {
+        validate_ids(session, agent).ok()?;
+        let directory = journal_directory(&self.sessions_root, session).ok()?;
+        let sidecar = directory.join(format!("{agent}.binding"));
+        validate_existing_file(&self.sessions_root, &sidecar).ok()?;
+        let binding = super::codex_rollout_source::load_binding(&sidecar)?;
+        if Some(binding.key.as_str()) != key || Some(binding.spawned_at) != spawned_at
+            || uuid::Uuid::parse_str(&binding.thread_id).is_err() {
+            return None;
+        }
+        Some(binding.thread_id)
+    }
+
     /// Discovery and cold replay preparation happen outside the journals lock.
     /// A readable, identity-checked first window is required before any write.
     pub fn use_codex_rollout(
@@ -766,4 +784,24 @@ fn read_window(
         scanned_end = offset;
     }
     Ok((events, scanned_end))
+}
+
+#[cfg(test)]
+mod resume_binding_tests {
+    use super::*;
+
+    #[test]
+    fn g49_old_snapshot_recovers_only_its_own_codex_sidecar_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let feeds = FeedStore::new(root.path().into(), None);
+        let directory = journal_directory(root.path(), "session").unwrap();
+        fs::create_dir_all(&directory).unwrap();
+        let spawned = chrono::Utc::now();
+        let id = uuid::Uuid::new_v4().to_string();
+        let binding = CodexBinding { key: "codex-prompt-synthetic".into(), spawned_at: spawned, thread_id: id.clone(), rollout_path: root.path().join("unused.jsonl") };
+        fs::write(directory.join("worker.binding"), serde_json::to_vec(&binding).unwrap()).unwrap();
+        assert_eq!(feeds.codex_provider_id("session", "worker", Some(&binding.key), Some(spawned)), Some(id));
+        assert!(feeds.codex_provider_id("session", "worker", Some("codex-prompt-other"), Some(spawned)).is_none());
+        assert!(feeds.codex_provider_id("session", "worker", Some(&binding.key), Some(spawned + chrono::Duration::seconds(1))).is_none());
+    }
 }

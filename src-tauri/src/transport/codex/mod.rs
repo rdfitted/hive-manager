@@ -4,6 +4,8 @@ mod correlate;
 mod events;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod resume_tests;
 
 use crate::delivery::Delivery;
 use crate::transport::{
@@ -31,6 +33,19 @@ pub struct CodexOptions {
     pub agent_id: String,
 }
 
+/// Parsed launch intent keeps resume identity separate from server arguments.
+pub struct CodexLaunch {
+    options: CodexOptions,
+    resume_thread_id: Option<String>,
+}
+impl std::ops::Deref for CodexLaunch {
+    type Target = CodexOptions;
+    fn deref(&self) -> &Self::Target { &self.options }
+}
+impl From<CodexOptions> for CodexLaunch {
+    fn from(options: CodexOptions) -> Self { Self { options, resume_thread_id: None } }
+}
+
 impl CodexOptions {
     pub fn from_pty(
         command: &str,
@@ -39,7 +54,7 @@ impl CodexOptions {
         env: Vec<(String, String)>,
         session_id: String,
         agent_id: String,
-    ) -> Result<Self, String> {
+    ) -> Result<CodexLaunch, String> {
         let store = crate::cli::agent_store::store_dir_for(&agent_id);
         crate::cli::agent_store::ensure_store_dir(&store)
             .map_err(|e| format!("Cannot create isolated Codex store: {e}"))?;
@@ -47,9 +62,16 @@ impl CodexOptions {
         let mut model = None;
         let mut effort = None;
         let mut initial_prompt = None;
+        let mut resume_thread_id = None;
         let mut index = 0;
         while index < args.len() {
             match args[index] {
+                "resume" if index == 0 => {
+                    index += 1;
+                    let id = *args.get(index).ok_or("Missing Codex resume thread UUID")?;
+                    uuid::Uuid::parse_str(id).map_err(|_| "Codex resume needs an explicit thread UUID")?;
+                    resume_thread_id = Some(id.to_string());
+                },
                 "--dangerously-bypass-approvals-and-sandbox" => {},
                 "-m" | "--model" => { index+=1; model=Some(args.get(index).ok_or("Missing Codex model")?.to_string()); },
                 "-c" | "--config" | "--enable" | "--disable" | "-p" | "--profile" => {
@@ -64,7 +86,7 @@ impl CodexOptions {
             index += 1;
         }
         server_args.extend(["app-server".into(), "--listen".into(), "stdio://".into()]);
-        Ok(Self {
+        Ok(CodexLaunch { resume_thread_id, options: Self {
             command: command.into(),
             server_args,
             cwd,
@@ -74,7 +96,7 @@ impl CodexOptions {
             initial_prompt,
             session_id,
             agent_id,
-        })
+        } })
     }
 }
 
@@ -124,7 +146,7 @@ struct State {
     stopped: bool,
 }
 struct Core {
-    options: CodexOptions,
+    options: CodexLaunch,
     client: Arc<client::RpcClient>,
     registry: Weak<TransportRegistry>,
     state: Mutex<State>,
@@ -143,7 +165,8 @@ pub struct CodexTransport {
     core: Arc<Core>,
 }
 impl CodexTransport {
-    pub fn new(options: CodexOptions, registry: &Arc<TransportRegistry>) -> Arc<Self> {
+    pub fn new(options: impl Into<CodexLaunch>, registry: &Arc<TransportRegistry>) -> Arc<Self> {
+        let options = options.into();
         let (events, _) = broadcast::channel(256);
         Arc::new(Self {
             core: Arc::new(Core {
@@ -209,11 +232,19 @@ impl CodexTransport {
                 deadline,
             )?;
             require_chatgpt(&account)?;
-            let thread=self.core.client.request("thread/start",json!({"cwd":self.core.options.cwd,"model":self.core.options.model,"approvalPolicy":"never","sandbox":"danger-full-access"}),deadline)?;
+            let mut params = json!({"cwd":self.core.options.cwd,"model":self.core.options.model,"approvalPolicy":"never","sandbox":"danger-full-access"});
+            let method = if let Some(id) = &self.core.options.resume_thread_id {
+                params["threadId"] = json!(id);
+                "thread/resume"
+            } else { "thread/start" };
+            let thread = self.core.client.request(method, params, deadline)?;
             let held = thread["thread"]["id"]
                 .as_str()
                 .filter(|id| !id.is_empty())
-                .ok_or("Codex thread/start omitted thread.id; select PTY")?;
+                .ok_or("Codex thread response omitted thread.id; select PTY")?;
+            if self.core.options.resume_thread_id.as_deref().is_some_and(|id| id != held) {
+                return Err("Codex thread/resume returned a different thread ID; select PTY".into());
+            }
             if thread["modelProvider"].as_str() != Some("openai") {
                 return Err("Codex app-server requires the OpenAI ChatGPT provider; custom providers are refused to prevent accidental API billing. Select PTY for this configuration.".into());
             }

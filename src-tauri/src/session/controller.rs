@@ -4126,19 +4126,25 @@ impl SessionController {
                 skip_value = false;
                 return false;
             }
-            if flag == "--session-id" {
+            if matches!(flag.as_str(), "--session-id" | "--resume" | "-r") {
                 skip_value = true;
                 return false;
             }
-            !flag.starts_with("--session-id=")
+            !matches!(flag.as_str(), "--continue" | "-c" | "--fork-session")
+                && !["--session-id=", "--resume=", "-r=", "--fork-session="].iter().any(|prefix| flag.starts_with(prefix))
         });
     }
 
     fn transcript_key(command: &str, args: &[String]) -> Option<String> {
         match command {
-            "claude" => args.windows(2).find(|pair| pair[0] == "--session-id")
+            "claude" => args.windows(2).find(|pair| matches!(pair[0].as_str(), "--session-id" | "--resume"))
                 .map(|pair| pair[1].clone()),
             "codex" => {
+                if args.first().is_some_and(|arg| arg == "resume") {
+                    let id = args.get(1)?;
+                    Uuid::parse_str(id).ok()?;
+                    return Some(format!("codex-resume-{id}"));
+                }
                 let mut prompts = args.iter().filter(|arg| arg.strip_prefix("Read ")
                     .and_then(|path| path.strip_suffix("-prompt.md and execute."))
                     .is_some_and(|path| !path.is_empty() && !path.contains(['\n', '\r'])));
@@ -4214,6 +4220,22 @@ impl SessionController {
         };
 
         (command, args)
+    }
+
+    /// Resume the saved conversation without replaying its original launch task.
+    pub(crate) fn build_resume_command(config: &AgentConfig, provider_id: &str) -> Result<(String, Vec<String>), String> {
+        if !matches!(config.cli.as_str(), "claude" | "codex") {
+            return Err(format!("Conversation resume is unavailable for CLI {}", config.cli));
+        }
+        Uuid::parse_str(provider_id).map_err(|_| "Conversation resume needs a saved provider UUID".to_string())?;
+        let (command, mut args) = Self::build_command(config);
+        if config.cli == "claude" {
+            Self::remove_claude_session_flags(&mut args);
+            args.splice(0..0, ["--resume".to_string(), provider_id.to_string()]);
+        } else {
+            args.splice(0..0, ["resume".to_string(), provider_id.to_string()]);
+        }
+        Ok((command, args))
     }
 
     /// Add prompt argument to args based on CLI type
@@ -18836,6 +18858,7 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 #[cfg(test)]
 mod tests {
     mod lane_a_tests { include!("lane_a_tests.rs"); }
+    mod lane_e_tests { include!("lane_e_tests.rs"); }
     use super::{
         extract_model_arg, parse_persisted_session_state, serialize_session_state, AgentConfig,
         AgentInfo, AuthStrategy, BuiltWorkerPrompt, CompletionError, DebateDebaterMetadata,
