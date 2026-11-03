@@ -499,16 +499,16 @@
                           <span class="type-tag solo">Solo</span>
                         {/if}
                         {formatTimestamp(session.last_activity_at ?? session.created_at)}
+                        {#if attentionAgents.length > 0}
+                          <button type="button" class="session-attention lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--chip"
+                            aria-label={`${attentionAgents.length} need attention in ${session.name || session.id}`}
+                            onclick={(event) => { event.stopPropagation(); selectSession(session.id); handleAgentSelect(new CustomEvent('select', { detail: attentionAgents[0].id })); }}
+                          >{attentionAgents.length} need you</button>
+                        {/if}
                       </span>
                     {/if}
                     </div>
                   </div>
-                  {#if attentionAgents.length > 0}
-                    <button type="button" class="session-attention lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--chip"
-                      aria-label={`${attentionAgents.length} need attention in ${session.name || session.id}`}
-                      onclick={() => { selectSession(session.id); handleAgentSelect(new CustomEvent('select', { detail: attentionAgents[0].id })); }}
-                    >{attentionAgents.length} need you</button>
-                  {/if}
                   <button
                     class="close-session-button lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon"
                     class:lattice-btn--waiting={closingSessionId === session.id}
