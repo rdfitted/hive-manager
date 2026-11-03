@@ -102,6 +102,7 @@ export async function seed(root, now = new Date()) {
       config: { cli: 'codex', flags: [], label: agent.label, name: agent.label, initial_prompt: 'Inspect the synthetic orbital report.' },
       transcript_cwd: project, transcript_spawned_at: at(manifest.timing.createdSeconds),
       transcript_session_id: null, base_commit_sha: base,
+      provider_session_id: agent.providerSessionId ?? null,
     }));
     await json(`${relative}/session.json`, {
       id: session.id, name: session.name, session_type: { Hive: { worker_count: agents.length - 1 } },

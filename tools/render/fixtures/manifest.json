@@ -9,7 +9,7 @@
       "project": "orbit",
       "agents": [
         { "id": "fixture-orbit-queen", "role": "Queen", "state": "markdown", "label": "Orbit coordinator" },
-        { "id": "fixture-orbit-worker-1", "role": "Worker(1)", "state": "finished", "label": "Finished principal" },
+        { "id": "fixture-orbit-worker-1", "role": "Worker(1)", "state": "finished", "label": "Finished principal", "providerSessionId": "00000000-0000-4000-8000-000000000001" },
         { "id": "fixture-orbit-worker-2", "role": "Worker(2)", "state": "stalled", "label": "Stalled principal" },
         { "id": "fixture-orbit-worker-3", "role": "Worker(3)", "state": "exited_during_startup", "label": "Startup exit" },
         { "id": "fixture-orbit-worker-4", "role": "Worker(4)", "state": "delivery_failed", "label": "Delivery failure" },

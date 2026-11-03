@@ -133,6 +133,9 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   const session = manifest.sessions.find(item => item.id === manifest.screens.grid.sessionId);
   const byState = state => session.agents.find(agent => agent.state === state);
   const normal = session.agents.find(agent => agent.id === manifest.chat.agentId), stalled = byState('stalled');
+  const resumable = session.agents.find(agent => agent.state === 'finished' && agent.providerSessionId);
+  const unavailableSession = manifest.sessions.find(item => item.state === 'Completed' && item.agents.some(agent => agent.state === 'finished' && !agent.providerSessionId));
+  const unavailable = unavailableSession.agents.find(agent => agent.state === 'finished' && !agent.providerSessionId);
   let settled = false;
   const prove = mutationProver(report, assert);
   const probe = async (name, fn, context) => { try { const result = await fn(); assert(name, result.passed, result.details, context); } catch (error) { assert(name, false, error.message, context); } };
@@ -180,6 +183,36 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       }
     }
     else report.modalBadgeObservation = { ...(await badgeGeometry(page)), scope: 'Modal backdrop intentionally interdicts background controls; normal-screen badge checks remain gating.' };
+  };
+  const resumeChecks = async (agent, expected, mode, viewport) => {
+    const pane = paneFor(page, agent);
+    const button = pane.getByRole('button', { name: `Resume ${agent.label}`, exact: true });
+    const name = `resume-${expected ? 'available' : 'unavailable'}-${mode.toLowerCase()}-${viewport.width}`;
+    const context = { screen: mode.toLowerCase(), viewport: `${viewport.width}x${viewport.height}`, agentId: agent.id };
+    const measure = async () => {
+      const paneExists = await pane.count() === 1;
+      const count = await button.count();
+      const status = paneExists ? await pane.locator('.pane-status-text').textContent() : null;
+      const visible = count === 1 ? await visibleTargetState(button) : { visible: false, visibleText: '' };
+      const enabled = count === 1 && !await button.isDisabled();
+      const buttonBox = count === 1 ? await button.boundingBox() : null;
+      const paneBox = paneExists ? await pane.boundingBox() : null;
+      const contained = !!buttonBox && !!paneBox && buttonBox.width > 0 && buttonBox.height > 0
+        && buttonBox.x >= Math.max(0, paneBox.x) - 1 && buttonBox.y >= Math.max(0, paneBox.y) - 1
+        && buttonBox.x + buttonBox.width <= Math.min(viewport.width, paneBox.x + paneBox.width) + 1
+        && buttonBox.y + buttonBox.height <= Math.min(viewport.height, paneBox.y + paneBox.height) + 1;
+      return { passed: paneExists && status === 'Completed' && (expected
+        ? count === 1 && visible.visible && visible.visibleText === 'Resume' && enabled && contained
+        : count === 0), details: { paneExists, status, count, visible, enabled, contained, buttonBox, paneBox, expected } };
+    };
+    await probe(name, measure, context);
+    if (expected) await prove(`${name}-clipped`, measure, async () => {
+      const buttonBox = await button.boundingBox(), paneBox = await pane.boundingBox();
+      return styleChange(button, { transform: `translateX(${paneBox.x + paneBox.width - buttonBox.x - buttonBox.width + 6}px)` });
+    }, context);
+    await prove(name, measure, () => expected ? removeNode(button) : appendNode(pane.locator('.terminal-header'), {
+      tag: 'button', attributes: { 'aria-label': `Resume ${agent.label}` }, text: 'Resume',
+    }), context);
   };
   const gridChecks = async (viewport, stage) => {
     const context = { screen: 'grid', viewport: `${viewport.width}x${viewport.height}`, stage };
@@ -276,6 +309,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       settled = true;
     }
     await gridChecks(viewport, 'after-stall-and-sweep');
+    await resumeChecks(resumable, true, 'Grid', viewport);
     // Full labels remain required in the DOM. Shipped headers truncate them;
     // visible fixture state text and each pane's viewport check prove content.
     await capture('grid', viewport, page.locator('.terminal-panel:not(.hidden) .terminal-grid'),
@@ -395,6 +429,40 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await capture('dialog', viewport, dialog, text => text.includes('Keyboard Shortcuts'));
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
     if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
+  }
+  // Check completed history after baseline Review/dialog captures so this
+  // additional session navigation cannot change their selection state.
+  const resumePanelToggle = page.locator('#title-bar-panel-toggle');
+  if (await resumePanelToggle.getAttribute('aria-expanded') === 'true') await resumePanelToggle.click();
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 800, height: 900 }]) {
+    if (signal.aborted) throw new Error('Resume render checks interrupted');
+    await page.setViewportSize(viewport);
+    await selectSession(page, session, report);
+    await viewMode(page, 'Focus');
+    await page.locator(`.tree-row[data-agent-id=${JSON.stringify(resumable.id)}]`).click();
+    await resumeChecks(resumable, true, 'Focus', viewport);
+    await capture('focus', viewport, paneFor(page, resumable),
+      text => text.includes(resumable.label) && text.includes('Resume') && text.includes('Completed'), 'resume-available',
+      text => text.includes('Resume') && text.includes('Completed'));
+    await page.locator(`.tree-row[data-agent-id=${JSON.stringify(normal.id)}]`).click();
+    await page.getByRole('link', { name: 'Dashboard', exact: true }).click();
+    // Open the already-loaded completed fixture through the shipped Dashboard
+    // action. Recent's Load action intentionally refuses spawns in isolation.
+    const unavailableCard = page.locator(`article.card[aria-label=${JSON.stringify(unavailableSession.name)}]`);
+    await unavailableCard.scrollIntoViewIfNeeded();
+    await unavailableCard.getByRole('button', { name: 'Open session', exact: true }).click();
+    await page.locator('.terminal-panel:not(.hidden)').waitFor({ state: 'visible' });
+    await expandAgents(page, unavailableSession);
+    await viewMode(page, 'Focus');
+    await page.locator(`.tree-row[data-agent-id=${JSON.stringify(unavailable.id)}]`).click();
+    await resumeChecks(unavailable, false, 'Focus', viewport);
+    await capture('focus', viewport, paneFor(page, unavailable),
+      text => text.includes(unavailable.label) && text.includes('Completed'), 'resume-unavailable', text => text.includes('Completed'));
+    await viewMode(page, 'Grid');
+    await resumeChecks(unavailable, false, 'Grid', viewport);
+    await capture('grid', viewport, page.locator('.terminal-panel:not(.hidden) .terminal-grid'),
+      text => text.includes(unavailable.label) && text.includes('Completed'), 'resume-unavailable', text => text.includes('Completed'));
+    await selectSession(page, session, report);
   }
   const updater = await updaterState(page);
   assert('updater-invoke-rejected', updater.rejected, updater);
