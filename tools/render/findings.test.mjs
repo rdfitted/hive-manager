@@ -3,6 +3,48 @@ import assert from 'node:assert/strict';
 import { classifyFinding } from './findings.mjs';
 import { runInNewContext } from 'node:vm';
 import { updaterState } from './updater.mjs';
+import { scrubDiagnostic, failureDiagnostic } from './diagnostics.mjs';
+import { mutationProver, reviewProofNames } from './mutations.mjs';
+
+const diagnosticOptions = {
+  instanceRoot: String.raw`Z:\scratch\instance`, home: '/synthetic-home',
+  env: { HOME: '/synthetic-home', USERPROFILE: String.raw`Z:\Users\sample-person`, USERNAME: 'sample-person', HIVE_AGENT_TOKEN: 'synthetic-environment-secret' },
+};
+
+test('CI diagnostics scrub instance, home, user paths and credential shapes before bounding', () => {
+  const root = diagnosticOptions.instanceRoot;
+  const paths = [root, root.replaceAll('\\', '/'), root.replaceAll('\\', '\\\\'), '/synthetic-home/private', String.raw`Z:\Users\sample-person\private`, '/home/other-person/private', '/Users/another-person/private', String.raw`C:\Users\runner-person\private`, String.raw`C:\\Users\\escaped-person\\private`];
+  const tokens = ['sk-' + 'a'.repeat(32), 'sk-proj-' + 'a'.repeat(32), 'sk-ant-' + 'a'.repeat(32), 'ghp_' + 'b'.repeat(36), 'github_pat_' + 'c'.repeat(30), 'AKIA' + 'A'.repeat(16), 'eyJ' + 'd'.repeat(12) + '.' + 'e'.repeat(12) + '.' + 'f'.repeat(12), 'ab'.repeat(24), 'synthetic-environment-secret', 'Bearer short-value', 'token=short-value', 'api_key:short-value'];
+  const output = scrubDiagnostic({ text: [...paths, ...tokens, 'sample-person'].join('\n'), access_token: 'short-hidden-value', nested: { password: 'other-hidden-value' } }, diagnosticOptions);
+  for (const forbidden of ['scratch', 'synthetic-home', 'sample-person', 'other-person', 'another-person', 'runner-person', 'escaped-person', 'short-value', 'short-hidden-value', 'other-hidden-value', ...tokens.slice(0, -3)]) assert.equal(output.includes(forbidden), false, forbidden);
+  assert.equal(scrubDiagnostic({ error: 'plugin updater not found', port: 18800, passed: false }, diagnosticOptions), '{"error":"plugin updater not found","port":18800,"passed":false}');
+  const row = failureDiagnostic({ status: 'fail', name: 'no-console-errors', details: [`${tokens[0]} ${'diagnostic text '.repeat(500)}`] }, diagnosticOptions);
+  assert.ok(row.length <= 2000);
+  assert.match(row, /truncated/);
+  assert.equal(row.includes(tokens[0]), false);
+});
+
+test('CI diagnostics omit PNG and binary payloads without reading output files', () => {
+  const base64 = 'iVBORw0KGgo' + 'A'.repeat(80);
+  const output = scrubDiagnostic({ png: [137, 80, 78, 71], screenshot: 'private image payload', buffer: Buffer.from('private binary payload'), typed: new Uint8Array([137, 80, 78, 71]), raw: '\u0089PNG\r\n\u001a\nprivate PNG payload', data: `data:image/png;base64,${base64}`, bare: base64 }, diagnosticOptions);
+  for (const forbidden of ['137', 'private', 'iVBOR', 'data:image/png', base64]) assert.equal(output.includes(forbidden), false, forbidden);
+  const circular = {}; circular.self = circular;
+  assert.match(scrubDiagnostic(circular, diagnosticOptions), /circular/);
+});
+
+test('failed mutation diagnostics retain the name and all three phase results within one row', async () => {
+  const report = { mutations: [] }, rows = [];
+  const prove = mutationProver(report, (name, passed, details, context) => {
+    if (!passed) rows.push(failureDiagnostic({ name, status: 'fail', details, context }, diagnosticOptions));
+  });
+  await prove('no-console-errors', async () => ({ details: ['observed console error ' + 'details '.repeat(1000)], passed: false }), async () => async () => {});
+  assert.equal(rows.length, 1);
+  assert.ok(rows[0].length <= 2000);
+  assert.match(rows[0], /name="no-console-errors"/);
+  for (const phase of ['before', 'mutant', 'restored']) assert.ok(rows[0].includes(`${phase}={"passed":false,`), phase);
+  assert.match(rows[0], /error=null/);
+  for (const name of reviewProofNames) assert.ok(failureDiagnostic({ name: 'mutation-proof', status: 'fail', details: { name } }, diagnosticOptions).includes(`name="${name}"`), name);
+});
 test('a known overflow still records failure and its issue, rather than turning green', () => {
   for (const name of ['grid-composer-with-attention', 'grid-composer-without-attention']) {
     const result = classifyFinding(name, false, { contained: false, card: name === 'grid-composer-with-attention', composer: { x: 1, y: 2, width: 50, height: 50, right: 51, bottom: 52 }, pane: { x: 0, y: 0, width: 60, height: 40, right: 60, bottom: 40 } }, { [name]: { issue: 414 } });

@@ -10,6 +10,7 @@ import { trackedSnapshot, trackedChanges } from './integrity.mjs';
 import { acquireGate } from './gate.mjs';
 import { runRenderAssertions, diagnoseReview } from './assertions.mjs';
 import { classifyFinding } from './findings.mjs';
+import { failureDiagnostic } from './diagnostics.mjs';
 import { mutationProver, reviewProofNames } from './mutations.mjs';
 import { ps, quote, identity, sameProcess, tree, killOwned, liveState, liveUnchanged, desktopState, environment, inside, plainPath, sleep } from './windows.mjs';
 
@@ -32,7 +33,7 @@ const knownFindings = JSON.parse(await readFile(path.join(repo, 'tools/render/kn
 const assertion = (name, passed, details, context = {}) => {
   const result = classifyFinding(name, passed, details, knownFindings);
   report.assertions.push({ name, ...result, details, ...context });
-  if (!result.accepted) console.log(`render:check ${result.status} ${name} ${context.viewport ?? ''} ${context.stage ?? ''}`);
+  if (!result.accepted) console.log(failureDiagnostic({ name, status: result.status, details, context }, { instanceRoot: root }));
   return result.accepted;
 };
 const stateFile = root => path.join(root, 'render-run.json');
