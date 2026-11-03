@@ -44,6 +44,29 @@ beforeEach(() => {
 });
 
 describe('G31 heartbeat work state', () => {
+  it('G48 retains inactive stale sets with one fetch and drops disappeared sessions', async () => {
+    const old = new Date(Date.now() - 4 * 60_000).toISOString();
+    const inactive = { id: 'inactive', agents: [
+      { id: 'stale-only', last_activity: old, work_state: 'working' },
+      { id: 'finished', last_activity: old, work_state: 'finished' },
+      { id: 'retired', last_activity: old, work_state: 'retired' },
+      { id: 'recent-input', last_activity: old, latest_input_at: new Date().toISOString() },
+    ] };
+    let snapshots = [{ id: 'selected', agents: [] }, inactive];
+    fetchMock.mockImplementation(async () => ({ ok: true, json: async () => ({ sessions: snapshots }) }));
+    await heartbeatStore.loadHeartbeats('selected');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/sessions/active');
+    expect([...get(heartbeatStore).staleAgents]).toEqual([]);
+    expect([...get(heartbeatStore).staleAgentsBySession.inactive]).toEqual(['stale-only']);
+    expect(get(heartbeatStore).agentsBySession.inactive['stale-only'].work_state).toBe('working');
+    snapshots = [inactive];
+    await heartbeatStore.loadHeartbeats('absent');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(get(heartbeatStore).agents).toEqual({});
+    expect([...get(heartbeatStore).staleAgents]).toEqual([]);
+    expect(Object.keys(get(heartbeatStore).staleAgentsBySession)).toEqual(['inactive']);
+  });
   it('G31 confirmed follow-up gets three minutes after input even with an old completed heartbeat', async () => {
     vi.useFakeTimers();
     try {

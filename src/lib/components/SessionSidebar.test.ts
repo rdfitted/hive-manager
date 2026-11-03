@@ -5,6 +5,11 @@ import { get, type Writable } from 'svelte/store';
 import type { AgentInfo, Session } from '$lib/stores/sessions';
 
 const launchMocks = vi.hoisted(() => ({ goto: vi.fn().mockResolvedValue(undefined), invoke: vi.fn().mockResolvedValue([]), closeSession: vi.fn().mockResolvedValue(undefined) }));
+const eventMocks = vi.hoisted(() => ({ listeners: new Map<string, (event: { payload: { session: Session } }) => void>() }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async (name, callback) => {
+  eventMocks.listeners.set(name, callback);
+  return () => eventMocks.listeners.delete(name);
+}) }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: launchMocks.invoke }));
 vi.mock('$app/navigation', () => ({ goto: launchMocks.goto }));
 vi.mock('$app/stores', async () => {
@@ -33,6 +38,7 @@ import { sessions, activeSession, activeAgents } from '$lib/stores/sessions';
 import { ui } from '$lib/stores/ui';
 import { launch } from '$lib/stores/launch';
 import { page } from '$app/stores';
+import { heartbeatStore } from '$lib/stores/conversations';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -101,10 +107,67 @@ describe('SessionSidebar launch entries', () => {
     await waitFor(() => expect(get(launch).defaultProjectPath).toBe('D:/latest'));
   });
 
-  it('falls back to the current directory when no persisted session exists', async () => {
+  it('uses an empty launch default when no persisted session exists', async () => {
     launchMocks.invoke.mockImplementation(async (command: string) => command === 'get_current_directory' ? 'D:/cwd' : []);
     render(SessionSidebar);
-    await waitFor(() => expect(get(launch).defaultProjectPath).toBe('D:/cwd'));
+    await waitFor(() => expect(get(launch).defaultProjectPath).toBe(''));
+  });
+});
+
+describe('Recent sessions across projects (G48)', () => {
+  const stored = Array.from({ length: 8 }, (_, index) => ({
+    id: `stored-${index}`, project_path: `D:/project-${index % 2}`,
+    created_at: '2026-01-01', last_activity_at: `2026-10-${String(index + 10).padStart(2, '0')}`,
+    session_type: 'Hive', agent_count: 1, state: index === 7 ? 'Running' : 'Completed',
+  }));
+  it('keeps the terminal refresh when an older initial request finishes last', async () => {
+    let finishInitial!: (value: typeof stored) => void;
+    launchMocks.invoke.mockImplementationOnce(() => new Promise(resolve => { finishInitial = resolve; }))
+      .mockResolvedValueOnce(stored);
+    if (get(layout).recentCollapsed) layout.toggleSection('recentCollapsed');
+    const view = render(SessionSidebar);
+    await waitFor(() => expect(launchMocks.invoke).toHaveBeenCalledTimes(1));
+    eventMocks.listeners.get('session-update')!({ payload: { session: { state: 'Completed' } as Session } });
+    await waitFor(() => expect(view.getAllByRole('button', { name: 'Load session' })).toHaveLength(8));
+    finishInitial([]);
+    await import('svelte').then(({ tick }) => tick());
+    expect(view.getAllByRole('button', { name: 'Load session' })).toHaveLength(8);
+  });
+  it('lists all stored projects newest first with an unrelated application cwd', async () => {
+    launchMocks.invoke.mockImplementation(async (command: string, args?: { projectPath?: string }) => {
+      if (command === 'get_current_directory') return 'D:/unrelated-installed-app';
+      return args?.projectPath ? stored.filter(item => item.project_path === args.projectPath) : stored;
+    });
+    if (get(layout).recentCollapsed) layout.toggleSection('recentCollapsed');
+    const view = render(SessionSidebar);
+    await waitFor(() => expect(view.getAllByRole('button', { name: 'Load session' })).toHaveLength(8));
+    const rows = [...view.container.querySelectorAll('.session-item.recent')];
+    expect(rows.map(row => row.querySelector('.session-path')?.textContent)).toEqual(
+      [...stored].reverse().map(item => item.project_path.split('/').pop()),
+    );
+    expect(rows[0].textContent).toContain('Interrupted');
+    expect(launchMocks.invoke).toHaveBeenCalledWith('list_stored_sessions', { projectPath: null });
+  });
+  it('filters on the active project and refreshes when sessions reach terminal states', async () => {
+    const live = { id: 'stored-7', project_path: 'D:/project-1', created_at: '2026-01-01',
+      session_type: { Hive: { worker_count: 0 } }, state: 'Running', agents: [] } as unknown as Session;
+    (activeSession as Writable<Session | null>).set(live);
+    (sessions as unknown as Writable<unknown>).set({ sessions: [live] });
+    launchMocks.invoke.mockResolvedValue(stored);
+    if (get(layout).recentCollapsed) layout.toggleSection('recentCollapsed');
+    const view = render(SessionSidebar);
+    await waitFor(() => expect(view.getAllByRole('button', { name: 'Load session' })).toHaveLength(8));
+    expect(view.queryByText('Interrupted')).toBeNull();
+    await fireEvent.click(view.getByRole('checkbox', { name: 'Active project only' }));
+    expect(view.getAllByRole('button', { name: 'Load session' })).toHaveLength(4);
+    const count = launchMocks.invoke.mock.calls.length;
+    eventMocks.listeners.get('session-update')!({ payload: { session: live } });
+    expect(launchMocks.invoke).toHaveBeenCalledTimes(count);
+    for (const state of ['Completed', 'Closed', { Failed: 'test' }] as Session['state'][]) {
+      eventMocks.listeners.get('session-update')!({ payload: { session: { ...live, state } } });
+    }
+    await waitFor(() => expect(launchMocks.invoke).toHaveBeenCalledTimes(count + 3));
+    expect(launchMocks.invoke.mock.calls.every(([name]) => name === 'list_stored_sessions')).toBe(true);
   });
 });
 
@@ -179,6 +242,16 @@ describe('sidebar session and agent attention', () => {
     if (get(layout).agentsCollapsed) layout.toggleSection('agentsCollapsed');
     if (get(layout).sessionsCollapsed) layout.toggleSection('sessionsCollapsed');
   }
+  it('G48 shows a stale-only inactive session badge using its own heartbeat snapshot', () => {
+    load(session('Active hive', []), session('Inactive hive', [agent('stale-only', 'waiting')]));
+    (heartbeatStore as unknown as Writable<unknown>).set({ agents: {}, staleAgents: new Set(), stalledAgents: new Set(),
+      staleAgentsBySession: { 'Inactive hive': new Set(['stale-only']) },
+      agentsBySession: { 'Inactive hive': { 'stale-only': { work_state: 'working' } } },
+    });
+    const view = render(SessionSidebar);
+    expect(view.getByRole('button', { name: '1 need attention in Inactive hive' })).toBeTruthy();
+    expect(view.queryByRole('button', { name: /need attention in Active hive/ })).toBeNull();
+  });
   it('nests the tree under the active session, shows failed-delivery badges, and focuses by badge', async () => {
     const active = session('Active hive', [agent('Failed worker', 'injected_delivery_failed:transcript:1')]);
     const inactive = session('Other hive', [agent('Other failed', 'injected_delivery_failed:transcript:2')]);
