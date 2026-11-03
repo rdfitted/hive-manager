@@ -305,9 +305,17 @@ fn pty_conversion_preserves_policy_model_effort_and_pinned_id() {
         .windows(2)
         .any(|p| p == ["--model", "synthetic-model"]));
     assert!(options.args.windows(2).any(|p| p == ["--effort", "high"]));
+    let resumed = ClaudeOptions::from_pty(
+        "claude",
+        &["--resume", &id, "--dangerously-skip-permissions", "--model", "synthetic-model"],
+        ".".into(), vec![], "session".into(), "worker".into(),
+    ).unwrap();
+    assert_eq!(resumed.transcript_id, id);
+    assert!(resumed.args.windows(2).any(|pair| pair == ["--resume", id.as_str()]));
+    assert!(resumed.args.windows(2).any(|pair| pair == ["--model", "synthetic-model"]));
+    assert!(!resumed.args.iter().any(|arg| arg == "--session-id"));
     for flag in [
         "--bare",
-        "--resume",
         "--settings",
         "--no-session-persistence",
         "--permission-mode",
