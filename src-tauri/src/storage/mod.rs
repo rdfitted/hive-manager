@@ -437,7 +437,7 @@ impl SessionStorage {
 
     /// Get the app data directory path
     #[cfg_attr(test, allow(dead_code))]
-    fn get_app_data_dir() -> Result<PathBuf, StorageError> {
+    pub(crate) fn get_app_data_dir() -> Result<PathBuf, StorageError> {
         #[cfg(windows)]
         {
             std::env::var("APPDATA")
@@ -585,13 +585,16 @@ impl SessionStorage {
 
     /// Load session metadata from disk
     pub fn load_session(&self, session_id: &str) -> Result<PersistedSession, StorageError> {
+        crate::instance::guard_id(session_id).map_err(StorageError::InvalidPath)?;
         let session_file = self.session_file_path(session_id);
+        crate::instance::guard_path(&session_file).map_err(StorageError::InvalidPath)?;
         if !session_file.exists() {
             return Err(StorageError::SessionNotFound(session_id.to_string()));
         }
 
         let json = fs::read_to_string(session_file)?;
         let session: PersistedSession = serde_json::from_str(&json)?;
+        crate::instance::guard_stored_session(session_id, &session).map_err(StorageError::InvalidPath)?;
 
         Ok(session)
     }

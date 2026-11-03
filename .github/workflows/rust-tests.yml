@@ -66,6 +66,11 @@ jobs:
       - name: Cargo test
         run: cargo test
 
+      - name: Setup Node for serial fixture proof
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+
       - name: Overhead benchmarks (isolated)
         working-directory: src-tauri
-        run: cargo test --lib -- --ignored --exact --test-threads=1 --nocapture http::handlers::evaluator::tests::typed_verdict_recording_overhead_under_50ms_median orchestrator::org_graph::retrieval_ledger::tests::benchmark_retrieval_spawn_overhead orchestrator::org_graph::retrieval_ledger::tests::large_existing_ledger_keeps_retrieval_spawn_under_fifty_ms
+        run: cargo test --lib -- --ignored --exact --test-threads=1 --nocapture http::handlers::evaluator::tests::typed_verdict_recording_overhead_under_50ms_median orchestrator::org_graph::retrieval_ledger::tests::benchmark_retrieval_spawn_overhead orchestrator::org_graph::retrieval_ledger::tests::large_existing_ledger_keeps_retrieval_spawn_under_fifty_ms instance_fixture_tests::seeded_output_loads_through_real_storage_and_isolated_controller

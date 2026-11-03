@@ -98,6 +98,7 @@ const STALE_STORE_RETENTION: std::time::Duration =
 /// `~/.codex` would just relocate the growth here. Every failure is skipped silently — a
 /// janitor must never take the app down.
 pub fn cleanup_stale_stores() {
+    if crate::instance::is_isolated() { return; }
     let root = store_root();
     let Ok(entries) = std::fs::read_dir(&root) else {
         return;

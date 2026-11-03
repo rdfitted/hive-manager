@@ -1,0 +1,86 @@
+name: Render Check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ["feat/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  render-check:
+    name: Isolated Windows WebView
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      # https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution
+      - name: Ensure WebView2 runtime on the disposable runner
+        timeout-minutes: 5
+        run: |
+          function Get-WebViewVersion {
+            $keys = @(
+              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+              'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+            )
+            foreach ($key in $keys) {
+              $version = Get-ItemPropertyValue -LiteralPath $key -Name pv -ErrorAction SilentlyContinue
+              if ($version -and [version]$version -gt [version]'0.0.0.0') { return $version }
+            }
+          }
+          if (!(Get-WebViewVersion)) {
+            $installer = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebview2Setup.exe'
+            Invoke-WebRequest -UseBasicParsing 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $installer
+            $setup = Start-Process -FilePath $installer -ArgumentList '/silent','/install' -WindowStyle Hidden -Wait -PassThru
+            if ($setup.ExitCode -ne 0) { throw "WebView2 setup failed: $($setup.ExitCode)" }
+          }
+          $version = Get-WebViewVersion
+          if (!$version) { throw 'WebView2 runtime was not installed' }
+          Write-Output "WebView2 runtime: $version"
+
+      - name: Resolve isolated build cache
+        id: paths
+        run: |
+          $target = Join-Path $env:LOCALAPPDATA 'hive-manager-target\loop1'
+          "CARGO_BUILD_JOBS=1" >> $env:GITHUB_ENV
+          "CARGO_TARGET_DIR=$target" >> $env:GITHUB_ENV
+          $relative = node -e "process.stdout.write(require('node:path').relative(require('node:path').resolve('src-tauri'), process.argv[1]).replaceAll('\\', '/'))" $target
+          "cache_target=$relative" >> $env:GITHUB_OUTPUT
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: ./src-tauri -> ${{ steps.paths.outputs.cache_target }}
+
+      - name: Driver and fixture tests
+        run: node --test tools/render/fixtures.test.mjs tools/render/lifecycle.test.mjs tools/render/findings.test.mjs tools/render/gate-policy.test.mjs
+
+      # Measured hosted cold run: render step 14.6 minutes, job 15.9 minutes.
+      # Leave build variance within the 25-minute job budget.
+      - name: Render check
+        timeout-minutes: 20
+        run: npm run render:check
+
+      # Reports and PNGs intentionally remain private runner-local artifacts.
+      # No upload-artifact step: screenshots must never be uploaded.

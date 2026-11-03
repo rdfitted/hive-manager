@@ -101,6 +101,7 @@ impl ActionRegistry {
         ctx: &ActionContext,
         input: Value,
     ) -> Result<Value, ActionError> {
+        crate::instance::guard_action(name, &input).map_err(ActionError::bad_request)?;
         let action = self
             .actions
             .get(name)

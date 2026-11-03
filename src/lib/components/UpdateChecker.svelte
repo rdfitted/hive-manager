@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { isIsolatedInstance } from '$lib/config';
   import { check, type Update } from '@tauri-apps/plugin-updater';
   import { relaunch } from '@tauri-apps/plugin-process';
   import { getVersion } from '@tauri-apps/api/app';
@@ -23,7 +24,7 @@
   let upToDateTimer: number | undefined;
 
   async function checkForUpdates(manual = false) {
-    if (checking || downloading || restartPending) return;
+    if (isIsolatedInstance() || checking || downloading || restartPending) return;
     checking = true;
     error = null;
     upToDate = false;
@@ -57,6 +58,7 @@
       .catch(() => {
         // Outside Tauri (plain browser dev) there is no app version to show.
       });
+    if (isIsolatedInstance()) return;
     void checkForUpdates();
     const interval = window.setInterval(() => void checkForUpdates(), 6 * 60 * 60 * 1000);
     return () => {
@@ -144,7 +146,7 @@
 {#if !updateAvailable || checking || restartPending || error}
 <div class="update-check-actions" class:expanded={checking || restartPending || upToDate || !!error}>
   {#if !updateAvailable && !restartPending}
-    <button class="check-icon" on:click={() => checkForUpdates(true)} disabled={checking || downloading} aria-label="Check for updates" title="Check for updates">
+    <button class="check-icon" on:click={() => checkForUpdates(true)} disabled={isIsolatedInstance() || checking || downloading} aria-label="Check for updates" title="Check for updates">
       <ArrowClockwise size={16} weight="light" aria-hidden="true" />
     </button>
   {/if}

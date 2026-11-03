@@ -1492,6 +1492,7 @@ impl SessionController {
         name: Option<String>,
         color: Option<String>,
     ) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
         let prompt_str = prompt.unwrap_or_default();
@@ -1687,7 +1688,52 @@ impl SessionController {
         Ok(session)
     }
 
+    /// Synthetic state is admitted only after successful debug-instance bootstrap.
+    pub(crate) fn apply_instance_fixture(&self, fixture: &crate::instance::FixtureSession) -> Result<(), String> {
+        if !crate::instance::is_isolated() { return Err("Fixture overlay requires an isolated instance".into()); }
+        {
+            let mut sessions = self.sessions.write();
+            let session = sessions.get_mut(&fixture.session_id).ok_or("Unknown fixture session")?;
+            for entry in &fixture.agents {
+                let agent = session.agents.iter_mut().find(|agent| agent.id == entry.agent_id)
+                    .ok_or("Unknown fixture agent")?;
+                agent.status = entry.status.clone();
+                agent.work_state = entry.work_state;
+            }
+        }
+        {
+            let mut heartbeats = self.agent_heartbeats.write();
+            let agents = heartbeats.entry(fixture.session_id.clone()).or_default();
+            for entry in &fixture.agents {
+                if let Some(heartbeat) = &entry.heartbeat {
+                    agents.insert(entry.agent_id.clone(), AgentHeartbeatInfo {
+                        last_activity: heartbeat.last_activity, status: heartbeat.status.clone(), summary: heartbeat.summary.clone(),
+                    });
+                }
+            }
+        }
+        self.emit_session_update(&fixture.session_id);
+        Ok(())
+    }
+
+    /// Maintain only opted-in fixture timestamps, without replaying canonical statuses.
+    pub(crate) fn refresh_instance_fixture_heartbeats(
+        &self,
+        fixture: &crate::instance::FixtureSession,
+        now: DateTime<Utc>,
+    ) {
+        if !crate::instance::is_isolated() { return; }
+        let mut heartbeats = self.agent_heartbeats.write();
+        let Some(agents) = heartbeats.get_mut(&fixture.session_id) else { return; };
+        for entry in fixture.agents.iter().filter(|entry| entry.refresh_heartbeat) {
+            if let Some(heartbeat) = agents.get_mut(&entry.agent_id) {
+                heartbeat.last_activity = now;
+            }
+        }
+    }
+
     pub fn get_session(&self, id: &str) -> Option<Session> {
+        if crate::instance::guard_id(id).is_err() { return None; }
         self.refresh_session_from_storage_if_clean(id);
         let session = self.sessions.read().get(id).cloned()?;
         Some(self.project_work_states(session))
@@ -1734,6 +1780,7 @@ impl SessionController {
         for (agent, state) in session.agents.iter_mut().zip(states) {
             agent.work_state = Some(state);
         }
+        crate::instance::project_fixture_work_states(&mut session);
         (session, heartbeats)
     }
 
@@ -4284,6 +4331,7 @@ cat "{prince_verdict}"
     }
 
     fn run_git_in_dir(project_path: &PathBuf, args: &[&str]) -> Result<String, String> {
+        crate::instance::guard_path(project_path)?;
         if !project_path.exists() {
             return Err(format!(
                 "Project path does not exist: {}",
@@ -4396,6 +4444,8 @@ cat "{prince_verdict}"
         session_id: &str,
     ) -> Result<FusionSessionMetadata, String> {
         let metadata_path = Self::fusion_metadata_path(project_path, session_id);
+        crate::instance::guard_id(session_id)?;
+        crate::instance::guard_path(&metadata_path)?;
         let json = std::fs::read_to_string(&metadata_path).map_err(|e| {
             format!(
                 "Failed to read fusion metadata {}: {}",
@@ -4403,7 +4453,9 @@ cat "{prince_verdict}"
                 e
             )
         })?;
-        serde_json::from_str(&json).map_err(|e| format!("Failed to parse fusion metadata: {}", e))
+        let metadata: FusionSessionMetadata = serde_json::from_str(&json).map_err(|e| format!("Failed to parse fusion metadata: {}", e))?;
+        crate::instance::guard_serialized_paths(&metadata)?;
+        Ok(metadata)
     }
 
     fn debate_metadata_path(project_path: &PathBuf, session_id: &str) -> PathBuf {
@@ -4435,6 +4487,8 @@ cat "{prince_verdict}"
         session_id: &str,
     ) -> Result<DebateSessionMetadata, String> {
         let metadata_path = Self::debate_metadata_path(project_path, session_id);
+        crate::instance::guard_id(session_id)?;
+        crate::instance::guard_path(&metadata_path)?;
         let json = std::fs::read_to_string(&metadata_path).map_err(|e| {
             format!(
                 "Failed to read debate metadata {}: {}",
@@ -4442,7 +4496,9 @@ cat "{prince_verdict}"
                 e
             )
         })?;
-        serde_json::from_str(&json).map_err(|e| format!("Failed to parse debate metadata: {}", e))
+        let metadata: DebateSessionMetadata = serde_json::from_str(&json).map_err(|e| format!("Failed to parse debate metadata: {}", e))?;
+        crate::instance::guard_serialized_paths(&metadata)?;
+        Ok(metadata)
     }
 
     fn parse_task_status(content: &str) -> Option<String> {
@@ -9963,6 +10019,7 @@ Last updated: {timestamp}
     }
 
     pub fn launch_solo(&self, config: HiveLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         let project_path = PathBuf::from(&config.project_path);
         let task_description = config
             .prompt
@@ -9993,6 +10050,7 @@ Last updated: {timestamp}
     }
 
     pub fn launch_hive_v2(&self, config: HiveLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         self.launch_hive_internal(config, None, HashMap::new(), true, true)
     }
 
@@ -10536,6 +10594,7 @@ Last updated: {timestamp}
     ///   (template key `roles/researcher`).
     /// - Planning and the evaluator are always disabled.
     pub fn launch_research(&self, config: ResearchLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         let smoke_test = config.smoke_test;
 
         // Assign the "researcher" role to any worker that doesn't already carry one,
@@ -10666,6 +10725,7 @@ phases and do EXACTLY this, then stop:
     }
 
     pub fn launch_fusion(&self, config: FusionLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         tracing::info!(
             "launch_fusion called: with_planning={}, variants={}, task={}",
             config.with_planning,
@@ -10963,6 +11023,7 @@ phases and do EXACTLY this, then stop:
     }
 
     pub fn launch_debate(&self, mut config: DebateLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         tracing::info!(
             "launch_debate called: with_planning={}, debaters={}, rounds={}, topic={}",
             config.with_planning,
@@ -11205,6 +11266,7 @@ phases and do EXACTLY this, then stop:
         round: u8,
         wiki_batch: Option<crate::wiki::WikiBatch>,
     ) -> Result<(), String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -12896,6 +12958,7 @@ The backend composed and persisted the following authoritative skeleton before l
         config: &HiveLaunchConfig,
         queen_id: &str,
     ) -> Result<(), SessionError> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", session_id)))?;
@@ -14625,6 +14688,7 @@ The backend composed and persisted the following authoritative skeleton before l
     }
 
     fn spawn_fusion_judge(&self, session_id: &str) -> Result<(), String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -14958,6 +15022,7 @@ The backend composed and persisted the following authoritative skeleton before l
         session_id: &str,
         wiki_batch: Option<crate::wiki::WikiBatch>,
     ) -> Result<(), String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -15172,6 +15237,7 @@ The backend composed and persisted the following authoritative skeleton before l
     }
 
     pub fn select_fusion_winner(&self, session_id: &str, variant_name: &str) -> Result<(), String> {
+        crate::instance::refuse("Fusion winner selection")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -15510,6 +15576,7 @@ The backend composed and persisted the following authoritative skeleton before l
         &self,
         session_id: &str,
     ) -> Result<Session, PlanningPhaseError> {
+        crate::instance::refuse("agent launch").map_err(PlanningPhaseError::Failed)?;
         // mark_plan_ready moves the session to PlanReady before the Queen is up,
         // and PlanReady passes the guard below. Hold the lifecycle lock (shared
         // with stop/close/resume) across the whole continuation so a concurrent
@@ -16119,6 +16186,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
     /// Resume a persisted session from storage
     pub fn resume_session(&self, session_id: &str) -> Result<Session, String> {
+        crate::instance::guard_id(session_id)?;
         // Validate session ID format to prevent path traversal
         if session_id.contains("..") || session_id.contains("/") || session_id.contains("\\") {
             return Err("Invalid session ID format".to_string());
@@ -16576,6 +16644,7 @@ The backend composed and persisted the following authoritative skeleton before l
     }
 
     pub fn launch_swarm(&self, config: SwarmLaunchConfig) -> Result<Session, String> {
+        crate::instance::refuse("agent launch")?;
         let session_id = Uuid::new_v4().to_string();
         let default_cli = config.default_cli.trim().to_string();
         let default_model = config.default_model.clone();
@@ -16754,6 +16823,7 @@ The backend composed and persisted the following authoritative skeleton before l
         qa_workers: Option<&[QaWorkerConfig]>,
         smoke_test: bool,
     ) -> Result<(), String> {
+        crate::instance::refuse("agent launch")?;
         if !with_evaluator {
             return Ok(());
         }
@@ -17110,6 +17180,9 @@ The backend composed and persisted the following authoritative skeleton before l
         parent_id: Option<&str>,
         dispatch_tiers: Option<(TaskTier, TaskTier)>,
     ) -> Result<AddWorkerReservation, AddWorkerError> {
+        crate::instance::refuse("agent launch").map_err(|error| AddWorkerError::Rejected(AddWorkerRejection {
+            error, reason: AddWorkerRejectionReason::StateNotAcceptingWorkers, current_state: "isolated".into(),
+        }))?;
         let sessions = self.sessions.read();
         let session = sessions
             .get(session_id)
@@ -17134,6 +17207,7 @@ The backend composed and persisted the following authoritative skeleton before l
         parent_id: Option<String>,
         expected_index: Option<u8>,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         self.add_worker_for_plan_task(
             session_id,
             config,
@@ -17157,6 +17231,7 @@ The backend composed and persisted the following authoritative skeleton before l
         plan_task_id: Option<&str>,
         dispatch_tiers: Option<(TaskTier, TaskTier)>,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         // Get session and validate
         let session = {
             let sessions = self.sessions.read();
@@ -17458,6 +17533,7 @@ The backend composed and persisted the following authoritative skeleton before l
         mut config: AgentConfig,
         smoke_test: bool,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -17662,6 +17738,7 @@ The backend composed and persisted the following authoritative skeleton before l
         mut config: AgentConfig,
         smoke_test: bool,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -17784,6 +17861,7 @@ The backend composed and persisted the following authoritative skeleton before l
         specialization: String,
         parent_id: Option<String>,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -17916,6 +17994,7 @@ The backend composed and persisted the following authoritative skeleton before l
         domain: String,
         workers: Vec<AgentConfig>,
     ) -> Result<AgentInfo, String> {
+        crate::instance::refuse("agent launch")?;
         // Get session and validate
         let session = {
             let sessions = self.sessions.read();

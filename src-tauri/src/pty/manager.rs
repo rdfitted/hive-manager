@@ -919,6 +919,7 @@ impl PtyManager {
         cols: u16,
         rows: u16,
     ) -> Result<String, PtyError> {
+        crate::instance::refuse("agent spawn").map_err(PtyError::CreateError)?;
         if let Some((_,session_id))=agent_identity_env(&id,&role).first() {
             let enabled=self.agent_transports.read().get(session_id).cloned().unwrap_or_default();
             match crate::domain::agent_transport::selected_transport(&enabled,command,&role) {
@@ -1205,6 +1206,7 @@ impl PtyManager {
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), PtyError> {
         let sessions = self.sessions.read();
+        if crate::instance::is_isolated() && !sessions.contains_key(id) { return Ok(()); }
         let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
         tracing::debug!("Resizing PTY {} to {}x{}", id, cols, rows);
         session.resize(cols, rows)

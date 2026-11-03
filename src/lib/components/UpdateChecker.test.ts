@@ -39,11 +39,25 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  delete window.__HIVE_INSTANCE__;
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
 describe('UpdateChecker', () => {
+  it('skips isolated update checks and keeps the installed version badge', async () => {
+    window.__HIVE_INSTANCE__ = { isolated: true, apiBase: 'http://127.0.0.1:18891' };
+    const intervals = vi.spyOn(window, 'setInterval');
+    const view = render(UpdateChecker);
+    await waitFor(() => expect(view.getByText('v0.55.1')).toBeTruthy());
+    expect(mocks.check).not.toHaveBeenCalled();
+    const button = view.getByRole('button', { name: 'Check for updates' });
+    expect(button.hasAttribute('disabled')).toBe(true);
+    await fireEvent.click(button);
+    expect(mocks.check).not.toHaveBeenCalled();
+    expect(intervals.mock.calls.some(([, delay]) => delay === 6 * 60 * 60 * 1000)).toBe(false);
+  });
+
   it('shows the installed version next to the update check', async () => {
     mocks.check.mockResolvedValue(null);
     const view = render(UpdateChecker);

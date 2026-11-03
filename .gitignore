@@ -44,3 +44,6 @@ __pycache__/
 
 # Local issue-resolution hook state
 /.claude/resolvegitissue-loop.json
+
+# Local render evidence (never upload screenshots)
+tools/render/out/

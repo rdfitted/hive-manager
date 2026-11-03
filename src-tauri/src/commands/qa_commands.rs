@@ -36,6 +36,7 @@ pub struct QaVerdict {
 }
 
 fn validate_session_id(session_id: &str) -> Result<(), String> {
+    crate::instance::guard_id(session_id)?;
     if session_id.is_empty()
         || session_id.contains("..")
         || session_id.contains('/')

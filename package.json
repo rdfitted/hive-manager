@@ -1,6 +1,6 @@
 {
   "name": "hive-manager",
-  "version": "0.65.0",
+  "version": "0.66.0",
   "description": "Multi-agent orchestration and monitoring for Claude Code workflows",
   "type": "module",
   "scripts": {
@@ -11,7 +11,8 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "render:check": "node tools/render/check.mjs"
   },
   "license": "MIT",
   "dependencies": {
@@ -39,6 +40,7 @@
     "@tauri-apps/cli": "^2",
     "@testing-library/svelte": "^5.2.4",
     "jsdom": "^25.0.1",
+    "playwright-core": "^1.64.1",
     "svelte": "^5.33.0",
     "svelte-check": "^4.0.0",
     "typescript": "~5.6.2",
