@@ -1000,7 +1000,10 @@ mod tests {
             eprintln!("fixture_wait_ms name=ping PID publication elapsed={}", startup_wait.elapsed().as_millis());
             let mut cleanup = PingCleanup(Some(pid));
             assert!(pid_is_live(pid), "ping grandchild exited before kill");
-            session.kill().unwrap();
+            let kill_started = Instant::now();
+            let killed = session.kill();
+            eprintln!("fixture_kill_ms elapsed={} status={}", kill_started.elapsed().as_millis(), if killed.is_ok() { "ok" } else { "error" });
+            killed.unwrap();
             let reap_wait = Instant::now();
             while pid_is_live(pid) && reap_wait.elapsed() < FIXTURE_WAIT_FAILSAFE {
                 thread::sleep(Duration::from_millis(50));
