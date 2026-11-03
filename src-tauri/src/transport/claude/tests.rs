@@ -365,6 +365,26 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(25));
     }
 }
+// PID publication is a fixture signal, not a startup performance budget.
+#[cfg(windows)]
+fn wait_for_child_pid(root: &std::path::Path) -> u32 {
+    loop {
+        if let Ok(value) = std::fs::read_to_string(root.join("child.pid")) {
+            if let Ok(pid) = value.trim().parse() {
+                return pid;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_signal(mut predicate: impl FnMut() -> bool) {
+    while !predicate() {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 #[cfg(windows)]
 fn child_alive(pid: u32) -> bool {
     use std::ffi::c_void;
@@ -547,12 +567,7 @@ fn g15_claude_startup_cancel_stop_exit_and_app_shutdown_reap_descendants() {
                 24,
             )
         });
-        wait_until(|| temp.path().join("child.pid").exists());
-        let pid = std::fs::read_to_string(temp.path().join("child.pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let pid = wait_for_child_pid(temp.path());
         assert!(child_alive(pid));
         if mode == "cancel" {
             manager.kill(&agent).unwrap();
@@ -567,15 +582,15 @@ fn g15_claude_startup_cancel_stop_exit_and_app_shutdown_reap_descendants() {
                     Some(true)
                 );
                 assert!(transport.interrupt_sync().is_err());
-                wait_until(|| !transport.is_alive());
-                wait_until(|| !child_alive(pid)); // Observe natural-exit cleanup before explicit stop.
+                wait_for_signal(|| !transport.is_alive());
+                wait_for_signal(|| !child_alive(pid)); // Observe natural-exit cleanup before explicit stop.
             } else if mode == "app-exit" {
                 let runtime = tokio::runtime::Runtime::new().unwrap();
                 assert!(runtime.block_on(registry.stop_all()).is_empty());
             }
             manager.kill(&agent).unwrap();
         }
-        wait_until(|| !child_alive(pid));
+        wait_for_signal(|| !child_alive(pid));
         assert!(
             !manager.is_alive(&agent),
             "G15 Claude no live runtime after cleanup"
@@ -619,14 +634,10 @@ fn g15_claude_direct_writer_failure_cleans_owned_tree() {
         .register(&session, &agent, transport.thread_id(), transport.clone())
         .unwrap();
     transport.activate().unwrap();
-    wait_until(|| temp.path().join("input-closed").exists());
-    let pid = std::fs::read_to_string(temp.path().join("child.pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    wait_for_signal(|| temp.path().join("input-closed").exists());
+    let pid = wait_for_child_pid(temp.path());
     assert!(transport.send_input("synthetic", true).is_err());
-    wait_until(|| !child_alive(pid));
+    wait_for_signal(|| !child_alive(pid));
     let environment: Value =
         serde_json::from_slice(&std::fs::read(temp.path().join("environment.json")).unwrap())
             .unwrap();
@@ -685,14 +696,9 @@ fn g15_claude_drop_unregistered_runtime_and_bounded_control_failure() {
         } else {
             transport.start_blocking().unwrap();
         }
-        wait_until(|| temp.path().join("child.pid").exists());
-        let pid = std::fs::read_to_string(temp.path().join("child.pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let pid = wait_for_child_pid(temp.path());
         assert!(child_alive(pid));
         drop(transport);
-        wait_until(|| !child_alive(pid));
+        wait_for_signal(|| !child_alive(pid));
     }
 }

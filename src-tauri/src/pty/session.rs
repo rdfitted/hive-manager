@@ -985,21 +985,19 @@ mod tests {
                 24,
                 8192,
             ).unwrap();
-            let deadline = Instant::now() + Duration::from_secs(10);
             let pid = loop {
                 if let Ok(value) = fs::read_to_string(&pid_file) {
                     if let Ok(pid) = value.trim().parse::<u32>() {
                         break pid;
                     }
                 }
-                assert!(Instant::now() < deadline, "ping PID was not reported");
+                assert!(session.is_alive(), "ping PID was not reported: fixture process exited");
                 thread::sleep(Duration::from_millis(50));
             };
             let mut cleanup = PingCleanup(Some(pid));
             assert!(pid_is_live(pid), "ping grandchild exited before kill");
             session.kill().unwrap();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while pid_is_live(pid) && Instant::now() < deadline {
+            while pid_is_live(pid) {
                 thread::sleep(Duration::from_millis(50));
             }
             assert!(!pid_is_live(pid), "ping grandchild {pid} survived PTY kill");

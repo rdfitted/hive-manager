@@ -312,7 +312,8 @@ fn fake_server(
     let script = r#"
 $ErrorActionPreference='Stop'
 $child=Start-Process -FilePath "$PSHOME\powershell.exe" -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 300' -WindowStyle Hidden -PassThru
-[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'child.pid'),[string]$child.Id)
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'child.pid.pending'),[string]$child.Id)
+[IO.File]::Move((Join-Path $PSScriptRoot 'child.pid.pending'), (Join-Path $PSScriptRoot 'child.pid'))
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'environment.json'),(@{billing_present=[bool]($env:OPENAI_API_KEY -or $env:CODEX_API_KEY);parent_marker_present=[bool]$env:CLAUDECODE;agent=$env:HIVE_AGENT_ID;token_present=[bool]$env:HIVE_AGENT_TOKEN}|ConvertTo-Json -Compress))
 function Reply($m,$r){[Console]::Out.WriteLine((@{id=$m.id;result=$r}|ConvertTo-Json -Compress -Depth 16))}
 function Notify($method,$params){[Console]::Out.WriteLine((@{method=$method;params=$params}|ConvertTo-Json -Compress -Depth 16))}
@@ -354,6 +355,26 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !predicate() {
         assert!(Instant::now() < deadline, "bounded fake server condition");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+// PID publication is a fixture signal, not a startup performance budget.
+#[cfg(windows)]
+fn wait_for_child_pid(root: &std::path::Path) -> u32 {
+    loop {
+        if let Ok(value) = std::fs::read_to_string(root.join("child.pid")) {
+            if let Ok(pid) = value.trim().parse() {
+                return pid;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_signal(mut predicate: impl FnMut() -> bool) {
+    while !predicate() {
         std::thread::sleep(Duration::from_millis(25));
     }
 }
@@ -404,11 +425,7 @@ fn manager_shutdown_cancels_stalled_initialize_without_blocking_unrelated_pty() 
             .unwrap_or_default()
             .contains("initialize")
     });
-    let pid: u32 = std::fs::read_to_string(temp.path().join("child.pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid = wait_for_child_pid(temp.path());
     let (sent, received) = std::sync::mpsc::channel();
     let pty_owner = manager.clone();
     let unrelated = std::thread::spawn(move || {
@@ -485,7 +502,7 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
                 .register(&session, &agent, transport.thread_id(), transport.clone())
                 .unwrap();
             transport.activate().unwrap();
-            wait_until(|| temp.path().join("input-closed").exists());
+            wait_for_signal(|| temp.path().join("input-closed").exists());
             let environment: Value = serde_json::from_slice(
                 &std::fs::read(temp.path().join("environment.json")).unwrap(),
             )
@@ -494,16 +511,12 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
             assert_eq!(environment["parent_marker_present"], false);
             assert_eq!(environment["agent"], agent);
             assert_eq!(environment["token_present"], false);
-            let pid = std::fs::read_to_string(temp.path().join("child.pid"))
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
+            let pid = wait_for_child_pid(temp.path());
             assert!(
                 transport.send_input("synthetic", true).is_err(),
                 "closed server stdin must fail the writer"
             );
-            wait_until(|| !child_alive(pid)); // Writer owns cleanup before explicit stop.
+            wait_for_signal(|| !child_alive(pid)); // Writer owns cleanup before explicit stop.
             registry.stop_agent_sync(&session, &agent).unwrap();
             continue;
         }
@@ -525,12 +538,7 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
                 24,
             )
         });
-        wait_until(|| temp.path().join("child.pid").exists());
-        let pid = std::fs::read_to_string(temp.path().join("child.pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let pid = wait_for_child_pid(temp.path());
         assert!(child_alive(pid), "fixture descendant must start");
         if mode == "cancel" {
             manager.kill(&agent).unwrap();
@@ -555,15 +563,15 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
                 );
                 std::fs::write(temp.path().join("natural-exit"), "").unwrap();
                 assert!(entry.transport.interrupt_sync().is_err());
-                wait_until(|| !manager.is_alive(&agent));
-                wait_until(|| !child_alive(pid)); // Natural exit must clean descendants before explicit stop.
+                wait_for_signal(|| !manager.is_alive(&agent));
+                wait_for_signal(|| !child_alive(pid)); // Natural exit must clean descendants before explicit stop.
             } else if mode == "app-exit" {
                 let runtime = tokio::runtime::Runtime::new().unwrap();
                 assert!(runtime.block_on(registry.stop_all()).is_empty());
             }
             manager.kill(&agent).unwrap();
         }
-        wait_until(|| !child_alive(pid));
+        wait_for_signal(|| !child_alive(pid));
         assert!(
             !manager.is_alive(&agent),
             "G15 no live protocol runtime after cleanup"

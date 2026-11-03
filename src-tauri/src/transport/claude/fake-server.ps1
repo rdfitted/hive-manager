@@ -3,7 +3,8 @@ $ErrorActionPreference = 'Stop'
 $mode = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'mode'))
 $sid = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'session-id'))
 $child = Start-Process -FilePath "$PSHOME\powershell.exe" -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 300' -WindowStyle Hidden -PassThru
-[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'child.pid'), [string]$child.Id)
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'child.pid.pending'), [string]$child.Id)
+[IO.File]::Move((Join-Path $PSScriptRoot 'child.pid.pending'), (Join-Path $PSScriptRoot 'child.pid'))
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'environment.json'), (@{parent_marker_present=[bool]$env:CLAUDECODE;agent=$env:HIVE_AGENT_ID}|ConvertTo-Json -Compress))
 function Emit($value) { [Console]::Out.WriteLine(($value | ConvertTo-Json -Compress -Depth 20)) }
 function Reply($m,$value) { Emit @{type='control_response';response=@{subtype='success';request_id=$m.request_id;response=$value}} }
