@@ -206,7 +206,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
         : count === 0), details: { paneExists, status, count, visible, enabled, contained, buttonBox, paneBox, expected } };
     };
     await probe(name, measure, context);
-    if (expected) await prove(`${name}-clipped`, measure, async () => {
+    if (expected) await prove(`resume-clip-${mode.toLowerCase()}-${viewport.width}`, measure, async () => {
       const buttonBox = await button.boundingBox(), paneBox = await pane.boundingBox();
       return styleChange(button, { transform: `translateX(${paneBox.x + paneBox.width - buttonBox.x - buttonBox.width + 6}px)` });
     }, context);
