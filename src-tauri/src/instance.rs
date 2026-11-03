@@ -418,6 +418,9 @@ pub(crate) struct FixtureSession {
 #[serde(deny_unknown_fields)]
 pub(crate) struct FixtureAgent {
     pub agent_id: String,
+    /// Explicit opt-in; deliberately stale and finished fixtures keep their seeded time.
+    #[serde(default)]
+    pub refresh_heartbeat: bool,
     pub status: crate::pty::AgentStatus,
     pub work_state: Option<crate::session::work_state::WorkState>,
     pub heartbeat: Option<FixtureHeartbeat>,
@@ -479,6 +482,9 @@ pub(crate) fn load_fixtures(
         }
         let mut agents = std::collections::HashSet::new();
         for agent in &fixture.agents {
+            if agent.refresh_heartbeat && agent.heartbeat.is_none() {
+                return Err("Active fixture requires a heartbeat".into());
+            }
             if !agents.insert(&agent.agent_id)
                 || !persisted
                     .agents
@@ -500,7 +506,23 @@ pub(crate) fn load_fixtures(
         controller.resume_session(&fixture.session_id)?;
         controller.apply_instance_fixture(fixture)?;
     }
+    maintain_fixture_heartbeats(controller, chrono::Utc::now());
     Ok(())
+}
+
+/// Called at startup and before each stall sweep. The clock is explicit for aging proofs.
+pub(crate) fn maintain_fixture_heartbeats(
+    controller: &crate::session::SessionController,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    if !is_isolated() {
+        return;
+    }
+    if let Some(state) = FIXTURE_STATE.get() {
+        for fixture in &state.sessions {
+            controller.refresh_instance_fixture_heartbeats(fixture, now);
+        }
+    }
 }
 
 pub(crate) fn project_fixture_work_states(session: &mut crate::session::Session) {
@@ -780,6 +802,18 @@ mod tests {
         assert!(windows.contains(
             "if let Some(args) = settings.additional_browser_args() {\n                window.additional_browser_args = Some(args);\n            }"
         ), "CDP API arguments must be applied only when the isolated settings provide them");
+    }
+
+    #[test]
+    fn instance_fixture_maintenance_precedes_stall_sweep() {
+        // run() is cfg(not(test)); keep the production timer connected to the tested helper.
+        let lib = source("src/lib.rs");
+        let sweep = lib.split_once("let stall_controller = session_controller.clone();").unwrap().1;
+        let tick = sweep.split_once("interval.tick().await;").unwrap().1;
+        let before_snapshot = tick.split_once("let sessions = controller.list_sessions();").unwrap().0;
+        assert!(before_snapshot.contains(
+            "if instance::is_isolated() {\n                        instance::maintain_fixture_heartbeats(&controller, chrono::Utc::now());\n                    }"
+        ), "isolated fixture maintenance must run before every stall snapshot");
     }
 
     #[test]

@@ -122,6 +122,7 @@ export async function seed(root, now = new Date()) {
         : agent.state === 'exited_during_startup' ? { Error: 'exited_during_startup:17' }
         : agent.state === 'delivery_failed' ? { WaitingForInput: `injected_delivery_failed:synthetic:${activity}` } : 'Running';
       projected.push({ agent_id: agent.id, status, work_state: agent.state === 'finished' ? 'finished' : 'working',
+        ...(['working', 'markdown', 'idle'].includes(agent.state) ? { refresh_heartbeat: true } : {}),
         heartbeat: { status: agent.state === 'finished' ? 'completed' : agent.state === 'idle' ? 'idle' : 'working', summary: agent.label, last_activity: activity } });
       const generation = `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`;
       const rows = [

@@ -256,6 +256,9 @@ pub fn run() {
                 loop {
                     interval.tick().await;
                     let controller = stall_controller.read();
+                    if instance::is_isolated() {
+                        instance::maintain_fixture_heartbeats(&controller, chrono::Utc::now());
+                    }
                     let sessions = controller.list_sessions();
                     let running_session_ids: Vec<String> = sessions
                         .iter()

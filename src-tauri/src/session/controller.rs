@@ -1716,6 +1716,22 @@ impl SessionController {
         Ok(())
     }
 
+    /// Maintain only opted-in fixture timestamps, without replaying canonical statuses.
+    pub(crate) fn refresh_instance_fixture_heartbeats(
+        &self,
+        fixture: &crate::instance::FixtureSession,
+        now: DateTime<Utc>,
+    ) {
+        if !crate::instance::is_isolated() { return; }
+        let mut heartbeats = self.agent_heartbeats.write();
+        let Some(agents) = heartbeats.get_mut(&fixture.session_id) else { return; };
+        for entry in fixture.agents.iter().filter(|entry| entry.refresh_heartbeat) {
+            if let Some(heartbeat) = agents.get_mut(&entry.agent_id) {
+                heartbeat.last_activity = now;
+            }
+        }
+    }
+
     pub fn get_session(&self, id: &str) -> Option<Session> {
         if crate::instance::guard_id(id).is_err() { return None; }
         self.refresh_session_from_storage_if_clean(id);

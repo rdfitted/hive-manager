@@ -64,6 +64,11 @@ test('seeded schema, feeds, review repo, and relative timestamps cover every man
         assert.ok(stored.transcript_cwd.startsWith(root + path.sep));
         assert.equal(stored.base_commit_sha.length, 40);
         const projected = overlay.sessions.find(item => item.session_id === session.id).agents.find(item => item.agent_id === agent.id);
+        if (['working', 'markdown', 'idle'].includes(agent.state)) {
+          assert.equal(projected.refresh_heartbeat, true, `${agent.id} explicitly refreshes its heartbeat`);
+        } else {
+          assert.equal(Object.hasOwn(projected, 'refresh_heartbeat'), false, `${agent.id} preserves its seeded heartbeat`);
+        }
         const age = (Date.parse(now) - Date.parse(projected.heartbeat.last_activity)) / 1000;
         assert.equal(age, ['finished', 'stalled'].includes(agent.state) ? manifest.timing.oldActivitySeconds : manifest.timing.recentActivitySeconds);
         if (agent.state === 'finished') {
