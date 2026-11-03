@@ -256,6 +256,13 @@ impl Settings {
         ] {
             env.insert(key.into(), environment_path(&self.root.join(relative))?);
         }
+        // Git excludes ceiling directories from discovery. Use the parent so the root
+        // itself stays usable even when Git starts there (an equal cwd ceiling is ignored).
+        let ceiling = environment_path(self.root.parent().ok_or("Instance root has no parent")?)?;
+        if ceiling.contains(if cfg!(windows) { ';' } else { ':' }) {
+            return Err("Instance Git ceiling cannot contain a path-list separator".into());
+        }
+        env.insert("GIT_CEILING_DIRECTORIES".into(), ceiling);
         env.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
         env.insert(
             "GIT_CONFIG_GLOBAL".into(),
@@ -288,6 +295,8 @@ fn scrub_key(key: &str) -> bool {
     let key = key.to_ascii_uppercase();
     key.starts_with("HIVE_")
         || key.starts_with("CLAUDE_CODE_")
+        || key.starts_with("GH_")
+        || key == "GITHUB_TOKEN"
         || key.starts_with("GIT_")
         || key.starts_with("WEBVIEW2_")
         || ["HOMEDRIVE", "HOMEPATH", "ZDOTDIR", "ENV", "BASH_ENV"].contains(&key.as_str())
@@ -773,6 +782,205 @@ mod tests {
     }
 
     #[test]
+    fn instance_native_completion_listeners_are_not_registered() {
+        // run() is cfg(not(test)); prove placement/scope against the production source.
+        let lib = source("src/lib.rs");
+        let (before, registrations) = lib
+            .split_once(
+                "// Isolated fixtures have no live agents; do not admit native completion events.",
+            )
+            .unwrap();
+        assert!(
+            !before.contains("app.listen("),
+            "listener outside isolation gate"
+        );
+        let registrations = registrations.trim_start();
+        assert!(
+            registrations.starts_with("if !instance::is_isolated() {"),
+            "native completion registration must refuse isolated instances"
+        );
+        let opening = registrations.find('{').unwrap();
+        let mut depth = 0;
+        let closing = registrations[opening..]
+            .char_indices()
+            .find_map(|(offset, ch)| {
+                // Listener source uses balanced braces in its format strings too.
+                if ch == '{' {
+                    depth += 1;
+                }
+                if ch == '}' {
+                    depth -= 1;
+                }
+                (depth == 0).then_some(opening + offset)
+            })
+            .unwrap();
+        let (gated, after) = registrations.split_at(closing + 1);
+        assert!(
+            !after.contains("app.listen("),
+            "listener outside isolation gate"
+        );
+        assert_eq!(gated.matches("app.listen(").count(), 5);
+        for event in [
+            "worker-completed",
+            "fusion-variant-completed",
+            "debate-round-completed",
+            "milestone-ready",
+            "qa-verdict",
+            "prince-verdict",
+        ] {
+            assert!(gated.contains(&format!("\"{event}\"")), "{event}");
+        }
+    }
+
+    #[test]
+    fn instance_github_environment_is_scrubbed_at_bootstrap() {
+        const KEYS: &[&str] = &[
+            "GH_CONFIG_DIR",
+            "GH_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GH_HOST",
+            "GH_PROMPT_DISABLED",
+            "GH_FUTURE_SETTING",
+            "GITHUB_TOKEN",
+        ];
+        if std::env::var_os("HM_INSTANCE_GITHUB_CHILD").is_some() {
+            bootstrap();
+            for key in KEYS {
+                assert!(std::env::var_os(key).is_none(), "inherited {key}");
+            }
+            assert!(
+                std::env::var_os("PATH").is_some(),
+                "Git/WebView runtime PATH retained"
+            );
+            return;
+        }
+        let (_temp, env) = fixture();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "instance::tests::instance_github_environment_is_scrubbed_at_bootstrap",
+                "--nocapture",
+            ])
+            .envs(env)
+            .env("HM_INSTANCE_GITHUB_CHILD", "1");
+        for key in KEYS {
+            child.env(key, "synthetic-inherited-setting");
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn instance_git_ceiling_rejects_path_list_separators() {
+        let (_temp, env) = fixture();
+        let Instance::Isolated(mut settings) = resolve(&env, BuildProfile::Debug).unwrap() else {
+            panic!("isolated fixture");
+        };
+        settings.root = settings
+            .root
+            .join(if cfg!(windows) {
+                "parent;split"
+            } else {
+                "parent:split"
+            })
+            .join("root");
+        assert!(settings
+            .environment()
+            .unwrap_err()
+            .contains("path-list separator"));
+    }
+
+    #[test]
+    fn instance_git_ceiling_blocks_ancestor_repository_discovery() {
+        let (_temp, env) = fixture();
+        let Instance::Isolated(outer) = resolve(&env, BuildProfile::Debug).unwrap() else {
+            panic!("isolated fixture");
+        };
+        // Every repository and probe stays inside the original admitted scratch instance.
+        let root = outer.root.join("manual-root");
+        let descendant = root.join("projects/not-a-repository");
+        std::fs::create_dir_all(&descendant).unwrap();
+        let nested = Settings {
+            root: root.canonicalize().unwrap(),
+            ..outer.clone()
+        };
+        let run = |cwd: &Path, args: &[&str], settings: &Settings, ceiling: bool| {
+            let mut git = std::process::Command::new("git");
+            for (key, _) in std::env::vars_os() {
+                if scrub_key(&key.to_string_lossy()) {
+                    git.env_remove(key);
+                }
+            }
+            git.current_dir(cwd)
+                .args(args)
+                .envs(settings.environment().unwrap());
+            if !ceiling {
+                git.env_remove("GIT_CEILING_DIRECTORIES");
+            }
+            git.output()
+                .expect("real Git is required for the ceiling proof")
+        };
+        assert!(run(&outer.root, &["init", "--quiet"], &outer, true)
+            .status
+            .success());
+        assert!(
+            run(
+                &descendant,
+                &["rev-parse", "--show-toplevel"],
+                &nested,
+                false
+            )
+            .status
+            .success(),
+            "control must discover the ancestor scratch repository"
+        );
+        for cwd in [&root, &descendant] {
+            assert!(
+                !run(cwd, &["rev-parse", "--show-toplevel"], &nested, true)
+                    .status
+                    .success(),
+                "Git discovered a repository above the admitted root from {cwd:?}"
+            );
+        }
+        // Repositories at the admitted root and below it must remain usable.
+        assert!(run(&root, &["init", "--quiet"], &nested, true)
+            .status
+            .success());
+        for cwd in [&root, &descendant] {
+            let output = run(cwd, &["rev-parse", "--show-toplevel"], &nested, true);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let actual = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+            assert_eq!(actual.canonicalize().unwrap(), nested.root);
+        }
+        assert!(run(&descendant, &["init", "--quiet"], &nested, true)
+            .status
+            .success());
+        let output = run(
+            &descendant,
+            &["rev-parse", "--show-toplevel"],
+            &nested,
+            true,
+        );
+        assert!(output.status.success());
+        assert_eq!(
+            PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+                .canonicalize()
+                .unwrap(),
+            descendant.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
     fn instance_browser_args_preserve_defaults_and_loopback() {
         let (_temp, mut env) = fixture();
         let Instance::Isolated(settings) = resolve(&env, BuildProfile::Debug).unwrap() else {
@@ -826,7 +1034,9 @@ mod tests {
                     !value.starts_with(r"\\?\"),
                     "verbatim environment root: {key}"
                 );
-                settings.contains(Path::new(&value)).unwrap();
+                if key != "GIT_CEILING_DIRECTORIES" {
+                    settings.contains(Path::new(&value)).unwrap();
+                }
             }
             // Git must actually consume the emitted global config in a contained repo.
             // Git is also required by instance_git_paths_are_contained; fail loudly if absent.
@@ -976,17 +1186,43 @@ mod tests {
             .trim_start()
     }
 
+    // Pin the first statement and propagation, permitting the existing error conversions.
+    fn propagating_refusal(source: &str, name: &str) -> bool {
+        let statement = first_statement(source, name).split(';').next().unwrap();
+        let compact = statement.split_whitespace().collect::<String>();
+        let Some(call) = compact.strip_prefix("crate::instance::refuse(\"") else {
+            return false;
+        };
+        let Some((_, tail)) = call.split_once("\")") else {
+            return false;
+        };
+        matches!(tail, "?" | ".map_err(PtyError::CreateError)?" | ".map_err(RuntimeError::launch)?"
+            | ".map_err(PlanningPhaseError::Failed)?"
+            | ".map_err(|error|AddWorkerError::Rejected(AddWorkerRejection{error,reason:AddWorkerRejectionReason::StateNotAcceptingWorkers,current_state:\"isolated\".into(),}))?")
+    }
+
+    #[test]
+    fn instance_spawn_guard_rejects_swallowed_refusals() {
+        for statement in [
+            "crate::instance::refuse(\"agent launch\");",
+            "crate::instance::refuse(\"agent launch\").ok();",
+            "crate::instance::refuse(\"agent launch\").unwrap_or(());",
+            "crate::instance::refuse(\"agent launch\").or(Ok(()))?;",
+            "let _ = crate::instance::refuse(\"agent launch\");",
+        ] {
+            let planted = format!("fn launch() {{\n{statement}\n}}");
+            assert!(!propagating_refusal(&planted, "launch"), "{statement}");
+        }
+    }
+
     #[test]
     fn instance_spawn_guards_precede_side_effects() {
         let manager = source("src/pty/manager.rs");
-        assert!(first_statement(&manager, "create_session").starts_with("crate::instance::refuse("));
+        assert!(propagating_refusal(&manager, "create_session"));
         // Windows tests replace LocalPtyRuntime with a stub: inspect the production file.
         for path in ["src/runtime/local_pty.rs", "src/runtime/local_process.rs"] {
             let runtime = source(path);
-            assert!(
-                first_statement(&runtime, "launch").starts_with("crate::instance::refuse("),
-                "{path}"
-            );
+            assert!(propagating_refusal(&runtime, "launch"), "{path}");
         }
         let controller = source("src/session/controller.rs");
         for name in [
@@ -1011,10 +1247,7 @@ mod tests {
             "spawn_debate_judge",
             "spawn_launch_evaluator_agents",
         ] {
-            assert!(
-                first_statement(&controller, name).starts_with("crate::instance::refuse("),
-                "{name}"
-            );
+            assert!(propagating_refusal(&controller, name), "{name}");
         }
     }
 

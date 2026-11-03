@@ -480,209 +480,212 @@ pub fn run() {
                 }
             });
 
-            // Set up worker-completed event listener for sequential spawning
-            let session_controller_clone = session_controller.clone();
-            use tauri::Listener;
-            app.listen("worker-completed", move |event: tauri::Event| {
-                let payload = event.payload();
-
-                // Parse the payload (session_id, worker_id, task_file)
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
-                    let session_id = json.get("session_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let worker_id = json.get("worker_id")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u8;
-
-                    if session_id.is_empty() || worker_id == 0 {
-                        tracing::warn!("Invalid worker-completed payload: {}", payload);
-                        return;
-                    }
-
-                    tracing::info!("Worker {} completed, spawning next worker", worker_id);
-
-                    // Spawn async task to handle worker completion
-                    let controller = session_controller_clone.clone();
-                    let session_id_clone = session_id.to_string();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        let result = tauri::async_runtime::block_on(async {
-                            let controller_read = controller.read();
-                            controller_read.on_worker_completed(&session_id_clone, worker_id).await
-                        });
-
-                        if let Err(e) = result {
-                            tracing::error!("Failed to handle worker completion: {}", e);
-                        }
-                    });
-                } else {
-                    tracing::warn!("Failed to parse worker-committed payload: {}", payload);
-                }
-            });
-
-            // Set up fusion-variant-completed event listener for judge spawning
-            let fusion_controller_clone = session_controller.clone();
-            app.listen("fusion-variant-completed", move |event: tauri::Event| {
-                let payload = event.payload();
-
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
-                    let session_id = json.get("session_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let variant_index = json.get("variant_index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u8;
-
-                    if session_id.is_empty() || variant_index == 0 {
-                        tracing::warn!("Invalid fusion-variant-completed payload: {}", payload);
-                        return;
-                    }
-
-                    tracing::info!(
-                        "Fusion variant {} completed for session {}, checking judge trigger",
-                        variant_index,
-                        session_id
-                    );
-
-                    let controller = fusion_controller_clone.clone();
-                    let session_id_clone = session_id.to_string();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        let result = tauri::async_runtime::block_on(async {
-                            let controller_read = controller.read();
-                            controller_read
-                                .on_fusion_variant_completed(&session_id_clone, variant_index)
-                                .await
-                        });
-
-                        if let Err(e) = result {
-                            tracing::error!("Failed to handle fusion variant completion: {}", e);
-                        }
-                    });
-                } else {
-                    tracing::warn!("Failed to parse fusion-variant-completed payload: {}", payload);
-                }
-            });
-
-            let debate_controller_clone = session_controller.clone();
-            app.listen("debate-round-completed", move |event: tauri::Event| {
-                let payload = event.payload();
-
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
-                    let session_id = json.get("session_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let debater_index = json.get("debater_index")
-                        .and_then(|v| v.as_u64())
-                        .and_then(|value| u8::try_from(value).ok())
-                        .unwrap_or(0);
-                    let round = json.get("round")
-                        .and_then(|v| v.as_u64())
-                        .and_then(|value| u8::try_from(value).ok())
-                        .unwrap_or(0);
-
-                    if session_id.is_empty() || debater_index == 0 || round == 0 {
-                        tracing::warn!("Invalid debate-round-completed payload: {}", payload);
-                        return;
-                    }
-
-                    tracing::info!(
-                        "Debate debater {} completed round {} for session {}, checking next step",
-                        debater_index,
-                        round,
-                        session_id
-                    );
-
-                    let controller = debate_controller_clone.clone();
-                    let session_id_clone = session_id.to_string();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        let result = tauri::async_runtime::block_on(async {
-                            let controller_read = controller.read();
-                            controller_read
-                                .on_debate_round_completed(&session_id_clone, debater_index, round)
-                                .await
-                        });
-
-                        if let Err(e) = result {
-                            tracing::error!("Failed to handle debate round completion: {}", e);
-                        }
-                    });
-                } else {
-                    tracing::warn!("Failed to parse debate-round-completed payload: {}", payload);
-                }
-            });
-
-            let milestone_controller_clone = session_controller.clone();
-            app.listen("milestone-ready", move |event: tauri::Event| {
-                let payload = event.payload();
-
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
-                    let session_id = json
-                        .get("session_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if session_id.is_empty() {
-                        tracing::warn!("Invalid milestone-ready payload: {}", payload);
-                        return;
-                    }
-                    let Some(path) = json.get("path").and_then(|value| value.as_str()) else {
-                        tracing::warn!("Milestone-ready payload has no file path: {}", payload);
-                        return;
-                    };
-
-                    tracing::info!(
-                        "Milestone-ready signal observed for session {}, checking evaluator launch/respawn",
-                        session_id
-                    );
-
-                    let controller = milestone_controller_clone.clone();
-                    let session_id_clone = session_id.to_string();
-                    let milestone_path = std::path::PathBuf::from(path);
-                    tauri::async_runtime::spawn_blocking(move || {
-                        let controller_read = controller.read();
-                        if let Err(err) = controller_read
-                            .on_milestone_ready_from_file(&session_id_clone, &milestone_path)
-                        {
-                            tracing::error!(
-                                "Failed to handle milestone-ready signal for {}: {}",
-                                session_id_clone,
-                                err
-                            );
-                        }
-                    });
-                } else {
-                    tracing::warn!("Failed to parse milestone-ready payload: {}", payload);
-                }
-            });
-
-            // Fast-path consumers for verdict files. The watcher emits these when
-            // qa-verdict.json / prince-verdict.json appear; without a listener the
-            // signal was silently dropped and the UI only refreshed on the next poll.
-            // We push an immediate session-update so operators see the new state at once.
-            for verdict_event in ["qa-verdict", "prince-verdict"] {
-                let verdict_controller_clone = session_controller.clone();
-                app.listen(verdict_event, move |event: tauri::Event| {
+            // Isolated fixtures have no live agents; do not admit native completion events.
+            if !instance::is_isolated() {
+                // Set up worker-completed event listener for sequential spawning
+                let session_controller_clone = session_controller.clone();
+                use tauri::Listener;
+                app.listen("worker-completed", move |event: tauri::Event| {
                     let payload = event.payload();
+
+                    // Parse the payload (session_id, worker_id, task_file)
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
+                        let session_id = json.get("session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let worker_id = json.get("worker_id")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u8;
+
+                        if session_id.is_empty() || worker_id == 0 {
+                            tracing::warn!("Invalid worker-completed payload: {}", payload);
+                            return;
+                        }
+
+                        tracing::info!("Worker {} completed, spawning next worker", worker_id);
+
+                        // Spawn async task to handle worker completion
+                        let controller = session_controller_clone.clone();
+                        let session_id_clone = session_id.to_string();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let result = tauri::async_runtime::block_on(async {
+                                let controller_read = controller.read();
+                                controller_read.on_worker_completed(&session_id_clone, worker_id).await
+                            });
+
+                            if let Err(e) = result {
+                                tracing::error!("Failed to handle worker completion: {}", e);
+                            }
+                        });
+                    } else {
+                        tracing::warn!("Failed to parse worker-committed payload: {}", payload);
+                    }
+                });
+
+                // Set up fusion-variant-completed event listener for judge spawning
+                let fusion_controller_clone = session_controller.clone();
+                app.listen("fusion-variant-completed", move |event: tauri::Event| {
+                    let payload = event.payload();
+
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
+                        let session_id = json.get("session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let variant_index = json.get("variant_index")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u8;
+
+                        if session_id.is_empty() || variant_index == 0 {
+                            tracing::warn!("Invalid fusion-variant-completed payload: {}", payload);
+                            return;
+                        }
+
+                        tracing::info!(
+                            "Fusion variant {} completed for session {}, checking judge trigger",
+                            variant_index,
+                            session_id
+                        );
+
+                        let controller = fusion_controller_clone.clone();
+                        let session_id_clone = session_id.to_string();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let result = tauri::async_runtime::block_on(async {
+                                let controller_read = controller.read();
+                                controller_read
+                                    .on_fusion_variant_completed(&session_id_clone, variant_index)
+                                    .await
+                            });
+
+                            if let Err(e) = result {
+                                tracing::error!("Failed to handle fusion variant completion: {}", e);
+                            }
+                        });
+                    } else {
+                        tracing::warn!("Failed to parse fusion-variant-completed payload: {}", payload);
+                    }
+                });
+
+                let debate_controller_clone = session_controller.clone();
+                app.listen("debate-round-completed", move |event: tauri::Event| {
+                    let payload = event.payload();
+
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
+                        let session_id = json.get("session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let debater_index = json.get("debater_index")
+                            .and_then(|v| v.as_u64())
+                            .and_then(|value| u8::try_from(value).ok())
+                            .unwrap_or(0);
+                        let round = json.get("round")
+                            .and_then(|v| v.as_u64())
+                            .and_then(|value| u8::try_from(value).ok())
+                            .unwrap_or(0);
+
+                        if session_id.is_empty() || debater_index == 0 || round == 0 {
+                            tracing::warn!("Invalid debate-round-completed payload: {}", payload);
+                            return;
+                        }
+
+                        tracing::info!(
+                            "Debate debater {} completed round {} for session {}, checking next step",
+                            debater_index,
+                            round,
+                            session_id
+                        );
+
+                        let controller = debate_controller_clone.clone();
+                        let session_id_clone = session_id.to_string();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let result = tauri::async_runtime::block_on(async {
+                                let controller_read = controller.read();
+                                controller_read
+                                    .on_debate_round_completed(&session_id_clone, debater_index, round)
+                                    .await
+                            });
+
+                            if let Err(e) = result {
+                                tracing::error!("Failed to handle debate round completion: {}", e);
+                            }
+                        });
+                    } else {
+                        tracing::warn!("Failed to parse debate-round-completed payload: {}", payload);
+                    }
+                });
+
+                let milestone_controller_clone = session_controller.clone();
+                app.listen("milestone-ready", move |event: tauri::Event| {
+                    let payload = event.payload();
+
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
                         let session_id = json
                             .get("session_id")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                            .unwrap_or("");
+
                         if session_id.is_empty() {
+                            tracing::warn!("Invalid milestone-ready payload: {}", payload);
                             return;
                         }
+                        let Some(path) = json.get("path").and_then(|value| value.as_str()) else {
+                            tracing::warn!("Milestone-ready payload has no file path: {}", payload);
+                            return;
+                        };
+
                         tracing::info!(
-                            event = %verdict_event,
-                            session_id = %session_id,
-                            "Verdict file observed; emitting session update"
+                            "Milestone-ready signal observed for session {}, checking evaluator launch/respawn",
+                            session_id
                         );
-                        let controller = verdict_controller_clone.clone();
+
+                        let controller = milestone_controller_clone.clone();
+                        let session_id_clone = session_id.to_string();
+                        let milestone_path = std::path::PathBuf::from(path);
                         tauri::async_runtime::spawn_blocking(move || {
-                            controller.read().emit_session_update(&session_id);
+                            let controller_read = controller.read();
+                            if let Err(err) = controller_read
+                                .on_milestone_ready_from_file(&session_id_clone, &milestone_path)
+                            {
+                                tracing::error!(
+                                    "Failed to handle milestone-ready signal for {}: {}",
+                                    session_id_clone,
+                                    err
+                                );
+                            }
                         });
+                    } else {
+                        tracing::warn!("Failed to parse milestone-ready payload: {}", payload);
                     }
                 });
+
+                // Fast-path consumers for verdict files. The watcher emits these when
+                // qa-verdict.json / prince-verdict.json appear; without a listener the
+                // signal was silently dropped and the UI only refreshed on the next poll.
+                // We push an immediate session-update so operators see the new state at once.
+                for verdict_event in ["qa-verdict", "prince-verdict"] {
+                    let verdict_controller_clone = session_controller.clone();
+                    app.listen(verdict_event, move |event: tauri::Event| {
+                        let payload = event.payload();
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
+                            let session_id = json
+                                .get("session_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if session_id.is_empty() {
+                                return;
+                            }
+                            tracing::info!(
+                                event = %verdict_event,
+                                session_id = %session_id,
+                                "Verdict file observed; emitting session update"
+                            );
+                            let controller = verdict_controller_clone.clone();
+                            tauri::async_runtime::spawn_blocking(move || {
+                                controller.read().emit_session_update(&session_id);
+                            });
+                        }
+                    });
+                }
             }
 
             Ok(())
