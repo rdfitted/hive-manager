@@ -391,6 +391,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await probe('sidebar-session-names-painted', fullNamesMeasure, sidebarContext);
     await prove('sidebar-session-names-painted', fullNamesMeasure,
       () => styleChange(sessionName, { width: '32px', flex: '0 0 32px' }), sidebarContext);
+    await staleRow.scrollIntoViewIfNeeded();
     await capture('sidebar', viewport, page.locator('.session-row').filter({ has: staleBadge }),
       text => text.includes(staleSession.name) && text.includes('1'), 'inactive-stale');
     const agentsDisclosure = page.getByRole('button', { name: `Agents (${session.agents.length})`, exact: true });
