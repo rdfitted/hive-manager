@@ -3,7 +3,7 @@
 // Delimit the marker from its run ID so their concatenation cannot look like a
 // long opaque credential. Keep the diagnostic scrubber's rules unchanged.
 export const consoleProofMessage = runId => `render-mutation-console: ${runId}`;
-export const reviewProofNames = ['screen-target-offscreen', 'grid-target-offscreen', 'sidebar-target-offscreen', 'sidebar-all-recent-sessions', 'sidebar-inactive-stale-only', 'composer-offscreen-not-known', 'finished-duplicate-attention-card', 'finished-duplicate-needs-you-count', 'chat-empty-table', 'chat-empty-code', 'updater-network-rejection', 'badge-painted-line-1440', 'badge-painted-line-800', 'badge-painted-band-1440', 'badge-painted-band-800'];
+export const reviewProofNames = ['screen-target-offscreen', 'grid-target-offscreen', 'sidebar-target-offscreen', 'sidebar-all-recent-sessions', 'sidebar-inactive-stale-only', 'sidebar-session-attention-compact', 'sidebar-session-name-single-line', 'sidebar-session-names-painted', 'composer-offscreen-not-known', 'finished-duplicate-attention-card', 'finished-duplicate-needs-you-count', 'chat-empty-table', 'chat-empty-code', 'updater-network-rejection', 'badge-painted-line-1440', 'badge-painted-line-800', 'badge-painted-band-1440', 'badge-painted-band-800'];
 
 export const offscreenTarget = locator => styleChange(locator, { transform: 'translateY(2000px)' });
 export const emptyContents = locator => textChange(locator, '');

@@ -20,15 +20,22 @@ export async function expandAgents(page, session) {
   const row = page.locator(`.tree-row[data-agent-id=${JSON.stringify(queen.id)}]`);
   if (await row.getAttribute('aria-expanded') === 'false') await row.getByRole('button', { name: 'Expand', exact: true }).click();
 }
-export async function selectSession(page, session) {
+export async function selectSession(page, session, report) {
   if (new URL(page.url()).pathname !== '/') await page.getByRole('link', { name: 'Sessions', exact: true }).click();
   const row = page.locator('.session-button').filter({ hasText: session.name }).first();
   // Enter can reach xterm if terminal startup moves focus between Playwright's
   // locator focus and key dispatch. Activate the shipped click handler directly.
-  // The row centre can hit its nested Rename button. Timestamp text bubbles to
-  // the row's click handler without activating a nested control.
-  await row.locator('.session-meta').click();
+  const selectionState = async () => ({
+    active: await row.getAttribute('aria-current'),
+    selectedAgents: await page.locator('.tree-row[aria-selected="true"]').evaluateAll(rows => rows.map(node => node.getAttribute('data-agent-id'))),
+    renameOpen: await page.getByRole('textbox', { name: 'Session Name', exact: true }).count() > 0,
+  });
+  const before = await selectionState();
+  // The padding belongs to the row, away from the name, Rename and attention
+  // controls. Exercise the same shipped selection handler without a nested hit.
+  await row.click({ position: { x: 4, y: 4 } });
   await expandAgents(page, session);
+  if (report) (report.selectionEvidence ??= []).push({ sessionId: session.id, before, after: await selectionState() });
 }
 export async function viewMode(page, mode) {
   await page.getByRole('group', { name: 'Terminal view', exact: true }).getByRole('button', { name: mode, exact: true }).click();
@@ -113,7 +120,7 @@ export async function visibleTargetState(target) {
 }
 export async function diagnoseReview({ page, manifest, report, out }) {
   const session = manifest.sessions.find(item => item.id === manifest.screens.review.sessionId);
-  await selectSession(page, session);
+  await selectSession(page, session, report);
   await page.locator(`.tree-row[data-agent-id=${JSON.stringify(manifest.screens.review.agentId)}]`).click();
   await openReview(page);
   await cellSelect(page).selectOption(manifest.screens.review.cellId);
@@ -240,12 +247,12 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       const hold = async route => { await ready; await route.continue().catch(() => {}); };
       await page.route('**/agent-feeds', hold);
       try {
-        await selectSession(page, session);
+        await selectSession(page, session, report);
         const terminal = page.locator('.terminal-panel:not(.hidden) .xterm-helper-textarea').first();
         await terminal.waitFor({ state: 'attached' });
         await proveTerminalFocus({ page, target: page.locator('.session-button').filter({ hasText: session.name }).first(), terminal, prove });
       } finally { release(); await page.unroute('**/agent-feeds', hold); }
-    } else await selectSession(page, session);
+    } else await selectSession(page, session, report);
     await viewMode(page, 'Focus');
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(manifest.screens.focus.agentId)}]`).click();
     const focused = paneFor(page, normal);
@@ -286,7 +293,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       // synthetic card, rather than empty leftmost columns at narrow widths.
       await capture('kanban', viewport, page.locator('.dashboard .board'), text => text.includes(item.name), item.id);
     }
-    await selectSession(page, session);
+    await selectSession(page, session, report);
     const recent = page.getByRole('button', { name: 'Recent', exact: true });
     if (await recent.getAttribute('aria-expanded') === 'false') await recent.click();
     for (const id of manifest.screens.sidebar.sessionIds) {
@@ -308,6 +315,48 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     };
     await probe('sidebar-inactive-stale-only', staleMeasure, { screen: 'sidebar', viewport: `${viewport.width}x${viewport.height}` });
     await prove('sidebar-inactive-stale-only', staleMeasure, () => removeNode(staleBadge));
+    const staleRow = page.locator('.session-row').filter({ has: staleBadge });
+    const sessionName = staleRow.locator('.session-name');
+    const compactMeasure = async () => {
+      const details = await staleBadge.evaluate(node => {
+        const box = node.getBoundingClientRect();
+        return { width: box.width, height: box.height };
+      });
+      return { passed: details.width > 0 && details.height > 0 && details.height < 32, details };
+    };
+    const singleLineMeasure = async () => {
+      const details = await sessionName.evaluate(node => {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const lines = new Set([...range.getClientRects()]
+          .filter(rect => rect.width > 0 && rect.height > 0).map(rect => Math.round(rect.top))).size;
+        const box = node.getBoundingClientRect();
+        return { width: box.width, height: box.height, lines };
+      });
+      return { passed: details.width > 0 && details.height > 0 && details.lines === 1, details };
+    };
+    const sidebarContext = { screen: 'sidebar', viewport: String(viewport.width) + 'x' + String(viewport.height) };
+    await probe('sidebar-session-attention-compact', compactMeasure, sidebarContext);
+    await prove('sidebar-session-attention-compact', compactMeasure,
+      () => styleChange(staleBadge, { height: '90px', 'min-height': '90px' }), sidebarContext);
+    await probe('sidebar-session-name-single-line', singleLineMeasure, sidebarContext);
+    await prove('sidebar-session-name-single-line', singleLineMeasure,
+      () => styleChange(sessionName, { width: '32px', flex: '0 0 32px', 'white-space': 'normal' }), sidebarContext);
+    const fullNamesMeasure = async () => {
+      const details = [];
+      for (const expected of [session.name, staleSession.name]) {
+        const name = page.locator('.session-button .session-name').filter({ hasText: expected });
+        await name.scrollIntoViewIfNeeded();
+        const painted = await visibleTargetState(name);
+        const fit = await name.evaluate(node => ({ width: node.clientWidth, textWidth: node.scrollWidth }));
+        details.push({ expected, ...painted, ...fit });
+      }
+      return { passed: details.every(item => item.visible && item.visibleText.includes(item.expected)
+        && item.width > 0 && item.textWidth <= item.width + 1), details };
+    };
+    await probe('sidebar-session-names-painted', fullNamesMeasure, sidebarContext);
+    await prove('sidebar-session-names-painted', fullNamesMeasure,
+      () => styleChange(sessionName, { width: '32px', flex: '0 0 32px' }), sidebarContext);
     await capture('sidebar', viewport, page.locator('.session-row').filter({ has: staleBadge }),
       text => text.includes(staleSession.name) && text.includes('1'), 'inactive-stale');
     const agentsDisclosure = page.getByRole('button', { name: `Agents (${session.agents.length})`, exact: true });
@@ -322,10 +371,21 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       text => manifest.sessions.every(item => text.includes(item.name)), 'recent',
       text => manifest.sessions.filter(item => text.includes(item.name)).length > 5);
     await agentsDisclosure.click();
-    await page.locator(`.tree-row[data-agent-id=${JSON.stringify(manifest.screens.review.agentId)}]`).click();
+    const reviewAgentSelector = `.tree-row[data-agent-id=${JSON.stringify(manifest.screens.review.agentId)}]`;
+    await page.locator(reviewAgentSelector).click();
+    await page.waitForFunction(selector => document.querySelector(selector)?.getAttribute('aria-selected') === 'true', reviewAgentSelector);
     await openReview(page);
-    await cellSelect(page).selectOption(manifest.screens.review.cellId);
-    await principalSelect(page).selectOption(manifest.screens.review.agentId);
+    const reviewCell = cellSelect(page), reviewPrincipal = principalSelect(page);
+    if (await reviewCell.inputValue() !== manifest.screens.review.cellId) await reviewCell.selectOption(manifest.screens.review.cellId);
+    if (await reviewPrincipal.inputValue() !== manifest.screens.review.agentId) await reviewPrincipal.selectOption(manifest.screens.review.agentId);
+    await page.waitForFunction(expected => {
+      const labels = [...document.querySelectorAll('.review-view .pickers > label')];
+      const value = name => labels.find(label => label.textContent.startsWith(name))?.querySelector('select')?.value;
+      return value('Cell') === expected.cellId && value('Principal') === expected.agentId;
+    }, manifest.screens.review);
+    (report.reviewSelectionEvidence ??= []).push({ viewport: viewport.width,
+      cellId: await reviewCell.inputValue(), agentId: await reviewPrincipal.inputValue(),
+      selectedAgent: await page.locator(reviewAgentSelector).getAttribute('aria-selected') });
     await page.locator(`.file-review[aria-label=${JSON.stringify(manifest.screens.review.file)}]`).waitFor();
     await capture('review', viewport, page.locator('.review-view'), text => text.includes(manifest.screens.review.file));
     if (!manifest.screens.dialog.action.includes('Keyboard Shortcuts')) throw new Error('Manifest dialog does not name the shipped Keyboard Shortcuts dialog');
