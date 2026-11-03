@@ -26070,6 +26070,17 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert!(state.pty_manager.read().is_alive(&id));
     }
 
+    // Roster insertion alone is not runtime admission. Delivery observations must
+    // refer to a concrete live generation, including tests with an aged input.
+    fn admit_delivery_runtime(controller: &SessionController, session_id: &str, agent_id: &str,
+        submitted_at: chrono::DateTime<Utc>) {
+        let role = controller.sessions.read().get(session_id).unwrap().agents.iter()
+            .find(|agent| agent.id == agent_id).unwrap().role.clone();
+        let manager = controller.pty_manager.read();
+        manager.create_session(agent_id.into(), role, "fixture-shell", &[], None, 80, 24).unwrap();
+        manager.set_instance_spawned_at_for_test(agent_id, submitted_at - Duration::seconds(1));
+    }
+
     #[test]
     fn delivery_pending_retains_exact_marker_and_confirmed_turn_runs() {
         let controller = test_controller();
@@ -26078,6 +26089,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let agent_id = session.agents[0].id.clone();
         controller.insert_test_session(session);
         let submitted_at = Utc::now();
+        admit_delivery_runtime(&controller, id, &agent_id, submitted_at);
         controller.record_injection_submission(id, &agent_id, submitted_at, true).unwrap();
         let marker = AgentStatus::WaitingForInput(format!("awaiting_injected_turn:{}", submitted_at.to_rfc3339()));
         assert_eq!(controller.get_session(id).unwrap().agents[0].status, marker);
@@ -26097,6 +26109,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let agent_id = session.agents[0].id.clone();
         controller.insert_test_session(session);
         let submitted_at = Utc::now();
+        admit_delivery_runtime(&controller, id, &agent_id, submitted_at);
         for (visible, expected) in [
             (true, format!("injected_delivery_failed:transcript-timeout:{}", submitted_at.to_rfc3339())),
             (false, format!("awaiting_injected_turn:{}", submitted_at.to_rfc3339()))] {
@@ -26116,6 +26129,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let agent_id = session.agents[0].id.clone();
         controller.insert_test_session(session);
         let older = Utc::now();
+        admit_delivery_runtime(&controller, id, &agent_id, older);
         let newer = older + Duration::seconds(1);
         controller.record_injection_submission(id, &agent_id, older, true).unwrap();
         controller.record_injection_submission(id, &agent_id, newer, true).unwrap();
@@ -26135,8 +26149,11 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let agent_id = session.agents[0].id.clone();
         controller.insert_test_session(session);
         let submitted_at = Utc::now();
+        admit_delivery_runtime(&controller, id, &agent_id, submitted_at);
         controller.record_injection_submission(id, &agent_id, submitted_at, true).unwrap();
         let marker = controller.get_session(id).unwrap().agents[0].status.clone();
+        assert_eq!(marker, AgentStatus::WaitingForInput(format!(
+            "awaiting_injected_turn:{}", submitted_at.to_rfc3339())), "fixture must establish the guarded marker");
         // Keep the exact pending marker so this exercises the heartbeat guard independently.
         controller.agent_heartbeats.write().entry(id.to_string()).or_default().insert(
             agent_id.clone(), super::AgentHeartbeatInfo {
@@ -26160,6 +26177,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let agent_id = session.agents[0].id.clone();
         controller.insert_test_session(session);
         let submitted_at = Utc::now() - Duration::seconds(1);
+        admit_delivery_runtime(&controller, id, &agent_id, submitted_at);
         controller.record_injection_submission(id, &agent_id, submitted_at, true).unwrap();
         controller.record_injection_delivery(id, &agent_id, submitted_at,
             &crate::delivery::Delivery::unavailable()).unwrap();
@@ -26180,6 +26198,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let agent_id = session.agents[0].id.clone();
         controller.insert_test_session(session);
         let submitted_at = Utc::now() - Duration::seconds(1);
+        admit_delivery_runtime(&controller, id, &agent_id, submitted_at);
         controller.record_injection_submission(id, &agent_id, submitted_at, true).unwrap();
         controller.record_injection_delivery(id, &agent_id, submitted_at,
             &crate::delivery::Delivery::timeout(true)).unwrap();

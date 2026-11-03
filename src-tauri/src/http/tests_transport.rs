@@ -23,6 +23,16 @@ impl FakeTransport {
     }
 }
 
+// Fake registry registration skips the manager's production protocol admission.
+// Mint its runtime identity through the test stub before installing the protocol
+// transport. Manager operations remain protocol-first, including rejecting raw
+// terminal writes; cfg(test) never launches the named CLI here.
+fn admit_fake_runtime(state: &crate::http::state::AppState) {
+    state.pty_manager.read().create_session(
+        "worker-a".into(), crate::pty::AgentRole::Worker { index: 1, parent: None },
+        "fixture-shell", &[], None, 80, 24).unwrap();
+}
+
 #[tokio::test]
 async fn claude_protocol_inject_and_feed_use_one_source_even_with_a_transcript() {
     use axum::{
@@ -69,6 +79,7 @@ async fn claude_protocol_inject_and_feed_use_one_source_even_with_a_transcript()
         before["events"][0]["payload"]["text"], "transcript-only",
         "the transcript fixture must be readable before switching sources"
     );
+    admit_fake_runtime(&state);
     let fake = FakeTransport::new();
     state
         .transports()
@@ -201,6 +212,7 @@ async fn protocol_inject_keeps_receipt_shape_without_terminal_writes_and_cleanup
     );
     session.agents[0].config.cli = "codex".into();
     state.session_controller.read().insert_test_session(session);
+    admit_fake_runtime(&state);
     let fake = FakeTransport::new();
     state
         .transports()
@@ -298,9 +310,9 @@ async fn pending_protocol_preserves_another_submissions_awaiting_marker() {
         temp.path().to_str().unwrap(),
         &["worker-a"],
     );
-    let marker = crate::pty::AgentStatus::WaitingForInput(
-        "awaiting_injected_turn:2026-01-01T00:00:00Z".into(),
-    );
+    admit_fake_runtime(&state);
+    let marker = crate::pty::AgentStatus::WaitingForInput(format!(
+        "awaiting_injected_turn:{}", chrono::Utc::now().to_rfc3339()));
     session.agents[0].status = marker.clone();
     session.agents[0].config.cli = "codex".into();
     state.session_controller.read().insert_test_session(session);
