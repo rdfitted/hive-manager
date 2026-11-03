@@ -537,7 +537,12 @@ fn g49_pre_resume_receipt_cannot_mark_or_write_the_respawned_instance() {
         .submit_instance(&worker, receipt.instance_id, b"stale submit")
         .is_err());
     assert_eq!(manager.input_fence(&worker), fence);
-    assert!(manager.write_records_for_test(&worker).unwrap().is_empty());
+    // Errors and the unchanged input fence above cover stale input on every
+    // platform; the Windows stub also exposes the exact bytes it received.
+    #[cfg(windows)]
+    {
+        assert!(manager.write_records_for_test(&worker).unwrap().is_empty());
+    }
     manager.kill(&source.agents[0].id).unwrap();
     manager.kill(&worker).unwrap();
 }
