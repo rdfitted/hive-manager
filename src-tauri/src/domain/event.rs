@@ -24,6 +24,7 @@ pub enum EventType {
     WorkspaceCreated,
     AgentLaunched,
     AgentCompleted,
+    AgentStopped,
     AgentWaitingInput,
     AgentFailed,
     ArtifactUpdated,

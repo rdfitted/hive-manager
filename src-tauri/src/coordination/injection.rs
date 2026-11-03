@@ -20,6 +20,8 @@ use super::{CoordinationMessage, StateManager, WorkerStateInfo};
 /// after-write snapshot; neither kind of ring change proves that the agent took a turn.
 #[derive(Debug, Clone)]
 pub struct InjectionReceipt {
+    /// Runtime generation admitted for this write, never a later same-ID seat.
+    pub instance_id: uuid::Uuid,
     /// Protocol sends write no terminal bytes. Only correlated turn start confirms.
     pub protocol_delivery: Option<crate::delivery::Delivery>,
     pub protocol_submission_requested: bool,
@@ -257,13 +259,18 @@ impl InjectionManager {
         submit: bool,
     ) -> Result<InjectionReceipt, InjectionError> {
         let pty_manager = self.pty_manager.read();
+        let instance_id = pty_manager.instance_id(agent_id)
+            .ok_or_else(|| InjectionError::AgentNotFound(agent_id.to_owned()))?;
         let write_started_at = Utc::now();
-        if let Some(entry)=pty_manager.protocol_agent(agent_id) {
+        let protocol = pty_manager.with_current_instance(agent_id, instance_id, |_| pty_manager.protocol_agent(agent_id))
+            .ok_or_else(|| InjectionError::AgentNotFound(agent_id.to_owned()))?;
+        if let Some(entry)=protocol {
             let text=message.trim_end_matches(&['\r','\n'][..]);
             let started=std::time::Instant::now();
             let delivery=entry.transport.send_input(text,submit).map_err(InjectionError::PtyError)?;
             let submitted_at=Utc::now();
             return Ok(InjectionReceipt {
+                instance_id,
                 protocol_delivery:Some(delivery), protocol_submission_requested:submit, nonce:None,confirmation_since:None,confirmation_expires:None,
                 write_started_at,submitted_at,observation_started_at:submitted_at,payload_bytes_written:text.len(),
                 submit_keystroke_issued:false,submit_bytes_written:0,pty_output_before:None,pty_output_after_write:None,
@@ -290,7 +297,7 @@ impl InjectionManager {
         // discrete Enter write itself — not echoes of the request flags.
         let (payload_bytes_written, submit_bytes_written) = if submit {
             let submit_result = pty_manager
-                .submit(agent_id, clean_message.as_bytes())
+                .submit_instance(agent_id, instance_id, clean_message.as_bytes())
                 .map_err(|e| InjectionError::PtyError(format!("Failed to write: {}", e)))?;
             (
                 submit_result.payload_bytes_written,
@@ -298,7 +305,7 @@ impl InjectionManager {
             )
         } else {
             pty_manager
-                .write(agent_id, clean_message.as_bytes())
+                .write_instance(agent_id, instance_id, clean_message.as_bytes())
                 .map_err(|e| InjectionError::PtyError(format!("Failed to write: {}", e)))?;
             (clean_message.len(), 0)
         };
@@ -318,6 +325,7 @@ impl InjectionManager {
         tracing::info!("=== INJECTION COMPLETE ===");
 
         Ok(InjectionReceipt {
+            instance_id,
             protocol_delivery: None,
             protocol_submission_requested: false,
             confirmation_expires: None,

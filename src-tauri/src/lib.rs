@@ -401,6 +401,7 @@ pub fn run() {
                         event.event_type,
                         EventType::AgentLaunched
                             | EventType::AgentCompleted
+                            | EventType::AgentStopped
                             | EventType::AgentWaitingInput
                             | EventType::AgentFailed
                             | EventType::ArtifactUpdated
@@ -424,6 +425,7 @@ pub fn run() {
                                     event.event_type,
                                     EventType::AgentLaunched
                                         | EventType::AgentCompleted
+                                        | EventType::AgentStopped
                                         | EventType::AgentWaitingInput
                                         | EventType::AgentFailed
                                         | EventType::ArtifactUpdated

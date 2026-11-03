@@ -2281,11 +2281,33 @@ impl SessionController {
     pub fn record_input_time(&self, session_id: &str, agent_id: &str, at: DateTime<Utc>) {
         let manager = self.pty_manager.read();
         let Some(instance) = manager.instance_id(agent_id) else { return };
-        if manager.spawned_at(agent_id).is_none_or(|spawned| at < spawned) { return; }
+        drop(manager);
+        self.record_input_time_for_instance(session_id, agent_id, instance, at);
+    }
+
+    pub fn record_input_time_for_instance(&self, session_id: &str, agent_id: &str,
+        instance: uuid::Uuid, at: DateTime<Utc>) {
+        self.pty_manager.read().with_current_instance(agent_id, instance, |spawned| {
+            if at >= spawned { self.record_current_input(session_id, agent_id, instance, at); }
+        });
+    }
+
+    fn record_current_input(&self, session_id: &str, agent_id: &str, instance: uuid::Uuid, at: DateTime<Utc>) {
         let mut inputs = self.latest_inputs.write();
         let entry = inputs.entry((session_id.to_string(), agent_id.to_string())).or_insert((instance, at));
         if entry.0 != instance { *entry = (instance, at); }
         else { entry.1 = entry.1.max(at); }
+    }
+
+    /// Terminal actions carry an agent ID rather than a session ID. Scratch shells
+    /// have no roster entry and deliberately do not create managed work evidence.
+    pub fn record_terminal_input_time(&self, agent_id: &str, instance: uuid::Uuid, at: DateTime<Utc>) {
+        let session_id = self.sessions.read().values()
+            .find(|session| session.agents.iter().any(|agent| agent.id == agent_id))
+            .map(|session| session.id.clone());
+        if let Some(session_id) = session_id {
+            self.record_input_time_for_instance(&session_id, agent_id, instance, at);
+        }
     }
 
     fn awaiting_injected_turn_since(status: &AgentStatus) -> Option<DateTime<Utc>> {
@@ -2314,42 +2336,54 @@ impl SessionController {
         submitted_at: DateTime<Utc>,
         submit_keystroke_issued: bool,
     ) -> Result<(), String> {
+        let Some(instance) = self.pty_manager.read().instance_id(agent_id) else { return Ok(()) };
+        self.record_instance_injection_submission(session_id, agent_id, instance, submitted_at, submit_keystroke_issued)
+    }
+
+    /// Receipt-bearing callers must pass the identity captured at write admission.
+    pub fn record_instance_injection_submission(&self, session_id: &str, agent_id: &str,
+        instance: uuid::Uuid, submitted_at: DateTime<Utc>, submit_keystroke_issued: bool) -> Result<(), String> {
         if !submit_keystroke_issued {
             return Ok(());
         }
-        self.record_input_time(session_id, agent_id, submitted_at);
-        if self
+        let recovered = self
             .agent_heartbeats
             .read()
             .get(session_id)
             .and_then(|agents| agents.get(agent_id))
-            .is_some_and(|heartbeat| heartbeat.last_activity > submitted_at)
-        {
-            // The agent already produced managed recovery evidence while the HTTP route observed
-            // the post-submit PTY window. Do not overwrite that newer heartbeat with Waiting.
-            return Ok(());
-        }
+            .is_some_and(|heartbeat| heartbeat.last_activity > submitted_at);
 
-        {
+        let changed = {
             let mut sessions = self.sessions.write();
-            let session = sessions
-                .get_mut(session_id)
-                .ok_or_else(|| format!("Session not found: {session_id}"))?;
-            let agent = session
-                .agents
-                .iter_mut()
-                .find(|agent| agent.id == agent_id)
-                .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+            let manager = self.pty_manager.read();
+            manager.with_current_instance(agent_id, instance, |spawned| -> Result<bool, String> {
+                if submitted_at < spawned { return Ok(false); }
+                let session = sessions
+                    .get_mut(session_id)
+                    .ok_or_else(|| format!("Session not found: {session_id}"))?;
+                let agent = session
+                    .agents
+                    .iter_mut()
+                    .find(|agent| agent.id == agent_id)
+                    .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
 
-            // Begin pending; only a nonce-matched transcript turn or newer heartbeat
-            // clears this marker. Terminal activity cannot resolve delivery.
-            agent.status = AgentStatus::WaitingForInput(format!(
-                "{}{}",
-                Self::AWAITING_INJECTED_TURN_PREFIX,
-                submitted_at.to_rfc3339()
-            ));
-        }
-        self.emit_session_update(session_id);
+                if self.input_at_for_instance(session_id, agent_id, Some(instance))
+                    .is_some_and(|latest| latest > submitted_at) { return Ok(false); }
+                self.record_current_input(session_id, agent_id, instance, submitted_at);
+                // A newer heartbeat already observed recovery during receipt measurement.
+                if recovered { return Ok(false); }
+
+                // Begin pending; only a nonce-matched transcript turn or newer heartbeat
+                // clears this marker. Terminal activity cannot resolve delivery.
+                agent.status = AgentStatus::WaitingForInput(format!(
+                    "{}{}",
+                    Self::AWAITING_INJECTED_TURN_PREFIX,
+                    submitted_at.to_rfc3339()
+                ));
+                Ok(true)
+            }).transpose()?.unwrap_or(false)
+        };
+        if changed { self.emit_session_update(session_id); }
         Ok(())
     }
 
@@ -2362,30 +2396,41 @@ impl SessionController {
         submitted_at: DateTime<Utc>,
         delivery: &crate::delivery::Delivery,
     ) -> Result<(), String> {
+        let Some(instance) = self.pty_manager.read().instance_id(agent_id) else { return Ok(()) };
+        self.record_instance_injection_delivery(session_id, agent_id, instance, submitted_at, delivery)
+    }
+
+    pub fn record_instance_injection_delivery(&self, session_id: &str, agent_id: &str,
+        instance: uuid::Uuid, submitted_at: DateTime<Utc>, delivery: &crate::delivery::Delivery) -> Result<(), String> {
         if delivery.confirmed.is_none() { return Ok(()); }
         if self.agent_heartbeats.read().get(session_id)
             .and_then(|agents| agents.get(agent_id))
             .is_some_and(|heartbeat| heartbeat.last_activity > submitted_at) {
             return Ok(());
         }
-        {
+        let changed = {
             let mut sessions = self.sessions.write();
-            let session = sessions.get_mut(session_id)
-                .ok_or_else(|| format!("Session not found: {session_id}"))?;
-            let agent = session.agents.iter_mut().find(|agent| agent.id == agent_id)
-                .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
-            let expected = format!("{}{}", Self::AWAITING_INJECTED_TURN_PREFIX, submitted_at.to_rfc3339());
-            if !matches!(&agent.status, AgentStatus::WaitingForInput(reason) if reason == &expected) {
-                return Ok(());
-            }
-            agent.status = match delivery.confirmed {
-                Some(true) => AgentStatus::Running,
-                Some(false) => AgentStatus::WaitingForInput(format!(
-                    "injected_delivery_failed:{}:{}", delivery.basis, submitted_at.to_rfc3339())),
-                None => return Ok(()),
-            };
-        }
-        self.emit_session_update(session_id);
+            let manager = self.pty_manager.read();
+            manager.with_current_instance(agent_id, instance, |spawned| -> Result<bool, String> {
+                if submitted_at < spawned { return Ok(false); }
+                let session = sessions.get_mut(session_id)
+                    .ok_or_else(|| format!("Session not found: {session_id}"))?;
+                let agent = session.agents.iter_mut().find(|agent| agent.id == agent_id)
+                    .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+                let expected = format!("{}{}", Self::AWAITING_INJECTED_TURN_PREFIX, submitted_at.to_rfc3339());
+                if !matches!(&agent.status, AgentStatus::WaitingForInput(reason) if reason == &expected) {
+                    return Ok(false);
+                }
+                agent.status = match delivery.confirmed {
+                    Some(true) => AgentStatus::Running,
+                    Some(false) => AgentStatus::WaitingForInput(format!(
+                        "injected_delivery_failed:{}:{}", delivery.basis, submitted_at.to_rfc3339())),
+                    None => return Ok(false),
+                };
+                Ok(true)
+            }).transpose()?.unwrap_or(false)
+        };
+        if changed { self.emit_session_update(session_id); }
         Ok(())
     }
 
@@ -3819,25 +3864,52 @@ impl SessionController {
     }
 
     pub fn stop_agent(&self, session_id: &str, agent_id: &str) -> Result<(), String> {
-        let pty_manager = self.pty_manager.read();
-        pty_manager.kill(agent_id).map_err(|e| e.to_string())?;
+        let Some(instance) = self.pty_manager.read().instance_id(agent_id) else { return Ok(()) };
+        self.stop_agent_instance(session_id, agent_id, instance)
+    }
 
-        let completed_agent = {
+    /// Stop the named generation without earning task completion or harvesting output.
+    pub fn stop_agent_instance(&self, session_id: &str, agent_id: &str, instance: uuid::Uuid) -> Result<(), String> {
+        let completed_fence = self.pty_manager.read().input_fence(agent_id);
+        let was_finished = self.get_session(session_id).is_some_and(|session| session.agents.iter()
+            .any(|agent| agent.id == agent_id && agent.work_state == Some(super::work_state::WorkState::Finished)));
+        let pty_manager = self.pty_manager.read();
+        let stopped_at = Utc::now();
+        let stopped_cell = {
             let mut sessions = self.sessions.write();
-            if let Some(session) = sessions.get_mut(session_id) {
-                if let Some(index) = session.agents.iter().position(|agent| agent.id == agent_id) {
-                    session.agents[index].status = AgentStatus::Completed;
-                    Some((session.clone(), session.agents[index].clone()))
-                } else {
-                    None
+            let session = sessions.get_mut(session_id).ok_or_else(|| format!("Session not found: {session_id}"))?;
+            let index = session.agents.iter().position(|agent| agent.id == agent_id)
+                .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+            let preserved = if was_finished {
+                match completed_fence.filter(|(owner, _)| *owner == instance) {
+                    Some((_, revision)) => pty_manager.kill_instance_at_input_revision(agent_id, instance, revision)
+                        .map_err(|e| e.to_string())?,
+                    None => false,
                 }
-            } else {
-                None
+            } else { false };
+            if (!preserved && !pty_manager.kill_instance(agent_id, instance).map_err(|e| e.to_string())?)
+                || pty_manager.instance_id(agent_id).is_some() {
+                return Err(format!("Agent {agent_id} runtime instance was replaced; stop rejected"));
             }
+            session.agents[index].status = if preserved { AgentStatus::Completed } else {
+                AgentStatus::WaitingForInput("stopped_by_operator".into())
+            };
+            session.agents[index].work_state = Some(if preserved {
+                super::work_state::WorkState::Finished
+            } else { super::work_state::WorkState::Working });
+            agent_cell_id(session, &session.agents[index])
         };
+        drop(pty_manager);
         self.update_session_storage(session_id);
-        if let Some((session, agent)) = completed_agent {
-            self.emit_agent_completed(&session, &agent);
+        self.emit_session_update(session_id);
+        if let Some(emitter) = self.event_emitter.clone() {
+            let session_id = session_id.to_owned();
+            let agent_id = agent_id.to_owned();
+            tokio::spawn(async move {
+                if let Err(error) = emitter.emit_agent_stopped(&session_id, &stopped_cell, &agent_id, instance, stopped_at).await {
+                    tracing::debug!("Failed to emit agent stopped event: {error}");
+                }
+            });
         }
 
         Ok(())
@@ -3854,7 +3926,12 @@ impl SessionController {
     /// planner process is still running, so the operator can see and stop it.
     fn retire_master_planner(&self, session_id: &str, successor: &str) {
         let planner_id = format!("{}-master-planner", session_id);
-        match self.stop_agent(session_id, &planner_id) {
+        let instance = self.pty_manager.read().instance_id(&planner_id);
+        let stop = match instance {
+            Some(instance) => self.stop_agent_instance(session_id, &planner_id, instance),
+            None => Ok(()),
+        };
+        match stop {
             Ok(()) => {
                 tracing::info!(
                     "Stopped Master Planner {} before spawning {}",
@@ -3863,6 +3940,10 @@ impl SessionController {
                 );
             }
             Err(error) => {
+                if self.pty_manager.read().instance_id(&planner_id) != instance {
+                    tracing::warn!("Master Planner {planner_id} was replaced during stop; retaining replacement");
+                    return;
+                }
                 if self.pty_manager.read().is_alive(&planner_id) {
                     tracing::warn!(
                         "Failed to stop Master Planner {}: {}; it is still running, so it stays in the session",
@@ -3878,17 +3959,20 @@ impl SessionController {
                 );
                 // With the root gone taskkill answers "not found", which releases
                 // the PTY handle the manager kept for this retry.
-                if let Err(error) = self.pty_manager.read().kill(&planner_id) {
+                if let Some(instance) = instance {
+                if let Err(error) = self.pty_manager.read().kill_instance(&planner_id, instance) {
                     tracing::warn!(
                         "Retrying cleanup of exited Master Planner {} failed: {}",
                         planner_id,
                         error
                     );
                 }
+                }
             }
         }
 
         let mut sessions = self.sessions.write();
+        if self.pty_manager.read().instance_id(&planner_id).is_some() { return; }
         if let Some(s) = sessions.get_mut(session_id) {
             s.agents.retain(|a| a.id != planner_id);
         }
@@ -8973,6 +9057,10 @@ curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/workers/{{wor
 Returns `{{"released": true|false, "previous_status": "...", "new_status": "queued"}}`. It only
 releases the queue claim — it never stops a live agent. If the worker is actually
 running, use `DELETE /api/sessions/{session_id}/agents/{{agent_id}}` instead.
+DELETE stops only the captured runtime instance and emits `agent_stopped`, never task
+completion. Its running/failed queue claim is released back to queued for reassignment;
+finalized work stays finalized. Record earned completion through the heartbeat/mark tools
+before stopping a finished principal.
 
 ## Notes
 
@@ -18747,6 +18835,7 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod lane_a_tests { include!("lane_a_tests.rs"); }
     use super::{
         extract_model_arg, parse_persisted_session_state, serialize_session_state, AgentConfig,
         AgentInfo, AuthStrategy, BuiltWorkerPrompt, CompletionError, DebateDebaterMetadata,

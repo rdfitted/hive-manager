@@ -227,12 +227,12 @@ pub async fn close_session(
 
 #[tauri::command]
 pub async fn stop_agent(
-    state: State<'_, SessionControllerState>,
+    app_state: State<'_, Arc<AppState>>,
     session_id: String,
     agent_id: String,
 ) -> Result<(), String> {
-    let controller = state.0.read();
-    controller.stop_agent(&session_id, &agent_id)
+    crate::http::handlers::agents::stop_agent_and_release(&app_state, &session_id, &agent_id)
+        .await.map_err(|error| error.message)
 }
 
 #[tauri::command]

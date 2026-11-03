@@ -1173,6 +1173,10 @@ impl PtyManager {
     }
 
     fn admit_input(&self, id: &str) -> Result<(Arc<PtySession>, InputAdmission), PtyError> {
+        self.admit_input_instance(id, None)
+    }
+
+    fn admit_input_instance(&self, id: &str, expected: Option<uuid::Uuid>) -> Result<(Arc<PtySession>, InputAdmission), PtyError> {
         let _lifecycle = self.lifecycle.lock();
         if self.protocol_agent(id).is_some() {
             return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));
@@ -1181,6 +1185,9 @@ impl PtyManager {
             .ok_or_else(|| PtyError::NotFound(id.to_string()))?;
         let mut instances = self.instances.write();
         let current = instances.get_mut(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        if expected.is_some_and(|expected| expected != current.id) {
+            return Err(PtyError::NotFound(format!("{id} (runtime instance replaced)")));
+        }
         current.input_revision = current.input_revision.saturating_add(1);
         current.input_active = current.input_active.saturating_add(1);
         let admission = InputAdmission { instances: Arc::clone(&self.instances), id: id.to_string(), instance: current.id };
@@ -1190,6 +1197,31 @@ impl PtyManager {
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
         let (session, _admission) = self.admit_input(id)?;
         session.write(data)
+    }
+
+    /// Validate identity at admission, then release lifecycle before blocking I/O.
+    pub fn write_instance(&self, id: &str, instance: uuid::Uuid, data: &[u8]) -> Result<(), PtyError> {
+        let (session, _admission) = self.admit_input_instance(id, Some(instance))?;
+        session.write(data)
+    }
+
+    pub fn submit_instance(&self, id: &str, instance: uuid::Uuid, data: &[u8]) -> Result<PtySubmitResult, PtyError> {
+        let (session, _admission) = self.admit_input_instance(id, Some(instance))?;
+        session.submit(data)
+    }
+
+    pub fn write_bracketed_instance(&self, id: &str, instance: uuid::Uuid, data: &[u8]) -> Result<(), PtyError> {
+        let (session, _admission) = self.admit_input_instance(id, Some(instance))?;
+        session.write_bracketed(data)
+    }
+
+    /// Keep a metadata update bound to the current identity. Callers acquire the
+    /// roster first and must not perform I/O or emit projections in this callback.
+    pub fn with_current_instance<T>(&self, id: &str, expected: uuid::Uuid,
+        update: impl FnOnce(chrono::DateTime<chrono::Utc>) -> T) -> Option<T> {
+        let instances = self.instances.read();
+        let current = instances.get(id).filter(|current| current.id == expected)?;
+        Some(update(current.spawned_at))
     }
 
     /// Deliver a payload as a bracketed paste and then a discrete bare Enter to submit it.
@@ -1224,6 +1256,12 @@ impl PtyManager {
         self.instances.read().get(id).map(|instance| instance.spawned_at)
     }
 
+    #[cfg(test)]
+    pub fn set_instance_spawned_at_for_test(&self, id: &str, at: chrono::DateTime<chrono::Utc>) {
+        let _lifecycle = self.lifecycle.lock();
+        self.instances.write().get_mut(id).expect("instance fixture").spawned_at = at;
+    }
+
     /// Input admission and retirement share lifecycle. This fence binds completion
     /// to the last submitted input even before HTTP records its pending marker.
     pub fn input_fence(&self, id: &str) -> Option<(uuid::Uuid, u64)> {
@@ -1235,6 +1273,11 @@ impl PtyManager {
     /// its replacement. Failed cleanup keeps the identity and handle for retry.
     pub fn kill_instance(&self, id: &str, instance_id: uuid::Uuid) -> Result<bool, PtyError> {
         self.kill_inner(id, Some(instance_id), false, None)
+    }
+
+    /// Preserve earned work state only if no new input was admitted since its proof.
+    pub fn kill_instance_at_input_revision(&self, id: &str, instance_id: uuid::Uuid, revision: u64) -> Result<bool, PtyError> {
+        self.kill_inner(id, Some(instance_id), false, Some(revision))
     }
 
     /// Exact-instance retirement preserves just its bounded terminal replay bytes.

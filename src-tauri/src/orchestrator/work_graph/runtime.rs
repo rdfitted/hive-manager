@@ -881,6 +881,7 @@ pub enum RuntimeObservationKind {
     ClaimFailed,
     Spawn,
     Retry,
+    Stop,
     Completion,
     Failure,
     Finalization,
@@ -1018,6 +1019,7 @@ pub fn derive_runtime_graph_with_completion_facts(
         .collect();
     let structural_ids: std::collections::BTreeSet<_> = structural_nodes.keys().cloned().collect();
     let mut last_agent_observation = BTreeMap::<String, String>::new();
+    let mut latest_agent_launch = BTreeMap::<String, DateTime<Utc>>::new();
     let mut current_task = BTreeMap::<String, TaskId>::new();
     let mut outcomes = BTreeMap::<String, RuntimeOutcome>::new();
     let declared_agents = completion_facts
@@ -1160,6 +1162,16 @@ pub fn derive_runtime_graph_with_completion_facts(
         }
 
         if let Some(agent_id) = agent_id {
+            if kind == RuntimeObservationKind::Spawn {
+                let latest = latest_agent_launch.entry(agent_id.clone()).or_insert(event.timestamp);
+                *latest = (*latest).max(event.timestamp);
+            }
+            if kind == RuntimeObservationKind::Stop && latest_agent_launch.get(&agent_id)
+                .is_some_and(|launched| *launched > event.timestamp) {
+                // Resume can launch the same ID without a new queue claim. A late
+                // stop from its prior generation remains history, not current state.
+                continue;
+            }
             let resolved_event_task = task_id
                 .filter(|task_id| structural_ids.contains(task_id))
                 .or_else(|| current_task.get(&agent_id).cloned());
@@ -1170,6 +1182,18 @@ pub fn derive_runtime_graph_with_completion_facts(
                 kind,
                 event,
             );
+            if kind == RuntimeObservationKind::Stop {
+                // A principal can own lane nodes without queue claim events. Release
+                // only work that was running; stopping never completes pending work.
+                if let Some(binding) = completion_role_binding(&agent_id, agent_principals) {
+                    for node in structural_nodes.values().filter(|node| node.binding == binding) {
+                        if node.status == NodeStatus::Running || outcomes.get(&node.id)
+                            .is_some_and(|outcome| outcome.status == RuntimeOutcomeStatus::Running) {
+                            update_event_outcome(&mut outcomes, &agent_id, Some(node.id.clone()), kind, event);
+                        }
+                    }
+                }
+            }
             if kind == RuntimeObservationKind::Completion
                 && event.event_type != EventType::WorkNodeCompleted
                 && !declared_agents.contains(agent_id.as_str())
@@ -1365,6 +1389,7 @@ fn observation_kind(event_type: &EventType) -> Option<RuntimeObservationKind> {
         EventType::AgentLaunched => Some(RuntimeObservationKind::Spawn),
         EventType::WorkerReclaimed => Some(RuntimeObservationKind::Retry),
         EventType::AgentCompleted => Some(RuntimeObservationKind::Completion),
+        EventType::AgentStopped => Some(RuntimeObservationKind::Stop),
         EventType::AgentFailed => Some(RuntimeObservationKind::Failure),
         EventType::WorkerFinalized => Some(RuntimeObservationKind::Finalization),
         EventType::WorkNodeCompleted => Some(RuntimeObservationKind::Completion),
@@ -1380,6 +1405,7 @@ fn observation_status(kind: RuntimeObservationKind) -> NodeStatus {
         | RuntimeObservationKind::JournalStep => NodeStatus::Running,
         RuntimeObservationKind::ClaimFailed | RuntimeObservationKind::Failure => NodeStatus::Failed,
         RuntimeObservationKind::Retry => NodeStatus::Ready,
+        RuntimeObservationKind::Stop => NodeStatus::Cancelled,
         RuntimeObservationKind::Completion
         | RuntimeObservationKind::Finalization
         | RuntimeObservationKind::Artifact
@@ -1625,6 +1651,13 @@ fn update_event_outcome(
             outcome.completion_evidence = None;
             outcome.executed_as = None;
             outcome.status = RuntimeOutcomeStatus::Running;
+        }
+        RuntimeObservationKind::Stop => {
+            // Stopping a finished process does not revoke earned completion facts.
+            if !matches!(outcome.status, RuntimeOutcomeStatus::Completed | RuntimeOutcomeStatus::Finalized) {
+                outcome.status = RuntimeOutcomeStatus::Interrupted;
+                outcome.finished_at = Some(event.timestamp);
+            }
         }
         RuntimeObservationKind::Completion => {
             record_first_finish(outcome, event.timestamp);
