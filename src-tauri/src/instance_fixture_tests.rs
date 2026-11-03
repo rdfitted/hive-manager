@@ -17,6 +17,67 @@ fn manifest() -> serde_json::Value {
 }
 
 #[test]
+fn g49_isolated_resume_refuses_coordinator_and_per_agent_spawns() {
+    if std::env::var_os("HM_RESUME_ISOLATION_CHILD").is_some() {
+        instance::bootstrap();
+        let settings = instance::settings().expect("isolated resume child");
+        let storage = Arc::new(SessionStorage::new_with_base(settings.data_dir()).unwrap());
+        let manager = Arc::new(parking_lot::RwLock::new(PtyManager::new()));
+        let mut controller = SessionController::new(manager.clone());
+        controller.set_storage(storage.clone());
+        let cwd = settings.root.join("saved-worktree");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let provider = uuid::Uuid::new_v4().to_string();
+        let sid = "fixture-resume";
+        let queen = "fixture-resume-queen";
+        let worker = "fixture-resume-worker-1";
+        let mut saved: crate::storage::PersistedSession = serde_json::from_value(serde_json::json!({
+            "id":sid,"session_type":{"Hive":{"worker_count":1}},"project_path":cwd,
+            "created_at":chrono::Utc::now(),"state":"Completed","default_cli":"claude",
+            "qa_workers":[],"max_qa_iterations":3,"qa_timeout_secs":300,"auth_strategy":"none",
+            "agents":[{"id":queen,"role":"Queen","parent_id":null,"config":{"cli":"claude","flags":[]},
+                "provider_session_id":provider,"transcript_session_id":provider,"transcript_cwd":cwd}]
+        })).unwrap();
+        storage.save_session(&saved).unwrap();
+        let error = controller.resume_session(sid).unwrap_err();
+        assert!(error.contains("Isolated instance"), "G40 coordinator Resume must be refused: {error}");
+        assert!(controller.list_sessions().is_empty());
+        assert!(manager.read().instance_id(queen).is_none());
+        assert!(!manager.read().is_alive(queen));
+
+        // The existing fixture loader may still restore metadata when the
+        // coordinator has no ID; a ready worker must never start automatically.
+        let mut worker_info = saved.agents[0].clone();
+        worker_info.id = worker.into();
+        worker_info.role = "Worker(1)".into();
+        worker_info.parent_id = Some(queen.into());
+        saved.agents[0].provider_session_id = None;
+        saved.agents[0].transcript_session_id = None;
+        saved.agents.push(worker_info);
+        storage.save_session(&saved).unwrap();
+        let session = controller.resume_session(sid).unwrap();
+        assert!(session.agents[1].provider_session_id.is_some());
+        let error = controller.resume_agent(sid, worker).unwrap_err();
+        assert!(error.contains("Isolated instance"), "G40 per-agent Resume must be refused: {error}");
+        for id in [queen, worker] {
+            assert!(manager.read().instance_id(id).is_none());
+            assert!(!manager.read().is_alive(id));
+        }
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join(".hive-instance"), "fixture").unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "instance_fixture_tests::g49_isolated_resume_refuses_coordinator_and_per_agent_spawns", "--nocapture"])
+        .env("HM_RESUME_ISOLATION_CHILD", "1")
+        .env(instance::DIR, temp.path()).env(instance::PORT, "18897")
+        .env_remove(instance::CDP_PORT).output().unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed; 0 failed;"));
+    assert!(!instance::is_isolated(), "G40 the parent stays on its normal profile");
+}
+
+#[test]
 #[ignore = "process-heavy fixture proof; run serially by CI"]
 fn seeded_output_loads_through_real_storage_and_isolated_controller() {
     // Re-exec keeps bootstrap's process environment and OnceLocks away from other tests.

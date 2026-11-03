@@ -292,6 +292,9 @@ pub enum SessionTypeInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct PersistedAgentInfo {
+    /// Provider conversation ID, separate from transcript attribution keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
     /// Exact cwd argument recorded at the PTY/protocol spawn boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_cwd: Option<String>,
@@ -2099,6 +2102,7 @@ mod tests {
             agents: vec![PersistedAgentInfo {
                 transcript_cwd: None,
                 transcript_spawned_at: None,
+                provider_session_id: None,
                 transcript_session_id: None,
                 id: format!("{session_id}-worker-1"),
                 role: "Worker(1)".to_string(),
@@ -2301,6 +2305,7 @@ mod tests {
         let agent = PersistedAgentInfo {
             transcript_cwd: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
             id: "agent-reviewer".to_string(),
             role: "Worker(1)".to_string(),

@@ -54,6 +54,7 @@ commands.allow = [
     "continue_after_planning",
     "mark_plan_ready",
     "resume_session",
+    "resume_agent",
     "get_run_journal",
     "list_session_files",
     "open_preview_window",

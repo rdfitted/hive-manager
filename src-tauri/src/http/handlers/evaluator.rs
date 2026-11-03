@@ -2172,6 +2172,7 @@ mod tests {
         AgentInfo {
             work_state: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
             id: format!("{session_id}-evaluator"),
             role: AgentRole::Evaluator,

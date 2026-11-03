@@ -429,7 +429,10 @@ pub async fn resume_session(
     // `running` whose worker is NOT among the resumed session's live agents (its PTY did not
     // survive) is flipped back to `queued` so it becomes claimable again. The queue table
     // persisted across the restart on its own; reconcile only fixes orphaned `running` rows.
-    let live_worker_ids: Vec<String> = session.agents.iter().map(|a| a.id.clone()).collect();
+    let live_worker_ids = {
+        let manager = app_state.pty_manager.read();
+        live_resume_agent_ids(&session, &manager)
+    };
     if let Err(e) = app_state
         .queue_manager
         .reconcile(&session_id, &live_worker_ids)
@@ -440,6 +443,22 @@ pub async fn resume_session(
 
     Ok(session)
 }
+
+fn live_resume_agent_ids(session: &Session, manager: &crate::pty::PtyManager) -> Vec<String> {
+    session.agents.iter().filter(|agent| manager.is_alive(&agent.id))
+        .map(|agent| agent.id.clone()).collect()
+}
+
+#[tauri::command]
+pub async fn resume_agent(
+    state: State<'_, SessionControllerState>, session_id: String, agent_id: String,
+) -> Result<Session, String> {
+    let controller = state.0.read();
+    controller.resume_agent(&session_id, &agent_id)
+}
+
+#[cfg(test)]
+mod lane_e_resume_tests { include!("lane_e_resume_tests.rs"); }
 
 /// #125: read the run journal + side-effect ledger for a session, for the resume modal.
 #[tauri::command]

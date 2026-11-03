@@ -1802,6 +1802,7 @@ mod tests {
             agents: vec![AgentInfo {
                 work_state: None,
                 transcript_spawned_at: None,
+                provider_session_id: None,
                 transcript_session_id: None,
                 id: "parent".to_string(),
                 role: worker_parent(),
@@ -1830,6 +1831,7 @@ mod tests {
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         }
     }

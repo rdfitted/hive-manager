@@ -942,6 +942,7 @@ mod tests {
             commit_sha: None,
             base_commit_sha: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
         }
     }
@@ -988,6 +989,7 @@ mod tests {
             worktree_path: None,
             worktree_branch: None,
             no_git: true,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         }
     }

@@ -674,6 +674,8 @@ impl SessionState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
     #[serde(default)]
     pub work_state: Option<super::work_state::WorkState>,
     #[serde(default)]
@@ -991,6 +993,8 @@ pub struct Session {
     /// the frontend can show a confirmation modal. `None` for freshly launched sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_report: Option<crate::domain::run_journal::ResumeReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_resume_report: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1560,6 +1564,7 @@ impl SessionController {
             agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(cmd, &queen_args),
                 id: queen_id,
                 role: AgentRole::Queen,
@@ -1623,6 +1628,7 @@ impl SessionController {
                 agents.push(AgentInfo {
                     work_state: None,
                     transcript_spawned_at,
+                    provider_session_id: None,
                     transcript_session_id: Self::transcript_key(cmd, &worker_args),
                     id: worker_id.clone(),
                     role: AgentRole::Worker {
@@ -1665,6 +1671,7 @@ impl SessionController {
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         };
 
@@ -1746,6 +1753,7 @@ impl SessionController {
     /// Publish heartbeat fields and their derived work state from the same snapshot.
     pub fn session_with_heartbeats(&self, mut session: Session) -> (Session, HashMap<String, AgentHeartbeatInfo>) {
         use super::work_state::{work_state_since, verdict_at, WorkEvidence, WorkState};
+        self.populate_provider_ids(&mut session);
         let retired: HashSet<String> = session.agents.iter()
             .filter(|agent| agent.work_state == Some(WorkState::Retired)
                 && matches!(agent.status, AgentStatus::Completed))
@@ -9999,6 +10007,7 @@ Last updated: {timestamp}
             agents: vec![AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: solo_id,
                 role: AgentRole::Worker {
@@ -10027,6 +10036,7 @@ Last updated: {timestamp}
             worktree_path: Some(solo_cwd.clone()),
             worktree_branch: Some(solo_branch.clone()),
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         };
 
@@ -10376,6 +10386,7 @@ Last updated: {timestamp}
         agents.push(AgentInfo {
             work_state: None,
             transcript_spawned_at,
+            provider_session_id: None,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: queen_id.clone(),
             role: AgentRole::Queen,
@@ -10573,6 +10584,7 @@ Last updated: {timestamp}
             agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: worker_id,
                 role: AgentRole::Worker {
@@ -10634,6 +10646,7 @@ Last updated: {timestamp}
                 None
             },
             no_git: !use_worktrees,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         };
 
@@ -10921,6 +10934,7 @@ phases and do EXACTLY this, then stop:
             worktree_path: variants.first().map(|v| v.worktree_path.clone()),
             worktree_branch: variants.first().map(|v| v.branch.clone()),
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         };
 
@@ -11064,6 +11078,7 @@ phases and do EXACTLY this, then stop:
             let agent_info = AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: variant.agent_id.clone(),
                 role: AgentRole::Fusion {
@@ -11192,6 +11207,7 @@ phases and do EXACTLY this, then stop:
             worktree_path: debaters.first().map(|d| d.worktree_path.clone()),
             worktree_branch: debaters.first().map(|d| d.branch.clone()),
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         };
 
@@ -11518,6 +11534,7 @@ phases and do EXACTLY this, then stop:
             new_agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: agent_id,
                 role: AgentRole::Fusion {
@@ -12110,6 +12127,7 @@ The backend composed and persisted the following authoritative skeleton before l
             agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
@@ -12152,6 +12170,7 @@ The backend composed and persisted the following authoritative skeleton before l
             worktree_path,
             worktree_branch,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         };
 
@@ -12238,6 +12257,7 @@ The backend composed and persisted the following authoritative skeleton before l
             agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
@@ -12295,6 +12315,7 @@ The backend composed and persisted the following authoritative skeleton before l
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         };
 
@@ -12377,6 +12398,7 @@ The backend composed and persisted the following authoritative skeleton before l
             agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
@@ -12433,6 +12455,7 @@ The backend composed and persisted the following authoritative skeleton before l
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         };
 
@@ -12587,6 +12610,7 @@ The backend composed and persisted the following authoritative skeleton before l
             new_agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id,
                 role: AgentRole::Queen,
@@ -12718,6 +12742,7 @@ The backend composed and persisted the following authoritative skeleton before l
             new_agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: variant.agent_id.clone(),
                 role: AgentRole::Fusion {
@@ -12981,6 +13006,7 @@ The backend composed and persisted the following authoritative skeleton before l
             agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
@@ -13037,6 +13063,7 @@ The backend composed and persisted the following authoritative skeleton before l
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         };
 
@@ -13311,6 +13338,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 let agent = AgentInfo {
                     work_state: None,
                     transcript_spawned_at,
+                    provider_session_id: None,
                     transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: worker_id,
                     role: AgentRole::Worker {
@@ -14884,6 +14912,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 let agent = AgentInfo {
                     work_state: None,
                     transcript_spawned_at,
+                    provider_session_id: None,
                     transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: judge_id,
                     role: AgentRole::Judge {
@@ -15230,6 +15259,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 let agent = AgentInfo {
                     work_state: None,
                     transcript_spawned_at,
+                    provider_session_id: None,
                     transcript_session_id: Self::transcript_key(&cmd, &args),
                     id: judge_id,
                     role: AgentRole::Judge {
@@ -15906,6 +15936,7 @@ The backend composed and persisted the following authoritative skeleton before l
         new_agents.push(AgentInfo {
             work_state: None,
             transcript_spawned_at,
+            provider_session_id: None,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: queen_id.clone(),
             role: AgentRole::Queen,
@@ -16294,6 +16325,128 @@ The backend composed and persisted the following authoritative skeleton before l
         Ok(())
     }
 
+    fn resolve_provider_id(
+        session_id: &str, agent_id: &str, cli: &str, saved_id: Option<&str>,
+        transcript_key: Option<&str>, spawned_at: Option<DateTime<Utc>>,
+        registry: Option<&crate::transport::TransportRegistry>,
+    ) -> Option<String> {
+        if !matches!(cli, "claude" | "codex") { return None; }
+        let valid = |id: &&str| Uuid::parse_str(id).is_ok();
+        let key_id = if cli == "claude" { transcript_key }
+            else { transcript_key.and_then(|key| key.strip_prefix("codex-resume-")) };
+        if let Some(id) = saved_id.filter(valid).or_else(|| key_id.filter(valid)) {
+            return Some(id.to_string());
+        }
+        if cli != "codex" { return None; }
+        let registry = registry?;
+        registry.get(session_id, agent_id).and_then(|entry| entry.thread_id)
+            .filter(|id| Uuid::parse_str(id).is_ok())
+            .or_else(|| registry.feeds.codex_provider_id(session_id, agent_id, transcript_key, spawned_at))
+    }
+
+    fn provider_id_from_persisted(&self, session_id: &str, agent: &crate::storage::PersistedAgentInfo) -> Option<String> {
+        let registry = self.pty_manager.try_read().and_then(|manager| manager.transport_registry());
+        Self::resolve_provider_id(session_id, &agent.id, &agent.config.cli,
+            agent.provider_session_id.as_deref(), agent.transcript_session_id.as_deref(),
+            agent.transcript_spawned_at, registry.as_deref())
+            .or_else(|| {
+                if agent.config.cli != "codex" { return None; }
+                // Old snapshots keep their prompt attribution key; the sidecar
+                // supplies the provider UUID without rewriting session.json.
+                let storage = self.storage.as_ref()?;
+                crate::transport::feed::FeedStore::new(storage.sessions_dir(), None)
+                    .codex_provider_id(session_id, &agent.id, agent.transcript_session_id.as_deref(), agent.transcript_spawned_at)
+            })
+    }
+
+    fn populate_provider_ids(&self, session: &mut Session) {
+        // Roster reads can occur inside lifecycle operations. Never wait on an
+        // unavailable manager guard while enriching an outward-facing clone.
+        let registry = self.pty_manager.try_read().and_then(|manager| manager.transport_registry());
+        for agent in &mut session.agents {
+            agent.provider_session_id = Self::resolve_provider_id(&session.id, &agent.id,
+                &agent.config.cli, agent.provider_session_id.as_deref(),
+                agent.transcript_session_id.as_deref(), agent.transcript_spawned_at, registry.as_deref());
+        }
+    }
+
+    fn agent_resume_report(session: &Session) -> Vec<String> {
+        session.agents.iter().filter(|agent| agent.provider_session_id.is_none()).map(|agent| {
+            let name = agent.config.label.as_deref().or(agent.config.name.as_deref()).unwrap_or(&agent.id);
+            format!("{name} ({}): no saved conversation ID; Resume is unavailable.", agent.id)
+        }).collect()
+    }
+
+    /// Caller holds the session lifecycle lock. Always create a fresh runtime.
+    fn respawn_saved_agent(&self, session: &mut Session, agent_id: &str) -> Result<(), String> {
+        crate::instance::refuse("conversation resume")?;
+        let index = session.agents.iter().position(|agent| agent.id == agent_id)
+            .ok_or_else(|| format!("Agent {agent_id} not found in session {}", session.id))?;
+        let agent = &session.agents[index];
+        let provider_id = agent.provider_session_id.clone()
+            .ok_or_else(|| format!("Agent {agent_id} has no saved conversation ID"))?;
+        let (command, args) = Self::build_resume_command(&agent.config, &provider_id)?;
+        let (previous_instance, cwd) = {
+            let manager = self.pty_manager.read();
+            if manager.is_alive(agent_id) { return Err(format!("Agent {agent_id} is already running")); }
+            (manager.instance_id(agent_id), manager.spawn_cwd(agent_id))
+        };
+        let cwd = cwd.or_else(|| self.storage.as_ref()?.load_session(&session.id).ok()?
+            .agents.into_iter().find(|saved| saved.id == agent_id)?.transcript_cwd)
+            .ok_or_else(|| format!("Cannot resume {agent_id}: no saved working directory"))?;
+        if !Path::new(&cwd).is_absolute() || !Path::new(&cwd).is_dir() {
+            return Err(format!("Cannot resume {agent_id}: saved working directory no longer exists or is not absolute: {cwd}"));
+        }
+        let manager = self.pty_manager.read();
+        if manager.is_alive(agent_id) || manager.instance_id(agent_id) != previous_instance {
+            return Err(format!("Agent {agent_id} runtime changed while preparing Resume; try again"));
+        }
+        if let Some(instance) = previous_instance {
+            if !manager.kill_instance(agent_id, instance).map_err(|error| error.to_string())? {
+                return Err(format!("Agent {agent_id} runtime changed while preparing Resume; try again"));
+            }
+        }
+        manager.create_session(agent_id.to_string(), agent.role.clone(), &command,
+            &args.iter().map(String::as_str).collect::<Vec<_>>(), Some(&cwd), 80, 24)
+            .map_err(|error| format!("Cannot resume {agent_id}: {error}"))?;
+        let spawned_at = manager.spawned_at(agent_id)
+            .ok_or_else(|| format!("Agent {agent_id} did not publish a resumed runtime identity"))?;
+        let status = if manager.is_alive(agent_id) { AgentStatus::Running }
+            else { manager.get_status(agent_id).unwrap_or(AgentStatus::Completed) };
+        drop(manager);
+        let agent = &mut session.agents[index];
+        agent.provider_session_id = Some(provider_id);
+        agent.transcript_session_id = Self::transcript_key(&command, &args);
+        agent.transcript_spawned_at = Some(spawned_at);
+        agent.status = status;
+        agent.work_state = None;
+        session.last_activity_at = Utc::now();
+        if session.state.is_terminal() || matches!(session.state, SessionState::Closing | SessionState::Paused) {
+            session.state = SessionState::Running;
+        }
+        Ok(())
+    }
+
+    pub fn resume_agent(&self, session_id: &str, agent_id: &str) -> Result<Session, String> {
+        crate::instance::guard_id(session_id)?;
+        crate::instance::refuse("conversation resume")?;
+        crate::transport::feed::safe_component(agent_id)?;
+        let lifecycle_lock = self.session_lifecycle_lock(session_id);
+        let _lifecycle_guard = lifecycle_lock.lock();
+        let mut session = self.sessions.read().get(session_id).cloned()
+            .ok_or_else(|| format!("Session not found: {session_id}"))?;
+        self.populate_provider_ids(&mut session);
+        self.respawn_saved_agent(&mut session, agent_id)?;
+        session.agent_resume_report = Self::agent_resume_report(&session);
+        self.sessions.write().insert(session_id.to_string(), session.clone());
+        self.update_session_storage(session_id);
+        let session = self.project_work_states(session);
+        if let Some(app_handle) = &self.app_handle {
+            let _ = app_handle.emit("session-update", SessionUpdate { session: session.clone() });
+        }
+        Ok(session)
+    }
+
     /// Resume a persisted session from storage
     pub fn resume_session(&self, session_id: &str) -> Result<Session, String> {
         crate::instance::guard_id(session_id)?;
@@ -16333,6 +16486,16 @@ The backend composed and persisted the following authoritative skeleton before l
 
         // Convert persisted session to active session
         let mut session = self.session_from_persisted(&persisted)?;
+        self.populate_provider_ids(&mut session);
+        session.agent_resume_report = Self::agent_resume_report(&session);
+        let coordinator = session.agents.iter().find(|agent| {
+            if matches!(session.session_type, SessionType::Solo { .. }) {
+                matches!(agent.role, AgentRole::Worker { index: 1, parent: None }) && agent.parent_id.is_none()
+            } else { matches!(agent.role, AgentRole::Queen) }
+        }).filter(|agent| agent.provider_session_id.is_some()).map(|agent| agent.id.clone());
+        if let Some(agent_id) = &coordinator {
+            self.respawn_saved_agent(&mut session, agent_id)?;
+        }
 
         // #125: classify the run journal for this resumed session — mark completed
         // write-steps Skipped (the spawn/commit guards keep them from re-running) and
@@ -16349,6 +16512,8 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         self.ensure_task_watcher(&session.id, &session.project_path);
+        if coordinator.is_some() { self.update_session_storage(session_id); }
+        let session = self.project_work_states(session);
 
         // Emit session-update event to frontend
         if let Some(ref app_handle) = self.app_handle {
@@ -16532,6 +16697,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 Some(AgentInfo {
                     work_state: None,
                     transcript_spawned_at: pa.transcript_spawned_at,
+                    provider_session_id: self.provider_id_from_persisted(&persisted.id, pa),
                     transcript_session_id: pa.transcript_session_id.clone(),
                     id: pa.id.clone(),
                     role,
@@ -16587,6 +16753,7 @@ The backend composed and persisted the following authoritative skeleton before l
             worktree_path: persisted.worktree_path.clone(),
             worktree_branch: persisted.worktree_branch.clone(),
             no_git: persisted.no_git,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         })
     }
@@ -16686,6 +16853,7 @@ The backend composed and persisted the following authoritative skeleton before l
             new_agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id.clone(),
                 role: AgentRole::Queen,
@@ -16839,6 +17007,7 @@ The backend composed and persisted the following authoritative skeleton before l
             agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at,
+                provider_session_id: None,
                 transcript_session_id: Self::transcript_key(&cmd, &args),
                 id: queen_id.clone(),
                 role: AgentRole::Queen,
@@ -16894,6 +17063,7 @@ The backend composed and persisted the following authoritative skeleton before l
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         };
 
@@ -17583,6 +17753,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let agent_info = AgentInfo {
             work_state: None,
             transcript_spawned_at,
+            provider_session_id: None,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: worker_id.clone(),
             role: worker_role,
@@ -17777,6 +17948,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let agent_info = AgentInfo {
             work_state: None,
             transcript_spawned_at,
+            provider_session_id: None,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: evaluator_id,
             role: AgentRole::Evaluator,
@@ -17935,6 +18107,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let agent_info = AgentInfo {
             work_state: None,
             transcript_spawned_at,
+            provider_session_id: None,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: prince_id,
             role: AgentRole::Prince,
@@ -18064,6 +18237,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let agent_info = AgentInfo {
             work_state: None,
             transcript_spawned_at,
+            provider_session_id: None,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: qa_worker_id,
             role,
@@ -18213,6 +18387,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let agent_info = AgentInfo {
             work_state: None,
             transcript_spawned_at,
+            provider_session_id: None,
             transcript_session_id: Self::transcript_key(&cmd, &args),
             id: planner_id.clone(),
             role: AgentRole::Planner {
@@ -18300,31 +18475,41 @@ The backend composed and persisted the following authoritative skeleton before l
         load_previous: impl FnOnce() -> Option<crate::storage::PersistedSession>,
     ) -> crate::storage::PersistedSession {
         let mut snapshot = Self::session_to_persisted_snapshot(session);
-        let live_cwds: Vec<_> = {
+        let live_facts: Vec<_> = {
             let manager = pty_manager.read();
-            snapshot.agents.iter().map(|agent| manager.spawn_cwd(&agent.id)).collect()
+            let registry = manager.transport_registry();
+            session.agents.iter().map(|agent| {
+                let cwd = manager.spawn_cwd(&agent.id);
+                let mut provider_id = Self::resolve_provider_id(&session.id, &agent.id,
+                    &agent.config.cli, agent.provider_session_id.as_deref(),
+                    agent.transcript_session_id.as_deref(), agent.transcript_spawned_at, registry.as_deref());
+                if provider_id.is_none() && agent.config.cli == "codex" {
+                    if let (Some(registry), Some(cwd)) = (registry.as_ref(), cwd.as_deref()) {
+                        let _ = registry.feeds.use_codex_rollout(&session.id, &agent.id, Path::new(cwd),
+                            agent.transcript_session_id.as_deref(), agent.transcript_spawned_at);
+                        provider_id = Self::resolve_provider_id(&session.id, &agent.id,
+                            &agent.config.cli, None, agent.transcript_session_id.as_deref(),
+                            agent.transcript_spawned_at, Some(registry));
+                    }
+                }
+                (cwd, provider_id)
+            }).collect()
         };
-        let previous = if live_cwds.iter().any(Option::is_none) {
+        let previous = if live_facts.iter().zip(&snapshot.agents).any(|((cwd, provider), agent)|
+            cwd.is_none() || (provider.is_none() && agent.config.cli == "codex")) {
             load_previous()
         } else {
             None
         };
-        for (agent, live_cwd) in snapshot.agents.iter_mut().zip(live_cwds) {
-            agent.transcript_cwd = live_cwd.or_else(|| {
-                // A snapshot after restart can have no live PTY entry. Preserve
-                // the saved fact only for the same transcript incarnation.
-                previous
-                    .as_ref()?
-                    .agents
-                    .iter()
-                    .find(|old| {
-                        old.id == agent.id
-                            && old.transcript_session_id == agent.transcript_session_id
-                            && old.transcript_spawned_at == agent.transcript_spawned_at
-                    })?
-                    .transcript_cwd
-                    .clone()
-            });
+        for (agent, (live_cwd, provider)) in snapshot.agents.iter_mut().zip(live_facts) {
+            let old = previous.as_ref().and_then(|previous| previous.agents.iter().find(|old|
+                old.id == agent.id && old.transcript_session_id == agent.transcript_session_id
+                    && old.transcript_spawned_at == agent.transcript_spawned_at));
+            agent.transcript_cwd = live_cwd.or_else(|| old.and_then(|old| old.transcript_cwd.clone()));
+            // Stopping a protocol transport removes its live registry entry.
+            // Retain the already-persisted UUID only for that same incarnation.
+            agent.provider_session_id = provider.or_else(|| old.and_then(|old| old.provider_session_id.clone())
+                .filter(|id| Uuid::parse_str(id).is_ok()));
         }
         snapshot
     }
@@ -18362,6 +18547,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 PersistedAgentInfo {
                     transcript_cwd: None,
                     transcript_spawned_at: a.transcript_spawned_at,
+                    provider_session_id: Self::resolve_provider_id(&session.id, &a.id, &a.config.cli,
+                        a.provider_session_id.as_deref(), a.transcript_session_id.as_deref(), a.transcript_spawned_at, None),
                     transcript_session_id: a.transcript_session_id.clone(),
                     id: a.id.clone(),
                     role: role_str,
@@ -19213,6 +19400,7 @@ mod tests {
             AgentInfo {
                 work_state: None,
                 transcript_spawned_at: None,
+                provider_session_id: None,
                 transcript_session_id: None,
                 id: format!("{SESSION_ID}-queen"),
                 role: AgentRole::Queen,
@@ -19227,6 +19415,7 @@ mod tests {
             AgentInfo {
                 work_state: None,
                 transcript_spawned_at: None,
+                provider_session_id: None,
                 transcript_session_id: None,
                 id: format!("{SESSION_ID}-worker-1"),
                 role: AgentRole::Worker {
@@ -19244,6 +19433,7 @@ mod tests {
             AgentInfo {
                 work_state: None,
                 transcript_spawned_at: None,
+                provider_session_id: None,
                 transcript_session_id: None,
                 id: format!("{SESSION_ID}-worker-2"),
                 role: AgentRole::Worker {
@@ -20394,6 +20584,7 @@ mod tests {
         session.agents = vec![AgentInfo {
             work_state: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
             id: planner_id,
             role: AgentRole::MasterPlanner,
@@ -22969,6 +23160,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             agents: vec![AgentInfo {
                 work_state: None,
                 transcript_spawned_at: None,
+                provider_session_id: None,
                 transcript_session_id: None,
                 id: format!("{session_id}-worker-{worker_id}"),
                 role: AgentRole::Worker {
@@ -22997,6 +23189,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         }
     }
@@ -23012,6 +23205,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at: None,
+                provider_session_id: None,
                 transcript_session_id: None,
                 id: format!("{id}-evaluator"),
                 role: AgentRole::Evaluator,
@@ -23055,6 +23249,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         }
     }
@@ -23240,6 +23435,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let mut agents = vec![AgentInfo {
             work_state: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
             id: format!("{id}-evaluator"),
             role: AgentRole::Evaluator,
@@ -23255,6 +23451,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             agents.push(AgentInfo {
                 work_state: None,
                 transcript_spawned_at: None,
+                provider_session_id: None,
                 transcript_session_id: None,
                 id: format!("{id}-prince"),
                 role: AgentRole::Prince,
@@ -23291,6 +23488,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         }
     }
@@ -24121,6 +24319,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             worktree_path: None, // Key: no session worktree for planning/swarm
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         };
 

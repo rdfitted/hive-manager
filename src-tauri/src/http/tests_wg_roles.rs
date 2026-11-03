@@ -210,6 +210,7 @@ fn role_test_session(id: &str, project_path: PathBuf) -> Session {
         worktree_path: Some(shared_workspace),
         worktree_branch: Some(format!("hive/{id}/primary")),
         no_git: false,
+        agent_resume_report: Vec::new(),
         resume_report: None,
     }
 }

@@ -278,6 +278,7 @@ mod tests {
                 .map(|(idx, status)| AgentInfo {
                     work_state: None,
                     transcript_spawned_at: None,
+                    provider_session_id: None,
                     transcript_session_id: None,
                     id: format!("agent-{idx}"),
                     role: AgentRole::Fusion {
@@ -306,6 +307,7 @@ mod tests {
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         }
     }
@@ -516,6 +518,7 @@ mod tests {
         let fusion_agent = AgentInfo {
             work_state: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
             id: "fusion-agent".to_string(),
             role: AgentRole::Fusion {
@@ -532,6 +535,7 @@ mod tests {
         let judge_agent = AgentInfo {
             work_state: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
             id: "judge-agent".to_string(),
             role: AgentRole::Judge {
@@ -563,6 +567,7 @@ mod tests {
         let fusion_agent = AgentInfo {
             work_state: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
             id: "fusion-agent".to_string(),
             role: AgentRole::Fusion {
@@ -579,6 +584,7 @@ mod tests {
         let judge_agent = AgentInfo {
             work_state: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
             id: "judge-agent".to_string(),
             role: AgentRole::Judge {

@@ -2159,6 +2159,7 @@ async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: worker_id.clone(),
         role: AgentRole::Worker {
@@ -2387,6 +2388,7 @@ async fn http_reassignment_refreshes_finalized_liveness_and_restores_stall_cover
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: worker_id.clone(),
         role: AgentRole::Worker {
@@ -3320,6 +3322,7 @@ fn quiet_fusion_session(session_id: &str, project_path: &Path) -> Session {
         worktree_path: None,
         worktree_branch: None,
         no_git: true,
+        agent_resume_report: Vec::new(),
         resume_report: None,
     }
 }
@@ -3431,6 +3434,7 @@ async fn queen_completed_node_unblocks_the_same_task_spawn_only_after_ownership_
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: queen_id.clone(),
         role: AgentRole::Queen,
@@ -3445,6 +3449,7 @@ async fn queen_completed_node_unblocks_the_same_task_spawn_only_after_ownership_
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: principal_id.clone(),
         role: AgentRole::Worker {
@@ -3569,6 +3574,7 @@ async fn queen_external_completion_keeps_dependent_code_conflict_serialized() {
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: queen_id.clone(),
         role: AgentRole::Queen,
@@ -3720,6 +3726,7 @@ async fn queen_legacy_completion_for_another_principal_does_not_unblock() {
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: queen_id,
         role: AgentRole::Queen,

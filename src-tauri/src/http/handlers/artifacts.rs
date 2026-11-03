@@ -170,6 +170,7 @@ fn session_from_persisted(persisted: PersistedSession) -> Session {
         worktree_path: persisted.worktree_path,
         worktree_branch: persisted.worktree_branch,
         no_git: persisted.no_git,
+        agent_resume_report: Vec::new(),
         resume_report: None,
     }
 }

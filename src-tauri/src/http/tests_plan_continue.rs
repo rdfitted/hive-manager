@@ -179,6 +179,7 @@ fn seed_session(
         worktree_path: Some(worktree_path.to_string_lossy().to_string()),
         worktree_branch: Some(format!("hive/{session_id}/queen")),
         no_git: true,
+        agent_resume_report: Vec::new(),
         resume_report: None,
     });
 }

@@ -1045,6 +1045,7 @@ mod tests {
         AgentInfo {
             work_state: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
             id: id.to_string(),
             role,
@@ -1131,6 +1132,7 @@ mod tests {
             worktree_path: None,
             worktree_branch: None,
             no_git: true,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         });
 
