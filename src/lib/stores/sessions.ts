@@ -462,6 +462,7 @@ interface SessionsState {
   activeSessionId: string | null;
   loading: boolean;
   error: string | null;
+  resumeNotice?: { sessionName: string; messages: string[] } | null;
 }
 
 function createSessionsStore() {
@@ -786,7 +787,7 @@ function createSessionsStore() {
     },
 
     async resumeSession(sessionId: string, _options?: ResumeOptions) {
-      update((state) => ({ ...state, loading: true, error: null }));
+      update((state) => ({ ...state, loading: true, error: null, resumeNotice: null }));
       try {
         const session = await invoke<Session>('resume_session', { sessionId });
         update((state) => {
@@ -796,6 +797,10 @@ function createSessionsStore() {
             sessions: exists ? state.sessions : [...state.sessions, session],
             activeSessionId: session.id,
             loading: false,
+            resumeNotice: session.agent_resume_report?.length ? {
+              sessionName: sessionDisplayName(session),
+              messages: [...session.agent_resume_report],
+            } : null,
           };
         });
         return session;
@@ -803,6 +808,10 @@ function createSessionsStore() {
         update((state) => ({ ...state, loading: false, error: String(err) }));
         throw err;
       }
+    },
+
+    dismissResumeNotice() {
+      update((state) => ({ ...state, resumeNotice: null }));
     },
 
     async resumeAgent(sessionId: string, agentId: string) {

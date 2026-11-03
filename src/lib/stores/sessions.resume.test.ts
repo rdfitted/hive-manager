@@ -20,6 +20,19 @@ function savedSession(id: string): Session {
 beforeEach(() => vi.clearAllMocks());
 
 describe('G49 per-agent resume store', () => {
+  it('retains the returned unavailable-agent report until dismissed, then clears it for the next load', async () => {
+    const saved = { ...savedSession('resume-store-report'), name: 'Synthetic report',
+      agent_resume_report: ['Synthetic principal: no saved conversation ID'] };
+    vi.mocked(invoke).mockResolvedValueOnce(saved);
+    await sessions.resumeSession(saved.id);
+    expect(get(sessions).resumeNotice).toEqual({ sessionName: saved.name, messages: saved.agent_resume_report });
+    sessions.dismissResumeNotice();
+    expect(get(sessions).resumeNotice).toBeNull();
+    vi.mocked(invoke).mockResolvedValueOnce(savedSession('resume-store-no-report'));
+    await sessions.resumeSession('resume-store-no-report');
+    expect(get(sessions).resumeNotice).toBeNull();
+  });
+
   it('requests only the selected agent and replaces the returned roster', async () => {
     const saved = savedSession('resume-store-success');
     vi.mocked(invoke).mockResolvedValueOnce(saved);
