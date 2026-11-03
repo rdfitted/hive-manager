@@ -156,6 +156,12 @@ repeating every mutation on every screen, width and stage. The badge paint proof
 runs at both widths. The narrow width is measured after the 66-second wait:
 its stage named `load` is a first measurement at that width, not a fresh startup.
 
+Grid and Sidebar labels truncate in the real layout and are not asserted in full
+as visible text. Their full labels remain required in the DOM. Each Grid pane
+must intersect the viewport with text, and the Grid must show fixture-specific
+stalled and startup-exit message fragments. Sidebar must show the coordinator and
+the fixture agent count. Moving either target off-screen fails a named proof.
+
 The badge pixel probe looks only for a uniform full-width central horizontal run
 distinct from the adjacent rows, inside the badge clip. It catches the tested
 pointer-transparent one-pixel line. Other paint artifacts can escape it.

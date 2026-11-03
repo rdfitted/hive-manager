@@ -125,17 +125,18 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   let settled = false;
   const prove = mutationProver(report, assert);
   const probe = async (name, fn, context) => { try { const result = await fn(); assert(name, result.passed, result.details, context); } catch (error) { assert(name, false, error.message, context); } };
-  const capture = async (screen, viewport, target, expected, variant) => {
+  const capture = async (screen, viewport, target, expected, variant, expectedVisible = expected) => {
     console.log(`render:check capture ${screen} ${viewport.width}x${viewport.height}`);
     const context = { screen, viewport: `${viewport.width}x${viewport.height}`, ...(variant ? { variant } : {}) };
     const screenMeasure = async () => {
       const details = await visibleTargetState(target);
-      return { passed: details.visible && expected(details.text) && expected(details.visibleText), details };
+      return { passed: details.visible && expected(details.text) && expectedVisible(details.visibleText), details };
     };
     await probe('screen-not-empty', screenMeasure, context);
     await prove('screen-not-empty', screenMeasure, () => styleChange(target, { display: 'none' }), context);
     await prove('screen-target-offscreen', screenMeasure, () => offscreenTarget(target), context);
     if (screen === 'grid') await prove('grid-target-offscreen', screenMeasure, () => offscreenTarget(target), context);
+    if (screen === 'sidebar') await prove('sidebar-target-offscreen', screenMeasure, () => offscreenTarget(target), context);
     const file = path.join(out, `${screen}-${viewport.width}${variant ? `-${variant}` : ''}.png`);
     const bytes = await page.screenshot({ path: file });
     const pixels = pngPixels(bytes);
@@ -242,7 +243,11 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       settled = true;
     }
     await gridChecks(viewport, 'after-stall-and-sweep');
-    await capture('grid', viewport, page.locator('.terminal-panel:not(.hidden) .terminal-grid'), text => session.agents.every(agent => text.includes(agent.label)));
+    // Full labels remain required in the DOM. Shipped headers truncate them;
+    // visible fixture state text and each pane's viewport check prove content.
+    await capture('grid', viewport, page.locator('.terminal-panel:not(.hidden) .terminal-grid'),
+      text => session.agents.every(agent => text.includes(agent.label)), undefined,
+      text => text.includes('No heartbeat has arrived') && text.includes("This agent's process exited"));
     await page.getByRole('link', { name: 'Dashboard', exact: true }).click();
     await page.locator('.dashboard .board').waitFor();
     const kanbanSessions = manifest.screens.kanban.sessionIds.map(id => manifest.sessions.find(item => item.id === id));
@@ -264,7 +269,9 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       assert('sidebar-fixture-present', await rows.count() > 0, { sessionId: id }, { screen: 'sidebar', viewport: `${viewport.width}x${viewport.height}` });
       await prove('sidebar-fixture-present', async () => ({ passed: await rows.count() > 0 }), () => removeNode(rows.first()));
     }
-    await capture('sidebar', viewport, page.locator('.session-agents[aria-label="Session agents"]'), text => session.agents.every(agent => text.includes(agent.label)));
+    await capture('sidebar', viewport, page.locator('.session-agents[aria-label="Session agents"]'),
+      text => session.agents.every(agent => text.includes(agent.label)), undefined,
+      text => text.includes(normal.label) && text.includes(`Agents (${session.agents.length})`));
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(manifest.screens.review.agentId)}]`).click();
     await openReview(page);
     await cellSelect(page).selectOption(manifest.screens.review.cellId);

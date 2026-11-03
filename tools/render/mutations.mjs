@@ -1,6 +1,6 @@
 // Mutations affect only the disposable WebView DOM and are restored in finally.
 // The same measurement functions used by the gate are supplied by the caller.
-export const reviewProofNames = ['screen-target-offscreen', 'grid-target-offscreen', 'composer-offscreen-not-known', 'finished-duplicate-attention-card', 'finished-duplicate-needs-you-count', 'chat-empty-table', 'chat-empty-code', 'updater-network-rejection', 'badge-painted-line-1440', 'badge-painted-line-800'];
+export const reviewProofNames = ['screen-target-offscreen', 'grid-target-offscreen', 'sidebar-target-offscreen', 'composer-offscreen-not-known', 'finished-duplicate-attention-card', 'finished-duplicate-needs-you-count', 'chat-empty-table', 'chat-empty-code', 'updater-network-rejection', 'badge-painted-line-1440', 'badge-painted-line-800'];
 
 export const offscreenTarget = locator => styleChange(locator, { transform: 'translateY(2000px)' });
 export const emptyContents = locator => textChange(locator, '');
