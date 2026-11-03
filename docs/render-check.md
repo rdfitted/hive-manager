@@ -9,6 +9,8 @@ npm run render:check
 Use Windows with WebView2, Node.js/npm, installed project dependencies (including
 `playwright-core`), Git, Rust, and the MSVC Windows build tools required by Tauri.
 Playwright uses the installed WebView2 runtime. It does not download a browser.
+PowerShell script children use process-scoped `-ExecutionPolicy Bypass`; the driver
+does not change persistent user or machine execution policy.
 
 The storage/controller fixture proof starts Node and several Git processes, so
 plain `cargo test` skips it. CI runs it in the serial ignored-test step. Run the

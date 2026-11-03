@@ -35,6 +35,7 @@ const executableHash = async () => {
   for await (const chunk of createReadStream(target)) hash.update(chunk);
   return hash.digest('hex');
 };
+export const spawnBuildScript = (script, args, options) => spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], options);
 export async function ensureBuild(out, gate, signal) {
   const receiptPath = path.join(out, 'build-state.json');
   const fingerprint = await inputHash();
@@ -44,7 +45,7 @@ export async function ensureBuild(out, gate, signal) {
   const log = await open(path.join(out, 'build.log'), 'w');
   const started = Date.now();
   console.log('render:check building the guarded custom-protocol executable');
-  const child = spawn('powershell.exe', ['-NoProfile', '-File', path.join(repo, 'tools/render/build.ps1'), '-Repo', repo, '-GateJson', JSON.stringify(gate)], { cwd: repo, windowsHide: true, stdio: ['ignore', log.fd, log.fd] });
+  const child = spawnBuildScript(path.join(repo, 'tools/render/build.ps1'), ['-Repo', repo, '-GateJson', JSON.stringify(gate)], { cwd: repo, windowsHide: true, stdio: ['ignore', log.fd, log.fd] });
   const owned = identity(child.pid);
   const abort = () => { if (owned) void killOwned(owned).catch(() => {}); };
   signal.addEventListener('abort', abort, { once: true });

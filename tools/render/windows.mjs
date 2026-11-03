@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 export const quote = value => `'${String(value).replaceAll("'", "''")}'`;
-export const ps = code => execFileSync('powershell.exe', ['-NoProfile', '-Command', code], { encoding: 'utf8', windowsHide: true, maxBuffer: 8 * 1024 * 1024 }).trim();
+export const ps = code => execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', code], { encoding: 'utf8', windowsHide: true, maxBuffer: 8 * 1024 * 1024 }).trim();
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 export const plainPath = value => value.replace(/^\\\\\?\\/, '');
 export function inside(root, value) {

@@ -30,12 +30,20 @@ export async function acquireGate(repo, pool, signal) {
       while (true) {
         if (signal.aborted) throw new Error('Render check interrupted while waiting for FIFO');
         const first = pendingRequests(await readFile(queue, 'utf8'))[0];
-        if (first?.lane === lane && first.stamp === stamp) return { kind: 'fifo', path: queue, lane, stamp, release };
+        if (first?.lane === lane && first.stamp === stamp) {
+          const local = await acquireLocalGate(pool);
+          return { kind: 'fifo', path: queue, lane, stamp, release: async () => {
+            try { await local.release(); } finally { await release(); }
+          } };
+        }
         console.log('render:check waiting for the FIFO gate');
         await sleep(60000);
       }
     } catch (error) { await release(); throw error; }
   }
+  return acquireLocalGate(pool);
+}
+async function acquireLocalGate(pool) {
   await mkdir(pool, { recursive: true });
   const lock = path.join(pool, 'render-check.lock');
   const owner = identity(process.pid);
