@@ -352,11 +352,16 @@ while($null -ne ($line=[Console]::ReadLine())) {
 
 #[cfg(windows)]
 fn wait_until(mut predicate: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let started = Instant::now();
+    let deadline = started + FIXTURE_WAIT_FAILSAFE;
     while !predicate() {
         assert!(Instant::now() < deadline, "bounded fake server condition");
         std::thread::sleep(Duration::from_millis(25));
     }
+    eprintln!(
+        "fixture_wait_ms name=fake server condition elapsed={}",
+        started.elapsed().as_millis()
+    );
 }
 
 // Readiness is the pass criterion; this ceiling only fails a broken fixture.
@@ -622,7 +627,8 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
                 wait_for_signal("descendant process exit", || !child_alive(pid)); // Natural exit must clean descendants before explicit stop.
             } else if mode == "app-exit" {
                 let runtime = tokio::runtime::Runtime::new().unwrap();
-                assert!(runtime.block_on(registry.stop_all()).is_empty());
+                let errors = runtime.block_on(registry.stop_all());
+                assert!(errors.is_empty(), "stop_all returned {errors:?}");
             }
             manager.kill(&agent).unwrap();
         }

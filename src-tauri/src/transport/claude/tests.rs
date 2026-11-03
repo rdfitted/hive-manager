@@ -649,7 +649,8 @@ fn g15_claude_startup_cancel_stop_exit_and_app_shutdown_reap_descendants() {
                 wait_for_signal("descendant process exit", || !child_alive(pid)); // Observe natural-exit cleanup before explicit stop.
             } else if mode == "app-exit" {
                 let runtime = tokio::runtime::Runtime::new().unwrap();
-                assert!(runtime.block_on(registry.stop_all()).is_empty());
+                let errors = runtime.block_on(registry.stop_all());
+                assert!(errors.is_empty(), "stop_all returned {errors:?}");
             }
             manager.kill(&agent).unwrap();
         }
