@@ -1633,6 +1633,47 @@ while($null -ne ($line=[Console]::ReadLine())) {
         }
     }
 
+    // Signals decide success; the ceiling only fails a broken fixture.
+    #[cfg(windows)]
+    const PROTOCOL_FIXTURE_FAILSAFE: Duration = Duration::from_secs(120);
+
+    #[cfg(windows)]
+    fn spawn_reported_protocol_startup(
+        startup_signal: mpsc::Sender<Result<(), String>>,
+        start: impl FnOnce() -> Result<String, super::PtyError> + Send + 'static,
+    ) -> thread::JoinHandle<Result<String, super::PtyError>> {
+        thread::spawn(move || {
+            let result = start();
+            if let Err(error) = &result {
+                let _ = startup_signal.send(Err(error.to_string()));
+            }
+            result
+        })
+    }
+
+    #[cfg(windows)]
+    fn wait_for_protocol_publication(ready: mpsc::Receiver<Result<(), String>>) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        let result = ready.recv_timeout(PROTOCOL_FIXTURE_FAILSAFE)
+            .map_err(|error| format!("fixture publication signal failed: {error}"))?;
+        eprintln!("fixture_wait_ms name=protocol publication elapsed={}", started.elapsed().as_millis());
+        result
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protocol_startup_failure_is_reported_before_publish() {
+        let (entered, ready) = mpsc::channel();
+        let startup = spawn_reported_protocol_startup(entered, || {
+            Err(super::PtyError::CreateError("synthetic startup failure".into()))
+        });
+        let reported = wait_for_protocol_publication(ready)
+            .expect_err("startup error must be reported before publication");
+        let failed = startup.join().unwrap().unwrap_err();
+        assert_eq!(reported, failed.to_string(), "report the actual startup result");
+        assert!(reported.contains("synthetic startup failure"));
+    }
+
     #[cfg(windows)]
     #[test]
     fn cancelled_protocol_start_cannot_publish_cwd_after_respawn() {
@@ -1653,22 +1694,25 @@ while($null -ne ($line=[Console]::ReadLine())) {
             let args: Vec<String> = if command == "claude" {
                 vec!["--session-id".into(), transcript_id, "--dangerously-skip-permissions".into()]
             } else { Vec::new() };
-            let (entered, ready) = mpsc::channel();
+            let (entered, ready) = mpsc::channel::<Result<(), String>>();
+            let startup_signal = entered.clone();
             let (finish, release) = mpsc::channel();
             *manager.before_protocol_publish.lock() = Some(Box::new(move || {
-                entered.send(()).unwrap();
-                release.recv_timeout(Duration::from_secs(15)).unwrap();
+                entered.send(Ok(())).unwrap();
+                let started = std::time::Instant::now();
+                release.recv_timeout(PROTOCOL_FIXTURE_FAILSAFE).expect("fixture failsafe expired waiting for publication release");
+                eprintln!("fixture_wait_ms name=publication release elapsed={}", started.elapsed().as_millis());
             }));
             let owner = manager.clone();
             let old_id = id.clone();
             let old_shim = shim.clone();
             let old_args = args.clone();
             let old_cwd = format!("{}\\.\\", temp.path().display());
-            let startup = thread::spawn(move || owner.create_session(
+            let startup = spawn_reported_protocol_startup(startup_signal, move || owner.create_session(
                 old_id, AgentRole::Worker { index: 1, parent: None }, old_shim.to_str().unwrap(),
                 &old_args.iter().map(String::as_str).collect::<Vec<_>>(), Some(&old_cwd), 80, 24,
             ));
-            ready.recv_timeout(Duration::from_secs(15)).unwrap();
+            wait_for_protocol_publication(ready).unwrap_or_else(|error| panic!("protocol startup failed before publication: {error}"));
             assert!(manager.lifecycle.try_lock().is_some(), "startup barrier must not hold lifecycle");
             manager.kill(&id).unwrap();
             let after_cancel = manager.spawn_cwd(&id);

@@ -373,24 +373,79 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(25));
     }
 }
-// PID publication is a fixture signal, not a startup performance budget.
+// Readiness is the pass criterion; this ceiling only fails a broken fixture.
+// Descendants sleep for 300 s: fail well before natural exit could hide a leak.
 #[cfg(windows)]
-fn wait_for_child_pid(root: &std::path::Path) -> u32 {
-    loop {
-        if let Ok(value) = std::fs::read_to_string(root.join("child.pid")) {
-            if let Ok(pid) = value.trim().parse() {
-                return pid;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+const FIXTURE_WAIT_FAILSAFE: Duration = Duration::from_secs(120);
+
+#[cfg(windows)]
+fn spawn_with_startup_result<T: Send + 'static, E: std::fmt::Display + Send + 'static>(
+    start: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> (
+    std::thread::JoinHandle<Result<T, E>>,
+    std::sync::mpsc::Receiver<Result<(), String>>,
+) {
+    let (finished, result) = std::sync::mpsc::channel();
+    let startup = std::thread::spawn(move || {
+        let result = start();
+        let _ = finished.send(result.as_ref().map(|_| ()).map_err(|error| error.to_string()));
+        result
+    });
+    (startup, result)
 }
 
 #[cfg(windows)]
-fn wait_for_signal(mut predicate: impl FnMut() -> bool) {
+fn wait_for_child_pid(root: &std::path::Path) -> u32 {
+    wait_for_child_pid_with_startup(root, None)
+}
+
+#[cfg(windows)]
+fn wait_for_child_pid_with_startup(
+    root: &std::path::Path,
+    startup: Option<&std::sync::mpsc::Receiver<Result<(), String>>>,
+) -> u32 {
+    let mut pid = None;
+    let mut startup_completed = false;
+    wait_for_signal("child PID publication", || {
+        if let Some(startup) = startup {
+            match startup.try_recv() {
+                Ok(Err(error)) => panic!("fixture startup failed before child PID publication: {error}"),
+                Ok(Ok(())) => startup_completed = true,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) if !startup_completed => {
+                    panic!("fixture startup thread exited without reporting its result");
+                }
+                Err(_) => {}
+            }
+        }
+        pid = std::fs::read_to_string(root.join("child.pid"))
+            .ok()
+            .and_then(|value| value.trim().parse().ok());
+        pid.is_some()
+    });
+    pid.unwrap()
+}
+
+#[cfg(windows)]
+fn wait_for_signal(name: &str, mut predicate: impl FnMut() -> bool) {
+    let started = Instant::now();
     while !predicate() {
+        assert!(
+            started.elapsed() < FIXTURE_WAIT_FAILSAFE,
+            "fixture failsafe expired waiting for {name}"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
+    eprintln!("fixture_wait_ms name={name} elapsed={}", started.elapsed().as_millis());
+}
+
+#[cfg(windows)]
+#[test]
+#[should_panic(expected = "fixture startup failed before child PID publication: synthetic startup failure")]
+fn g15_startup_failure_is_reported_before_pid() {
+    let temp = tempfile::tempdir().unwrap();
+    let (startup, result) = spawn_with_startup_result(|| Err::<(), _>("synthetic startup failure"));
+    assert!(startup.join().unwrap().is_err());
+    wait_for_child_pid_with_startup(temp.path(), Some(&result));
 }
 
 #[cfg(windows)]
@@ -557,7 +612,7 @@ fn g15_claude_startup_cancel_stop_exit_and_app_shutdown_reap_descendants() {
         let owner = manager.clone();
         let id = agent.clone();
         let path = temp.path().to_path_buf();
-        let spawn = std::thread::spawn(move || {
+        let (spawn, startup_result) = spawn_with_startup_result(move || {
             owner.create_session(
                 id,
                 crate::pty::AgentRole::Worker {
@@ -575,7 +630,7 @@ fn g15_claude_startup_cancel_stop_exit_and_app_shutdown_reap_descendants() {
                 24,
             )
         });
-        let pid = wait_for_child_pid(temp.path());
+        let pid = wait_for_child_pid_with_startup(temp.path(), Some(&startup_result));
         assert!(child_alive(pid));
         if mode == "cancel" {
             manager.kill(&agent).unwrap();
@@ -590,15 +645,15 @@ fn g15_claude_startup_cancel_stop_exit_and_app_shutdown_reap_descendants() {
                     Some(true)
                 );
                 assert!(transport.interrupt_sync().is_err());
-                wait_for_signal(|| !transport.is_alive());
-                wait_for_signal(|| !child_alive(pid)); // Observe natural-exit cleanup before explicit stop.
+                wait_for_signal("transport exit", || !transport.is_alive());
+                wait_for_signal("descendant process exit", || !child_alive(pid)); // Observe natural-exit cleanup before explicit stop.
             } else if mode == "app-exit" {
                 let runtime = tokio::runtime::Runtime::new().unwrap();
                 assert!(runtime.block_on(registry.stop_all()).is_empty());
             }
             manager.kill(&agent).unwrap();
         }
-        wait_for_signal(|| !child_alive(pid));
+        wait_for_signal("descendant process exit", || !child_alive(pid));
         assert!(
             !manager.is_alive(&agent),
             "G15 Claude no live runtime after cleanup"
@@ -642,10 +697,10 @@ fn g15_claude_direct_writer_failure_cleans_owned_tree() {
         .register(&session, &agent, transport.thread_id(), transport.clone())
         .unwrap();
     transport.activate().unwrap();
-    wait_for_signal(|| temp.path().join("input-closed").exists());
+    wait_for_signal("input-closed publication", || temp.path().join("input-closed").exists());
     let pid = wait_for_child_pid(temp.path());
     assert!(transport.send_input("synthetic", true).is_err());
-    wait_for_signal(|| !child_alive(pid));
+    wait_for_signal("descendant process exit", || !child_alive(pid));
     let environment: Value =
         serde_json::from_slice(&std::fs::read(temp.path().join("environment.json")).unwrap())
             .unwrap();
@@ -707,6 +762,6 @@ fn g15_claude_drop_unregistered_runtime_and_bounded_control_failure() {
         let pid = wait_for_child_pid(temp.path());
         assert!(child_alive(pid));
         drop(transport);
-        wait_for_signal(|| !child_alive(pid));
+        wait_for_signal("descendant process exit", || !child_alive(pid));
     }
 }
