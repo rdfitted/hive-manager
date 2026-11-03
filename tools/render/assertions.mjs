@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { pngPixels, badgePaint } from './png.mjs';
-import { mutationProver, styleChange, removeNode, textChange, appendNode, offscreenTarget, emptyContents, duplicateIndicators, updaterResponse } from './mutations.mjs';
-import { updaterState } from './updater.mjs';
+import { mutationProver, styleChange, removeNode, textChange, appendNode, offscreenTarget, emptyContents, duplicateIndicators } from './mutations.mjs';
+import { updaterState, classifyUpdater } from './updater.mjs';
 import { classifyFinding } from './findings.mjs';
 
 const attention = 'section[aria-label="Agent needs attention"]';
@@ -161,10 +161,12 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
         return { passed: details.clear, details };
       };
       await probe('version-badge-no-painted-line', paintMeasure, context);
-      await prove(`badge-painted-line-${viewport.width}`, paintMeasure, async () => {
-        const rect = await badge.boundingBox();
-        return appendNode(page.locator('body'), { attributes: { style: `position:fixed;left:${rect.x}px;top:${Math.floor(rect.y + rect.height / 2)}px;width:${rect.width}px;height:1px;background:black;pointer-events:none;z-index:2147483647` } });
-      }, context);
+      for (const [name, thickness] of [['line', 1], ['band', 2]]) {
+        await prove(`badge-painted-${name}-${viewport.width}`, paintMeasure, async () => {
+          const rect = await badge.boundingBox();
+          return appendNode(page.locator('body'), { attributes: { style: `position:fixed;left:${rect.x}px;top:${Math.floor(rect.y + rect.height / 2)}px;width:${rect.width}px;height:${thickness}px;background:black;pointer-events:none;z-index:2147483647` } });
+        }, context);
+      }
     }
     else report.modalBadgeObservation = { ...(await badgeGeometry(page)), scope: 'Modal backdrop intentionally interdicts background controls; normal-screen badge checks remain gating.' };
   };
@@ -288,14 +290,18 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   }
   const updater = await updaterState(page);
   assert('updater-invoke-rejected', updater.rejected, updater);
+  let injectedOutcome;
   const updaterMeasure = async () => {
-    const probe = await import(`./updater.mjs?proof=${Date.now()}-${Math.random()}`);
-    const details = await probe.updaterState(page);
+    const details = injectedOutcome === undefined ? await updaterState(page) : classifyUpdater(injectedOutcome);
     return { passed: details.rejected, details };
   };
-  // The frozen Tauri bridge requires mutating the owned adapter call boundary.
-  await prove('updater-invoke-rejected', updaterMeasure, () => updaterResponse('await Promise.resolve(null);'), { file: 'tools/render/updater.mjs' });
-  await prove('updater-network-rejection', updaterMeasure, () => updaterResponse("await Promise.reject(new Error('network failed after updater HTTP request'));"), { file: 'tools/render/updater.mjs' });
+  const injectOutcome = async outcome => {
+    injectedOutcome = outcome;
+    return async () => { injectedOutcome = undefined; };
+  };
+  // Exercise the same classifier without writing the adapter or replacing the frozen bridge.
+  await prove('updater-invoke-rejected', updaterMeasure, () => injectOutcome({}), { boundary: 'in-memory outcome' });
+  await prove('updater-network-rejection', updaterMeasure, () => injectOutcome({ error: 'network failed after updater HTTP request' }), { boundary: 'in-memory outcome' });
   assert('all-screens-captured', Object.keys(manifest.screens).every(screen => [1440, 800].every(width => report.screenshots.some(item => item.screen === screen && item.viewport.width === width))), { captures: report.screenshots.map(item => `${item.screen}-${item.viewport.width}`) });
   const complete = () => Object.keys(manifest.screens).every(screen => [1440, 800].every(width => report.screenshots.some(item => item.screen === screen && item.viewport.width === width)));
   await prove('all-screens-captured', async () => ({ passed: complete(), details: report.screenshots.map(item => `${item.screen}-${item.viewport.width}`) }), async () => { const removed = report.screenshots.pop(); return async () => { report.screenshots.push(removed); }; });

@@ -1,7 +1,13 @@
+// Shared by the real IPC observation and in-memory mutation proofs.
+export function classifyUpdater(outcome) {
+  return { ...outcome, rejected: outcome.error === 'plugin updater not found' };
+}
+
 export async function updaterState(page) {
-  return page.evaluate(async () => {
-    if (typeof window.__TAURI_INTERNALS__?.invoke !== 'function') return { rejected: false, error: 'No real Tauri invoke bridge' };
-    try { await window.__TAURI_INTERNALS__.invoke('plugin:updater|check'); return { rejected: false }; }
-    catch (error) { return { rejected: String(error) === 'plugin updater not found', error: String(error) }; }
+  const outcome = await page.evaluate(async () => {
+    if (typeof window.__TAURI_INTERNALS__?.invoke !== 'function') return { error: 'No real Tauri invoke bridge' };
+    try { await window.__TAURI_INTERNALS__.invoke('plugin:updater|check'); return {}; }
+    catch (error) { return { error: String(error) }; }
   });
+  return classifyUpdater(outcome);
 }

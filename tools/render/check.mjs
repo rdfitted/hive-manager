@@ -6,6 +6,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { seed, manifest } from './seed.mjs';
 import { repo, target, ensureBuild } from './build.mjs';
+import { trackedSnapshot, trackedChanges } from './integrity.mjs';
 import { acquireGate } from './gate.mjs';
 import { runRenderAssertions, diagnoseReview } from './assertions.mjs';
 import { classifyFinding } from './findings.mjs';
@@ -78,11 +79,12 @@ async function reapStale() {
   return reaped;
 }
 const freePort = () => new Promise((resolve, reject) => { const server = net.createServer(); server.on('error', reject); server.listen(0, '127.0.0.1', () => { const number = server.address().port; server.close(() => number === 18800 ? freePort().then(resolve, reject) : resolve(number)); }); });
-let gate, state, root, app;
+let gate, state, root, app, trackedBefore;
 try {
   report.liveBefore = await liveState();
   report.desktopBefore = desktopState();
   gate = await acquireGate(repo, pool, controller.signal);
+  trackedBefore = await trackedSnapshot(repo);
   report.staleRunsReaped = await reapStale();
   report.build = await ensureBuild(out, gate, controller.signal);
   if (controller.signal.aborted) throw new Error('Render check interrupted');
@@ -239,6 +241,12 @@ finally {
     assertion('input-desktop-unchanged', report.desktopBefore.inputDesktop === report.desktopAfter.inputDesktop, { before: report.desktopBefore, after: report.desktopAfter });
     if (report.foregroundPreserved !== null) assertion('foreground-preserved', report.foregroundPreserved);
   } catch (error) { assertion('G42-live-app-unchanged', false, error.message); }
+  if (trackedBefore) {
+    try {
+      const changed = await trackedChanges(repo, trackedBefore);
+      assertion('tracked-files-unchanged', changed.length === 0, { trackedCount: trackedBefore.size, changed });
+    } catch (error) { assertion('tracked-files-unchanged', false, error.message); }
+  }
   if (gate) { try { await gate.release(); } catch (error) { assertion('gate-release', false, error.message); } }
   report.completedAt = new Date().toISOString();
   report.passed = report.assertions.every(item => item.accepted);

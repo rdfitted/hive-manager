@@ -1,6 +1,6 @@
 // Mutations affect only the disposable WebView DOM and are restored in finally.
 // The same measurement functions used by the gate are supplied by the caller.
-export const reviewProofNames = ['screen-target-offscreen', 'grid-target-offscreen', 'sidebar-target-offscreen', 'composer-offscreen-not-known', 'finished-duplicate-attention-card', 'finished-duplicate-needs-you-count', 'chat-empty-table', 'chat-empty-code', 'updater-network-rejection', 'badge-painted-line-1440', 'badge-painted-line-800'];
+export const reviewProofNames = ['screen-target-offscreen', 'grid-target-offscreen', 'sidebar-target-offscreen', 'composer-offscreen-not-known', 'finished-duplicate-attention-card', 'finished-duplicate-needs-you-count', 'chat-empty-table', 'chat-empty-code', 'updater-network-rejection', 'badge-painted-line-1440', 'badge-painted-line-800', 'badge-painted-band-1440', 'badge-painted-band-800'];
 
 export const offscreenTarget = locator => styleChange(locator, { transform: 'translateY(2000px)' });
 export const emptyContents = locator => textChange(locator, '');
@@ -11,21 +11,6 @@ export async function duplicateIndicators(locator, spec) {
     return async () => { try { await undoSecond(); } finally { await undoFirst(); } };
   } catch (error) { await undoFirst(); throw error; }
 }
-export async function updaterResponse(replacement) {
-  const { readFile, writeFile } = await import('node:fs/promises');
-  const file = new URL('./updater.mjs', import.meta.url);
-  const original = await readFile(file);
-  const source = original.toString('utf8');
-  const call = "await window.__TAURI_INTERNALS__.invoke('plugin:updater|check');";
-  if (source.split(call).length !== 2) throw new Error('Updater mutation target is ambiguous');
-  try { await writeFile(file, source.replace(call, replacement)); }
-  catch (error) { await writeFile(file, original); throw error; }
-  return async () => {
-    await writeFile(file, original);
-    if (!(await readFile(file)).equals(original)) throw new Error('Updater adapter source was not restored exactly');
-  };
-}
-
 export function mutationProver(report, assert) {
   const seen = new Set();
   return async (name, measure, change, context = {}) => {

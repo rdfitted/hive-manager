@@ -97,6 +97,12 @@ means every assertion was accepted, including explicitly recorded known findings
 | Cleanup and live app | No owned process/profile remains; live health, PID, executable and start identity are unchanged, or port 18800 remains unused when no live app exists. |
 | Desktop | Input desktop remains unchanged; foreground identity is compared only when observable. |
 
+The driver hashes every tracked working file after acquiring the gate and checks
+those bytes again after cleanup, including the entire tracked `tools/render`
+tree. The updater proofs inject outcomes in memory into the same pure classifier
+used for real IPC results; they never rewrite a tracked adapter. A scratch Git
+fixture test plants in-place writes and proves the byte guard detects them.
+
 G41 is the render/assertion gate, including restored mutation proofs and issued
 known findings. G42 is the before/after live-app check. G43 requires normal and
 forced-failure cleanup evidence, plus confirmation that output stays ignored by
@@ -162,9 +168,11 @@ must intersect the viewport with text, and the Grid must show fixture-specific
 stalled and startup-exit message fragments. Sidebar must show the coordinator and
 the fixture agent count. Moving either target off-screen fails a named proof.
 
-The badge pixel probe looks only for a uniform full-width central horizontal run
-distinct from the adjacent rows, inside the badge clip. It catches the tested
-pointer-transparent one-pixel line. Other paint artifacts can escape it.
+The badge pixel probe looks only for a maximal uniform full-width horizontal
+band 1-4 screenshot pixels thick starting in the central 30-70% of the badge
+clip, distinct from the rows outside the band. It ignores two pixels at each
+side. Runtime pointer-transparent 1px and 2px black overlays are proved at both
+1440 and 800 widths. Thicker, nonuniform or noncentral artifacts can escape it.
 
 Geometry assertions cover the boxes and points they name, not the whole UI.
 Nonuniform PNG pixels do not establish visual correctness. There is no pixel

@@ -45,20 +45,32 @@ export function pngPixels(bytes) {
 }
 
 // A narrow paint probe, not a reference-image comparison. Ignore the rounded
-// border and require a uniform central run distinct from both adjacent rows.
+// border and compare the rows outside each maximal uniform 1-4px band.
 export function badgePaint(bytes) {
   const { width, height, channels, rows } = decodePng(bytes);
   const color = (y, x) => rows[y].subarray(x * channels, (x + 1) * channels).toString();
-  const runs = [];
-  for (let y = Math.max(1, Math.floor(height * 0.3)); y < Math.min(height - 1, Math.ceil(height * 0.7)); y++) {
+  const uniformInk = y => {
     const ink = color(y, 2);
-    let uniform = true, differentAbove = 0, differentBelow = 0;
+    for (let x = 2; x < width - 2; x++) if (color(y, x) !== ink) return null;
+    return ink;
+  };
+  const runs = [];
+  const low = Math.max(1, Math.floor(height * 0.3)), high = Math.min(height - 1, Math.ceil(height * 0.7));
+  for (let y = low; y < high; y++) {
+    const ink = uniformInk(y);
+    if (ink === null || uniformInk(y - 1) === ink) continue;
+    let end = y + 1;
+    while (end < height && uniformInk(end) === ink) end++;
+    if (end - y > 4 || end >= height) continue;
+    let differentAbove = 0, differentBelow = 0;
     for (let x = 2; x < width - 2; x++) {
-      uniform &&= color(y, x) === ink;
       differentAbove += Number(color(y - 1, x) !== ink);
-      differentBelow += Number(color(y + 1, x) !== ink);
+      differentBelow += Number(color(end, x) !== ink);
     }
-    if (uniform && differentAbove > (width - 4) / 4 && differentBelow > (width - 4) / 4) runs.push(y);
+    if (differentAbove > (width - 4) / 4 && differentBelow > (width - 4) / 4) {
+      for (let row = y; row < end; row++) runs.push(row);
+    }
+    y = end - 1;
   }
   return { width, height, centralHorizontalRuns: runs, clear: runs.length === 0 };
 }

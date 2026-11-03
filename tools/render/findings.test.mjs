@@ -46,3 +46,32 @@ test('updater accepts only the omitted-plugin rejection', async () => {
   const result = await updaterState({ evaluate: fn => runInNewContext(`(${fn.toString()})()`, { window: { __TAURI_INTERNALS__: { invoke: async () => null } } }) });
   assert.equal(result.rejected, false);
 });
+
+
+test('badge paint detects maximal 1-4px bands and ignores border, shadow and blank background', async () => {
+  const { deflateSync } = await import('node:zlib');
+  const { badgePaint } = await import('./png.mjs');
+  const png = (thickness = 0, ink = [0, 0, 0]) => {
+    const width = 60, height = 30;
+    const chunk = (type, data) => {
+      const result = Buffer.alloc(data.length + 12);
+      result.writeUInt32BE(data.length); result.write(type, 4); data.copy(result, 8);
+      return result;
+    };
+    const header = Buffer.alloc(13);
+    header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 2;
+    const pixels = Buffer.alloc(height * (width * 3 + 1));
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      const rgb = y >= 14 && y < 14 + thickness ? ink : y < 2 || y >= height - 2 ? [20, 20, 20] : [40, 40, 40];
+      pixels.set(rgb, y * (width * 3 + 1) + 1 + x * 3);
+    }
+    return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk('IHDR', header), chunk('IDAT', deflateSync(pixels)), chunk('IEND', Buffer.alloc(0))]);
+  };
+  assert.equal(badgePaint(png()).clear, true);
+  for (const ink of [[0, 0, 0], [255, 0, 0]]) for (let thickness = 1; thickness <= 4; thickness++) {
+    const result = badgePaint(png(thickness, ink));
+    assert.equal(result.clear, false, `${thickness}px ${ink}`);
+    assert.equal(result.centralHorizontalRuns.length, thickness);
+  }
+  assert.equal(badgePaint(png(5)).clear, true, 'explicit 4px bound; do not slice thicker bands');
+});

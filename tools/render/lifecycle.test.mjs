@@ -23,3 +23,30 @@ test('live comparison rejects restarts and health changes without depending on J
   assert.equal(liveUnchanged(before, { ...before, health: 'changed' }), false);
   assert.equal(liveUnchanged(before, { ...before, processes: [{ ...before.processes[0], started: '2' }] }), false);
 });
+
+
+test('tracked-byte guard covers the render tree and catches a planted in-place adapter write', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+  const { execFileSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { trackedSnapshot, trackedChanges } = await import('./integrity.mjs');
+  const root = await mkdtemp(path.join(tmpdir(), 'render-integrity-'));
+  const git = args => execFileSync('git', args, { cwd: root, windowsHide: true });
+  try {
+    await mkdir(path.join(root, 'tools/render/fixtures'), { recursive: true });
+    const files = ['tools/render/updater.mjs', 'tools/render/fixtures/input.json', 'outside.txt'];
+    for (const name of files) await writeFile(path.join(root, name), 'original\r\n');
+    git(['init', '--quiet']);
+    git(['add', '--', ...files]);
+    const before = await trackedSnapshot(root);
+    assert.deepEqual([...before.keys()].sort(), files.sort());
+    assert.deepEqual(await trackedChanges(root, before), []);
+    for (const name of files) {
+      await writeFile(path.join(root, name), 'planted write\n');
+      assert.deepEqual(await trackedChanges(root, before), [name]);
+      await writeFile(path.join(root, name), 'original\r\n');
+      assert.deepEqual(await trackedChanges(root, before), []);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
