@@ -23,6 +23,7 @@ import type { Component } from 'svelte';
 
 /** Detail payload for the Approval widget's approve/reject callbacks. */
 export interface ApprovalActionDetail {
+  approvalId?: string;
   actionId?: string;
 }
 

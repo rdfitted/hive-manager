@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::tauri_shim::{AppHandle, Emitter};
 use tokio::sync::RwLock;
 
-use crate::actions::render::envelope_for_content;
 use crate::actions::ActionRegistry;
 use crate::coordination::{InjectionManager, QueueManager};
 use crate::domain::event::{Event, EventType, Severity};
@@ -15,6 +14,7 @@ use crate::storage::{AppConfig, ApplicationStateDb, SessionStorage};
 
 #[allow(dead_code)]
 pub struct AppState {
+    pub(crate) pending_approvals: parking_lot::Mutex<std::collections::HashMap<String, crate::actions::approval::PendingApproval>>,
     pub config: Arc<RwLock<AppConfig>>,
     pub pty_manager: Arc<PLRwLock<PtyManager>>,
     pub session_controller: Arc<PLRwLock<SessionController>>,
@@ -48,6 +48,7 @@ impl AppState {
     ) -> Self {
         session_controller.write().set_queue_repo(Arc::clone(queue_manager.repo()));
         let state = Self {
+            pending_approvals: parking_lot::Mutex::new(std::collections::HashMap::new()),
             config,
             pty_manager,
             session_controller,
@@ -98,19 +99,10 @@ impl AppState {
         agent_id: &str,
         message: &ConversationMessage,
     ) -> Result<(), String> {
-        let data = serde_json::json!({
-            "session_id": session_id,
-            "agent_id": agent_id,
-            "timestamp": message.timestamp,
-            "from": message.from,
-            "content": message.content,
-        });
-        let envelope = envelope_for_content(data.clone(), &message.content);
-        let mut payload = data;
-        if let (Some(payload), Some(envelope)) = (payload.as_object_mut(), envelope.as_object()) {
-            for (key, value) in envelope {
-                payload.insert(key.clone(), value.clone());
-            }
+        let mut payload = serde_json::to_value(message).map_err(|error| error.to_string())?;
+        if let Some(fields) = payload.as_object_mut() {
+            fields.insert("session_id".into(), serde_json::json!(session_id));
+            fields.insert("agent_id".into(), serde_json::json!(agent_id));
         }
 
         if let Some(app_handle) = self.app_handle.as_ref() {

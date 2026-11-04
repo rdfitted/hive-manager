@@ -2,6 +2,7 @@
 identifier = "main-window-commands"
 description = "Allows the trusted main window to invoke every application command registered by Hive Manager."
 commands.allow = [
+    "resolve_approval",
     "create_pty",
     "write_to_pty",
     "paste_to_pty",

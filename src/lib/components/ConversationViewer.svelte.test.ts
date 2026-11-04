@@ -1,186 +1,142 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
+import { writable } from 'svelte/store';
 import { tick } from 'svelte';
+import type { Session } from '$lib/stores/sessions';
+import type { ConversationMessage } from '$lib/stores/conversations';
 
-interface TestConversationState {
-  messages: Array<{ timestamp: string; from: string; content: string }>;
-  loading: boolean;
-  error: string | null;
-  selectedAgent: string | null;
-  sessionId: string | null;
-}
-
-const storeMocks = vi.hoisted(() => ({
-  setConversationState: undefined as
-    | ((state: TestConversationState) => void)
-    | undefined,
-  selectAgent: vi.fn(),
-  setSessionId: vi.fn(),
-  loadConversation: vi.fn().mockResolvedValue(undefined),
-  sendMessage: vi.fn().mockResolvedValue(undefined),
-  clearError: vi.fn(),
-  loadHeartbeats: vi.fn().mockResolvedValue(undefined),
+const { handlers, invokeMock } = vi.hoisted(() => ({
+  handlers: new Map<string, (event: { payload: unknown }) => void>(),
+  invokeMock: vi.fn(),
 }));
-
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
-
-vi.mock('$lib/stores/sessions', async () => {
-  const { derived, writable } = await import('svelte/store');
-  const activeSession = writable({
-    id: 'session-a',
-    agents: [
-      {
-        id: 'worker-1',
-        role: { Worker: { index: 1 } },
-        status: 'Running',
-        config: { label: 'Worker One' },
-      },
-    ],
-  });
-  return {
-    activeSession,
-    activeAgents: derived(activeSession, (session) => session?.agents ?? []),
-    sessions: { subscribe: writable([]).subscribe },
-  };
-});
-
-vi.mock('$lib/stores/conversations', async () => {
-  const { writable } = await import('svelte/store');
-  const initialState: TestConversationState = {
-    messages: [],
-    loading: false,
-    error: null,
-    selectedAgent: null,
-    sessionId: 'session-a',
-  };
-  const conversationState = writable(initialState);
-  let currentState = initialState;
-  conversationState.subscribe((state) => {
-    currentState = state;
-  });
-  storeMocks.setConversationState = conversationState.set;
-  storeMocks.setSessionId.mockImplementation((sessionId: string | null) => {
-    if (currentState.sessionId === sessionId) return;
-    conversationState.set({ ...initialState, sessionId });
-  });
-  storeMocks.selectAgent.mockImplementation((agentId: string | null) => {
-    conversationState.update((state) => ({
-      ...state,
-      selectedAgent: agentId,
-      messages: [],
-      loading: false,
-      error: null,
-    }));
-  });
-  storeMocks.loadConversation.mockImplementation(async (sessionId: string, agentId: string) => {
-    if (currentState.sessionId !== sessionId || currentState.selectedAgent !== agentId) return;
-    conversationState.update((state) => ({
-      ...state,
-      messages: [{
-        timestamp: '2026-08-01T20:00:00Z',
-        from: 'worker-1',
-        content: 'Loaded conversation',
-      }],
-      loading: false,
-    }));
-  });
-  const heartbeatState = writable({
-    agents: {},
-    stalledAgents: new Set<string>(),
-    staleAgents: new Set<string>(),
-  });
-
-  return {
-    conversationStore: {
-      subscribe: conversationState.subscribe,
-      selectAgent: storeMocks.selectAgent,
-      setSessionId: storeMocks.setSessionId,
-      loadConversation: storeMocks.loadConversation,
-      sendMessage: storeMocks.sendMessage,
-      clearError: storeMocks.clearError,
-    },
-    heartbeatStore: {
-      subscribe: heartbeatState.subscribe,
-      loadHeartbeats: storeMocks.loadHeartbeats,
-    },
-  };
-});
-
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn((name, handler) => {
+  handlers.set(name, handler);
+  return Promise.resolve(() => {});
+}) }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
+vi.mock('$lib/stores/sessions', async (original) => ({
+  ...await original<typeof import('$lib/stores/sessions')>(),
+  activeSession: (await import('svelte/store')).writable(null),
+}));
+import { activeSession } from '$lib/stores/sessions';
+import { conversationStore } from '$lib/stores/conversations';
 import ConversationViewer from './ConversationViewer.svelte';
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  storeMocks.setConversationState?.({
-    messages: [],
-    loading: false,
-    error: null,
-    selectedAgent: null,
-    sessionId: 'session-a',
-  });
-});
+const fetchMock = vi.fn();
+let saved: ConversationMessage[] = [];
+const diff: ConversationMessage = {
+  timestamp: '2026-01-02T03:04:05Z', from: 'worker-1', content: 'diff --git a/demo b/demo\n@@ -1 +1 @@\n-old\n+new',
+  renderer: 'diff', data: { unified: 'diff --git a/demo b/demo\n@@ -1 +1 @@\n-old\n+new' },
+  session_id: 'render-session', agent_id: 'shared',
+};
 
+beforeEach(() => {
+  saved = [];
+  invokeMock.mockReset().mockResolvedValue({ delivered: true });
+  fetchMock.mockReset().mockImplementation(async (input) => ({ ok: true, json: async () =>
+    String(input).includes('/conversations/') ? { messages: saved } : { sessions: [] },
+  }));
+  vi.stubGlobal('fetch', fetchMock);
+  conversationStore.setSessionId(null);
+  (activeSession as ReturnType<typeof writable<Session | null>>).set({ id: 'render-session', agents: [] } as unknown as Session);
+});
 afterEach(() => {
   cleanup();
+  conversationStore.setSessionId(null);
+  (activeSession as ReturnType<typeof writable<Session | null>>).set(null);
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   vi.clearAllTimers();
   vi.useRealTimers();
 });
 
+// Preserve the existing tab-selection and polling guards, now against the real store.
 describe('ConversationViewer tab selection', () => {
+  function workerSession() {
+    (activeSession as ReturnType<typeof writable<Session | null>>).set({
+      id: 'render-session', agents: [{ id: 'worker-1', role: { Worker: { index: 1 } }, status: 'Running', config: { label: 'Worker One' } }],
+    } as unknown as Session);
+    saved = [{ timestamp: diff.timestamp, from: 'worker-1', content: 'Loaded conversation' }];
+  }
+
   it('selects the clicked agent in the conversation store', async () => {
-    const { getByRole } = render(ConversationViewer);
-    await tick();
-
-    await fireEvent.click(getByRole('tab', { name: 'Worker One' }));
-
-    expect(storeMocks.selectAgent).toHaveBeenCalledWith('worker-1');
-    expect(getByRole('textbox', { name: /Send message as operator/ })).toBeTruthy();
-    expect(getByRole('tab', { name: 'Worker One' }).getAttribute('aria-selected')).toBe('true');
+    workerSession();
+    const select = vi.spyOn(conversationStore, 'selectAgent');
+    const view = render(ConversationViewer);
+    await fireEvent.click(view.getByRole('tab', { name: 'Worker One' }));
+    expect(select).toHaveBeenCalledWith('worker-1');
+    expect(view.getByRole('textbox', { name: /Send message as operator/ })).toBeTruthy();
+    expect(view.getByRole('tab', { name: 'Worker One' }).getAttribute('aria-selected')).toBe('true');
   });
 
   it('selects the agent strictly before loading its conversation', async () => {
-    const { getByRole } = render(ConversationViewer);
-    await tick();
-
-    await fireEvent.click(getByRole('tab', { name: 'Worker One' }));
-
-    expect(storeMocks.loadConversation).toHaveBeenCalledWith('session-a', 'worker-1');
-    expect(storeMocks.selectAgent.mock.invocationCallOrder[0]).toBeLessThan(
-      storeMocks.loadConversation.mock.invocationCallOrder[0],
-    );
+    workerSession();
+    const select = vi.spyOn(conversationStore, 'selectAgent');
+    const load = vi.spyOn(conversationStore, 'loadConversation');
+    const view = render(ConversationViewer);
+    await fireEvent.click(view.getByRole('tab', { name: 'Worker One' }));
+    expect(load).toHaveBeenCalledWith('render-session', 'worker-1');
+    expect(select.mock.invocationCallOrder[0]).toBeLessThan(load.mock.invocationCallOrder[0]);
   });
 
   it('renders the selected conversation only after the store selection gate is established', async () => {
-    const { getByRole, getByText, queryByText } = render(ConversationViewer);
-    await tick();
-
-    await fireEvent.click(getByRole('tab', { name: 'Worker One' }));
-    await tick();
-
-    expect(getByText('Loaded conversation')).toBeTruthy();
-    expect(queryByText('Select an agent tab to view conversation.')).toBeNull();
+    workerSession();
+    const view = render(ConversationViewer);
+    await fireEvent.click(view.getByRole('tab', { name: 'Worker One' }));
+    await waitFor(() => expect(view.getByText('Loaded conversation')).toBeTruthy());
+    expect(view.queryByText('Select an agent tab to view conversation.')).toBeNull();
   });
 
   it('polls an already-selected conversation without raising the loading skeleton', async () => {
     vi.useFakeTimers();
-    storeMocks.setConversationState?.({
-      messages: [],
-      loading: false,
-      error: null,
-      selectedAgent: 'worker-1',
-      sessionId: 'session-a',
-    });
+    conversationStore.setSessionId('render-session');
+    conversationStore.selectAgent('shared');
+    const load = vi.spyOn(conversationStore, 'loadConversation');
     render(ConversationViewer);
     await tick();
-    storeMocks.loadConversation.mockClear();
-
+    load.mockClear();
     vi.advanceTimersByTime(5000);
     await tick();
+    expect(load).toHaveBeenCalledWith('render-session', 'shared', undefined, { silent: true });
+  });
+});
 
-    expect(storeMocks.loadConversation).toHaveBeenCalledWith(
-      'session-a',
-      'worker-1',
-      undefined,
-      { silent: true },
-    );
+describe('G57 conversation widgets', () => {
+  it('renders a real diff envelope live and after GET reload', async () => {
+    const view = render(ConversationViewer);
+    await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));
+    await waitFor(() => expect(view.getByText('No messages yet.')).toBeTruthy());
+    handlers.get('conversation-message')?.({ payload: diff });
+    await waitFor(() => expect(view.container.querySelector('.diff-line.add')?.textContent).toContain('new'));
+    saved = [diff];
+    conversationStore.selectAgent('shared');
+    await conversationStore.loadConversation('render-session', 'shared');
+    await waitFor(() => expect(view.container.querySelector('.diff-line.del')?.textContent).toContain('old'));
+    expect(view.container.querySelectorAll('.diff-widget')).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/conversations/shared'))).toBe(true);
+  });
+
+  it.each(['approved', 'rejected'] as const)('sends a structured %s decision bound only to the server ID', async (decision) => {
+    saved = [{ ...diff, renderer: 'approval', content: 'Review patch', data: { title: 'Review patch', approvalId: 'pending-demo' } }];
+    const view = render(ConversationViewer);
+    await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));
+    await waitFor(() => expect(view.getByTestId('approve')).toBeTruthy());
+    await fireEvent.click(view.getByTestId(decision === 'approved' ? 'approve' : 'reject'));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('resolve_approval', { request: {
+      session_id: 'render-session', approval_id: 'pending-demo', decision,
+    } }));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect((view.getByTestId('approve') as HTMLButtonElement).disabled).toBe(true);
+    expect((view.getByTestId('reject') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('shows a stale decision error returned by the backend', async () => {
+    invokeMock.mockRejectedValue('Approval is stale or already resolved');
+    saved = [{ ...diff, renderer: 'approval', data: { title: 'Review patch', approvalId: 'expired-demo' } }];
+    const view = render(ConversationViewer);
+    await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));
+    await waitFor(() => expect(view.getByTestId('approve')).toBeTruthy());
+    await fireEvent.click(view.getByTestId('approve'));
+    await waitFor(() => expect(view.getByText('Approval is stale or already resolved')).toBeTruthy());
   });
 });

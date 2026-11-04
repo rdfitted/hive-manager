@@ -2,14 +2,8 @@
   /**
    * Approval tool-render widget.
    *
-   * data shape: { title: string; description?: string; actionId?: string; destructive?: boolean }
-   *
-   * Invokes the optional `onapprove` / `onreject` callback props with
-   * { actionId } (Svelte 5 runes idiom). Wiring these to the queen/worker is OUT
-   * OF SCOPE for #127 (no general "approve tool result" endpoint exists; that
-   * belongs to #123's Action contract). For now ToolRenderHost re-emits them as
-   * Svelte events and ConversationViewer console-logs them, so the widget and
-   * the future contract are independently testable.
+   * data holds a server-issued approvalId. Legacy actionId-only cards are inert.
+   * The backend binds the ID to a pending request and makes the decision single-use.
    */
   import type { ToolRendererProps } from './registry';
 
@@ -19,6 +13,7 @@
     title?: string;
     description?: string;
     actionId?: string;
+    approvalId?: string;
     destructive?: boolean;
   }
 
@@ -28,13 +23,18 @@
   }
 
   const approval = $derived(asApproval(data));
+  let decided = $state(false);
 
   function approve() {
-    onapprove?.({ actionId: approval.actionId });
+    if (decided || !approval.approvalId || !onapprove) return;
+    decided = true;
+    onapprove({ approvalId: approval.approvalId });
   }
 
   function reject() {
-    onreject?.({ actionId: approval.actionId });
+    if (decided || !approval.approvalId || !onreject) return;
+    decided = true;
+    onreject({ approvalId: approval.approvalId });
   }
 </script>
 
@@ -50,11 +50,12 @@
       type="button"
       class="lattice-btn lattice-btn--compact lattice-btn--filled {approval.destructive ? 'lattice-btn--danger' : 'lattice-btn--success'}"
       data-testid="approve"
+      disabled={decided || !approval.approvalId || !onapprove}
       onclick={approve}
     >
       Approve
     </button>
-    <button type="button" class="lattice-btn lattice-btn--compact lattice-btn--danger" data-testid="reject" onclick={reject}>
+    <button type="button" class="lattice-btn lattice-btn--compact lattice-btn--danger" data-testid="reject" disabled={decided || !approval.approvalId || !onreject} onclick={reject}>
       Reject
     </button>
   </div>

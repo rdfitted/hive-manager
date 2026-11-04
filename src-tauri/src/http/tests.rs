@@ -6409,7 +6409,8 @@ async fn test_short_and_full_conversation_keys_share_canonical_history_and_live_
         .await
         .expect("timed out waiting for the short-key conversation event");
     assert_eq!(event.agent_id.as_deref(), Some(full_agent_id.as_str()));
-    assert_eq!(event.payload["data"]["agent_id"], full_agent_id);
+    assert_eq!(event.payload["agent_id"], full_agent_id);
+    assert!(event.payload.get("data").is_none(), "untagged prose must not wrap the whole message as widget data");
 
     let response = app
         .clone()
@@ -6455,7 +6456,8 @@ async fn test_short_and_full_conversation_keys_share_canonical_history_and_live_
     let event = tokio::time::timeout(std::time::Duration::from_secs(5), next_conversation_event!())
         .await
         .expect("timed out waiting for the full-key conversation event");
-    assert_eq!(event.payload["data"]["agent_id"], full_agent_id);
+    assert_eq!(event.payload["agent_id"], full_agent_id);
+    assert!(event.payload.get("data").is_none(), "routing stays outside widget data");
 
     let response = app
         .clone()
@@ -6511,7 +6513,8 @@ async fn test_short_and_full_conversation_keys_share_canonical_history_and_live_
         .await
         .expect("timed out waiting for the shared conversation event");
     assert_eq!(event.agent_id.as_deref(), Some("shared"));
-    assert_eq!(event.payload["data"]["agent_id"], "shared");
+    assert_eq!(event.payload["agent_id"], "shared");
+    assert!(event.payload.get("data").is_none(), "untagged shared messages keep routing outside widget data");
     assert!(storage
         .session_dir(&session_id)
         .join("conversations")
@@ -9738,6 +9741,8 @@ async fn test_conversation_emit_includes_render_envelope() {
         timestamp: chrono::Utc::now(),
         from: "worker-3".to_string(),
         content: "| file | status |\n| --- | --- |\n| src/lib.rs | changed |".to_string(),
+        renderer: Some("table".into()),
+        data: Some(serde_json::json!({"columns":["file","status"],"rows":[{"file":"src/lib.rs","status":"changed"}]})),
     };
     state
         .emit_conversation_message("session-render", "worker-3", &table_message)
@@ -9747,15 +9752,18 @@ async fn test_conversation_emit_includes_render_envelope() {
     let table_event = events.recv().await.unwrap();
     assert_eq!(table_event.payload["renderer"], "table");
     assert_eq!(
-        table_event.payload["data"]["content"],
-        table_message.content
+        table_event.payload["data"]["rows"][0]["file"],
+        "src/lib.rs"
     );
-    assert_eq!(table_event.payload["data"]["agent_id"], "worker-3");
+    assert_eq!(table_event.payload["agent_id"], "worker-3");
+    assert!(table_event.payload["data"].get("agent_id").is_none());
 
     let diff_message = ConversationMessage {
         timestamp: chrono::Utc::now(),
         from: "worker-3".to_string(),
         content: "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new".to_string(),
+        renderer: Some("diff".into()),
+        data: Some(serde_json::json!({"unified":"diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new"})),
     };
     state
         .emit_conversation_message("session-render", "worker-3", &diff_message)
@@ -9764,7 +9772,62 @@ async fn test_conversation_emit_includes_render_envelope() {
 
     let diff_event = events.recv().await.unwrap();
     assert_eq!(diff_event.payload["renderer"], "diff");
-    assert_eq!(diff_event.payload["data"]["content"], diff_message.content);
+    assert_eq!(diff_event.payload["data"]["unified"], diff_message.content);
+}
+
+#[tokio::test]
+async fn g57_real_worker_diff_survives_live_event_and_conversation_get() {
+    use serde_json::json;
+    let state = setup_test_state().await;
+    state.storage.create_session_dir("render-session").unwrap();
+    state
+        .session_controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "render-session",
+            ".",
+            &["render-session-worker-1"],
+        ));
+    let mut events = state.event_bus.subscribe_session("render-session".into());
+    let app = create_router(state);
+    let diff = "diff --git a/demo b/demo\n@@ -1 +1 @@\n-old\n+new";
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/render-session/conversations/worker-1/append")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"from":"worker-1", "content":diff}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let event = loop {
+        let event = events.recv().await.unwrap();
+        if event.event_type == crate::domain::event::EventType::ConversationMessage {
+            break event;
+        }
+    };
+    assert_eq!(event.payload["renderer"], "diff");
+    assert_eq!(event.payload["data"], json!({"unified":diff}));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/render-session/conversations/worker-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json_body(response).await;
+    assert_eq!(body["messages"][0]["renderer"], event.payload["renderer"]);
+    assert_eq!(body["messages"][0]["data"], event.payload["data"]);
+    assert_eq!(body["messages"][0]["content"], diff);
 }
 
 // ---- #125 run-journal endpoint ----
@@ -11051,4 +11114,236 @@ async fn review_diff_route_reaches_its_handler() {
         .await
         .unwrap();
     assert_eq!(missing_session.status(), StatusCode::NOT_FOUND);
+}
+
+// G57 uses an admitted stub runtime and a recording transport; no external CLI.
+struct G57RecordingTransport {
+    messages: parking_lot::Mutex<Vec<String>>,
+    events: tokio::sync::broadcast::Sender<crate::transport::AgentEvent>,
+    fail: std::sync::atomic::AtomicBool,
+}
+#[async_trait::async_trait]
+impl crate::transport::AgentTransport for G57RecordingTransport {
+    async fn start(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn send(&self, text: &str) -> Result<crate::delivery::Delivery, String> {
+        self.send_input(text, true)
+    }
+    async fn interrupt(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn stop(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn stop_sync(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn send_input(&self, text: &str, submit: bool) -> Result<crate::delivery::Delivery, String> {
+        assert!(submit, "approval decisions must submit a turn");
+        self.messages.lock().push(text.into());
+        if self.fail.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("ambiguous send failure".into());
+        }
+        Ok(crate::delivery::Delivery::protocol_turn_started(
+            "approval-turn".into(),
+        ))
+    }
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::transport::AgentEvent> {
+        self.events.subscribe()
+    }
+    fn capabilities(&self) -> crate::transport::Capabilities {
+        crate::transport::Capabilities {
+            has_terminal: false,
+            can_interrupt: true,
+            supports_approvals: true,
+            event_source: crate::transport::EventSource::Protocol,
+        }
+    }
+}
+async fn g57_approval_fixture() -> (
+    Arc<AppState>,
+    crate::actions::ActionRegistry,
+    Arc<G57RecordingTransport>,
+) {
+    let state = setup_test_state().await;
+    let agent_id = "approval-session-queen";
+    let mut session = make_test_session_with_agents("approval-session", ".", &[agent_id]);
+    session.agents[0].role = AgentRole::Queen;
+    state.session_controller.read().insert_test_session(session);
+    state
+        .storage
+        .create_session_dir("approval-session")
+        .unwrap();
+    state
+        .pty_manager
+        .read()
+        .create_session(
+            agent_id.into(),
+            AgentRole::Queen,
+            "fixture-shell",
+            &[],
+            None,
+            80,
+            24,
+        )
+        .unwrap();
+    let transport = Arc::new(G57RecordingTransport {
+        messages: parking_lot::Mutex::new(Vec::new()),
+        events: tokio::sync::broadcast::channel(8).0,
+        fail: std::sync::atomic::AtomicBool::new(false),
+    });
+    state
+        .transports()
+        .register("approval-session", agent_id, None, transport.clone())
+        .unwrap();
+    (state, crate::actions::build_registry(), transport)
+}
+async fn g57_request(state: &Arc<AppState>, registry: &crate::actions::ActionRegistry) -> String {
+    let output = registry.dispatch("approval.request", &crate::actions::ActionContext::new(crate::actions::Caller::Http, state.clone()), serde_json::json!({
+        "session_id":"approval-session", "target_agent_id":"approval-session-queen", "title":"Apply the reviewed patch?", "description":"Synthetic demo change"
+    })).await.unwrap();
+    output["data"]["approvalId"].as_str().unwrap().into()
+}
+fn g57_decision(id: &str) -> serde_json::Value {
+    serde_json::json!({"session_id":"approval-session", "approval_id":id, "decision":"approved"})
+}
+#[tokio::test]
+async fn g57_approval_drives_queen_once_and_rejects_replay() {
+    use crate::actions::{ActionContext, Caller};
+    let (state, registry, transport) = g57_approval_fixture().await;
+    let id = g57_request(&state, &registry).await;
+    let context = ActionContext::new(Caller::Frontend, state.clone());
+    let messages = state
+        .storage
+        .read_conversation("approval-session", "approval-session-queen", None)
+        .await
+        .unwrap();
+    assert_eq!(messages[0].renderer.as_deref(), Some("approval"));
+    assert_eq!(messages[0].data.as_ref().unwrap()["approvalId"], id);
+    let output = registry
+        .dispatch("approval.resolve", &context, g57_decision(&id))
+        .await
+        .unwrap();
+    assert_eq!(output["delivered"], true);
+    let delivered: serde_json::Value = serde_json::from_str(&transport.messages.lock()[0]).unwrap();
+    assert_eq!(delivered["approval_id"], id);
+    assert_eq!(delivered["decision"], "approved");
+    assert_eq!(delivered["title"], "Apply the reviewed patch?");
+    assert!(
+        registry
+            .dispatch("approval.resolve", &context, g57_decision(&id))
+            .await
+            .is_err(),
+        "single-use approval must reject replay"
+    );
+    assert_eq!(
+        transport.messages.lock().len(),
+        1,
+        "replay must never drive the target again"
+    );
+}
+#[tokio::test]
+async fn g57_approval_rejects_nonfrontend_forged_cross_session_and_expired() {
+    use crate::actions::{ActionContext, Caller};
+    let (state, registry, transport) = g57_approval_fixture().await;
+    let id = g57_request(&state, &registry).await;
+    for caller in [Caller::Http, Caller::Agent, Caller::Cli] {
+        let error = registry
+            .dispatch(
+                "approval.resolve",
+                &ActionContext::new(caller, state.clone()),
+                g57_decision(&id),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("Tauri commands"));
+    }
+    let context = ActionContext::new(Caller::Frontend, state.clone());
+    let mut wrong_session = g57_decision(&id);
+    wrong_session["session_id"] = serde_json::json!("another-session");
+    assert!(registry
+        .dispatch("approval.resolve", &context, wrong_session)
+        .await
+        .is_err());
+    assert!(registry
+        .dispatch("approval.resolve", &context, g57_decision("forged-id"))
+        .await
+        .is_err());
+    let mut forged_target = g57_decision(&id);
+    forged_target["target_agent_id"] = serde_json::json!("another-agent");
+    assert!(registry
+        .dispatch("approval.resolve", &context, forged_target)
+        .await
+        .is_err());
+    state
+        .pending_approvals
+        .lock()
+        .get_mut(&id)
+        .unwrap()
+        .expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    assert!(registry
+        .dispatch("approval.resolve", &context, g57_decision(&id))
+        .await
+        .is_err());
+    assert!(transport.messages.lock().is_empty());
+}
+#[tokio::test]
+async fn g57_concurrent_and_ambiguous_approval_decisions_are_single_use() {
+    use crate::actions::{ActionContext, Caller};
+    let (state, registry, transport) = g57_approval_fixture().await;
+    let id = g57_request(&state, &registry).await;
+    let context = ActionContext::new(Caller::Frontend, state.clone());
+    let (first, second) = tokio::join!(
+        registry.dispatch("approval.resolve", &context, g57_decision(&id)),
+        registry.dispatch("approval.resolve", &context, g57_decision(&id))
+    );
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    assert_eq!(transport.messages.lock().len(), 1);
+    let id = g57_request(&state, &registry).await;
+    transport
+        .fail
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(registry
+        .dispatch("approval.resolve", &context, g57_decision(&id))
+        .await
+        .is_err());
+    assert!(registry
+        .dispatch("approval.resolve", &context, g57_decision(&id))
+        .await
+        .is_err());
+    assert_eq!(
+        transport.messages.lock().len(),
+        2,
+        "ambiguous failure cannot retry a consumed request"
+    );
+}
+#[tokio::test]
+async fn g57_approval_rejects_a_replaced_runtime() {
+    use crate::actions::{ActionContext, Caller};
+    let (state, registry, transport) = g57_approval_fixture().await;
+    let id = g57_request(&state, &registry).await;
+    let manager = state.pty_manager.read();
+    manager.kill("approval-session-queen").unwrap();
+    manager
+        .create_session(
+            "approval-session-queen".into(),
+            AgentRole::Queen,
+            "fixture-shell",
+            &[],
+            None,
+            80,
+            24,
+        )
+        .unwrap();
+    drop(manager);
+    assert!(registry
+        .dispatch(
+            "approval.resolve",
+            &ActionContext::new(Caller::Frontend, state),
+            g57_decision(&id)
+        )
+        .await
+        .is_err());
+    assert!(transport.messages.lock().is_empty());
 }

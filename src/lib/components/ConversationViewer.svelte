@@ -101,47 +101,28 @@
     await conversationStore.sendMessage(sessionId, selectedAgent, 'operator', text.trim());
   }
 
-  function queenAgentId(): string | null {
-    const queen = agents.find((agent) => agent.role === 'Queen' || agent.id.endsWith('-queen'));
-    return queen?.id ?? null;
-  }
-
-  async function injectApprovalDecision(decision: 'approved' | 'rejected', detail: { actionId?: string }) {
-    if (!sessionId) return;
-    const targetAgentId = queenAgentId() ?? (selectedAgent !== 'shared' ? selectedAgent : null);
-    if (!targetAgentId) {
-      approvalError = 'No agent is available for approval injection.';
-      return;
-    }
-
-    const actionId = detail?.actionId ?? 'unknown';
-    const message = [
-      `Operator ${decision} approval request.`,
-      `action_id: ${actionId}`,
-      `decision: ${decision}`,
-    ].join('\n');
-
+  async function resolveApproval(decision: 'approved' | 'rejected', detail: { approvalId?: string }) {
+    if (!sessionId || !detail.approvalId) return;
     try {
       approvalError = '';
-      await invoke('operator_inject', {
+      await invoke('resolve_approval', {
         request: {
           session_id: sessionId,
-          target_agent_id: targetAgentId,
-          message,
+          approval_id: detail.approvalId,
+          decision,
         },
       });
     } catch (err) {
       approvalError = String(err);
-      console.error('[tool-render] approval injection failed', err);
     }
   }
 
-  function handleApprove(detail: { actionId?: string }) {
-    void injectApprovalDecision('approved', detail);
+  function handleApprove(detail: { approvalId?: string }) {
+    void resolveApproval('approved', detail);
   }
 
-  function handleReject(detail: { actionId?: string }) {
-    void injectApprovalDecision('rejected', detail);
+  function handleReject(detail: { approvalId?: string }) {
+    void resolveApproval('rejected', detail);
   }
 
   function getSenderColor(from: string): string {

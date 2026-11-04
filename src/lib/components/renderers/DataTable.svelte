@@ -19,6 +19,10 @@
   }
 
   function asTableData(value: unknown): TableData {
+    if (Array.isArray(value)) {
+      return { rows: value.filter((row): row is Record<string, unknown> =>
+        row !== null && typeof row === 'object' && !Array.isArray(row)) };
+    }
     if (value && typeof value === 'object' && Array.isArray((value as TableData).rows)) {
       return value as TableData;
     }

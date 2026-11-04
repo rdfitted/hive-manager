@@ -494,3 +494,30 @@ fn app_csp_is_pinned_without_script_escape_hatches() {
     );
 }
 
+#[test]
+fn approval_decisions_are_granted_only_to_the_trusted_main_window() {
+    assert!(handler_commands()
+        .iter()
+        .any(|command| command == "resolve_approval"));
+    assert!(manifest_commands()
+        .iter()
+        .any(|command| command == "resolve_approval"));
+    let main: serde_json::Value = serde_json::from_str(DEFAULT_CAPABILITY).unwrap();
+    let preview: serde_json::Value = serde_json::from_str(PREVIEW_CAPABILITY).unwrap();
+    assert_eq!(main["windows"], serde_json::json!(["main"]));
+    assert!(main["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|permission| permission == "main-window-commands"));
+    assert!(
+        main.get("remote").is_none(),
+        "remote content must never inherit approval decisions"
+    );
+    assert_eq!(preview["windows"], serde_json::json!(["operator-preview"]));
+    assert_eq!(preview["local"], false);
+    assert!(
+        preview["permissions"].as_array().unwrap().is_empty(),
+        "the untrusted preview must not receive the approval command or a broader command grant"
+    );
+}

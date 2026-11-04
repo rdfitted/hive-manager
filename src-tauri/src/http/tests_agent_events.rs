@@ -44,6 +44,7 @@ pub(super) fn setup() -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
     // Supply the scrubbed root before attaching the registry. AppState::new now
     // initializes and attaches its default registry immediately.
     let state = Arc::new(AppState {
+        pending_approvals: parking_lot::Mutex::new(std::collections::HashMap::new()),
         config: Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap())),
         pty_manager: pty,
         session_controller: controller,

@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 
-vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn().mockResolvedValue(() => {}),
-}));
+const { eventHandlers } = vi.hoisted(() => ({ eventHandlers: new Map<string, (event: { payload: unknown }) => void>() }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn((name, handler) => {
+  eventHandlers.set(name, handler);
+  return Promise.resolve(() => {});
+}) }));
 
 import { conversationStore, heartbeatStore, type ConversationMessage } from './conversations';
 
@@ -327,5 +329,65 @@ describe('conversationStore loading intent', () => {
       { silent: true },
     );
     loadSpy.mockRestore();
+  });
+});
+
+
+describe('G57 conversation envelope retention', () => {
+  const payload = { unified: 'diff --git a/demo b/demo\n@@ -1 +1 @@\n-old\n+new' };
+  const stored = { timestamp: '2026-01-02T03:04:05Z', from: 'worker-1', content: payload.unified };
+  function live(overrides: Partial<ConversationMessage> = {}) {
+    eventHandlers.get('conversation-message')?.({ payload: { ...stored, session_id: 'session-a', agent_id: 'worker-1', ...overrides } });
+  }
+  function select() {
+    conversationStore.setSessionId('session-a');
+    conversationStore.selectAgent('worker-1');
+  }
+  it('loads persisted renderer/data unchanged from GET', async () => {
+    select();
+    fetchMock.mockResolvedValueOnce(responseWith([{ ...stored, renderer: 'diff', data: payload }]));
+    await conversationStore.loadConversation('session-a', 'worker-1');
+    expect(get(conversationStore).messages).toEqual([{ ...stored, renderer: 'diff', data: payload }]);
+  });
+  it('enriches a live row from a routed/unrouted GET pair without duplicating it', async () => {
+    select();
+    live();
+    fetchMock.mockResolvedValueOnce(responseWith([{ ...stored, renderer: 'diff', data: payload }]));
+    await conversationStore.loadConversation('session-a', 'worker-1', stored.timestamp);
+    live();
+    const messages = get(conversationStore).messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ ...stored, renderer: 'diff', data: payload, agent_id: 'worker-1' });
+  });
+  it('keeps a live diff arriving while a full GET snapshot is in flight', async () => {
+    select();
+    const pending = deferredResponse();
+    fetchMock.mockReturnValueOnce(pending.promise);
+    const load = conversationStore.loadConversation('session-a', 'worker-1');
+    live({ renderer: 'diff', data: payload });
+    pending.resolve(responseWith([]));
+    await load;
+    expect(get(conversationStore).messages).toHaveLength(1);
+    expect(get(conversationStore).messages[0].data).toEqual(payload);
+  });
+  it('dedupes an in-flight GET/live pair when only the event has routing fields', async () => {
+    select();
+    const pending = deferredResponse();
+    fetchMock.mockReturnValueOnce(pending.promise);
+    const load = conversationStore.loadConversation('session-a', 'worker-1');
+    live({ renderer: 'diff', data: payload });
+    pending.resolve(responseWith([{ ...stored, renderer: 'diff', data: payload }]));
+    await load;
+    expect(get(conversationStore).messages).toHaveLength(1);
+    expect(get(conversationStore).messages[0].data).toEqual(payload);
+  });
+  it('keeps legacy identity dedupe and rejects foreign live routing', async () => {
+    select();
+    fetchMock.mockResolvedValueOnce(responseWith([message(), { ...message(), id: 'another-id' }]));
+    await conversationStore.loadConversation('session-a', 'worker-1');
+    expect(get(conversationStore).messages).toEqual([message()]);
+    live({ session_id: 'another-session', renderer: 'diff', data: payload });
+    live({ agent_id: 'another-worker', renderer: 'diff', data: payload });
+    expect(get(conversationStore).messages).toEqual([message()]);
   });
 });

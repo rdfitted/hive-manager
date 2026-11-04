@@ -12,8 +12,8 @@ export interface ConversationMessage {
   /**
    * Native tool-render envelope (issue #127). Optional + backward-compatible:
    * old messages and the Tauri 'conversation-message' payload deserialize
-   * unchanged, and conversationMessageSignature/dedupe IGNORE these fields, so
-   * the signature hash is stable whether or not a renderer is attached.
+   * unchanged. Dedupe keeps the original identity and enriches duplicate rows
+   * with their persisted or live envelope instead of discarding the widget.
    * `renderer` is a plain string hint; `data` is the structured payload.
    */
   renderer?: string;
@@ -68,22 +68,42 @@ function conversationMessageSignature(message: ConversationMessage): string {
 }
 
 function dedupeConversationMessages(messages: ConversationMessage[]): ConversationMessage[] {
-  const seenIds = new Set<string>();
-  const seenSignatures = new Set<string>();
+  const seenIds = new Map<string, number>();
+  const seenSignatures = new Map<string, number>();
+  const bodyMatches = new Map<string, number[]>();
   const deduped: ConversationMessage[] = [];
 
   for (const message of messages) {
     const signature = conversationMessageSignature(message);
+    const bodySignature = conversationMessageSignature({ ...message, agent_id: undefined });
     const id = message.id;
-    if ((id && seenIds.has(id)) || seenSignatures.has(signature)) {
-      continue;
+    let index = (id ? seenIds.get(id) : undefined) ?? seenSignatures.get(signature);
+    // GET omits routing fields; live messages carry them. In the selected
+    // conversation these are the same row. Two explicit agent IDs stay distinct.
+    index ??= bodyMatches.get(bodySignature)?.find((candidate) =>
+      !message.agent_id || !deduped[candidate].agent_id);
+    if (index === undefined) {
+      index = deduped.length;
+      deduped.push(message);
+      bodyMatches.set(bodySignature, [...(bodyMatches.get(bodySignature) ?? []), index]);
+    } else {
+      const previous = deduped[index];
+      if (previous.content === message.content) {
+        deduped[index] = {
+          ...previous,
+          ...(!previous.id && id ? { id } : {}),
+          ...(!previous.agent_id && message.agent_id ? { agent_id: message.agent_id } : {}),
+          ...(!previous.session_id && message.session_id ? { session_id: message.session_id } : {}),
+          ...(message.renderer ? { renderer: message.renderer } : {}),
+          ...(message.data !== undefined && message.data !== null ? { data: message.data } : {}),
+        };
+      }
     }
 
     if (id) {
-      seenIds.add(id);
+      seenIds.set(id, index);
     }
-    seenSignatures.add(signature);
-    deduped.push(message);
+    seenSignatures.set(signature, index);
   }
 
   return deduped;
@@ -98,6 +118,7 @@ function mergeConversationMessages(
 
 function createConversationStore() {
   let activeConversationRequest = 0;
+  let liveDuringRequest: ConversationMessage[] | null = null;
   const { subscribe, update } = writable<ConversationState>({
     messages: [],
     loading: false,
@@ -121,6 +142,7 @@ function createConversationStore() {
         return state;
       }
 
+      liveDuringRequest?.push(event.payload);
       return {
         ...state,
         messages: mergeConversationMessages(state.messages, [event.payload]),
@@ -133,6 +155,7 @@ function createConversationStore() {
 
     selectAgent(agentId: string | null) {
       activeConversationRequest += 1;
+      liveDuringRequest = null;
       update((state) => ({
         ...state,
         selectedAgent: agentId,
@@ -145,6 +168,7 @@ function createConversationStore() {
     setSessionId(sessionId: string | null) {
       if (getState().sessionId === sessionId) return;
       activeConversationRequest += 1;
+      liveDuringRequest = null;
       update((state) => ({
         ...state,
         sessionId,
@@ -162,6 +186,8 @@ function createConversationStore() {
       options?: { silent?: boolean },
     ) {
       const requestToken = ++activeConversationRequest;
+      const liveMessages: ConversationMessage[] = [];
+      liveDuringRequest = liveMessages;
       update((state) => ({
         ...state,
         loading: options?.silent ? state.loading : true,
@@ -186,7 +212,7 @@ function createConversationStore() {
 
           const newMessages = since
             ? mergeConversationMessages(state.messages, messages)
-            : dedupeConversationMessages(messages);
+            : mergeConversationMessages(messages, liveMessages);
 
           return {
             ...state,
@@ -205,6 +231,8 @@ function createConversationStore() {
 
           return { ...state, loading: false, error: String(err) };
         });
+      } finally {
+        if (requestToken === activeConversationRequest) liveDuringRequest = null;
       }
     },
 
