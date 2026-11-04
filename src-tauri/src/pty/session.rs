@@ -462,6 +462,46 @@ unsafe impl Send for PtySession {}
 unsafe impl Sync for PtySession {}
 
 impl PtySession {
+    // Only the isolated G49 test child sets this variable. Validate the final
+    // executable before openpty (which itself can start a console host), and
+    // again immediately before handing the builder to the OS launch boundary.
+    #[cfg(all(test, windows))]
+    fn guard_g49_fixture_command(cmd: &portable_pty::CommandBuilder) -> Result<(), PtyError> {
+        let Some(root) = std::env::var_os("HM_RESUME_PTY_CHILD") else { return Ok(()); };
+        let expected = std::path::PathBuf::from(root).join("synthetic-resume-fixture.exe")
+            .canonicalize().map_err(|error| PtyError::SpawnError(format!(
+                "G49 launch guard refused missing synthetic executable before OS launch: {error}")))?;
+        let selected = std::path::Path::new(&cmd.get_argv()[0]);
+        if !selected.is_absolute() || selected != expected || selected.canonicalize().ok().as_ref() != Some(&expected) {
+            return Err(PtyError::SpawnError(format!(
+                "G49 launch guard refused non-fixture executable before OS launch: {selected:?}")));
+        }
+        Ok(())
+    }
+
+    #[cfg(all(test, windows))]
+    fn verify_g49_fixture_image(child: &mut Box<dyn portable_pty::Child + Send + Sync>) -> Result<(), PtyError> {
+        let Some(root) = std::env::var_os("HM_RESUME_PTY_CHILD") else { return Ok(()); };
+        extern "system" {
+            fn QueryFullProcessImageNameW(process: *mut std::ffi::c_void, flags: u32, name: *mut u16, size: *mut u32) -> i32;
+        }
+        let expected = std::path::PathBuf::from(root).join("synthetic-resume-fixture.exe").canonicalize();
+        let mut name = vec![0u16; 32768];
+        let mut size = name.len() as u32;
+        let actual = child.as_raw_handle().and_then(|handle| {
+            (unsafe { QueryFullProcessImageNameW(handle, 0, name.as_mut_ptr(), &mut size) } != 0)
+                .then(|| std::path::PathBuf::from(String::from_utf16_lossy(&name[..size as usize])))
+        }).and_then(|path| path.canonicalize().ok());
+        if expected.ok().as_ref().is_none_or(|expected| actual.as_ref() != Some(expected)) {
+            // Identity is checked before publishing or otherwise inspecting the
+            // process. A mismatch must never leave an unowned child running.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PtyError::SpawnError("G49 launched image is not the synthetic executable".into()));
+        }
+        Ok(())
+    }
+
     fn write_locked(writer: &mut SendWriter, data: &[u8]) -> Result<(), PtyError> {
         // Write in chunks to respect Windows pipe buffer limits.
         for chunk in data.chunks(CHUNK_SIZE) {
@@ -512,6 +552,22 @@ impl PtySession {
     ) -> Result<Self, PtyError> {
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
+        #[cfg(all(test, windows))]
+        let fixture_command = if let Some(root) = std::env::var_os("HM_RESUME_PTY_CHILD") {
+            let root = std::path::PathBuf::from(root);
+            // Preserve the semantic provider for argv construction, but bypass
+            // PATH and the batch wrapper for this isolated synthetic fixture.
+            let selected = std::env::var_os("HM_RESUME_PTY_SELECTED")
+                .unwrap_or_else(|| root.join("synthetic-resume-fixture.exe")
+                    .canonicalize().unwrap_or_else(|_| root.join("synthetic-resume-fixture.exe")).into_os_string());
+            let mut cmd = CommandBuilder::new(selected);
+            cmd.arg(command);
+            cmd.arg(root.join(format!("{command}-result.json")));
+            cmd.args(args);
+            Self::guard_g49_fixture_command(&cmd)?;
+            Some(cmd)
+        } else { None };
+
         tracing::info!("Creating PTY session: command={} args={:?} cwd={:?}", command, args, cwd);
 
         let pty_system = NativePtySystem::default();
@@ -547,7 +603,13 @@ impl PtySession {
 
         // On Windows, create a batch file to avoid shell quoting issues
         // This is the same pattern used by /hive command
-        let mut cmd = if cfg!(windows) {
+        #[cfg(all(test, windows))]
+        let fixture_launch = fixture_command.is_some();
+        #[cfg(all(test, windows))]
+        let prepared_fixture = fixture_command;
+        #[cfg(not(all(test, windows)))]
+        let prepared_fixture: Option<CommandBuilder> = None;
+        let mut cmd = if let Some(cmd) = prepared_fixture { cmd } else if cfg!(windows) {
             // Create temp batch file with the full command
             let batch_content = Self::create_batch_content(command, command_args);
             let batch_path = Self::write_temp_batch(&batch_content)?;
@@ -575,11 +637,15 @@ impl PtySession {
             cmd.cwd(dir);
         }
 
+        #[cfg(all(test, windows))]
+        if fixture_launch { Self::guard_g49_fixture_command(&cmd)?; }
         let child = pending.pair.as_ref().unwrap()
             .slave
             .spawn_command(cmd)
             .map_err(|e| PtyError::SpawnError(e.to_string()))?;
         pending.child = Some(child);
+        #[cfg(all(test, windows))]
+        if fixture_launch { Self::verify_g49_fixture_image(pending.child.as_mut().unwrap())?; }
         #[cfg(windows)]
         {
             // portable-pty returns a running root. Preserve the launcher and
