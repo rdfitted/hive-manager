@@ -167,6 +167,8 @@ mod windows {
         fn Process32NextW(snapshot: *mut c_void, entry: *mut ProcessEntry) -> i32;
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
         fn GetCurrentProcess() -> *mut c_void;
+        #[cfg(test)]
+        fn IsProcessInJob(process: *mut c_void, job: *mut c_void, result: *mut i32) -> i32;
         fn DuplicateHandle(
             source_process: *mut c_void,
             source: *mut c_void,
@@ -233,11 +235,14 @@ mod windows {
     pub struct CapturedTree {
         identities: Vec<Identity>,
         // An opener failure supplies no creation-time proof. Keep the whole
-        // possible subtree until fresh global absence proves it gone.
-        unresolved: parking_lot::Mutex<std::collections::HashSet<u32>>,
+        // possible subtree until fresh global absence proves it gone. Each
+        // unknown branch inherits the birth-time lower bound of its last exact
+        // ancestor, so historical PPID links can still be disproved safely.
+        unresolved: parking_lot::Mutex<Unresolved>,
     }
 
     type ProcessLinks = Vec<(u32, u32)>;
+    type Unresolved = std::collections::HashMap<u32, u64>;
 
     fn process_links() -> Result<ProcessLinks, String> {
         let raw = unsafe { CreateToolhelp32Snapshot(2, 0) };
@@ -272,15 +277,58 @@ mod windows {
         }
     }
 
-    fn include_descendants(pids: &mut std::collections::HashSet<u32>, links: &ProcessLinks) {
-        loop {
-            let before = pids.len();
-            for &(pid, parent) in links {
-                if pids.contains(&parent) {
-                    pids.insert(pid);
-                }
+    fn remember_unresolved(unresolved: &mut Unresolved, pid: u32, earliest: u64) -> bool {
+        match unresolved.get_mut(&pid) {
+            Some(bound) if earliest < *bound => {
+                // Alternative possible ancestry must keep the looser bound.
+                *bound = earliest;
+                true
             }
-            if pids.len() == before {
+            Some(_) => false,
+            None => {
+                unresolved.insert(pid, earliest);
+                true
+            }
+        }
+    }
+
+    fn process_created_with(
+        pid: u32,
+        opener: &mut impl FnMut(u32) -> Result<Handle, std::io::Error>,
+    ) -> Option<u64> {
+        opener(pid).ok()?.times().ok().map(|(created, _)| created)
+    }
+
+    fn include_descendants(
+        unresolved: &mut Unresolved,
+        links: &ProcessLinks,
+        opener: &mut impl FnMut(u32) -> Result<Handle, std::io::Error>,
+    ) {
+        let mut created = std::collections::HashMap::new();
+        loop {
+            let mut changed = false;
+            for &(pid, parent) in links {
+                let Some(earliest) = unresolved.get(&parent).copied() else {
+                    continue;
+                };
+                if unresolved.contains_key(&pid) {
+                    changed |= remember_unresolved(unresolved, pid, earliest);
+                    continue;
+                }
+                let child_created = created
+                    .entry(pid)
+                    .or_insert_with(|| process_created_with(pid, opener));
+                if child_created.is_some_and(|time| time < earliest) {
+                    // The queried process predates an exact ancestor. This is
+                    // a historical PPID match, not a possible descendant.
+                    continue;
+                }
+                // Failed opens/times remain unknown. Never tighten this bound
+                // from a later-opened unknown PID: it could be a new generation
+                // with an older genuine orphan still alive.
+                changed |= remember_unresolved(unresolved, pid, earliest);
+            }
+            if !changed {
                 break;
             }
         }
@@ -301,7 +349,7 @@ mod windows {
                     created,
                     handle,
                 }],
-                unresolved: parking_lot::Mutex::new(std::collections::HashSet::new()),
+                unresolved: parking_lot::Mutex::new(Unresolved::new()),
             })
         }
 
@@ -349,8 +397,8 @@ mod windows {
                         Ok(handle) => handle,
                         Err(_) => {
                             let mut unresolved = self.unresolved.lock();
-                            unresolved.insert(child_pid);
-                            include_descendants(&mut unresolved, &links);
+                            remember_unresolved(&mut unresolved, child_pid, parent_created);
+                            include_descendants(&mut unresolved, &links, &mut opener);
                             continue;
                         }
                     };
@@ -358,8 +406,8 @@ mod windows {
                         Ok(times) => times,
                         Err(error) => {
                             let mut unresolved = self.unresolved.lock();
-                            unresolved.insert(child_pid);
-                            include_descendants(&mut unresolved, &links);
+                            remember_unresolved(&mut unresolved, child_pid, parent_created);
+                            include_descendants(&mut unresolved, &links, &mut opener);
                             return Err(error);
                         }
                     };
@@ -370,12 +418,56 @@ mod windows {
                             created,
                             handle,
                         });
-                        self.unresolved.lock().remove(&child_pid);
+                        // A later open may be a reused PID generation. Keep
+                        // any earlier unknown ancestry until fresh absence;
+                        // replacing its bound could hide an older live orphan.
                     }
                 }
                 index += 1;
             }
             Ok(())
+        }
+
+        #[cfg(test)]
+        pub(crate) fn cleanup_state(&self, job: &ProcessTree) -> String {
+            let unresolved = self.unresolved.lock().clone();
+            let identities: Vec<_> = self
+                .identities
+                .iter()
+                .map(|identity| {
+                    let mut member = 0;
+                    let queried = unsafe {
+                        IsProcessInJob(identity.handle.raw(), job.0 as *mut c_void, &mut member)
+                    };
+                    (
+                        identity.pid,
+                        identity.created,
+                        identity.handle.times(),
+                        identity.handle.exited(),
+                        queried,
+                        member,
+                    )
+                })
+                .collect();
+            let unknown: Vec<_> = unresolved
+                .iter()
+                .map(|(pid, earliest)| {
+                    (
+                        *pid,
+                        *earliest,
+                        open_process(*pid).map(|handle| (handle.times(), handle.exited())),
+                    )
+                })
+                .collect();
+            let links: Result<Vec<_>, _> = process_links().map(|links| {
+                links
+                    .into_iter()
+                    .filter(|(pid, parent)| {
+                        unresolved.contains_key(pid) || unresolved.contains_key(parent)
+                    })
+                    .collect()
+            });
+            format!("identities={identities:?}; unresolved={unknown:?}; links={links:?}; job_empty={:?}", job.is_empty())
         }
 
         pub fn is_empty(&self) -> Result<bool, String> {
@@ -386,13 +478,25 @@ mod windows {
             &self,
             snapshot: impl FnOnce() -> Result<ProcessLinks, String>,
         ) -> Result<bool, String> {
+            self.is_empty_with_sources(snapshot, open_process)
+        }
+
+        fn is_empty_with_sources(
+            &self,
+            snapshot: impl FnOnce() -> Result<ProcessLinks, String>,
+            mut opener: impl FnMut(u32) -> Result<Handle, std::io::Error>,
+        ) -> Result<bool, String> {
             let mut unresolved = self.unresolved.lock();
             if !unresolved.is_empty() {
                 let links = snapshot()?;
                 // Include new child links before testing absence; an exited
                 // unopenable parent cannot hide a surviving orphan.
-                include_descendants(&mut unresolved, &links);
-                if links.iter().any(|(pid, _)| unresolved.contains(pid)) {
+                unresolved.retain(|pid, earliest| {
+                    process_created_with(*pid, &mut opener)
+                        .map_or(true, |created| created >= *earliest)
+                });
+                include_descendants(&mut unresolved, &links, &mut opener);
+                if links.iter().any(|(pid, _)| unresolved.contains_key(pid)) {
                     return Ok(false);
                 }
                 // Complete snapshot: no PID of any generation, nor surviving
@@ -518,15 +622,45 @@ mod windows {
             job: ProcessTree,
             temp: tempfile::TempDir,
             child: u32,
+            // Keep this generation allocated during synthetic denial and job
+            // cleanup. This handle is deliberately outside CapturedTree.
+            _child_handle: Handle,
         }
 
         impl Fixture {
             fn new() -> Self {
+                Self::with_late_orphan(false)
+            }
+
+            fn with_late_orphan(late_orphan: bool) -> Self {
                 let temp = tempfile::tempdir().unwrap();
                 let ready = temp.path().join("ready");
                 let release = temp.path().join("release");
+                let child_command = if late_orphan {
+                    let child_script = temp.path().join("child.ps1");
+                    std::fs::write(
+                        &child_script,
+                        format!(
+                            "while(!(Test-Path '{}')){{Start-Sleep -Milliseconds 20}}; \
+                             $p=Start-Process ping.exe -ArgumentList '-n 600 127.0.0.1' -PassThru -NoNewWindow; \
+                             [IO.File]::WriteAllText('{}',[string]$p.Id); \
+                             while(!(Test-Path '{}')){{Start-Sleep -Milliseconds 20}}",
+                            temp.path().join("spawn-orphan").display(),
+                            temp.path().join("orphan-ready").display(),
+                            temp.path().join("release-child").display(),
+                        ),
+                    )
+                    .unwrap();
+                    format!(
+                        "Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"' -PassThru -NoNewWindow",
+                        child_script.display(),
+                    )
+                } else {
+                    "Start-Process ping.exe -ArgumentList '-n 600 127.0.0.1' -PassThru -NoNewWindow"
+                        .into()
+                };
                 let script = format!(
-                    "$p=Start-Process ping.exe -ArgumentList '-n 600 127.0.0.1' -PassThru -NoNewWindow; \
+                    "$p={child_command}; \
                      [IO.File]::WriteAllText('{}',[string]$p.Id); while(!(Test-Path '{}')){{Start-Sleep -Milliseconds 20}}",
                     ready.display(), release.display());
                 let root = Command::new("powershell.exe")
@@ -556,6 +690,7 @@ mod windows {
                     job,
                     temp,
                     child,
+                    _child_handle: open_process(child).unwrap(),
                 }
             }
 
@@ -571,16 +706,47 @@ mod windows {
                 }
             }
 
+            fn spawn_orphan(&self) -> u32 {
+                std::fs::write(self.temp.path().join("spawn-orphan"), []).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(120);
+                loop {
+                    if let Ok(text) = std::fs::read_to_string(self.temp.path().join("orphan-ready"))
+                    {
+                        if let Ok(pid) = text.parse::<u32>() {
+                            return pid;
+                        }
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "fixture failsafe expired waiting for orphan"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+
             fn denied_tree(&self) -> CapturedTree {
+                self.denied_tree_with_links(process_links().unwrap())
+            }
+
+            fn denied_tree_with_links(&self, links: ProcessLinks) -> CapturedTree {
                 let mut tree =
                     CapturedTree::root(self.root.id(), self.root.as_raw_handle()).unwrap();
                 let mut denied = false;
-                tree.refresh(process_links().unwrap(), |pid| {
-                    if pid == self.child {
-                        denied = true;
-                    }
-                    // Deny every descendant so an independently opened console
-                    // host cannot mask a missing unresolved-PID check.
+                let branch = (self.child, self.root.id());
+                assert!(
+                    links.contains(&branch),
+                    "the injected denial must target the fixture's real child link"
+                );
+                // Isolate the known fixture branch. Global PPIDs can refer to a
+                // previous generation of the root PID; denying every apparent
+                // child would suppress refresh's creation-time rejection and
+                // retain unrelated processes that the fixture job cannot stop.
+                // Keep only the root handle so no other opened descendant can
+                // mask a missing unresolved-PID check. Exit probes stay global.
+                let fixture_links = links.into_iter().filter(|link| *link == branch).collect();
+                tree.refresh(fixture_links, |pid| {
+                    assert_eq!(pid, self.child);
+                    denied = true;
                     Err(std::io::Error::from_raw_os_error(5))
                 })
                 .unwrap();
@@ -588,7 +754,11 @@ mod windows {
                     denied,
                     "regression must exercise an actual injected access denial"
                 );
-                assert_eq!(tree.identities.len(), 1, "only the root may have an opened handle in this fixture");
+                assert_eq!(
+                    tree.identities.len(),
+                    1,
+                    "only the root may have an opened handle in this fixture"
+                );
                 tree
             }
         }
@@ -609,29 +779,221 @@ mod windows {
                 "access-denied live descendant must survive root-only exit as unresolved"
             );
             fixture.job.terminate().unwrap();
-            wait_for_exit(Ok(()), STOP_BUDGET, || tree.is_empty()).unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || tree.is_empty())
+                .unwrap_or_else(|error| panic!("{error}; {}", tree.cleanup_state(&fixture.job)));
         }
 
         #[test]
         fn g53_denied_opener_snapshot_error_and_new_orphan_fail_closed() {
-            let mut fixture = Fixture::new();
+            let mut fixture = Fixture::with_late_orphan(true);
             let tree = fixture.denied_tree();
+            let denied_parent = open_process(fixture.child).unwrap();
             fixture.exit_root();
             assert!(tree
                 .is_empty_with_snapshot(|| Err("synthetic snapshot failure".into()))
                 .is_err());
+
+            // The denied parent creates a real descendant after capture and
+            // root exit, then exits itself. Its PPID link must still reveal the
+            // surviving orphan even though neither ancestor is in the snapshot.
+            let orphan = fixture.spawn_orphan();
+            let orphan_handle = open_process(orphan).unwrap();
+            std::fs::write(fixture.temp.path().join("release-child"), []).unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || denied_parent.exited()).unwrap();
+            let links = process_links().unwrap();
+            assert!(!links.iter().any(|(pid, _)| *pid == fixture.child));
+            assert!(links.contains(&(orphan, fixture.child)));
+            assert!(!orphan_handle.exited().unwrap());
             assert!(
-                !tree
-                    .is_empty_with_snapshot(|| Ok(vec![(u32::MAX, fixture.child)]))
-                    .unwrap(),
+                !tree.is_empty_with_snapshot(|| Ok(links)).unwrap(),
                 "an absent denied PID cannot hide a fresh surviving child link"
             );
             assert!(
-                tree.unresolved.lock().contains(&u32::MAX),
+                tree.unresolved.lock().contains_key(&orphan),
                 "fresh ancestry must persist across probes"
             );
+            assert!(
+                wait_for_exit(Ok(()), Duration::ZERO, || tree.is_empty()).is_err(),
+                "the real orphan must prevent assumed-empty success"
+            );
             fixture.job.terminate().unwrap();
-            wait_for_exit(Ok(()), STOP_BUDGET, || tree.is_empty()).unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || fixture.job.is_empty()).unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || tree.is_empty())
+                .unwrap_or_else(|error| panic!("{error}; {}", tree.cleanup_state(&fixture.job)));
+            assert!(orphan_handle.exited().unwrap());
+        }
+
+        #[test]
+        fn g53_denied_opener_does_not_deny_historical_parent_links() {
+            let mut fixture = Fixture::new();
+            let unrelated = std::process::id();
+            let mut tree = fixture.denied_tree_with_links(vec![
+                (fixture.child, fixture.root.id()),
+                (unrelated, fixture.root.id()),
+            ]);
+            assert!(
+                !tree.unresolved.lock().contains_key(&unrelated),
+                "synthetic denial must not include historical PPID matches outside the fixture"
+            );
+            let unrelated_handle = open_process(unrelated).unwrap();
+            assert!(unrelated_handle.times().unwrap().0 < tree.identities[0].created);
+            // A historical PPID match is possible after PID reuse. Let the
+            // production opener disprove it; it is not an injected denial.
+            tree.refresh(vec![(unrelated, fixture.root.id())], open_process)
+                .unwrap();
+            assert!(!tree
+                .identities
+                .iter()
+                .any(|identity| identity.pid == unrelated));
+            assert!(!tree.unresolved.lock().contains_key(&unrelated));
+            assert!(tree.unresolved.lock().contains_key(&fixture.child));
+            fixture.exit_root();
+            assert!(wait_for_exit(Ok(()), Duration::ZERO, || tree.is_empty()).is_err());
+            fixture.job.terminate().unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || tree.is_empty())
+                .unwrap_or_else(|error| panic!("{error}; {}", tree.cleanup_state(&fixture.job)));
+            assert!(!unrelated_handle.exited().unwrap());
+        }
+
+        #[test]
+        fn g53_unresolved_capture_rejects_historical_descendant_links() {
+            let mut fixture = Fixture::new();
+            let unrelated = std::process::id();
+            let mut tree =
+                CapturedTree::root(fixture.root.id(), fixture.root.as_raw_handle()).unwrap();
+            assert!(
+                open_process(unrelated).unwrap().times().unwrap().0 < tree.identities[0].created
+            );
+            tree.refresh(
+                vec![
+                    (fixture.child, fixture.root.id()),
+                    (unrelated, fixture.child),
+                ],
+                |pid| {
+                    if pid == fixture.child {
+                        Err(std::io::Error::from_raw_os_error(5))
+                    } else {
+                        open_process(pid)
+                    }
+                },
+            )
+            .unwrap();
+            assert!(tree.unresolved.lock().contains_key(&fixture.child));
+            assert!(
+                !tree.unresolved.lock().contains_key(&unrelated),
+                "unresolved capture must reject a process older than its exact ancestor"
+            );
+            fixture.exit_root();
+            assert!(wait_for_exit(Ok(()), Duration::ZERO, || tree.is_empty()).is_err());
+            fixture.job.terminate().unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || tree.is_empty())
+                .unwrap_or_else(|error| panic!("{error}; {}", tree.cleanup_state(&fixture.job)));
+        }
+
+        #[test]
+        fn g53_unresolved_probe_rejects_historical_links_and_rechecks_old_entries() {
+            let mut fixture = Fixture::new();
+            let tree = fixture.denied_tree();
+            let unrelated = std::process::id();
+            let earliest = tree.identities[0].created;
+            // A prior failed query leaves this entry unknown. A later query can
+            // disprove it, but a newer generation must never tighten the bound.
+            tree.unresolved.lock().insert(unrelated, earliest);
+            fixture.exit_root();
+            fixture.job.terminate().unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || fixture.job.is_empty()).unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || {
+                tree.is_empty_with_snapshot(|| {
+                    let mut links = process_links()?;
+                    links.push((unrelated, fixture.child));
+                    Ok(links)
+                })
+            })
+            .unwrap();
+            assert!(!open_process(unrelated).unwrap().exited().unwrap());
+            assert!(tree.unresolved.lock().is_empty());
+        }
+
+        #[test]
+        fn g53_unresolved_identity_errors_remain_unknown() {
+            let mut fixture = Fixture::new();
+            let tree = fixture.denied_tree();
+            let unrelated = std::process::id();
+            fixture.exit_root();
+            fixture.job.terminate().unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || fixture.job.is_empty()).unwrap();
+            let links = vec![(unrelated, fixture.child)];
+            assert!(!tree
+                .is_empty_with_sources(
+                    || Ok(links.clone()),
+                    |_| { Err(std::io::Error::from_raw_os_error(5)) }
+                )
+                .unwrap());
+            assert!(tree.unresolved.lock().contains_key(&unrelated));
+            assert!(!tree
+                .is_empty_with_sources(|| Ok(links), |_| Ok(Handle(0)))
+                .unwrap());
+            assert!(tree.unresolved.lock().contains_key(&unrelated));
+            wait_for_exit(Ok(()), STOP_BUDGET, || tree.is_empty())
+                .unwrap_or_else(|error| panic!("{error}; {}", tree.cleanup_state(&fixture.job)));
+        }
+
+        #[test]
+        fn g53_unresolved_bounds_inherit_and_merge_without_tightening() {
+            let pid = std::process::id();
+            let created = open_process(pid).unwrap().times().unwrap().0;
+            let mut unresolved = Unresolved::from([(u32::MAX, created)]);
+            include_descendants(&mut unresolved, &vec![(pid, u32::MAX)], &mut open_process);
+            assert_eq!(unresolved.get(&pid), Some(&created));
+            assert!(!remember_unresolved(&mut unresolved, pid, created + 1));
+            assert!(remember_unresolved(&mut unresolved, pid, created - 1));
+            assert_eq!(unresolved.get(&pid), Some(&(created - 1)));
+        }
+
+        #[test]
+        fn g53_later_opened_generation_cannot_hide_an_older_orphan() {
+            let mut fixture = Fixture::with_late_orphan(true);
+            let mut tree = fixture.denied_tree();
+            let orphan = fixture.spawn_orphan();
+            let orphan_handle = open_process(orphan).unwrap();
+            let mut replacement = Fixture::new();
+            assert!(
+                orphan_handle.times().unwrap().0 < replacement._child_handle.times().unwrap().0
+            );
+            let earliest = tree.unresolved.lock()[&fixture.child];
+            // Model a PID recycled between snapshot and open: the returned
+            // handle belongs to a real newer process, while the old generation
+            // has a genuine older orphan. The injected opener controls this race.
+            tree.refresh(
+                vec![(fixture.child, fixture.root.id()), (orphan, fixture.child)],
+                |pid| {
+                    open_process(if pid == fixture.child {
+                        replacement.child
+                    } else {
+                        pid
+                    })
+                },
+            )
+            .unwrap();
+            assert_eq!(tree.unresolved.lock().get(&fixture.child), Some(&earliest));
+            assert!(!tree
+                .identities
+                .iter()
+                .any(|identity| identity.pid == orphan));
+            std::fs::write(fixture.temp.path().join("release-child"), []).unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || fixture._child_handle.exited()).unwrap();
+            fixture.exit_root();
+            stop_child(&mut replacement.root, Some(&replacement.job)).unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || replacement._child_handle.exited()).unwrap();
+            assert!(!orphan_handle.exited().unwrap());
+            assert!(
+                wait_for_exit(Ok(()), Duration::ZERO, || tree.is_empty()).is_err(),
+                "a later opened generation cannot retire unresolved old-generation ancestry"
+            );
+            assert!(tree.unresolved.lock().contains_key(&orphan));
+            fixture.job.terminate().unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || tree.is_empty())
+                .unwrap_or_else(|error| panic!("{error}; {}", tree.cleanup_state(&fixture.job)));
         }
 
         #[test]
@@ -657,7 +1019,8 @@ mod windows {
             fixture.exit_root();
             assert!(!tree.is_empty().unwrap());
             fixture.job.terminate().unwrap();
-            wait_for_exit(Ok(()), STOP_BUDGET, || tree.is_empty()).unwrap();
+            wait_for_exit(Ok(()), STOP_BUDGET, || tree.is_empty())
+                .unwrap_or_else(|error| panic!("{error}; {}", tree.cleanup_state(&fixture.job)));
         }
     }
 }
@@ -803,6 +1166,7 @@ mod tests {
             "exact captured descendant must prevent root-only success"
         );
         stop_child(&mut root, Some(&job)).unwrap();
-        wait_for_exit(Ok(()), STOP_BUDGET, || captured.is_empty()).unwrap();
+        wait_for_exit(Ok(()), STOP_BUDGET, || captured.is_empty())
+            .unwrap_or_else(|error| panic!("{error}; {}", captured.cleanup_state(&job)));
     }
 }
