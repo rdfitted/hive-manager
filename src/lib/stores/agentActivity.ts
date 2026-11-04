@@ -1,5 +1,5 @@
 import { derived, readable, type Readable } from 'svelte/store';
-import { activeAgents, activeSession, type AgentInfo } from './sessions';
+import { activeAgents, activeSession, sessions, serdeEnumVariantName, type AgentInfo } from './sessions';
 import { heartbeatStore, type HeartbeatInfo } from './conversations';
 import { events } from './events';
 
@@ -69,13 +69,14 @@ function timestamp(value: string | undefined): number | null {
 // This shared subscription owns one refresh loop, regardless of the row count.
 const heartbeatRefresh = readable(null, () => {
   let sessionId: string | null = null;
+  let enabled = false;
   let timer: ReturnType<typeof setInterval> | undefined;
   let stopped = false;
   let loading = false;
   let pending = false;
 
   async function refresh() {
-    if (!sessionId || stopped) return;
+    if (!enabled || stopped) return;
     if (loading) { pending = true; return; }
     loading = true;
     try {
@@ -88,12 +89,16 @@ const heartbeatRefresh = readable(null, () => {
     }
   }
 
-  const unsubscribe = activeSession.subscribe((session) => {
-    const nextId = session?.id ?? null;
-    if (nextId === sessionId) return;
+  const unsubscribe = derived([activeSession, sessions], ([$active, $sessions]) => ({
+    nextId: $active?.id ?? null,
+    nextEnabled: $sessions.sessions.some((session) =>
+      !['Completed', 'Closed', 'Closing', 'Failed'].includes(serdeEnumVariantName(session.state) ?? '')),
+  })).subscribe(({ nextId, nextEnabled }) => {
+    if (nextId === sessionId && nextEnabled === enabled) return;
     sessionId = nextId;
+    enabled = nextEnabled;
     clearInterval(timer);
-    if (sessionId) {
+    if (enabled) {
       void refresh();
       timer = setInterval(() => void refresh(), 10_000);
     }

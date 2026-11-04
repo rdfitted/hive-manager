@@ -44,6 +44,19 @@ beforeEach(() => {
 });
 
 describe('G31 heartbeat work state', () => {
+  it('G52 loads every sidebar stale set with no selected session in one request', async () => {
+    const old = new Date(Date.now() - 4 * 60_000).toISOString();
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({ sessions: [
+      { id: 'one', agents: [{ id: 'worker-a', last_activity: old, work_state: 'working' }] },
+      { id: 'two', agents: [{ id: 'worker-b', last_activity: old, work_state: 'working' }] },
+    ] }) });
+    await heartbeatStore.loadHeartbeats(null);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(get(heartbeatStore).agents).toEqual({});
+    expect([...get(heartbeatStore).staleAgents]).toEqual([]);
+    expect([...get(heartbeatStore).staleAgentsBySession.one]).toEqual(['worker-a']);
+    expect([...get(heartbeatStore).staleAgentsBySession.two]).toEqual(['worker-b']);
+  });
   it('G48 retains inactive stale sets with one fetch and drops disappeared sessions', async () => {
     const old = new Date(Date.now() - 4 * 60_000).toISOString();
     const inactive = { id: 'inactive', agents: [

@@ -291,7 +291,7 @@ function createHeartbeatStore() {
   return {
     subscribe,
 
-    async loadHeartbeats(sessionId: string): Promise<void> {
+    async loadHeartbeats(sessionId: string | null): Promise<void> {
       try {
         let resp = await fetch(apiUrl('/api/sessions/active'));
         if (resp.status === 404) {
@@ -333,8 +333,8 @@ function createHeartbeatStore() {
           staleAgentsBySession[session.id] = staleAgents;
         }
         update((state) => ({ ...state, agentsBySession, staleAgentsBySession,
-          agents: agentsBySession[sessionId] ?? {},
-          staleAgents: staleAgentsBySession[sessionId] ?? new Set(),
+          agents: sessionId ? agentsBySession[sessionId] ?? {} : {},
+          staleAgents: sessionId ? staleAgentsBySession[sessionId] ?? new Set() : new Set(),
         }));
       } catch {
         // Silently ignore heartbeat fetch errors
