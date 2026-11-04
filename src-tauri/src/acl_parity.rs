@@ -487,8 +487,10 @@ fn app_csp_is_pinned_without_script_escape_hatches() {
         Some(dev_policy.as_str()),
         "development may add only the two configured local Vite HMR ports"
     );
-    assert!(
-        config["app"]["security"]["dangerousDisableAssetCspModification"].is_null(),
-        "Tauri must retain its trusted asset nonce/hash injection"
+    assert_eq!(
+        config["app"]["security"]["dangerousDisableAssetCspModification"],
+        serde_json::json!(["style-src"]),
+        "preserve inline styles without Tauri style hashes overriding unsafe-inline; script hashing must remain enabled"
     );
 }
+

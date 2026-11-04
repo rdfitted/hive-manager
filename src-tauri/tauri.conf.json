@@ -41,6 +41,7 @@
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:18800 http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; frame-src 'self'",
       "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:18800 http://127.0.0.1:* ws://localhost:1420 ws://localhost:1421; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; frame-src 'self'",
+      "dangerousDisableAssetCspModification": ["style-src"],
       "capabilities": ["default", "operator-preview"]
     }
   },
