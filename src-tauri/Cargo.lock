@@ -1691,6 +1691,7 @@ dependencies = [
  "chrono",
  "fs2",
  "futures",
+ "libc",
  "notify",
  "parking_lot",
  "portable-pty",

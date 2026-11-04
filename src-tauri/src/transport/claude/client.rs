@@ -154,7 +154,7 @@ impl JsonClient {
                         .child
                         .lock()
                         .as_mut()
-                        .is_none_or(|c| c.try_wait().ok().flatten().is_some());
+                        .is_none_or(|child| crate::transport::process::child_has_exited(child).unwrap_or(false));
                     if exited {
                         monitor.alive.store(false, Ordering::Release);
                         monitor.fail_pending("Claude stream-json exited; select PTY to restart");

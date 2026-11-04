@@ -44,3 +44,6 @@ schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 async-trait = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 base64 = "0.22"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

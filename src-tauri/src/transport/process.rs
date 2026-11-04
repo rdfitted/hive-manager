@@ -3,6 +3,46 @@ use std::time::{Duration, Instant};
 
 pub(crate) const STOP_BUDGET: Duration = Duration::from_secs(30);
 
+/// Shared deterministic seam for Unix generation ownership and signal delivery.
+/// The platform probe must retain the original waitable child until retirement.
+#[cfg(any(unix, test))]
+fn terminate_unix_group_with(
+    retired: &mut bool,
+    root_exit: impl FnOnce() -> Result<Option<u32>, String>,
+    live_members: impl FnOnce() -> Result<bool, String>,
+    signal: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if *retired { return Ok(()); }
+    let exited = root_exit()?.is_some();
+    if exited && !live_members()? {
+        *retired = true;
+        return Ok(());
+    }
+    signal()
+}
+
+pub(crate) fn child_has_exited(child: &mut std::process::Child) -> Result<bool, String> {
+    #[cfg(unix)]
+    return unix_child_exit_status(child.id()).map(|status| status.is_some());
+    #[cfg(windows)]
+    return child.try_wait().map(|status| status.is_some()).map_err(|error| error.to_string());
+}
+
+// PROC_PGRP_ONLY returns bytes, unlike proc_listpgrppids which returns
+// a PID count. Two slots suffice: only the root in a non-full result proves
+// emptiness; any second member (or truncation) conservatively stays occupied.
+#[cfg(any(target_os = "macos", test))]
+fn group_members_present(root: u32, bytes: i32, members: &[i32; 2]) -> Result<bool, String> {
+    let width = std::mem::size_of::<i32>() as i32;
+    if bytes <= 0 || bytes > 2 * width || bytes % width != 0 {
+        return Err("Cannot obtain atomic process-group membership".into());
+    }
+    let members = &members[..(bytes / width) as usize];
+    if members.iter().any(|pid| *pid <= 0) { return Err("Invalid process-group identity".into()); }
+    if members.iter().any(|pid| *pid as u32 != root) { return Ok(true); }
+    if members.len() == 1 { Ok(false) } else { Err("Ambiguous process-group membership".into()) }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StopOutcome {
     Exited,
@@ -66,6 +106,11 @@ pub(crate) fn wait_for_child_exit(
     budget: Duration,
 ) -> Result<(), String> {
     wait_for_exit(termination, budget, || {
+        #[cfg(unix)]
+        let root_gone = if tree.is_some() { child_has_exited(child)? } else {
+            child.try_wait().map_err(|error| error.to_string())?.is_some()
+        };
+        #[cfg(windows)]
         let root_gone = child
             .try_wait()
             .map_err(|error| error.to_string())?
@@ -74,7 +119,11 @@ pub(crate) fn wait_for_child_exit(
             Some(tree) => tree.is_empty()?,
             None => root_gone,
         };
-        Ok(root_gone && tree_gone)
+        let gone = root_gone && tree_gone;
+        // Keep the original leader allocated until the whole group retires.
+        #[cfg(unix)]
+        if gone { child.wait().map_err(|error| error.to_string())?; }
+        Ok(gone)
     })
     .map(|_| ())
 }
@@ -167,7 +216,6 @@ mod windows {
         fn Process32NextW(snapshot: *mut c_void, entry: *mut ProcessEntry) -> i32;
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
         fn GetCurrentProcess() -> *mut c_void;
-        #[cfg(test)]
         fn IsProcessInJob(process: *mut c_void, job: *mut c_void, result: *mut i32) -> i32;
         fn DuplicateHandle(
             source_process: *mut c_void,
@@ -186,6 +234,7 @@ mod windows {
             user: *mut u64,
         ) -> i32;
         fn WaitForSingleObject(handle: *mut c_void, timeout: u32) -> u32;
+        fn TerminateProcess(handle: *mut c_void, code: u32) -> i32;
     }
 
     struct Handle(isize);
@@ -234,6 +283,7 @@ mod windows {
     /// even if the root exits during taskkill or Windows recycles another PID.
     pub struct CapturedTree {
         identities: Vec<Identity>,
+        owned_job: Option<std::sync::Arc<ProcessTree>>,
         // An opener failure supplies no creation-time proof. Keep the whole
         // possible subtree until fresh global absence proves it gone. Each
         // unknown branch inherits the birth-time lower bound of its last exact
@@ -269,7 +319,10 @@ mod windows {
     }
 
     fn open_process(pid: u32) -> Result<Handle, std::io::Error> {
-        let raw = unsafe { OpenProcess(0x0010_1000, 0, pid) };
+        // Prefer termination and job-assignment rights, retaining a query-only
+        // identity when access is restricted. Verification stays conservative.
+        let mut raw = unsafe { OpenProcess(0x0010_1101, 0, pid) };
+        if raw.is_null() { raw = unsafe { OpenProcess(0x0010_1000, 0, pid) }; }
         if raw.is_null() {
             Err(std::io::Error::last_os_error())
         } else {
@@ -335,6 +388,11 @@ mod windows {
     }
 
     impl CapturedTree {
+        #[cfg(test)]
+        pub(crate) fn fully_opened_for_test(&self) -> bool {
+            self.unresolved.lock().is_empty()
+        }
+
         fn root(pid: u32, root: std::os::windows::io::RawHandle) -> Result<Self, String> {
             let mut copied = std::ptr::null_mut();
             let current = unsafe { GetCurrentProcess() };
@@ -344,6 +402,7 @@ mod windows {
             let handle = Handle(copied as isize);
             let (created, _) = handle.times()?;
             Ok(Self {
+                owned_job: None,
                 identities: vec![Identity {
                     pid,
                     created,
@@ -366,14 +425,53 @@ mod windows {
             pid: u32,
             root: std::os::windows::io::RawHandle,
         ) -> Result<(), String> {
+            Self::capture_retaining_owned(slot, pid, root, None)
+        }
+
+        pub(crate) fn capture_retaining_owned(
+            slot: &mut Option<Self>,
+            pid: u32,
+            root: std::os::windows::io::RawHandle,
+            job: Option<std::sync::Arc<ProcessTree>>,
+        ) -> Result<(), String> {
             if slot.is_none() {
                 *slot = Some(Self::root(pid, root)?);
             }
             let tree = slot.as_mut().unwrap();
+            if let Some(job) = job { tree.owned_job = Some(job); }
             if tree.identities[0].pid != pid {
                 return Err("PTY capture root identity changed".into());
             }
-            tree.refresh(process_links()?, open_process)
+            tree.refresh(process_links()?, open_process)?;
+            // Include still-identifiable startup children that predate the
+            // immediate post-spawn assignment. The lifetime job then tracks
+            // their future children even after every PPID link disappears.
+            if let Some(job) = &tree.owned_job {
+                for identity in &tree.identities {
+                    if !identity.handle.exited()? { job.include(identity.handle.raw())?; }
+                }
+            }
+            Ok(())
+        }
+
+        pub(crate) fn terminate(&self) -> Result<(), String> {
+            let mut errors = Vec::new();
+            if let Some(job) = &self.owned_job {
+                if let Err(error) = job.terminate() { errors.push(error); }
+            }
+            // Root-directed taskkill cannot find retained, orphaned identities.
+            // These handles still name their exact original generations.
+            for identity in &self.identities {
+                match identity.handle.exited() {
+                    Ok(true) => continue,
+                    Err(error) => { errors.push(error); continue; },
+                    Ok(false) => {},
+                }
+                if unsafe { TerminateProcess(identity.handle.raw(), 1) } == 0 {
+                    errors.push(std::io::Error::last_os_error().to_string());
+                }
+            }
+            if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
         }
 
         fn refresh(
@@ -471,6 +569,9 @@ mod windows {
         }
 
         pub fn is_empty(&self) -> Result<bool, String> {
+            if let Some(job) = &self.owned_job {
+                if !job.is_empty()? { return Ok(false); }
+            }
             self.is_empty_with_snapshot(process_links)
         }
 
@@ -517,7 +618,26 @@ mod windows {
     }
     pub struct ProcessTree(isize);
     impl ProcessTree {
+        fn include(&self, process: std::os::windows::io::RawHandle) -> Result<(), String> {
+            let mut member = 0;
+            if unsafe { IsProcessInJob(process, self.0 as *mut c_void, &mut member) } == 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            if member != 0 || unsafe { AssignProcessToJobObject(self.0 as *mut c_void, process) } != 0 {
+                return Ok(());
+            }
+            Err(std::io::Error::last_os_error().to_string())
+        }
         pub fn attach(child: &std::process::Child) -> Result<Self, String> {
+            let job = Self::attach_running(child.as_raw_handle())?;
+            Self::resume(child.id())?;
+            Ok(job)
+        }
+
+        /// Assign an already running PTY without changing its launch contract.
+        /// This owns future descendants; children born before assignment need
+        /// the retained stop-time capture as well.
+        pub(crate) fn attach_running(process: std::os::windows::io::RawHandle) -> Result<Self, String> {
             // The handle belongs solely to this guard; Windows propagates job
             // membership to subsequently created descendants, including npm shims.
             let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -536,13 +656,17 @@ mod windows {
                 )
             };
             let assigned = configured != 0
-                && unsafe { AssignProcessToJobObject(raw, child.as_raw_handle()) } != 0;
+                && unsafe { AssignProcessToJobObject(raw, process) } != 0;
             if !assigned {
                 return Err(format!(
                     "Cannot own transport process tree: {}. Select PTY.",
                     std::io::Error::last_os_error()
                 ));
             }
+            Ok(job)
+        }
+
+        fn resume(pid: u32) -> Result<(), String> {
             // RpcClient creates the root suspended. Attach before any shim can
             // create an unowned Node child, then resume its primary thread.
             let snapshot = unsafe { CreateToolhelp32Snapshot(4, 0) };
@@ -556,7 +680,7 @@ mod windows {
             let mut resumed = false;
             let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
             while found {
-                if entry.owner_pid == child.id() {
+                if entry.owner_pid == pid {
                     let thread = unsafe { OpenThread(2, 0, entry.thread_id) };
                     if !thread.is_null() {
                         resumed = unsafe { ResumeThread(thread) } != u32::MAX;
@@ -576,7 +700,7 @@ mod windows {
             if !resumed {
                 return Err("Cannot resume owned transport process; select PTY".into());
             }
-            Ok(job)
+            Ok(())
         }
         pub fn is_empty(&self) -> Result<bool, String> {
             let mut accounting = Accounting::default();
@@ -1030,55 +1154,149 @@ pub(crate) use windows::CapturedTree;
 pub use windows::ProcessTree;
 
 #[cfg(unix)]
-pub struct ProcessTree(u32);
-#[cfg(unix)]
-impl ProcessTree {
-    /// portable-pty calls setsid before exec. Validate and retain that initial
-    /// group while its child is still owned and unreaped; never use tcgetpgrp.
-    pub fn for_pty(pid: u32) -> Result<Self, String> {
-        extern "C" { fn getpgid(pid: i32) -> i32; }
-        let pid_i32 = i32::try_from(pid).map_err(|error| error.to_string())?;
-        let group = unsafe { getpgid(pid_i32) };
-        if group < 0 { return Err(std::io::Error::last_os_error().to_string()); }
-        if group != pid_i32 { return Err("PTY root does not own its initial process group".into()); }
-        Ok(Self(pid))
-    }
-    pub fn attach(child: &std::process::Child) -> Result<Self, String> {
-        Ok(Self(child.id()))
-    }
-    pub fn terminate(&self) -> Result<(), String> {
-        extern "C" {
-            fn kill(pid: i32, signal: i32) -> i32;
-        }
-        if unsafe { kill(-(self.0 as i32), 9) } == 0 {
-            return Ok(());
-        }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(3) {
-            Ok(())
-        } else {
-            Err(error.to_string())
-        }
-    }
-    pub fn is_empty(&self) -> Result<bool, String> {
-        extern "C" {
-            fn kill(pid: i32, signal: i32) -> i32;
-        }
-        if unsafe { kill(-(self.0 as i32), 0) } == 0 {
-            return Ok(false);
-        }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(3) {
-            Ok(true)
-        } else {
-            Err(error.to_string())
-        }
-    }
+pub struct ProcessTree {
+    pid: u32,
+    retired: parking_lot::Mutex<bool>,
+    #[cfg(test)]
+    signal_observer: parking_lot::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>>,
 }
 
+/// Observe exit without freeing the root PID. An unreaped group leader reserves
+/// its PID/PGID even after natural exit, so a later stop cannot hit a new group.
+#[cfg(unix)]
+pub(crate) fn unix_child_exit_status(pid: u32) -> Result<Option<u32>, String> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info,
+        libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    if result < 0 { return Err(std::io::Error::last_os_error().to_string()); }
+    if unsafe { info.si_pid() } == 0 { return Ok(None); }
+    let status = unsafe { info.si_status() };
+    Ok(Some(if info.si_code == libc::CLD_EXITED { status as u32 } else { (128 + status) as u32 }))
+}
+
+#[cfg(unix)]
+impl ProcessTree {
+    fn new(pid: u32) -> Self {
+        Self { pid, retired: parking_lot::Mutex::new(false),
+            #[cfg(test)]
+            signal_observer: parking_lot::Mutex::new(None),
+        }
+    }
+    /// portable-pty calls setsid before exec. Validate the initial group before
+    /// any natural-exit observer can reap the owned child.
+    pub fn for_pty(pid: u32) -> Result<Self, String> {
+        let group = unsafe { libc::getpgid(pid as i32) };
+        if group < 0 { return Err(std::io::Error::last_os_error().to_string()); }
+        if group != pid as i32 { return Err("PTY root does not own its initial process group".into()); }
+        Ok(Self::new(pid))
+    }
+    pub fn attach(child: &std::process::Child) -> Result<Self, String> {
+        Ok(Self::new(child.id()))
+    }
+
+    /// The kernel copies group PID membership under one proc_list_lock.
+    /// Exclude only our known waitable leader; all other PIDs, even zombies,
+    /// prevent retirement. Unlike ps, no per-PID query can omit a late child.
+    #[cfg(target_os = "macos")]
+    fn live_group_members(&self) -> Result<bool, String> {
+        let mut members: [libc::pid_t; 2] = [0; 2];
+        let bytes = unsafe { libc::proc_listpids(2, self.pid,
+            members.as_mut_ptr().cast(), std::mem::size_of_val(&members) as i32) };
+        group_members_present(self.pid, bytes, &members)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn live_group_members(&self) -> Result<bool, String> {
+        // Windows and macOS are the shipped targets. Other Unix kernels need
+        // their own atomic membership authority; never infer emptiness from ps.
+        Err("Atomic process-group verification unavailable on this Unix platform; refusing unverified cleanup".into())
+    }
+    pub fn terminate(&self) -> Result<(), String> {
+        let mut retired = self.retired.lock();
+        terminate_unix_group_with(&mut retired,
+            || unix_child_exit_status(self.pid),
+            || self.live_group_members(),
+            || {
+                #[cfg(test)]
+                if let Some(observer) = self.signal_observer.lock().as_ref() {
+                    observer.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    return Err("synthetic replacement group observed a signal".into());
+                }
+                if unsafe { libc::kill(-(self.pid as i32), libc::SIGKILL) } == 0 { return Ok(()); }
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ESRCH) { Ok(()) } else { Err(error.to_string()) }
+            })
+    }
+
+    pub fn is_empty(&self) -> Result<bool, String> {
+        let mut retired = self.retired.lock();
+        if *retired { return Ok(true); }
+        if unix_child_exit_status(self.pid)?.is_none() { return Ok(false); }
+        if self.live_group_members()? { return Ok(false); }
+        // No live member can fork after this snapshot; retire before reaping.
+        *retired = true;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_reused_generation(&self, observer: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        *self.signal_observer.lock() = Some(observer);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reused_group_stop(signals: &std::sync::atomic::AtomicUsize) -> Result<(), String> {
+        terminate_unix_group_with(&mut false,
+            || Err("ECHILD: original root was reaped; numeric PGID now names replacement".into()),
+            || Ok(true),
+            || { signals.fetch_add(1, std::sync::atomic::Ordering::SeqCst); Ok(()) })
+    }
+
+    #[test]
+    fn g53_unix_first_stop_after_natural_exit_never_signals_reused_group() {
+        let signals = std::sync::atomic::AtomicUsize::new(0);
+        let _ = reused_group_stop(&signals);
+        assert_eq!(signals.load(std::sync::atomic::Ordering::SeqCst), 0,
+            "first stop must reject lost generation authority before signalling");
+    }
+
+    #[test]
+    fn g53_unix_drop_after_natural_exit_never_signals_reused_group() {
+        struct Cleanup<'a>(&'a std::sync::atomic::AtomicUsize);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) { let _ = reused_group_stop(self.0); }
+        }
+        let signals = std::sync::atomic::AtomicUsize::new(0);
+        drop(Cleanup(&signals));
+        assert_eq!(signals.load(std::sync::atomic::Ordering::SeqCst), 0,
+            "Drop must reject lost generation authority before signalling");
+    }
+
+    #[test]
+    fn g53_unix_retired_group_never_signals_after_leader_reap() {
+        let mut retired = false;
+        terminate_unix_group_with(&mut retired, || Ok(Some(0)), || Ok(false),
+            || panic!("empty original group needs no signal")).unwrap();
+        assert!(retired);
+        // The caller may now reap the leader and a replacement may reuse PGID.
+        terminate_unix_group_with(&mut retired,
+            || panic!("retired group must not inspect a replacement generation"),
+            || panic!("retired group must not inspect replacement membership"),
+            || panic!("retired group must never be signalled again")).unwrap();
+    }
+
+    #[test]
+    fn g53_atomic_group_snapshot_retires_only_the_reserved_root() {
+        assert_eq!(group_members_present(42, 4, &[42, 0]), Ok(false));
+        assert_eq!(group_members_present(42, 8, &[42, 43]), Ok(true));
+        assert_eq!(group_members_present(42, 8, &[43, 44]), Ok(true));
+        assert!(group_members_present(42, 0, &[0, 0]).is_err());
+        assert!(group_members_present(42, 3, &[42, 0]).is_err());
+        assert!(group_members_present(42, 12, &[42, 43]).is_err());
+        assert!(group_members_present(42, 4, &[0, 0]).is_err());
+    }
 
     #[test]
     fn g53_live_tree_never_succeeds_even_when_termination_reports_success() {

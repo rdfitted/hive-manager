@@ -169,7 +169,7 @@ impl RpcClient {
                         .child
                         .lock()
                         .as_mut()
-                        .is_none_or(|child| child.try_wait().ok().flatten().is_some());
+                        .is_none_or(|child| crate::transport::process::child_has_exited(child).unwrap_or(false));
                     if exited {
                         monitor.alive.store(false, Ordering::Release);
                         monitor.fail_pending("Codex app-server exited");
