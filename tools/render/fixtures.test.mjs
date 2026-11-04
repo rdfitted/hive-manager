@@ -99,6 +99,13 @@ test('seeded schema, feeds, review repo, and relative timestamps cover every man
         }
       }
     }
+    const conversation = manifest.conversation;
+    const storedConversation = await readFile(path.join(result.dataDir, 'sessions', conversation.sessionId, 'conversations', `${conversation.agentId}.md`), 'utf8');
+    const metadata = JSON.parse(storedConversation.split('\n')[2].match(/^<!-- hive-envelope: (.*) -->$/)[1]);
+    assert.equal(metadata.renderer, 'diff');
+    assert.deepEqual(metadata.data, conversation.data);
+    assert.equal(metadata.body_bytes, Buffer.byteLength(conversation.data.unified, 'utf8'));
+    assert.equal(storedConversation.split('\n').slice(3).join('\n').trimEnd(), conversation.data.unified);
     await assert.rejects(seed(root, now), /must be empty/);
   } finally {
     await rm(root, { recursive: true, force: true });

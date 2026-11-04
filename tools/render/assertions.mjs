@@ -432,6 +432,27 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await dialog.waitFor();
     await capture('dialog', viewport, dialog, text => text.includes('Keyboard Shortcuts'));
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    // Exercise the persisted result envelope through the shipped conversation UI.
+    const conversationFixture = manifest.conversation;
+    if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
+    const activity = page.getByRole('group', { name: 'Panel views', exact: true }).getByRole('button', { name: 'Activity', exact: true });
+    if (await activity.getAttribute('aria-pressed') !== 'true') await activity.click();
+    await page.getByRole('group', { name: 'Activity sections', exact: true }).getByRole('button', { name: 'Chat', exact: true }).click();
+    const viewer = page.locator('.conversation-viewer');
+    await viewer.getByRole('tab', { name: 'Queen', exact: true }).click();
+    const diffWidget = viewer.locator('.diff-widget').first();
+    await diffWidget.waitFor({ state: 'visible' });
+    await diffWidget.scrollIntoViewIfNeeded();
+    const measureDiff = async () => {
+      const widgets = await viewer.locator('.diff-widget').count();
+      const visible = widgets === 1 && (await visibleTargetState(diffWidget)).visible;
+      const additions = await viewer.locator('.diff-widget .diff-line.add .line-text').allTextContents();
+      const deletions = await viewer.locator('.diff-widget .diff-line.del .line-text').allTextContents();
+      return { passed: visible && additions.includes(conversationFixture.added) && deletions.includes(conversationFixture.removed), details: { widgets, visible, additions, deletions } };
+    };
+    await probe('conversation-diff-envelope', measureDiff, { screen: 'conversation', viewport: `${viewport.width}x${viewport.height}` });
+    await prove(`conv-diff-${viewport.width}`, measureDiff, () => emptyContents(diffWidget), { screen: 'conversation' });
+    await capture('conversation', viewport, viewer, text => text.includes(conversationFixture.added) && text.includes(conversationFixture.removed));
     if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
   }
   // Check completed history after baseline Review/dialog captures so this
