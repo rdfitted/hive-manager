@@ -78,10 +78,22 @@ pub fn owned_work_committed(cwd: &Path, outputs: &[String]) -> bool {
         }
     }
     if paths.is_empty() { return false; }
-    Command::new("git").arg("--literal-pathspecs").arg("-C").arg(cwd)
-        .args(["status", "--porcelain", "--untracked-files=all", "--"])
-        .args(paths).output().is_ok_and(|result| result.status.success() && result.stdout.is_empty())
+    owned_work_command(cwd, &paths).output()
+        .is_ok_and(|result| result.status.success() && result.stdout.is_empty())
 }
+
+fn owned_work_command(cwd: &Path, paths: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command.arg("--literal-pathspecs").arg("-C").arg(cwd)
+        .args(["status", "--porcelain", "--untracked-files=all", "--"])
+        .args(paths);
+    crate::process::hide_std_console_window(&mut command);
+    command
+}
+
+#[cfg(test)]
+#[path = "git_console_tests.rs"]
+mod git_console_tests;
 
 #[cfg(test)]
 mod tests {
