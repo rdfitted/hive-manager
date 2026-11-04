@@ -43,8 +43,16 @@ pub fn content_payload(content: &str) -> (Option<String>, Option<Value>) {
     {
         return (Some("diff".into()), Some(json!({"unified": content})));
     }
-    let lines: Vec<_> = content.lines().map(str::trim).collect();
+    let lines: Vec<_> = content.trim().lines().map(str::trim).collect();
     for (index, pair) in lines.windows(2).enumerate() {
+        // A widget replaces the whole message, so partial tables would hide prose.
+        if index != 0
+            || !lines[index + 2..]
+                .iter()
+                .all(|line| line.starts_with('|') && line.ends_with('|'))
+        {
+            continue;
+        }
         let cells = |line: &str| -> Vec<String> {
             line.trim_matches('|')
                 .split('|')
@@ -102,6 +110,22 @@ pub fn content_payload(content: &str) -> (Option<String>, Option<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn content_payload_preserves_prose_around_markdown_table() {
+        let table = "| file | status |\n| --- | --- |\n| demo | changed |";
+        for content in [
+            format!("Introductory explanation.\n\n{table}\n\nTrailing explanation."),
+            format!("Introductory explanation.\n{table}"),
+            format!("{table}\nTrailing explanation."),
+        ] {
+            assert_eq!(content_payload(&content), (None, None),
+                "mixed prose and tables must preserve the complete message as text");
+            assert_eq!(envelope_for_action_result("tool.result", json!(&content)),
+                json!({"data": content}));
+        }
+        assert_eq!(content_payload(&format!("\n  {table}\n\n")).0.as_deref(), Some("table"));
+    }
+
     #[test]
     fn real_outputs_have_widget_payloads_not_routing_metadata() {
         assert_eq!(content_payload("| value | value |\n| --- | --- |\n| old | new |"), (None, None));

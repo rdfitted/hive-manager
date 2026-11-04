@@ -102,6 +102,98 @@ describe('ConversationViewer tab selection', () => {
 });
 
 describe('G57 conversation widgets', () => {
+  function approvalPair() {
+    // Message IDs are optional; filtering replaces index zero with another approval.
+    saved = ['alpha', 'beta'].map((name) => ({
+      ...diff, content: `${name} request`, renderer: 'approval',
+      data: { title: `${name} request`, approvalId: `pending-${name}` },
+    }));
+  }
+
+  it('approval_filter_replacement_does_not_inherit_decided_state', async () => {
+    approvalPair();
+    const view = render(ConversationViewer);
+    await fireEvent.input(view.getByPlaceholderText('Search messages...'), { target: { value: 'alpha' } });
+    await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));
+    await waitFor(() => expect(view.getByTestId('approve')).toBeTruthy());
+    await fireEvent.click(view.getByTestId('approve'));
+    await waitFor(() => expect((view.getByTestId('approve') as HTMLButtonElement).disabled).toBe(true));
+    expect(invokeMock).toHaveBeenLastCalledWith('resolve_approval', { request: {
+      session_id: 'render-session', approval_id: 'pending-alpha', decision: 'approved',
+    } });
+    await fireEvent.input(view.getByPlaceholderText('Search messages...'), { target: { value: 'beta' } });
+    expect(view.getByText('beta request')).toBeTruthy();
+    expect((view.getByTestId('approve') as HTMLButtonElement).disabled).toBe(false);
+    expect((view.getByTestId('reject') as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(view.getByTestId('reject'));
+    await waitFor(() => expect(invokeMock).toHaveBeenLastCalledWith('resolve_approval', { request: {
+      session_id: 'render-session', approval_id: 'pending-beta', decision: 'rejected',
+    } }));
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['success', 'error'] as const)('approval_filter_replacement_ignores_prior_inflight_completion (%s)', async (outcome) => {
+    approvalPair();
+    let finish!: () => void;
+    let settled!: Promise<void>;
+    invokeMock.mockImplementationOnce(() => {
+      settled = new Promise<void>((resolve, reject) => {
+        finish = () => outcome === 'success' ? resolve() : reject('[approval_consumed] Prior approval delivery failed');
+      });
+      return settled;
+    });
+    const view = render(ConversationViewer);
+    await fireEvent.input(view.getByPlaceholderText('Search messages...'), { target: { value: 'alpha' } });
+    await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));
+    await waitFor(() => expect(view.getByTestId('approve')).toBeTruthy());
+    await fireEvent.click(view.getByTestId('approve'));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect((view.getByTestId('approve') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(view.getByPlaceholderText('Search messages...'), { target: { value: 'beta' } });
+    expect(view.getByText('beta request')).toBeTruthy();
+    finish();
+    await settled.catch(() => {});
+    await tick();
+    await waitFor(() => expect((view.getByTestId('approve') as HTMLButtonElement).disabled).toBe(false));
+    expect((view.getByTestId('reject') as HTMLButtonElement).disabled).toBe(false);
+    expect(view.queryByText('Prior approval delivery failed')).toBeNull();
+    await fireEvent.click(view.getByTestId('approve'));
+    await waitFor(() => expect(invokeMock).toHaveBeenLastCalledWith('resolve_approval', { request: {
+      session_id: 'render-session', approval_id: 'pending-beta', decision: 'approved',
+    } }));
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('approval_filter_replacement_does_not_inherit_prior_error', async () => {
+    approvalPair();
+    invokeMock.mockRejectedValueOnce('Approval is stale or already resolved');
+    const view = render(ConversationViewer);
+    await fireEvent.input(view.getByPlaceholderText('Search messages...'), { target: { value: 'alpha' } });
+    await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));
+    await waitFor(() => expect(view.getByTestId('approve')).toBeTruthy());
+    await fireEvent.click(view.getByTestId('approve'));
+    await waitFor(() => expect(view.getByText('Approval is stale or already resolved')).toBeTruthy());
+    await fireEvent.input(view.getByPlaceholderText('Search messages...'), { target: { value: 'beta' } });
+    expect(view.queryByText('Approval is stale or already resolved')).toBeNull();
+    expect((view.getByTestId('approve') as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(view.getByTestId('approve'));
+    await waitFor(() => expect(invokeMock).toHaveBeenLastCalledWith('resolve_approval', { request: {
+      session_id: 'render-session', approval_id: 'pending-beta', decision: 'approved',
+    } }));
+  });
+
+  it('preserves both prose segments when a mixed table message falls back to text', async () => {
+    saved = [{ timestamp: diff.timestamp, from: diff.from,
+      content: 'Introductory explanation.\n\n| file | status |\n| --- | --- |\n| demo | changed |\n\nTrailing explanation.',
+    }];
+    const view = render(ConversationViewer);
+    await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));
+    await waitFor(() => expect(view.container.querySelector('.msg-content')?.textContent).toContain('Introductory explanation.'));
+    expect(view.container.querySelector('.msg-content')?.textContent).toContain('Trailing explanation.');
+    expect(view.container.querySelector('.msg-content')?.textContent).toContain('| demo | changed |');
+    expect(view.container.querySelector('.msg-widget')).toBeNull();
+  });
+
   it('renders a real diff envelope live and after GET reload', async () => {
     const view = render(ConversationViewer);
     await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));

@@ -1778,15 +1778,33 @@ impl SessionStorage {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static LEGACY_DELIMITER_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn find_legacy_conversation_delimiter(input: &str, delimiter: &str) -> Option<usize> {
+    let found = input.find(delimiter);
+    // Count the searched prefix, including the match, rather than timing the parser.
+    #[cfg(test)]
+    LEGACY_DELIMITER_SCAN_BYTES.with(|work| {
+        work.set(work.get() + found.map_or(input.len(), |offset| offset + delimiter.len()));
+    });
+    found
+}
+
 fn parse_conversation_messages(content: &str) -> Vec<ConversationMessage> {
     fn split_entry(input: &str) -> Option<(&str, &str)> {
-        let (offset, width) = ["\n---\n", "\n---\r\n"]
+        let lf = find_legacy_conversation_delimiter(input, "\n---\n")
+            .map(|offset| (offset, "\n---\n".len()));
+        // An earlier CRLF delimiter can share its last newline with the LF match.
+        // Include that byte, while avoiding a full suffix scan for every LF entry.
+        let crlf_end = lf.map_or(input.len(), |(offset, _)| offset + 1);
+        let crlf = find_legacy_conversation_delimiter(&input[..crlf_end], "\n---\r\n")
+            .map(|offset| (offset, "\n---\r\n".len()));
+        let (offset, width) = lf
             .into_iter()
-            .filter_map(|delimiter| {
-                input
-                    .find(delimiter)
-                    .map(|offset| (offset, delimiter.len()))
-            })
+            .chain(crlf)
             .min_by_key(|(offset, _)| *offset)?;
         Some((&input[..offset], &input[offset + width..]))
     }
@@ -1962,6 +1980,40 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap();
         (storage, temp_dir)
+    }
+
+    #[test]
+    fn legacy_lf_history_delimiter_scan_work_is_linear() {
+        let entry = "---\n[2026-01-02T03:04:05Z] from @worker-1\nLegacy λ content.\n\n";
+        let mut previous_work = None;
+        for count in [32, 64, 128] {
+            let history = entry.repeat(count);
+            LEGACY_DELIMITER_SCAN_BYTES.with(|work| work.set(0));
+            let messages = parse_conversation_messages(&history);
+            let scanned = LEGACY_DELIMITER_SCAN_BYTES.with(|work| work.get());
+            assert_eq!(messages.len(), count);
+            assert!(messages.iter().all(|message| message.content == "Legacy λ content."));
+            assert!(scanned <= history.len() * 4,
+                "{count} LF entries searched {scanned} bytes for {} input bytes", history.len());
+            if let Some(previous) = previous_work {
+                assert!(scanned <= previous * 3,
+                    "doubling LF history must grow scan work linearly: {previous} -> {scanned}");
+            }
+            previous_work = Some(scanned);
+        }
+    }
+
+    #[test]
+    fn legacy_mixed_delimiters_preserve_shared_newline_boundary() {
+        // The CRLF delimiter's final newline also starts the following LF delimiter.
+        let history = "---\n[2026-01-02T03:04:05Z] from @worker-1\nFirst λ\n---\r\n---\n[2026-01-02T03:04:06Z] from @worker-2\nSecond\n---\n[2026-01-02T03:04:07Z] from @worker-3\nThird\n---\r\n[2026-01-02T03:04:08Z] from @worker-4\nFourth\n";
+        let messages = parse_conversation_messages(history);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.iter().map(|message| message.content.as_str()).collect::<Vec<_>>(),
+            ["First λ", "Second", "Third", "Fourth"]);
+        assert_eq!(messages.iter().map(|message| message.from.as_str()).collect::<Vec<_>>(),
+            ["worker-1", "worker-2", "worker-3", "worker-4"]);
+        assert!(messages.iter().all(|message| message.renderer.is_none() && message.data.is_none()));
     }
 
     #[tokio::test]

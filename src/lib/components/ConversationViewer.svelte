@@ -119,6 +119,11 @@
     return resolveApproval('rejected', detail);
   }
 
+  function approvalIdentity(data: unknown): string | null {
+    if (!data || typeof data !== 'object' || !('approvalId' in data)) return null;
+    return typeof data.approvalId === 'string' ? data.approvalId : null;
+  }
+
   function getSenderColor(from: string): string {
     if (from === 'queen') return 'var(--accent)';
     if (from === 'system' || from === 'SYSTEM') return 'var(--accent-chrome)';
@@ -211,11 +216,14 @@
               <span class="msg-sender" style="color: {getSenderColor(msg.from)}">{msg.from}</span>
               {#if msg.renderer || msg.data}
                 <div class="msg-content msg-widget">
-                  <ToolRenderHost
-                    message={msg}
-                    onapprove={handleApprove}
-                    onreject={handleReject}
-                  />
+                  {#key JSON.stringify([sessionId, approvalIdentity(msg.data)])}
+                    <!-- Keep decisions and async completions scoped to this approval. -->
+                    <ToolRenderHost
+                      message={msg}
+                      onapprove={handleApprove}
+                      onreject={handleReject}
+                    />
+                  {/key}
                 </div>
               {:else}
                 <span class="msg-content">{msg.content}</span>
