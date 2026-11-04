@@ -160,7 +160,7 @@ impl Drop for ConstructionCleanup {
             if let Some(pid) = child.process_id() {
                 if let Some(handle) = child.as_raw_handle() {
                     let tree = crate::transport::process::CapturedTree::capture(pid, handle).ok();
-                    let _ = kill_windows_tree(pid, tree.as_ref());
+                    let _ = kill_windows_tree(pid, tree.as_ref(), Instant::now() + crate::transport::process::STOP_BUDGET);
                 }
             }
             let _ = child.kill();
@@ -197,7 +197,7 @@ fn into_io_error<E: std::fmt::Display>(error: E) -> PtyError {
 }
 
 #[cfg(windows)]
-fn kill_windows_tree(pid: u32, tree: Option<&crate::transport::process::CapturedTree>) -> std::io::Result<()> {
+fn kill_windows_tree(pid: u32, tree: Option<&crate::transport::process::CapturedTree>, deadline: Instant) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
@@ -212,8 +212,8 @@ fn kill_windows_tree(pid: u32, tree: Option<&crate::transport::process::Captured
         .stderr(Stdio::null())
         .spawn();
     let termination = helper.as_ref().map(|_| ()).map_err(|error| error.to_string());
-    let result = crate::transport::process::wait_for_exit(termination,
-        crate::transport::process::STOP_BUDGET, || tree.ok_or_else(|| "Cannot verify captured PTY tree".to_string())?.is_empty());
+    let result = crate::transport::process::wait_for_exit_until(termination,
+        deadline, || tree.ok_or_else(|| "Cannot verify captured PTY tree".to_string())?.is_empty());
     // The helper is ours, not an exit signal for the target. Stop/reap it even
     // when it stalls after the captured exact tree has already become empty.
     if let Ok(mut helper) = helper {
@@ -408,6 +408,8 @@ pub struct PtySession {
     /// intermediate parent disappears before the operator retries.
     #[cfg(windows)]
     cleanup_tree: Mutex<Option<crate::transport::process::CapturedTree>>,
+    #[cfg(unix)]
+    process_tree: crate::transport::process::ProcessTree,
     master: Mutex<Option<Arc<MasterPtyHandle>>>,
     #[cfg(windows)]
     needs_drain: AtomicBool,
@@ -546,6 +548,11 @@ impl PtySession {
             .spawn_command(cmd)
             .map_err(|e| PtyError::SpawnError(e.to_string()))?;
         pending.child = Some(child);
+        #[cfg(unix)]
+        let process_tree = crate::transport::process::ProcessTree::for_pty(
+            pending.child.as_ref().unwrap().process_id()
+                .ok_or_else(|| PtyError::CreateError("PTY root has no process-group identity".into()))?
+        ).map_err(PtyError::CreateError)?;
         #[cfg(test)]
         if args.contains(&"--real-pty-fail-after-spawn") || args.contains(&"--real-pty-output-before-return") {
             let mut first_output = [0u8; 128];
@@ -576,6 +583,8 @@ impl PtySession {
             child_pid,
             #[cfg(windows)]
             cleanup_tree: Mutex::new(None),
+            #[cfg(unix)]
+            process_tree,
             master: Mutex::new(Some(Arc::new(MasterPtyHandle(master)))),
             #[cfg(windows)]
             needs_drain: AtomicBool::new(false),
@@ -700,25 +709,31 @@ impl PtySession {
         #[cfg(windows)]
         return self.kill_with_tree_killer(kill_windows_tree);
 
-        #[cfg(not(windows))]
-        {
-            let mut child = self.child.lock();
-            if let Some(ref mut c) = *child {
-                if c.try_wait().map_err(into_io_error)?.is_some() {
-                    return Ok(());
-                }
-                c.kill().map_err(into_io_error)?;
-            }
-            Ok(())
-        }
+        #[cfg(unix)]
+        return self.kill_unix_with(|tree| tree.terminate(), crate::transport::process::STOP_BUDGET);
+    }
+
+    #[cfg(unix)]
+    fn kill_unix_with(&self, killer: impl FnOnce(&crate::transport::process::ProcessTree) -> Result<(), String>, budget: Duration) -> Result<(), PtyError> {
+        let deadline = Instant::now() + budget;
+        let mut child = self.child.lock();
+        let termination = killer(&self.process_tree);
+        crate::transport::process::wait_for_exit_until(termination, deadline, || {
+            let root_gone = match child.as_mut() {
+                Some(child) => child.try_wait().map_err(|error| error.to_string())?.is_some(),
+                None => false,
+            };
+            Ok(root_gone && self.process_tree.is_empty()?)
+        }).map(|_| ()).map_err(|error| PtyError::IoError(std::io::Error::other(error)))
     }
 
     #[cfg(windows)]
     fn kill_with_tree_killer(
         &self,
-        tree_killer: impl FnOnce(u32, Option<&crate::transport::process::CapturedTree>) -> std::io::Result<()>,
+        tree_killer: impl FnOnce(u32, Option<&crate::transport::process::CapturedTree>, Instant) -> std::io::Result<()>,
     ) -> Result<(), PtyError> {
         if let Some(pid) = self.child_pid {
+            let deadline = Instant::now() + crate::transport::process::STOP_BUDGET;
             // A reaped direct child says nothing about descendants. Always try the
             // recorded PID; /T can only enumerate children while that root exists.
             // Captured descendant handles remain authoritative after root exit.
@@ -727,22 +742,19 @@ impl PtySession {
                 let child = self.child.lock();
                 let handle = child.as_ref().and_then(|child| child.as_raw_handle())
                     .ok_or_else(|| PtyError::CreateError("PTY root has no process handle".into()))?;
-                crate::transport::process::CapturedTree::capture(pid, handle)
+                crate::transport::process::CapturedTree::capture_retaining(&mut held, pid, handle)
             };
             match captured {
-                Ok(captured) => match held.as_mut() {
-                    Some(tree) => tree.merge(captured),
-                    None => *held = Some(captured),
-                },
+                Ok(()) => {},
                 Err(error) => {
                     // Still attempt the recorded PID; unknown identity state
                     // cannot turn that attempt into a successful stop.
-                    let _ = tree_killer(pid, None);
-                    return Err(PtyError::CreateError(error));
+                    let _ = tree_killer(pid, None, deadline);
+                    return Err(PtyError::IoError(std::io::Error::other(error)));
                 }
             }
             let tree = held.as_ref().unwrap();
-            let termination = tree_killer(pid, Some(tree)).map_err(|error| error.to_string());
+            let termination = tree_killer(pid, Some(tree), deadline).map_err(|error| error.to_string());
             let result = crate::transport::process::wait_for_exit(termination, Duration::ZERO, || tree.is_empty());
             if result.is_ok() { held.take(); }
             return result.map(|_| ()).map_err(|error| PtyError::IoError(std::io::Error::other(error)));
@@ -913,6 +925,58 @@ pub fn read_from_reader(reader: &Arc<Mutex<SendReader>>, buf: &mut [u8]) -> Resu
 mod tests {
     use super::{sanitize_bracketed_paste, BRACKETED_PASTE_END};
 
+    #[cfg(unix)]
+    mod unix_tree {
+        use super::super::{AgentRole, PtySession};
+        use std::time::{Duration, Instant};
+
+        fn session(script: &str) -> PtySession {
+            PtySession::new("synthetic-unix-stop".into(), AgentRole::Worker { index: 1, parent: None },
+                "/bin/sh", crate::adapters::pty_submit_policy("/bin/sh"), &[], &["-c", script], None, 80, 24, 8192).unwrap()
+        }
+
+        fn wait_root_exit(session: &PtySession) {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while session.is_alive() {
+                assert!(Instant::now() < deadline, "fixture failsafe expired waiting for Unix root exit");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        #[test]
+        fn g53_unix_live_group_cannot_succeed_without_termination() {
+            let session = session("while :; do sleep 1; done");
+            assert!(session.kill_unix_with(|_| Ok(()), Duration::ZERO).is_err());
+            assert!(session.is_alive());
+            session.kill().unwrap();
+            assert!(session.process_tree.is_empty().unwrap());
+        }
+
+        #[test]
+        fn g53_unix_root_exit_does_not_hide_live_group_descendant() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("child.pid");
+            let escaped = path.to_string_lossy().replace('\'', "'\\''");
+            let session = session(&format!("trap '' HUP; sleep 600 & child=$!; printf '%s' \"$child\" > '{escaped}'; exit 0"));
+            wait_root_exit(&session);
+            assert!(std::fs::read_to_string(&path).unwrap().parse::<u32>().is_ok(), "fixture must publish the real child");
+            assert!(!session.process_tree.is_empty().unwrap());
+            assert!(session.kill_unix_with(|_| Ok(()), Duration::ZERO).is_err(), "root-only exit cannot authorize success");
+            session.kill().unwrap();
+            session.kill().unwrap();
+            assert!(session.process_tree.is_empty().unwrap());
+        }
+
+        #[test]
+        fn g53_unix_verified_empty_group_is_idempotent_despite_late_error() {
+            let session = session("exit 0");
+            wait_root_exit(&session);
+            session.kill_unix_with(|_| Err("synthetic late termination error".into()), Duration::ZERO).unwrap();
+            session.kill().unwrap();
+            session.kill().unwrap();
+        }
+    }
+
     #[cfg(windows)]
     mod windows_tree {
         use std::fs;
@@ -1039,7 +1103,7 @@ mod tests {
             }
             assert!(!session.is_alive(), "synthetic child did not exit");
             let mut attempted_pid = None;
-            session.kill_with_tree_killer(|pid, _| {
+            session.kill_with_tree_killer(|pid, _, _| {
                 attempted_pid = Some(pid);
                 Ok(())
             }).unwrap();
@@ -1110,7 +1174,7 @@ mod tests {
                 thread::sleep(Duration::from_millis(20));
             };
             let mut cleanup = PingCleanup(Some(ids[1]));
-            assert!(session.kill_with_tree_killer(|_, _| Err(std::io::Error::other("synthetic partial stop"))).is_err());
+            assert!(session.kill_with_tree_killer(|_, _, _| Err(std::io::Error::other("synthetic partial stop"))).is_err());
             // Exact captured handles keep these fixture PIDs from aliasing.
             assert!(Command::new("taskkill").args(["/PID", &ids[0].to_string(), "/F"])
                 .creation_flags(CREATE_NO_WINDOW).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success());
@@ -1123,7 +1187,7 @@ mod tests {
                 thread::sleep(Duration::from_millis(20));
             }
             assert!(pid_is_live(ids[1]));
-            assert!(session.kill_with_tree_killer(|_, _| Ok(())).is_err(),
+            assert!(session.kill_with_tree_killer(|_, _, _| Ok(())).is_err(),
                 "a retry snapshot must not forget the earlier captured orphan");
             drop(cleanup.0.take().map(|pid| PingCleanup(Some(pid))));
             session.kill().unwrap();
@@ -1136,7 +1200,7 @@ mod tests {
             let session = PtySession::new("synthetic-live".into(),
                 AgentRole::Worker { index: 1, parent: None }, "cmd.exe", pty_submit_policy("cmd.exe"),
                 &[], &["/c", "ping -n 600 127.0.0.1 >nul"], temp.path().to_str(), 80, 24, 8192).unwrap();
-            assert!(session.kill_with_tree_killer(|_, _| Ok(())).is_err(),
+            assert!(session.kill_with_tree_killer(|_, _, _| Ok(())).is_err(),
                 "helper success cannot replace exact process-tree liveness proof");
             assert!(session.is_alive(), "failed verification must retain the live cleanup target");
             session.kill().unwrap();
@@ -1163,9 +1227,9 @@ mod tests {
                 thread::sleep(Duration::from_millis(25));
             }
             assert!(!session.is_alive());
-            session.kill_with_tree_killer(|_, _| Err(std::io::Error::other("partial failure"))).unwrap();
+            session.kill_with_tree_killer(|_, _, _| Err(std::io::Error::other("partial failure"))).unwrap();
             let mut retried = false;
-            session.kill_with_tree_killer(|_, _| {
+            session.kill_with_tree_killer(|_, _, _| {
                 retried = true;
                 Ok(())
             }).unwrap();
