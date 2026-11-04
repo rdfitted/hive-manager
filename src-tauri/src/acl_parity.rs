@@ -462,3 +462,33 @@ fn updater_and_restart_permissions_are_main_window_only() {
         "main window must have exactly the updater and restart grants it uses"
     );
 }
+
+#[test]
+fn app_csp_is_pinned_without_script_escape_hatches() {
+    let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+        .expect("real Tauri configuration must parse");
+    let policy = config["app"]["security"]["csp"]
+        .as_str()
+        .expect("app CSP must be enabled");
+    assert_eq!(policy, "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:18800 http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; frame-src 'self'",
+        "CSP changes require reviewing the app and sandboxed preview source requirements");
+    assert!(!policy.contains("'unsafe-eval'"));
+    let scripts = policy
+        .split(';')
+        .find(|directive| directive.trim().starts_with("script-src "))
+        .expect("explicit script policy");
+    assert!(!scripts.contains("'unsafe-inline'"));
+    let dev_policy = policy.replace(
+        "http://127.0.0.1:*;",
+        "http://127.0.0.1:* ws://localhost:1420 ws://localhost:1421;",
+    );
+    assert_eq!(
+        config["app"]["security"]["devCsp"].as_str(),
+        Some(dev_policy.as_str()),
+        "development may add only the two configured local Vite HMR ports"
+    );
+    assert!(
+        config["app"]["security"]["dangerousDisableAssetCspModification"].is_null(),
+        "Tauri must retain its trusted asset nonce/hash injection"
+    );
+}
