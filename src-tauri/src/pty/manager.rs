@@ -1173,6 +1173,10 @@ impl PtyManager {
     }
 
     fn admit_input(&self, id: &str) -> Result<(Arc<PtySession>, InputAdmission), PtyError> {
+        self.admit_input_instance(id, None)
+    }
+
+    fn admit_input_instance(&self, id: &str, expected: Option<uuid::Uuid>) -> Result<(Arc<PtySession>, InputAdmission), PtyError> {
         let _lifecycle = self.lifecycle.lock();
         if self.protocol_agent(id).is_some() {
             return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));
@@ -1181,6 +1185,9 @@ impl PtyManager {
             .ok_or_else(|| PtyError::NotFound(id.to_string()))?;
         let mut instances = self.instances.write();
         let current = instances.get_mut(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        if expected.is_some_and(|expected| expected != current.id) {
+            return Err(PtyError::NotFound(format!("{id} (runtime instance replaced)")));
+        }
         current.input_revision = current.input_revision.saturating_add(1);
         current.input_active = current.input_active.saturating_add(1);
         let admission = InputAdmission { instances: Arc::clone(&self.instances), id: id.to_string(), instance: current.id };
@@ -1190,6 +1197,31 @@ impl PtyManager {
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
         let (session, _admission) = self.admit_input(id)?;
         session.write(data)
+    }
+
+    /// Validate identity at admission, then release lifecycle before blocking I/O.
+    pub fn write_instance(&self, id: &str, instance: uuid::Uuid, data: &[u8]) -> Result<(), PtyError> {
+        let (session, _admission) = self.admit_input_instance(id, Some(instance))?;
+        session.write(data)
+    }
+
+    pub fn submit_instance(&self, id: &str, instance: uuid::Uuid, data: &[u8]) -> Result<PtySubmitResult, PtyError> {
+        let (session, _admission) = self.admit_input_instance(id, Some(instance))?;
+        session.submit(data)
+    }
+
+    pub fn write_bracketed_instance(&self, id: &str, instance: uuid::Uuid, data: &[u8]) -> Result<(), PtyError> {
+        let (session, _admission) = self.admit_input_instance(id, Some(instance))?;
+        session.write_bracketed(data)
+    }
+
+    /// Keep a metadata update bound to the current identity. Callers acquire the
+    /// roster first and must not perform I/O or emit projections in this callback.
+    pub fn with_current_instance<T>(&self, id: &str, expected: uuid::Uuid,
+        update: impl FnOnce(chrono::DateTime<chrono::Utc>) -> T) -> Option<T> {
+        let instances = self.instances.read();
+        let current = instances.get(id).filter(|current| current.id == expected)?;
+        Some(update(current.spawned_at))
     }
 
     /// Deliver a payload as a bracketed paste and then a discrete bare Enter to submit it.
@@ -1224,6 +1256,12 @@ impl PtyManager {
         self.instances.read().get(id).map(|instance| instance.spawned_at)
     }
 
+    #[cfg(test)]
+    pub fn set_instance_spawned_at_for_test(&self, id: &str, at: chrono::DateTime<chrono::Utc>) {
+        let _lifecycle = self.lifecycle.lock();
+        self.instances.write().get_mut(id).expect("instance fixture").spawned_at = at;
+    }
+
     /// Input admission and retirement share lifecycle. This fence binds completion
     /// to the last submitted input even before HTTP records its pending marker.
     pub fn input_fence(&self, id: &str) -> Option<(uuid::Uuid, u64)> {
@@ -1235,6 +1273,11 @@ impl PtyManager {
     /// its replacement. Failed cleanup keeps the identity and handle for retry.
     pub fn kill_instance(&self, id: &str, instance_id: uuid::Uuid) -> Result<bool, PtyError> {
         self.kill_inner(id, Some(instance_id), false, None)
+    }
+
+    /// Preserve earned work state only if no new input was admitted since its proof.
+    pub fn kill_instance_at_input_revision(&self, id: &str, instance_id: uuid::Uuid, revision: u64) -> Result<bool, PtyError> {
+        self.kill_inner(id, Some(instance_id), false, Some(revision))
     }
 
     /// Exact-instance retirement preserves just its bounded terminal replay bytes.
@@ -1590,6 +1633,47 @@ while($null -ne ($line=[Console]::ReadLine())) {
         }
     }
 
+    // Signals decide success; the ceiling only fails a broken fixture.
+    #[cfg(windows)]
+    const PROTOCOL_FIXTURE_FAILSAFE: Duration = Duration::from_secs(120);
+
+    #[cfg(windows)]
+    fn spawn_reported_protocol_startup(
+        startup_signal: mpsc::Sender<Result<(), String>>,
+        start: impl FnOnce() -> Result<String, super::PtyError> + Send + 'static,
+    ) -> thread::JoinHandle<Result<String, super::PtyError>> {
+        thread::spawn(move || {
+            let result = start();
+            if let Err(error) = &result {
+                let _ = startup_signal.send(Err(error.to_string()));
+            }
+            result
+        })
+    }
+
+    #[cfg(windows)]
+    fn wait_for_protocol_publication(ready: mpsc::Receiver<Result<(), String>>) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        let result = ready.recv_timeout(PROTOCOL_FIXTURE_FAILSAFE)
+            .map_err(|error| format!("fixture publication signal failed: {error}"))?;
+        eprintln!("fixture_wait_ms name=protocol publication elapsed={}", started.elapsed().as_millis());
+        result
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protocol_startup_failure_is_reported_before_publish() {
+        let (entered, ready) = mpsc::channel();
+        let startup = spawn_reported_protocol_startup(entered, || {
+            Err(super::PtyError::CreateError("synthetic startup failure".into()))
+        });
+        let reported = wait_for_protocol_publication(ready)
+            .expect_err("startup error must be reported before publication");
+        let failed = startup.join().unwrap().unwrap_err();
+        assert_eq!(reported, failed.to_string(), "report the actual startup result");
+        assert!(reported.contains("synthetic startup failure"));
+    }
+
     #[cfg(windows)]
     #[test]
     fn cancelled_protocol_start_cannot_publish_cwd_after_respawn() {
@@ -1610,22 +1694,25 @@ while($null -ne ($line=[Console]::ReadLine())) {
             let args: Vec<String> = if command == "claude" {
                 vec!["--session-id".into(), transcript_id, "--dangerously-skip-permissions".into()]
             } else { Vec::new() };
-            let (entered, ready) = mpsc::channel();
+            let (entered, ready) = mpsc::channel::<Result<(), String>>();
+            let startup_signal = entered.clone();
             let (finish, release) = mpsc::channel();
             *manager.before_protocol_publish.lock() = Some(Box::new(move || {
-                entered.send(()).unwrap();
-                release.recv_timeout(Duration::from_secs(15)).unwrap();
+                entered.send(Ok(())).unwrap();
+                let started = std::time::Instant::now();
+                release.recv_timeout(PROTOCOL_FIXTURE_FAILSAFE).expect("fixture failsafe expired waiting for publication release");
+                eprintln!("fixture_wait_ms name=publication release elapsed={}", started.elapsed().as_millis());
             }));
             let owner = manager.clone();
             let old_id = id.clone();
             let old_shim = shim.clone();
             let old_args = args.clone();
             let old_cwd = format!("{}\\.\\", temp.path().display());
-            let startup = thread::spawn(move || owner.create_session(
+            let startup = spawn_reported_protocol_startup(startup_signal, move || owner.create_session(
                 old_id, AgentRole::Worker { index: 1, parent: None }, old_shim.to_str().unwrap(),
                 &old_args.iter().map(String::as_str).collect::<Vec<_>>(), Some(&old_cwd), 80, 24,
             ));
-            ready.recv_timeout(Duration::from_secs(15)).unwrap();
+            wait_for_protocol_publication(ready).unwrap_or_else(|error| panic!("protocol startup failed before publication: {error}"));
             assert!(manager.lifecycle.try_lock().is_some(), "startup barrier must not hold lifecycle");
             manager.kill(&id).unwrap();
             let after_cancel = manager.spawn_cwd(&id);

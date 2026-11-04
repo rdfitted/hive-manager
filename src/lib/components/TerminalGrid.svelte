@@ -19,7 +19,7 @@
     type ScratchShell,
     type ScratchTerminalPane,
   } from '$lib/stores/scratchTerminals';
-  import { serdeEnumVariantName, type AgentInfo, type Session } from '$lib/stores/sessions';
+  import { sessions, serdeEnumVariantName, type AgentInfo, type Session } from '$lib/stores/sessions';
   import { TERMINAL_SESSION_STATES } from '$lib/stores/terminalPool';
   import AgentActivityLine from './agent/AgentActivityLine.svelte';
   import AttentionCard from './attention/AttentionCard.svelte';
@@ -72,6 +72,22 @@
   let previousFocusedAgentId = $state<string | null>(null);
   let paneModes = $state<Record<string, 'chat' | 'terminal' | 'raw'>>({});
   let terminalFocusId = $state<string | null>(null);
+  let resumingAgents = $state<Record<string, boolean>>({});
+  let resumeErrors = $state<Record<string, string>>({});
+
+  async function resumeAgent(event: MouseEvent, agentId: string) {
+    event.stopPropagation();
+    if (resumingAgents[agentId]) return;
+    resumingAgents[agentId] = true;
+    delete resumeErrors[agentId];
+    try {
+      await sessions.resumeAgent(session.id, agentId);
+    } catch (error) {
+      resumeErrors[agentId] = String(error);
+    } finally {
+      resumingAgents[agentId] = false;
+    }
+  }
 
   let sessionId = $derived(session.id);
   let sessionState = $derived(serdeEnumVariantName(session.state));
@@ -426,11 +442,21 @@
             <span class="pane-activity"><AgentActivityLine agentId={pane.id} compact /></span>
           {/if}
           <div class="terminal-meta">
-            {#if chatEligible}<PaneToggle {hasTerminal} mode={chatShowing ? mode === 'raw' ? 'raw' : 'chat' : 'terminal'} onchange={(next) => { paneModes[pane.id] = next; }} />{/if}
             {#if pane.kind === 'agent'}
               {@const status = serdeEnumVariantName(pane.agent.status)}
               {@const waiting = typeof pane.agent.status === 'object' && 'WaitingForInput' in pane.agent.status}
               {@const failed = status === 'Error'}
+              {@const stopped = typeof pane.agent.status === 'object' && 'WaitingForInput' in pane.agent.status && pane.agent.status.WaitingForInput === 'stopped_by_operator'}
+              {#if (status === 'Completed' || failed || stopped) && pane.agent.provider_session_id}
+                <button type="button" class="lattice-btn lattice-btn--ghost"
+                  aria-label={`Resume ${pane.title}`} disabled={resumingAgents[pane.id]}
+                  onmousedown={(event) => event.preventDefault()}
+                  onclick={(event) => resumeAgent(event, pane.id)}>
+                  {resumingAgents[pane.id] ? 'Resuming?' : 'Resume'}
+                </button>
+              {/if}
+              {#if resumeErrors[pane.id]}<span role="alert">{resumeErrors[pane.id]}</span>{/if}
+              {#if chatEligible}<PaneToggle {hasTerminal} mode={chatShowing ? mode === 'raw' ? 'raw' : 'chat' : 'terminal'} onchange={(next) => { paneModes[pane.id] = next; }} />{/if}
               <span class="cli-badge">{pane.agent.config?.cli || 'unknown'}</span>
               <span class="pane-status-text">{status ?? 'Unknown'}</span>
               <span

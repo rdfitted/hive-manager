@@ -23,6 +23,9 @@
             case 'agent_completed':
                 if (event.agent_id) acc.agents[event.agent_id] = 'completed';
                 break;
+            case 'agent_stopped':
+                if (event.agent_id) acc.agents[event.agent_id] = 'killed';
+                break;
             case 'agent_failed':
                 if (event.agent_id) acc.agents[event.agent_id] = 'failed';
                 break;

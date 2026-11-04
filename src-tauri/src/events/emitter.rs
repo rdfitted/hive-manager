@@ -97,6 +97,22 @@ impl EventEmitter {
         self.emit(session_id, Some(cell_id), Some(agent_id), EventType::AgentCompleted, Severity::Info, json!({})).await
     }
 
+    pub async fn emit_agent_stopped(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+        agent_id: &str,
+        instance_id: uuid::Uuid,
+        stopped_at: chrono::DateTime<Utc>,
+    ) -> Result<(), String> {
+        self.bus.publish(Event {
+            id: uuid::Uuid::new_v4().to_string(), session_id: session_id.to_owned(),
+            cell_id: Some(cell_id.to_owned()), agent_id: Some(agent_id.to_owned()),
+            event_type: EventType::AgentStopped, severity: Severity::Info, timestamp: stopped_at,
+            payload: json!({"instance_id": instance_id, "reason": "manual_stop"}),
+        }).await
+    }
+
     pub async fn emit_agent_waiting_input(
         &self,
         session_id: &str,

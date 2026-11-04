@@ -12,6 +12,7 @@
         'workspace_created',
         'agent_launched',
         'agent_completed',
+        'agent_stopped',
         'agent_waiting_input',
         'agent_failed',
         'artifact_updated',

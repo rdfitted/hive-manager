@@ -39,6 +39,8 @@ interface ConversationState {
 
 interface HeartbeatState {
   agents: Record<string, HeartbeatInfo>;
+  agentsBySession: Record<string, Record<string, HeartbeatInfo>>;
+  staleAgentsBySession: Record<string, Set<string>>;
   stalledAgents: Set<string>;
   staleAgents: Set<string>; // Agents with heartbeat >3min old
 }
@@ -263,6 +265,8 @@ function isHeartbeatStale(timestamp: string | undefined, injectedAt?: string): b
 function createHeartbeatStore() {
   const { subscribe, update } = writable<HeartbeatState>({
     agents: {},
+    agentsBySession: {},
+    staleAgentsBySession: {},
     stalledAgents: new Set(),
     staleAgents: new Set(),
   });
@@ -300,35 +304,38 @@ function createHeartbeatStore() {
         }
 
         const data = await resp.json();
-        // Backend returns { sessions: [...] }; only populate the requested session.
+        // One response supplies every sidebar row; retain the requested view for existing consumers.
         const sessions: Array<{ id: string; agents?: Array<{ id?: string; agent_id?: string; status?: string; summary?: string; last_activity?: string; work_state?: string; awaiting_injected_turn_at?: string; latest_input_at?: string }> }> =
           Array.isArray(data?.sessions) ? data.sessions : [];
-        const session = sessions.find((s) => s.id === sessionId);
-        if (!session) {
-          update((state) => ({ ...state, agents: {}, staleAgents: new Set() }));
-          return;
-        }
-
-        const agents: Record<string, HeartbeatInfo> = {};
-        const staleAgents = new Set<string>();
-        for (const agent of session.agents ?? []) {
-          const id = agent.id || agent.agent_id;
-          if (!id) continue;
-          const timestamp = agent.last_activity ?? '';
-          agents[id] = {
-            agent_id: id,
-            status: agent.status || 'unknown',
-            summary: agent.summary || '',
-            timestamp,
-            work_state: agent.work_state,
-            latest_input_at: agent.latest_input_at,
-          };
-          if (agent.work_state !== 'finished' && agent.work_state !== 'retired'
-            && isHeartbeatStale(timestamp, agent.latest_input_at ?? agent.awaiting_injected_turn_at)) {
-            staleAgents.add(id);
+        const agentsBySession: HeartbeatState['agentsBySession'] = {};
+        const staleAgentsBySession: HeartbeatState['staleAgentsBySession'] = {};
+        for (const session of sessions) {
+          const agents: Record<string, HeartbeatInfo> = {};
+          const staleAgents = new Set<string>();
+          for (const agent of session.agents ?? []) {
+            const id = agent.id || agent.agent_id;
+            if (!id) continue;
+            const timestamp = agent.last_activity ?? '';
+            agents[id] = {
+              agent_id: id,
+              status: agent.status || 'unknown',
+              summary: agent.summary || '',
+              timestamp,
+              work_state: agent.work_state,
+              latest_input_at: agent.latest_input_at,
+            };
+            if (agent.work_state !== 'finished' && agent.work_state !== 'retired'
+              && isHeartbeatStale(timestamp, agent.latest_input_at ?? agent.awaiting_injected_turn_at)) {
+              staleAgents.add(id);
+            }
           }
+          agentsBySession[session.id] = agents;
+          staleAgentsBySession[session.id] = staleAgents;
         }
-        update((state) => ({ ...state, agents, staleAgents }));
+        update((state) => ({ ...state, agentsBySession, staleAgentsBySession,
+          agents: agentsBySession[sessionId] ?? {},
+          staleAgents: staleAgentsBySession[sessionId] ?? new Set(),
+        }));
       } catch {
         // Silently ignore heartbeat fetch errors
       }

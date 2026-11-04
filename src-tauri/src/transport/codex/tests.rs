@@ -312,7 +312,8 @@ fn fake_server(
     let script = r#"
 $ErrorActionPreference='Stop'
 $child=Start-Process -FilePath "$PSHOME\powershell.exe" -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 300' -WindowStyle Hidden -PassThru
-[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'child.pid'),[string]$child.Id)
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'child.pid.pending'),[string]$child.Id)
+[IO.File]::Move((Join-Path $PSScriptRoot 'child.pid.pending'), (Join-Path $PSScriptRoot 'child.pid'))
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'environment.json'),(@{billing_present=[bool]($env:OPENAI_API_KEY -or $env:CODEX_API_KEY);parent_marker_present=[bool]$env:CLAUDECODE;agent=$env:HIVE_AGENT_ID;token_present=[bool]$env:HIVE_AGENT_TOKEN}|ConvertTo-Json -Compress))
 function Reply($m,$r){[Console]::Out.WriteLine((@{id=$m.id;result=$r}|ConvertTo-Json -Compress -Depth 16))}
 function Notify($method,$params){[Console]::Out.WriteLine((@{method=$method;params=$params}|ConvertTo-Json -Compress -Depth 16))}
@@ -351,11 +352,91 @@ while($null -ne ($line=[Console]::ReadLine())) {
 
 #[cfg(windows)]
 fn wait_until(mut predicate: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let started = Instant::now();
+    let deadline = started + FIXTURE_WAIT_FAILSAFE;
     while !predicate() {
         assert!(Instant::now() < deadline, "bounded fake server condition");
         std::thread::sleep(Duration::from_millis(25));
     }
+    eprintln!(
+        "fixture_wait_ms name=fake server condition elapsed={}",
+        started.elapsed().as_millis()
+    );
+}
+
+// Readiness is the pass criterion; this ceiling only fails a broken fixture.
+// Descendants sleep for 300 s: fail well before natural exit could hide a leak.
+#[cfg(windows)]
+const FIXTURE_WAIT_FAILSAFE: Duration = Duration::from_secs(120);
+
+#[cfg(windows)]
+fn spawn_with_startup_result<T: Send + 'static, E: std::fmt::Display + Send + 'static>(
+    start: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> (
+    std::thread::JoinHandle<Result<T, E>>,
+    std::sync::mpsc::Receiver<Result<(), String>>,
+) {
+    let (finished, result) = std::sync::mpsc::channel();
+    let startup = std::thread::spawn(move || {
+        let result = start();
+        let _ = finished.send(result.as_ref().map(|_| ()).map_err(|error| error.to_string()));
+        result
+    });
+    (startup, result)
+}
+
+#[cfg(windows)]
+fn wait_for_child_pid(root: &std::path::Path) -> u32 {
+    wait_for_child_pid_with_startup(root, None)
+}
+
+#[cfg(windows)]
+fn wait_for_child_pid_with_startup(
+    root: &std::path::Path,
+    startup: Option<&std::sync::mpsc::Receiver<Result<(), String>>>,
+) -> u32 {
+    let mut pid = None;
+    let mut startup_completed = false;
+    wait_for_signal("child PID publication", || {
+        if let Some(startup) = startup {
+            match startup.try_recv() {
+                Ok(Err(error)) => panic!("fixture startup failed before child PID publication: {error}"),
+                Ok(Ok(())) => startup_completed = true,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) if !startup_completed => {
+                    panic!("fixture startup thread exited without reporting its result");
+                }
+                Err(_) => {}
+            }
+        }
+        pid = std::fs::read_to_string(root.join("child.pid"))
+            .ok()
+            .and_then(|value| value.trim().parse().ok());
+        pid.is_some()
+    });
+    pid.unwrap()
+}
+
+#[cfg(windows)]
+fn wait_for_signal(name: &str, mut predicate: impl FnMut() -> bool) {
+    let started = Instant::now();
+    while !predicate() {
+        assert!(
+            started.elapsed() < FIXTURE_WAIT_FAILSAFE,
+            "fixture failsafe expired waiting for {name}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    eprintln!("fixture_wait_ms name={name} elapsed={}", started.elapsed().as_millis());
+}
+
+#[cfg(windows)]
+#[test]
+#[should_panic(expected = "fixture startup failed before child PID publication: synthetic startup failure")]
+fn g15_startup_failure_is_reported_before_pid() {
+    let temp = tempfile::tempdir().unwrap();
+    let (startup, result) = spawn_with_startup_result(|| Err::<(), _>("synthetic startup failure"));
+    assert!(startup.join().unwrap().is_err());
+    wait_for_child_pid_with_startup(temp.path(), Some(&result));
 }
 
 #[cfg(windows)]
@@ -404,11 +485,7 @@ fn manager_shutdown_cancels_stalled_initialize_without_blocking_unrelated_pty() 
             .unwrap_or_default()
             .contains("initialize")
     });
-    let pid: u32 = std::fs::read_to_string(temp.path().join("child.pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid = wait_for_child_pid(temp.path());
     let (sent, received) = std::sync::mpsc::channel();
     let pty_owner = manager.clone();
     let unrelated = std::thread::spawn(move || {
@@ -485,7 +562,7 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
                 .register(&session, &agent, transport.thread_id(), transport.clone())
                 .unwrap();
             transport.activate().unwrap();
-            wait_until(|| temp.path().join("input-closed").exists());
+            wait_for_signal("input-closed publication", || temp.path().join("input-closed").exists());
             let environment: Value = serde_json::from_slice(
                 &std::fs::read(temp.path().join("environment.json")).unwrap(),
             )
@@ -494,16 +571,12 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
             assert_eq!(environment["parent_marker_present"], false);
             assert_eq!(environment["agent"], agent);
             assert_eq!(environment["token_present"], false);
-            let pid = std::fs::read_to_string(temp.path().join("child.pid"))
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
+            let pid = wait_for_child_pid(temp.path());
             assert!(
                 transport.send_input("synthetic", true).is_err(),
                 "closed server stdin must fail the writer"
             );
-            wait_until(|| !child_alive(pid)); // Writer owns cleanup before explicit stop.
+            wait_for_signal("descendant process exit", || !child_alive(pid)); // Writer owns cleanup before explicit stop.
             registry.stop_agent_sync(&session, &agent).unwrap();
             continue;
         }
@@ -511,7 +584,7 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
         let cwd = temp.path().to_string_lossy().to_string();
         let owner = manager.clone();
         let id = agent.clone();
-        let spawn = std::thread::spawn(move || {
+        let (spawn, startup_result) = spawn_with_startup_result(move || {
             owner.create_session(
                 id,
                 crate::pty::AgentRole::Worker {
@@ -525,12 +598,7 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
                 24,
             )
         });
-        wait_until(|| temp.path().join("child.pid").exists());
-        let pid = std::fs::read_to_string(temp.path().join("child.pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let pid = wait_for_child_pid_with_startup(temp.path(), Some(&startup_result));
         assert!(child_alive(pid), "fixture descendant must start");
         if mode == "cancel" {
             manager.kill(&agent).unwrap();
@@ -555,15 +623,16 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
                 );
                 std::fs::write(temp.path().join("natural-exit"), "").unwrap();
                 assert!(entry.transport.interrupt_sync().is_err());
-                wait_until(|| !manager.is_alive(&agent));
-                wait_until(|| !child_alive(pid)); // Natural exit must clean descendants before explicit stop.
+                wait_for_signal("protocol runtime exit", || !manager.is_alive(&agent));
+                wait_for_signal("descendant process exit", || !child_alive(pid)); // Natural exit must clean descendants before explicit stop.
             } else if mode == "app-exit" {
                 let runtime = tokio::runtime::Runtime::new().unwrap();
-                assert!(runtime.block_on(registry.stop_all()).is_empty());
+                let errors = runtime.block_on(registry.stop_all());
+                assert!(errors.is_empty(), "stop_all returned {errors:?}");
             }
             manager.kill(&agent).unwrap();
         }
-        wait_until(|| !child_alive(pid));
+        wait_for_signal("descendant process exit", || !child_alive(pid));
         assert!(
             !manager.is_alive(&agent),
             "G15 no live protocol runtime after cleanup"

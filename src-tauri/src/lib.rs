@@ -6,6 +6,9 @@ mod qa_commands;
 #[cfg(test)]
 #[path = "commands/fusion_commands.rs"]
 mod fusion_commands;
+#[cfg(test)]
+#[path = "commands/session_commands.rs"]
+mod session_commands;
 #[cfg(test)] mod acl_parity;
 pub mod actions;
 pub mod adapters;
@@ -68,7 +71,7 @@ use commands::{
     launch_hive, launch_hive_v2, launch_research, launch_solo, launch_swarm, list_branches,
     list_ptys, list_session_files, list_sessions, list_stored_sessions, log_coordination_message,
     mark_plan_ready, operator_inject, paste_to_pty, queen_inject, queen_switch_branch, resize_pty,
-    resume_session, stop_agent, stop_session, switch_branch, update_app_config,
+    resume_agent, resume_session, stop_agent, stop_session, switch_branch, update_app_config,
     update_session_metadata, write_to_pty, CoordinationState, PtyManagerState,
     SessionControllerState, StorageState,
 };
@@ -401,6 +404,7 @@ pub fn run() {
                         event.event_type,
                         EventType::AgentLaunched
                             | EventType::AgentCompleted
+                            | EventType::AgentStopped
                             | EventType::AgentWaitingInput
                             | EventType::AgentFailed
                             | EventType::ArtifactUpdated
@@ -424,6 +428,7 @@ pub fn run() {
                                     event.event_type,
                                     EventType::AgentLaunched
                                         | EventType::AgentCompleted
+                                        | EventType::AgentStopped
                                         | EventType::AgentWaitingInput
                                         | EventType::AgentFailed
                                         | EventType::ArtifactUpdated
@@ -758,6 +763,7 @@ pub fn run() {
             continue_after_planning,
             mark_plan_ready,
             resume_session,
+            resume_agent,
             get_run_journal,
             list_session_files,
         ])

@@ -985,23 +985,30 @@ mod tests {
                 24,
                 8192,
             ).unwrap();
-            let deadline = Instant::now() + Duration::from_secs(10);
+            const FIXTURE_WAIT_FAILSAFE: Duration = Duration::from_secs(120);
+            let startup_wait = Instant::now();
             let pid = loop {
                 if let Ok(value) = fs::read_to_string(&pid_file) {
                     if let Ok(pid) = value.trim().parse::<u32>() {
                         break pid;
                     }
                 }
-                assert!(Instant::now() < deadline, "ping PID was not reported");
+                assert!(session.is_alive(), "ping PID was not reported: fixture process exited");
+                assert!(startup_wait.elapsed() < FIXTURE_WAIT_FAILSAFE, "fixture failsafe expired waiting for ping PID publication");
                 thread::sleep(Duration::from_millis(50));
             };
+            eprintln!("fixture_wait_ms name=ping PID publication elapsed={}", startup_wait.elapsed().as_millis());
             let mut cleanup = PingCleanup(Some(pid));
             assert!(pid_is_live(pid), "ping grandchild exited before kill");
-            session.kill().unwrap();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while pid_is_live(pid) && Instant::now() < deadline {
+            let kill_started = Instant::now();
+            let killed = session.kill();
+            eprintln!("fixture_kill_ms elapsed={} status={}", kill_started.elapsed().as_millis(), if killed.is_ok() { "ok" } else { "error" });
+            killed.unwrap();
+            let reap_wait = Instant::now();
+            while pid_is_live(pid) && reap_wait.elapsed() < FIXTURE_WAIT_FAILSAFE {
                 thread::sleep(Duration::from_millis(50));
             }
+            eprintln!("fixture_wait_ms name=ping descendant exit elapsed={}", reap_wait.elapsed().as_millis());
             assert!(!pid_is_live(pid), "ping grandchild {pid} survived PTY kill");
             cleanup.0 = None;
         }

@@ -1,0 +1,717 @@
+use super::*;
+use crate::pty::PtyManager;
+use parking_lot::RwLock;
+use std::sync::Arc;
+use uuid::Uuid;
+
+#[test]
+fn g49_resume_commands_keep_saved_model_flags_and_conversation_identity() {
+    let id = Uuid::new_v4().to_string();
+    let claude = AgentConfig {
+        cli: "claude".into(),
+        model: Some("synthetic-model".into()),
+        flags: vec![
+            "--session-id".into(),
+            Uuid::new_v4().to_string(),
+            "--resume=old".into(),
+            "--continue".into(),
+            "--fork-session".into(),
+            "--effort".into(),
+            "high".into(),
+        ],
+        initial_prompt: Some("This original task must not run again".into()),
+        ..AgentConfig::default()
+    };
+    let (command, args) = SessionController::build_resume_command(&claude, &id).unwrap();
+    assert_eq!(command, "claude");
+    assert_eq!(&args[..2], &["--resume", id.as_str()]);
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--model", "synthetic-model"]));
+    assert!(args.windows(2).any(|pair| pair == ["--effort", "high"]));
+    assert!(!args.iter().any(|arg| arg.contains("old")
+        || ["--session-id", "--continue", "--fork-session"].contains(&arg.as_str())));
+    assert!(!args.iter().any(|arg| arg.contains("original task")));
+    assert_eq!(
+        SessionController::transcript_key(&command, &args),
+        Some(id.clone())
+    );
+
+    let codex = AgentConfig {
+        cli: "codex".into(),
+        model: Some("synthetic-codex".into()),
+        flags: vec!["-c".into(), "model_reasoning_effort=high".into()],
+        ..AgentConfig::default()
+    };
+    let (command, args) = SessionController::build_resume_command(&codex, &id).unwrap();
+    assert_eq!(command, "codex");
+    assert_eq!(&args[..2], &["resume", id.as_str()]);
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["-m", "synthetic-codex"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["-c", "model_reasoning_effort=high"]));
+    assert_eq!(
+        SessionController::transcript_key(&command, &args),
+        Some(format!("codex-resume-{id}"))
+    );
+    assert!(SessionController::build_resume_command(&codex, "invalid").is_err());
+    assert!(SessionController::build_resume_command(
+        &AgentConfig {
+            cli: "cursor".into(),
+            ..AgentConfig::default()
+        },
+        &id
+    )
+    .is_err());
+}
+
+#[test]
+fn g49_provider_fields_preserve_pre_change_json_without_migration() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage =
+        Arc::new(crate::storage::SessionStorage::new_with_base(temp.path().join("data")).unwrap());
+    let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
+    controller.set_storage(storage.clone());
+    let mut source = waiting_worker_session("legacy-claude", temp.path(), 1);
+    let provider = Uuid::new_v4().to_string();
+    source.agents[0].transcript_session_id = Some(provider.clone());
+    let mut persisted = SessionController::session_to_persisted_snapshot(&source);
+    persisted.agents[0].transcript_cwd = Some(temp.path().to_string_lossy().into_owned());
+    assert_eq!(
+        persisted.agents[0].provider_session_id.as_deref(),
+        Some(provider.as_str())
+    );
+    storage.save_session(&persisted).unwrap();
+    let mut old = serde_json::to_value(&persisted).unwrap();
+    for agent in old["agents"].as_array_mut().unwrap() {
+        agent.as_object_mut().unwrap().remove("provider_session_id");
+    }
+    old.as_object_mut().unwrap().remove("agent_resume_report");
+    let bytes = serde_json::to_vec(&old).unwrap();
+    let path = storage.session_dir(&source.id).join("session.json");
+    std::fs::write(&path, &bytes).unwrap();
+    let loaded = storage.load_session(&source.id).unwrap();
+    assert!(loaded.agents[0].provider_session_id.is_none());
+    let restored = controller.session_from_persisted(&loaded).unwrap();
+    assert_eq!(
+        restored.agents[0].provider_session_id.as_deref(),
+        Some(provider.as_str())
+    );
+    assert!(restored.agent_resume_report.is_empty());
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        bytes,
+        "G49 legacy reads never migrate session.json"
+    );
+
+    let mut old_live = serde_json::to_value(&source).unwrap();
+    old_live
+        .as_object_mut()
+        .unwrap()
+        .remove("agent_resume_report");
+    for agent in old_live["agents"].as_array_mut().unwrap() {
+        agent.as_object_mut().unwrap().remove("provider_session_id");
+    }
+    let legacy: AgentInfo = serde_json::from_value(old_live["agents"][0].clone()).unwrap();
+    assert!(legacy.provider_session_id.is_none());
+    assert!(!old_live
+        .as_object()
+        .unwrap()
+        .contains_key("agent_resume_report"));
+}
+
+#[test]
+fn g49_old_codex_session_recovers_sidecar_id_and_persists_it_on_next_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage =
+        Arc::new(crate::storage::SessionStorage::new_with_base(temp.path().join("data")).unwrap());
+    let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
+    controller.set_storage(storage.clone());
+    let mut source = waiting_worker_session("legacy-codex", temp.path(), 1);
+    let agent = &mut source.agents[0];
+    agent.config.cli = "codex".into();
+    agent.transcript_session_id = Some("codex-prompt-synthetic".into());
+    agent.transcript_spawned_at = Some(chrono::Utc::now());
+    let mut persisted = SessionController::session_to_persisted_snapshot(&source);
+    persisted.agents[0].transcript_cwd = Some(temp.path().to_string_lossy().into_owned());
+    storage.save_session(&persisted).unwrap();
+    let before = std::fs::read(storage.session_dir(&source.id).join("session.json")).unwrap();
+    let provider = Uuid::new_v4().to_string();
+    let sidecars = storage.session_dir(&source.id).join("agent-feeds");
+    std::fs::create_dir_all(&sidecars).unwrap();
+    let binding = crate::transport::codex_rollout_source::CodexBinding {
+        key: source.agents[0].transcript_session_id.clone().unwrap(),
+        spawned_at: source.agents[0].transcript_spawned_at.unwrap(),
+        thread_id: provider.clone(),
+        rollout_path: temp.path().join("synthetic-rollout.jsonl"),
+    };
+    std::fs::write(
+        sidecars.join(format!("{}.binding", source.agents[0].id)),
+        serde_json::to_vec(&binding).unwrap(),
+    )
+    .unwrap();
+    let restored = controller
+        .session_from_persisted(&storage.load_session(&source.id).unwrap())
+        .unwrap();
+    assert_eq!(
+        restored.agents[0].provider_session_id.as_deref(),
+        Some(provider.as_str())
+    );
+    assert_eq!(
+        restored.agents[0].transcript_session_id,
+        source.agents[0].transcript_session_id
+    );
+    assert_eq!(
+        controller.session_to_persisted(&restored).agents[0]
+            .provider_session_id
+            .as_deref(),
+        Some(provider.as_str())
+    );
+    assert_eq!(
+        std::fs::read(storage.session_dir(&source.id).join("session.json")).unwrap(),
+        before
+    );
+}
+
+struct PersistenceTransport;
+#[async_trait::async_trait]
+impl crate::transport::AgentTransport for PersistenceTransport {
+    async fn start(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn send(&self, _: &str) -> Result<crate::delivery::Delivery, String> {
+        Ok(crate::delivery::Delivery::protocol_pending())
+    }
+    async fn interrupt(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn stop(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn stop_sync(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::transport::AgentEvent> {
+        tokio::sync::broadcast::channel(1).1
+    }
+    fn capabilities(&self) -> crate::transport::Capabilities {
+        crate::transport::Capabilities {
+            has_terminal: false,
+            can_interrupt: true,
+            supports_approvals: false,
+            event_source: crate::transport::EventSource::Protocol,
+        }
+    }
+}
+
+#[test]
+fn g49_protocol_uuid_survives_stop_but_never_crosses_a_new_incarnation() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage =
+        Arc::new(crate::storage::SessionStorage::new_with_base(temp.path().join("data")).unwrap());
+    let manager = Arc::new(RwLock::new(PtyManager::new()));
+    let registry = Arc::new(crate::transport::TransportRegistry::new(
+        storage.sessions_dir(),
+        None,
+    ));
+    manager.read().attach_transports(registry.clone());
+    let mut controller = SessionController::new(manager.clone());
+    controller.set_storage(storage.clone());
+    let mut source = waiting_worker_session("protocol-persistence", temp.path(), 1);
+    source.agents[0].config.cli = "codex".into();
+    source.agents[0].transcript_session_id = Some("codex-prompt-synthetic".into());
+    source.agents[0].transcript_spawned_at = Some(chrono::Utc::now());
+    let agent_id = source.agents[0].id.clone();
+    let provider = Uuid::new_v4().to_string();
+    manager
+        .read()
+        .seed_spawn_cwd(&agent_id, temp.path().to_str().unwrap());
+    registry
+        .register(
+            &source.id,
+            &agent_id,
+            Some(provider.clone()),
+            Arc::new(PersistenceTransport),
+        )
+        .unwrap();
+    controller
+        .sessions
+        .write()
+        .insert(source.id.clone(), source.clone());
+    assert_eq!(
+        controller.get_session(&source.id).unwrap().agents[0]
+            .provider_session_id
+            .as_deref(),
+        Some(provider.as_str())
+    );
+    let saved = controller.session_to_persisted(&source);
+    assert_eq!(
+        saved.agents[0].provider_session_id.as_deref(),
+        Some(provider.as_str())
+    );
+    storage.save_session(&saved).unwrap();
+    registry.stop_agent_sync(&source.id, &agent_id).unwrap();
+    assert_eq!(
+        controller.session_to_persisted(&source).agents[0]
+            .provider_session_id
+            .as_deref(),
+        Some(provider.as_str())
+    );
+    source.agents[0].transcript_spawned_at =
+        Some(source.agents[0].transcript_spawned_at.unwrap() + chrono::Duration::seconds(1));
+    assert!(
+        controller.session_to_persisted(&source).agents[0]
+            .provider_session_id
+            .is_none(),
+        "G49 an old UUID cannot cross a new incarnation"
+    );
+}
+
+fn resume_fixture(
+    solo: bool,
+) -> (
+    tempfile::TempDir,
+    SessionController,
+    Arc<crate::storage::SessionStorage>,
+    Session,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let storage =
+        Arc::new(crate::storage::SessionStorage::new_with_base(temp.path().join("data")).unwrap());
+    let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
+    controller.set_storage(storage.clone());
+    let mut source = waiting_worker_session(&Uuid::new_v4().to_string(), temp.path(), 1);
+    source.state = SessionState::Completed;
+    source.agents[0].transcript_session_id = Some(Uuid::new_v4().to_string());
+    source.agents[0].transcript_spawned_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+    if solo {
+        source.session_type = SessionType::Solo {
+            cli: "claude".into(),
+            model: None,
+        };
+        source.agents[0].role = AgentRole::Worker {
+            index: 1,
+            parent: None,
+        };
+        source.agents[0].parent_id = None;
+        let mut evaluator = source.agents[0].clone();
+        evaluator.id = format!("{}-evaluator", source.id);
+        evaluator.role = AgentRole::Evaluator;
+        evaluator.transcript_session_id = Some(Uuid::new_v4().to_string());
+        source.agents.push(evaluator);
+    } else {
+        source.session_type = SessionType::Hive { worker_count: 2 };
+        let mut queen = source.agents[0].clone();
+        queen.id = format!("{}-queen", source.id);
+        queen.role = AgentRole::Queen;
+        queen.parent_id = None;
+        queen.transcript_session_id = Some(Uuid::new_v4().to_string());
+        source.agents.insert(0, queen);
+        let mut missing = source.agents[1].clone();
+        missing.id = format!("{}-worker-2", source.id);
+        missing.role = AgentRole::Worker {
+            index: 2,
+            parent: Some(format!("{}-queen", source.id)),
+        };
+        missing.transcript_session_id = None;
+        missing.provider_session_id = None;
+        source.agents.push(missing);
+    }
+    let saved_cwd = temp.path().join("saved worktree");
+    std::fs::create_dir(&saved_cwd).unwrap();
+    let mut persisted = SessionController::session_to_persisted_snapshot(&source);
+    for agent in &mut persisted.agents {
+        agent.transcript_cwd = Some(saved_cwd.to_string_lossy().into_owned());
+    }
+    storage.save_session(&persisted).unwrap();
+    (temp, controller, storage, source)
+}
+
+#[test]
+fn g49_load_resumes_only_queen_then_explicitly_resumes_one_worker_in_saved_cwd() {
+    let (temp, controller, storage, source) = resume_fixture(false);
+    let queen = source.agents[0].id.clone();
+    let worker = source.agents[1].id.clone();
+    let missing = source.agents[2].id.clone();
+    let resumed = controller.resume_session(&source.id).unwrap();
+    let queen_instance = controller.pty_manager.read().instance_id(&queen).unwrap();
+    assert!(controller.pty_manager.read().is_alive(&queen));
+    assert!(
+        controller.pty_manager.read().instance_id(&worker).is_none(),
+        "G49 Load never mass-spawns workers"
+    );
+    assert!(controller
+        .pty_manager
+        .read()
+        .instance_id(&missing)
+        .is_none());
+    assert_eq!(resumed.agent_resume_report.len(), 1);
+    assert!(resumed.agent_resume_report[0].contains(&missing));
+    assert!(matches!(resumed.agents[1].status, AgentStatus::Completed));
+    let resumed = controller.resume_agent(&source.id, &worker).unwrap();
+    assert_eq!(
+        controller.pty_manager.read().instance_id(&queen),
+        Some(queen_instance)
+    );
+    let worker_instance = controller.pty_manager.read().instance_id(&worker).unwrap();
+    assert_ne!(worker_instance, queen_instance);
+    let saved_cwd = temp
+        .path()
+        .join("saved worktree")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        controller.pty_manager.read().spawn_cwd(&worker),
+        Some(saved_cwd.clone())
+    );
+    let saved = storage.load_session(&source.id).unwrap();
+    let agent = saved
+        .agents
+        .iter()
+        .find(|agent| agent.id == worker)
+        .unwrap();
+    assert_eq!(agent.transcript_cwd, Some(saved_cwd));
+    assert_eq!(
+        agent.provider_session_id,
+        source.agents[1].transcript_session_id
+    );
+    assert_eq!(
+        agent.transcript_spawned_at,
+        controller.pty_manager.read().spawned_at(&worker)
+    );
+    assert!(matches!(resumed.agents[1].status, AgentStatus::Running));
+    assert!(controller
+        .resume_agent(&source.id, &worker)
+        .unwrap_err()
+        .contains("already running"));
+    assert_eq!(
+        controller.pty_manager.read().instance_id(&worker),
+        Some(worker_instance)
+    );
+    assert!(controller
+        .resume_agent(&source.id, &missing)
+        .unwrap_err()
+        .contains("no saved conversation ID"));
+    controller.pty_manager.read().kill(&queen).unwrap();
+    controller.pty_manager.read().kill(&worker).unwrap();
+}
+
+#[test]
+fn g49_solo_load_resumes_original_agent_without_starting_evaluator() {
+    let (_temp, controller, _storage, source) = resume_fixture(true);
+    let resumed = controller.resume_session(&source.id).unwrap();
+    assert!(controller.pty_manager.read().is_alive(&source.agents[0].id));
+    assert!(controller
+        .pty_manager
+        .read()
+        .instance_id(&source.agents[1].id)
+        .is_none());
+    assert!(matches!(resumed.state, SessionState::Running));
+    controller
+        .pty_manager
+        .read()
+        .kill(&source.agents[0].id)
+        .unwrap();
+}
+
+#[test]
+fn g49_missing_worktree_or_saved_cwd_refuses_without_project_root_fallback() {
+    for missing_path in [false, true] {
+        let (temp, controller, storage, source) = resume_fixture(false);
+        let mut saved = storage.load_session(&source.id).unwrap();
+        let queen = saved
+            .agents
+            .iter_mut()
+            .find(|agent| agent.role == "Queen")
+            .unwrap();
+        queen.transcript_cwd = missing_path.then(|| {
+            temp.path()
+                .join("gone worktree")
+                .to_string_lossy()
+                .into_owned()
+        });
+        storage.save_session(&saved).unwrap();
+        let error = controller.resume_session(&source.id).unwrap_err();
+        assert!(
+            error.contains("working directory"),
+            "G49 clear refusal: {error}"
+        );
+        assert!(
+            temp.path().is_dir(),
+            "the project root is available but must never be used instead"
+        );
+        assert!(controller.sessions.read().is_empty());
+        for agent in &source.agents {
+            assert!(controller
+                .pty_manager
+                .read()
+                .instance_id(&agent.id)
+                .is_none());
+        }
+    }
+}
+
+#[test]
+fn g49_load_without_coordinator_id_names_it_and_keeps_all_agents_stopped() {
+    let (_temp, controller, storage, source) = resume_fixture(false);
+    let mut saved = storage.load_session(&source.id).unwrap();
+    let queen = saved
+        .agents
+        .iter_mut()
+        .find(|agent| agent.role == "Queen")
+        .unwrap();
+    queen.provider_session_id = None;
+    queen.transcript_session_id = None;
+    storage.save_session(&saved).unwrap();
+    let path = storage.session_dir(&source.id).join("session.json");
+    let before = std::fs::read(&path).unwrap();
+    let resumed = controller.resume_session(&source.id).unwrap();
+    assert!(resumed
+        .agent_resume_report
+        .iter()
+        .any(|line| line.contains(&source.agents[0].id)));
+    for agent in &source.agents {
+        assert!(controller
+            .pty_manager
+            .read()
+            .instance_id(&agent.id)
+            .is_none());
+    }
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        before,
+        "metadata-only legacy loads do not rewrite storage"
+    );
+}
+
+#[test]
+fn g49_pre_resume_receipt_cannot_mark_or_write_the_respawned_instance() {
+    let (_temp, controller, storage, source) = resume_fixture(false);
+    controller.resume_session(&source.id).unwrap();
+    let worker = source.agents[1].id.clone();
+    controller.resume_agent(&source.id, &worker).unwrap();
+    let injection = crate::coordination::InjectionManager::new(
+        controller.pty_manager.clone(),
+        crate::storage::SessionStorage::new_with_base(storage.base_dir().to_path_buf()).unwrap(),
+    );
+    let mut receipt = injection
+        .operator_inject(&source.id, &worker, "synthetic old turn", true)
+        .unwrap();
+    controller.stop_agent(&source.id, &worker).unwrap();
+    assert!(
+        matches!(&controller.get_session(&source.id).unwrap().agents[1].status,
+        AgentStatus::WaitingForInput(reason) if reason == "stopped_by_operator")
+    );
+    controller.resume_agent(&source.id, &worker).unwrap();
+    let new_instance = controller.pty_manager.read().instance_id(&worker).unwrap();
+    assert_ne!(receipt.instance_id, new_instance);
+    receipt.submitted_at = chrono::Utc::now(); // A new timestamp cannot rescue an old UUID.
+    controller.record_input_time_for_instance(
+        &source.id,
+        &worker,
+        receipt.instance_id,
+        receipt.submitted_at,
+    );
+    controller
+        .record_instance_injection_submission(
+            &source.id,
+            &worker,
+            receipt.instance_id,
+            receipt.submitted_at,
+            true,
+        )
+        .unwrap();
+    assert!(controller.latest_input_at(&source.id, &worker).is_none());
+    assert!(matches!(
+        controller.get_session(&source.id).unwrap().agents[1].status,
+        AgentStatus::Running
+    ));
+    let manager = controller.pty_manager.read();
+    let fence = manager.input_fence(&worker);
+    assert!(manager
+        .write_instance(&worker, receipt.instance_id, b"stale retry")
+        .is_err());
+    assert!(manager
+        .submit_instance(&worker, receipt.instance_id, b"stale submit")
+        .is_err());
+    assert_eq!(manager.input_fence(&worker), fence);
+    // Errors and the unchanged input fence above cover stale input on every
+    // platform; the Windows stub also exposes the exact bytes it received.
+    #[cfg(windows)]
+    {
+        assert!(manager.write_records_for_test(&worker).unwrap().is_empty());
+    }
+    manager.kill(&source.agents[0].id).unwrap();
+    manager.kill(&worker).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn g49_real_pty_resume_uses_only_fake_cli_shims_in_saved_worktrees() {
+    if let Some(root) = std::env::var_os("HM_RESUME_PTY_CHILD") {
+        let root = std::path::PathBuf::from(root);
+        for cli in ["claude", "codex"] {
+            let (temp, controller, storage, source) = resume_fixture(true);
+            let mut saved = storage.load_session(&source.id).unwrap();
+            let agent = &mut saved.agents[0];
+            agent.config.cli = cli.into();
+            agent.config.model = Some("synthetic-model".into());
+            agent.config.flags = if cli == "claude" {
+                vec![
+                    "--real-pty-fixture".into(),
+                    "--effort".into(),
+                    "high".into(),
+                ]
+            } else {
+                vec![
+                    "--real-pty-fixture".into(),
+                    "-c".into(),
+                    "model_reasoning_effort=high".into(),
+                ]
+            };
+            if cli == "codex" {
+                agent.transcript_session_id = Some("codex-prompt-synthetic".into());
+            }
+            let provider = agent.provider_session_id.clone().unwrap();
+            let cwd = temp.path().join("saved worktree");
+            // ConPTY reconstructs PATH from the registry. CMD searches its cwd
+            // first, so place the fake there rather than trusting a PATH override.
+            let shim = cwd.join(format!("{cli}.cmd"));
+            if std::env::var_os("HM_RESUME_PTY_MISSING_SHIM").is_none() {
+                std::fs::write(&shim, format!("@echo off\r\nset \"SYNTHETIC_CLI={cli}\"\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\" %*\r\n", root.join("resume.ps1").display())).unwrap();
+            }
+            assert!(
+                shim.is_file(),
+                "G49 fake shim missing; refusing to launch a provider"
+            );
+            let resolved = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "where", cli])
+                .current_dir(&cwd)
+                .output()
+                .unwrap();
+            assert!(resolved.status.success());
+            assert_eq!(
+                std::path::Path::new(
+                    String::from_utf8_lossy(&resolved.stdout)
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .trim()
+                )
+                .canonicalize()
+                .unwrap(),
+                shim.canonicalize().unwrap(),
+                "G49 only the saved-cwd fake CLI may resolve"
+            );
+            let remembered = format!("synthetic-{cli}-memory");
+            std::fs::write(
+                cwd.join("memory.json"),
+                serde_json::json!({(provider.clone()): remembered}).to_string(),
+            )
+            .unwrap();
+            storage.save_session(&saved).unwrap();
+            let resumed = controller.resume_session(&source.id).unwrap();
+            let agent_id = &resumed.agents[0].id;
+            let captured = controller
+                .pty_manager
+                .read()
+                .spawn_args_for_test(agent_id)
+                .unwrap();
+            assert!(
+                captured.iter().any(|arg| arg == "--real-pty-fixture"),
+                "G49 real-PTY opt-in reaches spawn: {captured:?}"
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            let result = loop {
+                if let Ok(bytes) = std::fs::read(root.join(format!("{cli}-result.json"))) {
+                    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        break value;
+                    }
+                }
+                assert!(
+                    controller.pty_manager.read().is_alive(agent_id),
+                    "G49 fake {cli} shim exited before its complete result"
+                );
+                if std::time::Instant::now() >= deadline {
+                    let output = controller.pty_manager.read().recent_output(agent_id);
+                    controller.pty_manager.read().kill(agent_id).unwrap();
+                    panic!("G49 fake shim signal failsafe for {cli}; argv={captured:?}; output={output:?}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
+            controller.pty_manager.read().kill(agent_id).unwrap();
+            assert_eq!(result["fixture"], "g49-fake-resume");
+            assert_eq!(result["cli"], cli);
+            assert_eq!(result["provider"], provider);
+            assert_eq!(result["remembered"], remembered);
+            assert_eq!(
+                std::path::Path::new(result["cwd"].as_str().unwrap())
+                    .canonicalize()
+                    .unwrap(),
+                cwd.canonicalize().unwrap()
+            );
+            let args: Vec<&str> = result["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect();
+            let flag = if cli == "claude" {
+                "--resume"
+            } else {
+                "resume"
+            };
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == [flag, provider.as_str()]));
+            let model_flag = if cli == "claude" { "--model" } else { "-m" };
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == [model_flag, "synthetic-model"]));
+            assert!(!args.contains(&"--session-id"));
+            assert!(!args.contains(&"--real-pty-fixture"));
+            if cli == "claude" {
+                assert!(args.windows(2).any(|pair| pair == ["--effort", "high"]));
+            } else {
+                assert!(args
+                    .windows(2)
+                    .any(|pair| pair == ["-c", "model_reasoning_effort=high"]));
+            }
+        }
+        return;
+    }
+    // A separate exact-test child contains environment overrides. The actual
+    // ConPTY command resolves its fake shim from the synthetic saved cwd above.
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("resume.ps1"), r#"
+$ErrorActionPreference='Stop'
+$cli=$env:SYNTHETIC_CLI
+$flag=if($cli -eq 'claude'){'--resume'}else{'resume'}
+$index=[Array]::IndexOf($args,$flag)
+if($index -lt 0){exit 9}
+$provider=$args[$index+1]
+$memory=Get-Content -LiteralPath 'memory.json' -Raw | ConvertFrom-Json
+$remembered=$memory.$provider
+if(!$remembered){exit 10}
+$result=@{fixture='g49-fake-resume';cli=$cli;provider=$provider;remembered=$remembered;cwd=[Environment]::CurrentDirectory;args=@($args)}|ConvertTo-Json -Compress -Depth 8
+$path=Join-Path $PSScriptRoot "$cli-result.json"
+[IO.File]::WriteAllText("$path.pending",$result)
+[IO.File]::Move("$path.pending",$path)
+Start-Sleep -Seconds 300
+"#).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "session::controller::tests::lane_e_tests::g49_real_pty_resume_uses_only_fake_cli_shims_in_saved_worktrees", "--nocapture"])
+        .env("HM_RESUME_PTY_CHILD", root.path())
+        .output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed; 0 failed;")
+    );
+}

@@ -123,6 +123,7 @@ fn probe_bytes(
         return Probe::Rejected;
     };
     let payload = &meta["payload"];
+    let resumed = key.strip_prefix("codex-resume-").filter(|id| uuid::Uuid::parse_str(id).is_ok());
     let recent = payload["timestamp"]
         .as_str()
         .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
@@ -133,9 +134,12 @@ fn probe_bytes(
         || payload["cwd"]
             .as_str()
             .is_none_or(|held| normalized_cwd(held) != cwd)
-        || !recent
+        || (resumed.is_none() && !recent)
     {
         return Probe::Rejected;
+    }
+    if let Some(expected) = resumed {
+        return if expected == thread { Probe::Match(thread.into()) } else { Probe::Rejected };
     }
     for line in bytes[first_end + 1..].split_inclusive(|byte| *byte == b'\n') {
         if line.last() != Some(&b'\n') {
@@ -256,7 +260,7 @@ impl CodexBinder {
     ) -> Option<CodexBinding> {
         let identity = (session.to_owned(), agent.to_owned());
         let Some((key, spawned_at)) = key.zip(spawned_at).filter(|(key, _)| {
-            key.starts_with("codex-prompt-") && feed::safe_component(key).is_ok()
+            (key.starts_with("codex-prompt-") || key.strip_prefix("codex-resume-").is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())) && feed::safe_component(key).is_ok()
         }) else {
             self.agents.remove(&identity);
             remove_sidecar(sidecar);
@@ -309,11 +313,22 @@ impl CodexBinder {
             );
         }
         let state = self.agents.get_mut(&identity)?;
-        if state.binding.is_some() {
+        let resumed_id = key.strip_prefix("codex-resume-");
+        if resumed_id.is_none() && state.binding.is_some() {
             return state.binding.clone();
         }
         if now < state.next_scan {
-            return None;
+            return state.binding.clone().filter(|binding| matches!(
+                probe(root, &binding.rollout_path, key, &cwd, spawned_at),
+                Probe::Match(ref id) if id == &binding.thread_id
+            ));
+        }
+        if resumed_id.is_some() {
+            // Re-list exact-UUID candidates: resume may preserve the previous
+            // file while creating a newer rollout for the same conversation.
+            state.matches.clear();
+            state.rejected.clear();
+            state.binding = None;
         }
         before_scan();
         #[cfg(test)]
@@ -326,7 +341,9 @@ impl CodexBinder {
             state.next_scan = now + Duration::from_secs(state.backoff);
             state.backoff = (state.backoff * 2).min(60);
         }
-        for path in rollout_files(root, spawned_at) {
+        let since = if key.starts_with("codex-resume-") { DateTime::<Utc>::UNIX_EPOCH } else { spawned_at };
+        for path in rollout_files(root, since) {
+            if resumed_id.is_some_and(|id| filename_thread(&path) != Some(id)) { continue; }
             if state.rejected.contains(&path) || state.matches.contains_key(&path) {
                 continue;
             }
@@ -344,10 +361,22 @@ impl CodexBinder {
                 Probe::Pending => {}
             }
         }
-        if state.matches.len() != 1 {
-            return None;
-        }
-        let (path, thread) = state.matches.iter().next()?;
+        let selected = if resumed_id.is_some() {
+            let mut candidates = state.matches.iter().filter_map(|(path, thread)| {
+                Some((fs::metadata(path).ok()?.modified().ok()?, path, thread))
+            }).collect::<Vec<_>>();
+            candidates.sort_by_key(|(modified, _, _)| *modified);
+            let latest = candidates.pop()?;
+            if candidates.last().is_some_and(|previous| previous.0 == latest.0) {
+                remove_sidecar(sidecar);
+                return None; // Equal timestamps do not identify the current file.
+            }
+            (latest.1, latest.2)
+        } else {
+            if state.matches.len() != 1 { return None; }
+            state.matches.iter().next()?
+        };
+        let (path, thread) = selected;
         let binding = CodexBinding {
             key: key.into(),
             spawned_at,
@@ -360,7 +389,7 @@ impl CodexBinder {
     }
 }
 
-fn load_binding(path: &Path) -> Option<CodexBinding> {
+pub(crate) fn load_binding(path: &Path) -> Option<CodexBinding> {
     let meta = fs::symlink_metadata(path).ok()?;
     if !meta.is_file() || meta.file_type().is_symlink() {
         return None;
@@ -1045,6 +1074,37 @@ mod binding_tests {
             binder.opened[&path], 1,
             "G16b rejected cold sidecar is cached before scans"
         );
+    }
+
+    #[test]
+    fn g49_resume_rebinds_old_conversation_by_uuid_after_rollout_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("rollouts");
+        let original = write(&root, 1, &[
+            meta(1, json!("cli"), "2026-11-01T12:00:00Z", "C:/fixture"),
+            user("Remember the synthetic word: sapphire"),
+        ]);
+        let mut binder = CodexBinder::new(Some(root.clone()));
+        let key = format!("codex-resume-{}", id(1));
+        let sidecar = temp.path().join("worker.binding");
+        let newer_spawn = spawn() + chrono::Duration::days(2);
+        let scan = Instant::now();
+        let resolve_resume = |binder: &mut CodexBinder, now| binder.resolve(
+            "session", "worker", Some(&key), Some(newer_spawn),
+            Path::new("C:/fixture"), &sidecar, now, newer_spawn, || {},
+        );
+        let first = resolve_resume(&mut binder, scan).expect("G49 old metadata is resumable");
+        assert_eq!(first.thread_id, id(1));
+        let mut source = CodexRolloutSource::bound(root.clone(), &first, Path::new("C:/fixture"), "worker").unwrap();
+        assert!(source.poll().unwrap().0.iter().any(|event| event.payload.to_string().contains("sapphire")), "G49 conversation survives restart");
+        let moved = original.with_file_name(format!("rollout-moved-{}.jsonl", id(1)));
+        fs::copy(&original, &moved).unwrap();
+        fs::OpenOptions::new().write(true).open(&original).unwrap().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1)).unwrap();
+        fs::OpenOptions::new().write(true).open(&moved).unwrap().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2)).unwrap();
+        let second = resolve_resume(&mut binder, scan + Duration::from_secs(2)).expect("G49 newer rollout rebinds with old file retained");
+        assert!(original.exists());
+        assert_eq!(second.rollout_path, moved);
+        assert!(CodexRolloutSource::bound(root, &second, Path::new("C:/other"), "worker").is_err(), "G49 wrong cwd is refused");
     }
 
     #[test]

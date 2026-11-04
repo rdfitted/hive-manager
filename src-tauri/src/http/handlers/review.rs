@@ -96,6 +96,7 @@ mod tests {
             qa_inconclusive_at: None, auth_strategy: crate::session::AuthStrategy::None,
             worktree_path: Some("shared-primary".into()), worktree_branch: None,
             no_git: false, resume_report: None,
+            agent_resume_report: Vec::new(),
         };
         let agent: AgentInfo = serde_json::from_value(serde_json::json!({
             "id": "worker-1", "role": {"Worker": {"index": 1, "parent": null}},

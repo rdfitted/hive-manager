@@ -1,15 +1,49 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
+import { invoke } from '@tauri-apps/api/core';
+import { sessions, type Session } from '$lib/stores/sessions';
 import ResumeConfirmModal from './ResumeConfirmModal.svelte';
 import type { ResumeReport } from '$lib/stores/sessions';
 
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+
 afterEach(() => {
   cleanup();
+  sessions.dismissResumeNotice();
+  vi.clearAllMocks();
   document.body.innerHTML = '';
 });
 
 describe('ResumeConfirmModal', () => {
+  it('names agents without saved conversations after the sidebar closes its confirmation', async () => {
+    const messages = [
+      'Synthetic principal (fixture-worker-1): no saved conversation ID; Resume is unavailable.',
+      'Synthetic reviewer (fixture-worker-2): no saved conversation ID; Resume is unavailable.',
+    ];
+    const view = render(ResumeConfirmModal, { props: { open: true, sessionName: 'Synthetic session' } });
+    vi.mocked(invoke).mockResolvedValueOnce({
+      id: 'fixture-resume-report', name: 'Synthetic session', project_path: 'C:/synthetic-report', agents: [],
+      agent_resume_report: messages,
+    } as unknown as Session);
+    await sessions.resumeSession('fixture-resume-report');
+    await tick();
+    expect(view.getByRole('dialog', { name: 'Resume session' })).toBeTruthy();
+    expect(view.queryByRole('dialog', { name: 'Resume report' })).toBeNull();
+    // SessionSidebar resets these props after awaiting the returned session.
+    await view.rerender({ open: false, sessionName: null, report: null });
+    const report = await waitFor(() => view.getByRole('dialog', { name: 'Resume report' }));
+    expect(within(report).getAllByRole('listitem').map((item) => item.textContent)).toEqual(messages);
+    expect(within(report).getByText('Loaded Synthetic session')).toBeTruthy();
+    await fireEvent.click(within(report).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(view.queryByRole('dialog', { name: 'Resume report' })).toBeNull());
+    expect(get(sessions).resumeNotice).toBeNull();
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledWith('resume_session', { sessionId: 'fixture-resume-report' });
+  });
+
   it.each(['Escape', 'outside click'] as const)(
     'ignores %s while confirming and allows it after confirmation finishes',
     async (interaction) => {

@@ -398,14 +398,14 @@ struct PendingNonce {
     state: Weak<AppState>,
 }
 
-type PendingNonceKey = (usize, String, String);
+type PendingNonceKey = (usize, String, String, uuid::Uuid);
 fn pending_nonces() -> &'static parking_lot::Mutex<HashMap<PendingNonceKey, PendingNonce>> {
     static PENDING: OnceLock<parking_lot::Mutex<HashMap<PendingNonceKey, PendingNonce>>> = OnceLock::new();
     PENDING.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
 }
 
-fn pending_nonce_key(state: &AppState, session_id: &str, agent_id: &str) -> PendingNonceKey {
-    (state as *const AppState as usize, session_id.to_owned(), agent_id.to_owned())
+fn pending_nonce_key(state: &AppState, session_id: &str, agent_id: &str, instance: uuid::Uuid) -> PendingNonceKey {
+    (state as *const AppState as usize, session_id.to_owned(), agent_id.to_owned(), instance)
 }
 
 /// Empty flushes carry no marker. Reuse evidence only from an unexpired watch in
@@ -414,7 +414,7 @@ fn inherit_pending_nonce(state: &Arc<AppState>, session_id: &str, agent_id: &str
     if receipt.nonce.is_some() || !receipt.submit_keystroke_issued { return; }
     let mut pending = pending_nonces().lock();
     pending.retain(|_, value| value.expires > Instant::now() && value.state.strong_count() > 0);
-    if let Some(previous) = pending.get(&pending_nonce_key(state, session_id, agent_id)) {
+    if let Some(previous) = pending.get(&pending_nonce_key(state, session_id, agent_id, receipt.instance_id)) {
         let still_pending = state.session_controller.read().get_session(session_id)
             .and_then(|session| session.agents.into_iter().find(|agent| agent.id == agent_id))
             .is_some_and(|agent| matches!(agent.status, crate::pty::AgentStatus::WaitingForInput(reason)
@@ -458,17 +458,17 @@ async fn wait_for_transcript(reader: &SharedConfirmation, nonce: &str, since: Sy
     }
 }
 
-fn record_delivery(state: &AppState, session_id: &str, agent_id: &str,
+pub(super) fn record_delivery(state: &AppState, session_id: &str, agent_id: &str,
     receipt: &InjectionReceipt, delivery: &Delivery) {
     if !delivery.is_pending() {
-        let key = pending_nonce_key(state, session_id, agent_id);
+        let key = pending_nonce_key(state, session_id, agent_id, receipt.instance_id);
         let mut pending = pending_nonces().lock();
         if pending.get(&key).is_some_and(|value| value.submitted_at == receipt.submitted_at) {
             pending.remove(&key);
         }
     }
-    if let Err(error) = state.session_controller.read().record_injection_delivery(
-        session_id, agent_id, receipt.submitted_at, delivery) {
+    if let Err(error) = state.session_controller.read().record_instance_injection_delivery(
+        session_id, agent_id, receipt.instance_id, receipt.submitted_at, delivery) {
         tracing::debug!("Delivery watch stopped for {session_id}/{agent_id}: {error}");
     }
 }
@@ -494,7 +494,8 @@ fn watch_pending_delivery(state: &Arc<AppState>, session_id: &str, agent_id: &st
         let mut message_recorded = false;
         loop {
             let Some(state) = weak.upgrade() else { return };
-            if !state.pty_manager.read().is_alive(&agent_id)
+            if state.pty_manager.read().instance_id(&agent_id) != Some(receipt.instance_id)
+                || !state.pty_manager.read().is_alive(&agent_id)
                 || !state.session_controller.read().get_session(&session_id)
                     .is_some_and(|session| session.agents.iter().any(|agent| agent.id == agent_id
                         && matches!(&agent.status, crate::pty::AgentStatus::WaitingForInput(reason)
@@ -606,7 +607,8 @@ async fn observe_injection_with_retry(
             }
             let manager = Arc::clone(&state.pty_manager);
             let target = agent_id.to_owned();
-            let result = tokio::task::spawn_blocking(move || manager.read().write(&target, retry_keystroke)).await;
+            let instance = receipt.instance_id;
+            let result = tokio::task::spawn_blocking(move || manager.read().write_instance(&target, instance, retry_keystroke)).await;
             match result {
                 Ok(Ok(())) => {
                     submit_attempts += 1;
@@ -636,7 +638,7 @@ async fn observe_injection_with_retry(
     }
     let busy = verdict.basis == delivery::TRANSCRIPT_PENDING_BUSY;
     if receipt.submit_keystroke_issued {
-        let key = pending_nonce_key(state, session_id, agent_id);
+        let key = pending_nonce_key(state, session_id, agent_id, receipt.instance_id);
         let mut pending = pending_nonces().lock();
         pending.retain(|_, value| value.expires > Instant::now() && value.state.strong_count() > 0);
         pending.remove(&key);
@@ -667,7 +669,7 @@ async fn observe_injection_with_retry(
     }
 }
 
-fn record_injection_submission(
+pub(super) fn record_injection_submission(
     state: &AppState,
     session_id: &str,
     agent_id: &str,
@@ -675,7 +677,7 @@ fn record_injection_submission(
 ) {
     if receipt.submit_keystroke_issued
         || (receipt.protocol_submission_requested && receipt.payload_bytes_written > 0) {
-        state.session_controller.read().record_input_time(session_id, agent_id, receipt.submitted_at);
+        state.session_controller.read().record_input_time_for_instance(session_id, agent_id, receipt.instance_id, receipt.submitted_at);
     }
     // A queued protocol receipt has no exact delayed-delivery watcher. Leave the
     // current status alone rather than creating an awaiting marker that cannot
@@ -683,9 +685,10 @@ fn record_injection_submission(
     if receipt.protocol_delivery.as_ref().is_some_and(Delivery::is_pending) {
         return;
     }
-    if let Err(error) = state.session_controller.read().record_injection_submission(
+    if let Err(error) = state.session_controller.read().record_instance_injection_submission(
         session_id,
         agent_id,
+        receipt.instance_id,
         receipt.submitted_at,
         receipt.submit_keystroke_issued || (receipt.protocol_submission_requested && receipt.payload_bytes_written > 0),
     ) {
@@ -912,7 +915,7 @@ mod tests {
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
-        routing::post,
+        routing::{delete, post},
         Router,
     };
     use chrono::{Duration as ChronoDuration, Utc};
@@ -939,6 +942,7 @@ mod tests {
             commit_sha: None,
             base_commit_sha: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
         }
     }
@@ -985,6 +989,7 @@ mod tests {
             worktree_path: None,
             worktree_branch: None,
             no_git: true,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         }
     }
@@ -1068,6 +1073,8 @@ mod tests {
             None,
         ));
         let app = Router::new()
+            .route("/api/sessions/{id}/agents/{agent}", delete(super::super::agents::stop_agent))
+            .route("/api/sessions/{id}/agents/{agent}/input", post(super::super::agents::send_agent_input))
             .route("/api/sessions/{id}/inject", post(operator_inject))
             .route("/api/sessions/{id}/inject/queen", post(queen_inject))
             .route(
@@ -1077,6 +1084,284 @@ mod tests {
             .with_state(state.clone());
 
         (temp_dir, app, state)
+    }
+
+    async fn assert_terminal_rearms_finished_work(action: &str) {
+        use crate::actions::{build_registry, ActionContext, Caller};
+        use crate::session::work_state::WorkState;
+        let (_temp, _app, state) = setup_test_app();
+        state.session_controller.read().update_heartbeat(
+            SESSION_ID, QUEEN_ID, "completed", None).unwrap();
+        let work_state = || state.session_controller.read().get_session(SESSION_ID).unwrap()
+            .agents.into_iter().find(|agent| agent.id == QUEEN_ID).unwrap().work_state;
+        assert_eq!(work_state(), Some(WorkState::Finished), "fixture starts finished");
+        let ctx = ActionContext::new(Caller::Frontend, state.clone());
+        build_registry().dispatch(action, &ctx, json!({"id": QUEEN_ID, "data": "follow up"}))
+            .await.unwrap();
+        assert_eq!(work_state(), Some(WorkState::Working), "{action} re-arms controller work state");
+        assert!(state.pty_manager.read().is_alive(QUEEN_ID), "no retirement involved");
+    }
+
+    #[tokio::test]
+    async fn g45_terminal_write_rearms_controller_finished_work() {
+        assert_terminal_rearms_finished_work("pty.write").await;
+    }
+
+    #[tokio::test]
+    async fn g45_terminal_paste_rearms_controller_finished_work() {
+        assert_terminal_rearms_finished_work("pty.paste").await;
+    }
+
+    #[tokio::test]
+    async fn g45_http_agent_input_records_submission() {
+        let (_temp, app, state) = setup_test_app();
+        let (status, _) = post_inject(app, "/api/sessions/inject-test/agents/inject-test-worker-1/input",
+            json!({"input": "follow up"})).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let controller = state.session_controller.read();
+        assert!(controller.latest_input_at(SESSION_ID, AGENT_ID).is_some(), "HTTP input records controller input");
+        assert!(controller.get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).is_some_and(|agent|
+                matches!(agent.status, AgentStatus::WaitingForInput(reason)
+                    if reason.starts_with("awaiting_injected_turn:"))), "HTTP input records awaiting submission");
+    }
+
+    #[tokio::test]
+    async fn g45_http_protocol_input_applies_confirmed_delivery() {
+        let (_temp, app, state) = setup_test_app();
+        state.transports().register(SESSION_ID, AGENT_ID, None,
+            crate::http::tests_transport::FakeTransport::new()).unwrap();
+        let (status, _) = post_inject(app, "/api/sessions/inject-test/agents/inject-test-worker-1/input",
+            json!({"input": "confirm"})).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let controller = state.session_controller.read();
+        assert!(controller.latest_input_at(SESSION_ID, AGENT_ID).is_some());
+        assert!(matches!(controller.get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).unwrap().status, AgentStatus::Running),
+            "confirmed protocol input does not remain awaiting delivery");
+    }
+
+    fn respawn_fixture_agent(state: &AppState) {
+        let manager = state.pty_manager.read();
+        manager.kill(AGENT_ID).unwrap();
+        manager.create_session(AGENT_ID.into(), AgentRole::Worker { index: 1, parent: None },
+            "claude", &[], None, 80, 24).unwrap();
+    }
+
+    #[tokio::test]
+    async fn g45_stale_receipt_cannot_mark_or_write_same_id_replacement() {
+        let (_temp, _app, state) = setup_test_app();
+        let mut receipt = state.injection_manager.read().operator_inject(SESSION_ID, AGENT_ID, "old turn", true).unwrap();
+        respawn_fixture_agent(&state);
+        // Even a timestamp after replacement cannot compensate for a wrong UUID.
+        receipt.submitted_at = Utc::now();
+        record_injection_submission(&state, SESSION_ID, AGENT_ID, &receipt);
+        let controller = state.session_controller.read();
+        assert_eq!(controller.latest_input_at(SESSION_ID, AGENT_ID), None, "old receipt cannot record replacement input");
+        assert!(matches!(controller.get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).unwrap().status, AgentStatus::Running), "old receipt cannot mark replacement awaiting");
+        drop(controller);
+        let manager = state.pty_manager.read();
+        let fence = manager.input_fence(AGENT_ID);
+        assert!(manager.write_instance(AGENT_ID, receipt.instance_id, b"retry").is_err());
+        assert!(manager.submit_instance(AGENT_ID, receipt.instance_id, b"submit").is_err());
+        assert!(manager.write_bracketed_instance(AGENT_ID, receipt.instance_id, b"paste").is_err());
+        assert_eq!(manager.input_fence(AGENT_ID), fence, "stale admission does not revise replacement input");
+        assert!(manager.write_records_for_test(AGENT_ID).unwrap().is_empty(), "replacement receives no stale bytes");
+        receipt.instance_id = manager.instance_id(AGENT_ID).unwrap();
+        receipt.submitted_at = manager.spawned_at(AGENT_ID).unwrap() - ChronoDuration::microseconds(1);
+        drop(manager);
+        record_injection_submission(&state, SESSION_ID, AGENT_ID, &receipt);
+        assert_eq!(state.session_controller.read().latest_input_at(SESSION_ID, AGENT_ID), None,
+            "pre-spawn timestamp is rejected even with current UUID");
+        assert!(matches!(state.session_controller.read().get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).unwrap().status, AgentStatus::Running),
+            "pre-spawn timestamp cannot mark current instance awaiting");
+    }
+
+    #[tokio::test]
+    async fn g45_manager_admission_rejects_replaced_instance() {
+        let (_temp, _app, state) = setup_test_app();
+        let old = state.pty_manager.read().instance_id(AGENT_ID).unwrap();
+        respawn_fixture_agent(&state);
+        let manager = state.pty_manager.read();
+        let fence = manager.input_fence(AGENT_ID);
+        assert!(manager.write_instance(AGENT_ID, old, b"retry").is_err(), "stale raw write is rejected at admission");
+        assert!(manager.submit_instance(AGENT_ID, old, b"submit").is_err(), "stale submit is rejected at admission");
+        assert!(manager.write_bracketed_instance(AGENT_ID, old, b"paste").is_err(), "stale paste is rejected at admission");
+        assert_eq!(manager.input_fence(AGENT_ID), fence);
+        assert!(manager.write_records_for_test(AGENT_ID).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn g45_submission_rejects_timestamp_before_current_spawn() {
+        let (_temp, _app, state) = setup_test_app();
+        let mut receipt = state.injection_manager.read().operator_inject(SESSION_ID, AGENT_ID, "turn", true).unwrap();
+        receipt.submitted_at = state.pty_manager.read().spawned_at(AGENT_ID).unwrap() - ChronoDuration::microseconds(1);
+        record_injection_submission(&state, SESSION_ID, AGENT_ID, &receipt);
+        assert!(matches!(state.session_controller.read().get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).unwrap().status, AgentStatus::Running),
+            "pre-spawn submission cannot mark current instance awaiting");
+    }
+
+    #[tokio::test]
+    async fn g45_retry_after_respawn_never_writes_replacement() {
+        let (_temp, app, state) = setup_test_app();
+        support_codex(&state);
+        let staged = stage_after_write(state.clone());
+        let replace_state = state.clone();
+        install_before_submit_retry_hook(&state, async move { respawn_fixture_agent(&replace_state); });
+        let (status, response) = post_inject(app, "/api/sessions/inject-test/inject",
+            json!({"target_agent_id": AGENT_ID, "message": "old turn"})).await;
+        staged.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_retry_failed"], true, "retry fails closed after respawn");
+        assert_eq!(response["submit_attempts"], 1);
+        assert!(writes(&state).is_empty(), "delayed retry cannot write replacement");
+        assert_eq!(state.session_controller.read().latest_input_at(SESSION_ID, AGENT_ID), None);
+    }
+
+    #[tokio::test]
+    async fn g45_empty_flush_never_inherits_replaced_instance_nonce() {
+        let (_temp, _app, state) = setup_test_app();
+        let old = state.injection_manager.read().operator_inject(SESSION_ID, AGENT_ID, "old turn", true).unwrap();
+        respawn_fixture_agent(&state);
+        let mut flush = state.injection_manager.read().operator_inject(SESSION_ID, AGENT_ID, "", true).unwrap();
+        assert_ne!(old.instance_id, flush.instance_id);
+        // Make the roster marker match too: the pending map's identity is the fence.
+        state.session_controller.read().record_instance_injection_submission(
+            SESSION_ID, AGENT_ID, flush.instance_id, flush.submitted_at, true).unwrap();
+        let key = pending_nonce_key(&state, SESSION_ID, AGENT_ID, old.instance_id);
+        pending_nonces().lock().insert(key.clone(), PendingNonce {
+            nonce: old.nonce.unwrap(), since: old.write_started_at, submitted_at: flush.submitted_at,
+            expires: Instant::now() + Duration::from_secs(30), state: Arc::downgrade(&state),
+        });
+        inherit_pending_nonce(&state, SESSION_ID, AGENT_ID, &mut flush);
+        pending_nonces().lock().remove(&key);
+        assert_eq!(flush.nonce, None, "empty flush must not inherit another runtime's nonce");
+    }
+
+    #[tokio::test]
+    async fn g45_older_submission_cannot_replace_newer_awaiting_marker() {
+        let (_temp, _app, state) = setup_test_app();
+        let older = state.injection_manager.read().operator_inject(SESSION_ID, AGENT_ID, "first", true).unwrap();
+        let newer = state.injection_manager.read().operator_inject(SESSION_ID, AGENT_ID, "second", true).unwrap();
+        record_injection_submission(&state, SESSION_ID, AGENT_ID, &newer);
+        record_injection_submission(&state, SESSION_ID, AGENT_ID, &older);
+        let controller = state.session_controller.read();
+        assert_eq!(controller.latest_input_at(SESSION_ID, AGENT_ID), Some(newer.submitted_at));
+        assert!(matches!(controller.get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).unwrap().status, AgentStatus::WaitingForInput(reason)
+                if reason == format!("awaiting_injected_turn:{}", newer.submitted_at.to_rfc3339())),
+            "an older HTTP receipt cannot replace the newer marker");
+    }
+
+    #[tokio::test]
+    async fn g46_delete_stops_exact_instance_requeues_claim_without_completion() {
+        use crate::domain::event::EventType;
+        use crate::orchestrator::work_graph::{BindingRef, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkNode};
+        use crate::orchestrator::work_graph::runtime::{derive_runtime_graph, RuntimeOutcomeStatus};
+        use crate::storage::queue::{QueueRow, QueueStatus};
+        let (_temp, app, state) = setup_test_app();
+        state.session_controller.write().set_event_bus(state.event_bus.clone());
+        let instance = state.pty_manager.read().instance_id(AGENT_ID).unwrap();
+        let row = QueueRow {
+            id: "g46-row".into(), task_id: Some("T1".into()), session_id: SESSION_ID.into(),
+            worker_id: AGENT_ID.into(), role_type: "backend".into(), cli: "claude".into(),
+            status: QueueStatus::Running, payload: json!({}), attempts: 1, continuation_count: 0,
+            no_progress_count: 0, last_status: None, heartbeat_at: None, assignment_id: 1,
+            blocked_reason: None, created_at: 1, updated_at: 1,
+        };
+        state.queue_manager.repo().enqueue(&row).unwrap();
+        let mut second = row.clone();
+        second.id = "g46-second-row".into();
+        second.task_id = Some("T2".into());
+        state.queue_manager.repo().enqueue(&second).unwrap();
+        let plan = TaskGraph::new(vec![WorkNode::new("T1", NodeKind::Task, "stopped task",
+            NodeContract::default(), BindingRef::Role("backend".into()), NodeStatus::Running)], vec![]);
+        let mut events = state.event_bus.subscribe();
+        let response = app.oneshot(Request::builder().method("DELETE")
+            .uri("/api/sessions/inject-test/agents/inject-test-worker-1")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(state.pty_manager.read().instance_id(AGENT_ID), None, "DELETE kills the targeted instance");
+        assert!(!state.pty_manager.read().is_alive(AGENT_ID));
+        assert!(matches!(state.session_controller.read().get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).unwrap().status,
+            AgentStatus::WaitingForInput(reason) if reason == "stopped_by_operator"),
+            "unfinished stop has an explicit resumable marker");
+        assert_eq!(state.queue_manager.repo().get_row("g46-row").unwrap().unwrap().status, QueueStatus::Queued,
+            "stop releases the running claim rather than finalizing it");
+        assert_eq!(state.queue_manager.repo().get_row("g46-second-row").unwrap().unwrap().status, QueueStatus::Queued,
+            "stop releases every active claim owned by the stopped principal");
+        assert_eq!(state.queue_manager.project_queue_statuses(SESSION_ID, &plan).unwrap().nodes[0].status,
+            NodeStatus::Ready, "stopped node becomes schedulable again");
+        let mut recorded = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !recorded.iter().any(|event: &crate::domain::event::Event|
+                matches!(event.event_type, EventType::AgentStopped | EventType::AgentCompleted)) {
+                recorded.push(events.recv().await.unwrap());
+            }
+        }).await.expect("manual stop event is emitted");
+        while let Ok(event) = events.try_recv() { recorded.push(event); }
+        assert!(recorded.iter().all(|event| event.event_type != EventType::AgentCompleted),
+            "DELETE must not emit AgentCompleted");
+        let stopped = recorded.iter().find(|event| event.event_type == EventType::AgentStopped).unwrap();
+        assert_eq!(stopped.payload["instance_id"], instance.to_string());
+        assert!(recorded.iter().all(|event| event.event_type != EventType::AgentCompleted),
+            "DELETE must not emit AgentCompleted");
+        assert!(recorded.iter().all(|event| event.event_type != EventType::ArtifactUpdated),
+            "DELETE must not harvest completion artifacts");
+        let runtime = derive_runtime_graph(Some(&plan), &recorded, &[], &[], &[]);
+        assert!(runtime.outcomes.iter().all(|outcome| outcome.completion_evidence.is_none()
+            && !matches!(outcome.status, RuntimeOutcomeStatus::Completed | RuntimeOutcomeStatus::Finalized)),
+            "DELETE must create no runtime Completion");
+        assert_ne!(state.session_controller.read().get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).unwrap().work_state,
+            Some(crate::session::work_state::WorkState::Finished), "stop does not earn Finished work state");
+    }
+
+    #[tokio::test]
+    async fn g46_stale_stop_does_not_kill_or_mark_replacement() {
+        let (_temp, _app, state) = setup_test_app();
+        let old = state.pty_manager.read().instance_id(AGENT_ID).unwrap();
+        respawn_fixture_agent(&state);
+        let current = state.pty_manager.read().instance_id(AGENT_ID).unwrap();
+        assert!(state.session_controller.read().stop_agent_instance(SESSION_ID, AGENT_ID, old).is_err());
+        assert_eq!(state.pty_manager.read().instance_id(AGENT_ID), Some(current));
+        assert!(state.pty_manager.read().is_alive(AGENT_ID), "stale stop cannot kill replacement");
+        assert!(matches!(state.session_controller.read().get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).unwrap().status, AgentStatus::Running),
+            "stale stop cannot mutate replacement roster");
+    }
+
+    #[tokio::test]
+    async fn g46_delete_emits_stopped_instead_of_completed() {
+        use crate::domain::event::EventType;
+        let (_temp, app, state) = setup_test_app();
+        state.session_controller.write().set_event_bus(state.event_bus.clone());
+        let mut events = state.event_bus.subscribe();
+        let response = app.oneshot(Request::builder().method("DELETE")
+            .uri("/api/sessions/inject-test/agents/inject-test-worker-1")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let event = tokio::time::timeout(Duration::from_secs(3), events.recv()).await.unwrap().unwrap();
+        assert_eq!(event.event_type, EventType::AgentStopped, "manual DELETE must not emit AgentCompleted");
+    }
+
+    #[tokio::test]
+    async fn g46_stop_preserves_previously_earned_controller_completion() {
+        let (_temp, app, state) = setup_test_app();
+        state.session_controller.read().update_heartbeat_with_source(SESSION_ID, AGENT_ID, "completed", None, true).unwrap();
+        let finished = || state.session_controller.read().get_session(SESSION_ID).unwrap().agents.into_iter()
+            .find(|agent| agent.id == AGENT_ID).unwrap().work_state;
+        assert_eq!(finished(), Some(crate::session::work_state::WorkState::Finished));
+        let response = app.oneshot(Request::builder().method("DELETE")
+            .uri("/api/sessions/inject-test/agents/inject-test-worker-1")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(finished(), Some(crate::session::work_state::WorkState::Finished),
+            "stopping cannot revoke earned controller completion");
     }
 
     async fn post_inject(app: Router, path: &str, body: Value) -> (StatusCode, Value) {
@@ -1613,6 +1898,10 @@ mod tests {
             .unwrap();
 
         let stale_at = Utc::now() - ChronoDuration::minutes(5);
+        // An aged submission must still belong to this runtime. Keep the fixture
+        // before its input boundary rather than bypassing the production fence.
+        state.pty_manager.read().set_instance_spawned_at_for_test(
+            AGENT_ID, stale_at - ChronoDuration::seconds(1));
         for agent_id in [AGENT_ID, QUEEN_ID, QA_WORKER_ID] {
             controller.set_heartbeat_last_activity_for_test(SESSION_ID, agent_id, stale_at);
         }

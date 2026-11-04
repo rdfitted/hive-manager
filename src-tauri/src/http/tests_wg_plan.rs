@@ -52,6 +52,7 @@ fn planning_session(session_id: &str, project_path: &Path) -> Session {
         worktree_path: None,
         worktree_branch: None,
         no_git: true,
+        agent_resume_report: Vec::new(),
         resume_report: None,
     }
 }

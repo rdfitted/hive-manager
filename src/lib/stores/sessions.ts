@@ -49,6 +49,8 @@ export interface AgentConfig {
 }
 
 export interface AgentInfo {
+  provider_session_id?: string | null;
+  transcript_session_id?: string | null;
   id: string;
   work_state?: string;
   latest_input_at?: string;
@@ -335,6 +337,7 @@ export interface Session {
   worktree_branch?: string | null;
   /** Present on a resumed session (#125): per-step classification for the resume modal. */
   resume_report?: ResumeReport | null;
+  agent_resume_report?: string[];
 }
 
 // ---- #125 run journal + side-effect ledger ----
@@ -459,6 +462,7 @@ interface SessionsState {
   activeSessionId: string | null;
   loading: boolean;
   error: string | null;
+  resumeNotice?: { sessionName: string; messages: string[] } | null;
 }
 
 function createSessionsStore() {
@@ -783,7 +787,7 @@ function createSessionsStore() {
     },
 
     async resumeSession(sessionId: string, _options?: ResumeOptions) {
-      update((state) => ({ ...state, loading: true, error: null }));
+      update((state) => ({ ...state, loading: true, error: null, resumeNotice: null }));
       try {
         const session = await invoke<Session>('resume_session', { sessionId });
         update((state) => {
@@ -793,11 +797,34 @@ function createSessionsStore() {
             sessions: exists ? state.sessions : [...state.sessions, session],
             activeSessionId: session.id,
             loading: false,
+            resumeNotice: session.agent_resume_report?.length ? {
+              sessionName: sessionDisplayName(session),
+              messages: [...session.agent_resume_report],
+            } : null,
           };
         });
         return session;
       } catch (err) {
         update((state) => ({ ...state, loading: false, error: String(err) }));
+        throw err;
+      }
+    },
+
+    dismissResumeNotice() {
+      update((state) => ({ ...state, resumeNotice: null }));
+    },
+
+    async resumeAgent(sessionId: string, agentId: string) {
+      try {
+        const session = await invoke<Session>('resume_agent', { sessionId, agentId });
+        update((state) => ({
+          ...state,
+          sessions: state.sessions.map((current) => current.id === session.id ? session : current),
+          error: null,
+        }));
+        return session;
+      } catch (err) {
+        update((state) => ({ ...state, error: String(err) }));
         throw err;
       }
     },

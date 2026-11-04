@@ -104,24 +104,48 @@ pub async fn stop_agent(
 ) -> Result<StatusCode, ApiError> {
     validate_session_id(&session_id)?;
     validate_agent_id(&agent_id)?;
+    stop_agent_and_release(&state, &session_id, &agent_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
-    {
+/// Share exact-target stopping and durable claim release with the Tauri command.
+pub(crate) async fn stop_agent_and_release(state: &AppState, session_id: &str, agent_id: &str) -> Result<(), ApiError> {
+    let instance = {
         let controller = state.session_controller.read();
         let session = controller
-            .get_session(&session_id)
+            .get_session(session_id)
             .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
 
         if !session.agents.iter().any(|agent| agent.id == agent_id) {
             return Err(ApiError::not_found(format!("Agent {} not found", agent_id)));
         }
+        state.pty_manager.read().instance_id(agent_id)
+    };
+    let max_releases = state.queue_manager.repo().rows_for_session(session_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?.len();
+    let mut stopped = false;
+    for _ in 0..=max_releases {
+        let released = state.queue_manager.release_claim_with_preparation(session_id, agent_id, || {
+            if !stopped && instance.is_some() {
+                let instance = instance.expect("captured runtime");
+                state.session_controller.read().stop_agent_instance(session_id, agent_id, instance)
+                    .map_err(ApiError::internal)?;
+            } else if state.pty_manager.read().instance_id(agent_id).is_some() {
+                return Err(ApiError::new(StatusCode::CONFLICT, "Agent runtime was replaced; stop rejected"));
+            }
+            Ok(())
+        }).await.map_err(|error| ApiError::internal(error.to_string()))?;
+        stopped = true;
+        match released {
+            crate::coordination::queue_manager::GuardedRelease::SpawnInFlight(_) =>
+                return Err(ApiError::new(StatusCode::CONFLICT, "Agent spawn is in flight; retry stop after handoff")),
+            crate::coordination::queue_manager::GuardedRelease::PreparationFailed(error) => return Err(error),
+            crate::coordination::queue_manager::GuardedRelease::Complete {
+                outcome: crate::coordination::ReleaseOutcome::Released { .. }, .. } => {},
+            crate::coordination::queue_manager::GuardedRelease::Complete { .. } => return Ok(()),
+        }
     }
-
-    let controller = state.session_controller.write();
-    controller
-        .stop_agent(&session_id, &agent_id)
-        .map_err(ApiError::internal)?;
-
-    Ok(StatusCode::NO_CONTENT)
+    Err(ApiError::new(StatusCode::CONFLICT, "Agent claims changed during stop; retry release"))
 }
 
 pub async fn send_agent_input(
@@ -160,7 +184,7 @@ pub async fn send_agent_input(
     })
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
-    injection_result.map_err(|error| match error {
+    let receipt = injection_result.map_err(|error| match error {
         InjectionError::SessionNotFound(id) => {
             ApiError::not_found(format!("Session {} not found", id))
         }
@@ -172,6 +196,10 @@ pub async fn send_agent_input(
             ApiError::internal(msg)
         }
     })?;
+    super::inject::record_injection_submission(&state, &session_id, &agent_id, &receipt);
+    if let Some(delivery) = &receipt.protocol_delivery {
+        super::inject::record_delivery(&state, &session_id, &agent_id, &receipt, delivery);
+    }
 
     Ok((
         StatusCode::CREATED,

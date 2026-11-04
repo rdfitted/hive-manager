@@ -3,7 +3,7 @@
 // Delimit the marker from its run ID so their concatenation cannot look like a
 // long opaque credential. Keep the diagnostic scrubber's rules unchanged.
 export const consoleProofMessage = runId => `render-mutation-console: ${runId}`;
-export const reviewProofNames = ['screen-target-offscreen', 'grid-target-offscreen', 'sidebar-target-offscreen', 'composer-offscreen-not-known', 'finished-duplicate-attention-card', 'finished-duplicate-needs-you-count', 'chat-empty-table', 'chat-empty-code', 'updater-network-rejection', 'badge-painted-line-1440', 'badge-painted-line-800', 'badge-painted-band-1440', 'badge-painted-band-800'];
+export const reviewProofNames = ['resume-clip-focus-1440', 'resume-clip-grid-1440', 'resume-clip-focus-800', 'resume-clip-grid-800', 'resume-available-focus-1440', 'resume-available-grid-1440', 'resume-unavailable-focus-1440', 'resume-unavailable-grid-1440', 'resume-available-focus-800', 'resume-available-grid-800', 'resume-unavailable-focus-800', 'resume-unavailable-grid-800', 'screen-target-offscreen', 'grid-target-offscreen', 'sidebar-target-offscreen', 'sidebar-all-recent-sessions', 'sidebar-inactive-stale-only', 'sidebar-session-attention-compact', 'sidebar-session-name-single-line', 'sidebar-session-names-painted', 'composer-offscreen-not-known', 'finished-duplicate-attention-card', 'finished-duplicate-needs-you-count', 'chat-empty-table', 'chat-empty-code', 'updater-network-rejection', 'badge-painted-line-1440', 'badge-painted-line-800', 'badge-painted-band-1440', 'badge-painted-band-800'];
 
 export const offscreenTarget = locator => styleChange(locator, { transform: 'translateY(2000px)' });
 export const emptyContents = locator => textChange(locator, '');

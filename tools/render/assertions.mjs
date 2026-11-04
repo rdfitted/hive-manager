@@ -20,15 +20,22 @@ export async function expandAgents(page, session) {
   const row = page.locator(`.tree-row[data-agent-id=${JSON.stringify(queen.id)}]`);
   if (await row.getAttribute('aria-expanded') === 'false') await row.getByRole('button', { name: 'Expand', exact: true }).click();
 }
-export async function selectSession(page, session) {
+export async function selectSession(page, session, report) {
   if (new URL(page.url()).pathname !== '/') await page.getByRole('link', { name: 'Sessions', exact: true }).click();
   const row = page.locator('.session-button').filter({ hasText: session.name }).first();
   // Enter can reach xterm if terminal startup moves focus between Playwright's
   // locator focus and key dispatch. Activate the shipped click handler directly.
-  // The row centre can hit its nested Rename button. Timestamp text bubbles to
-  // the row's click handler without activating a nested control.
-  await row.locator('.session-meta').click();
+  const selectionState = async () => ({
+    active: await row.getAttribute('aria-current'),
+    selectedAgents: await page.locator('.tree-row[aria-selected="true"]').evaluateAll(rows => rows.map(node => node.getAttribute('data-agent-id'))),
+    renameOpen: await page.getByRole('textbox', { name: 'Session Name', exact: true }).count() > 0,
+  });
+  const before = await selectionState();
+  // The padding belongs to the row, away from the name, Rename and attention
+  // controls. Exercise the same shipped selection handler without a nested hit.
+  await row.click({ position: { x: 4, y: 4 } });
   await expandAgents(page, session);
+  if (report) (report.selectionEvidence ??= []).push({ sessionId: session.id, before, after: await selectionState() });
 }
 export async function viewMode(page, mode) {
   await page.getByRole('group', { name: 'Terminal view', exact: true }).getByRole('button', { name: mode, exact: true }).click();
@@ -113,7 +120,7 @@ export async function visibleTargetState(target) {
 }
 export async function diagnoseReview({ page, manifest, report, out }) {
   const session = manifest.sessions.find(item => item.id === manifest.screens.review.sessionId);
-  await selectSession(page, session);
+  await selectSession(page, session, report);
   await page.locator(`.tree-row[data-agent-id=${JSON.stringify(manifest.screens.review.agentId)}]`).click();
   await openReview(page);
   await cellSelect(page).selectOption(manifest.screens.review.cellId);
@@ -126,6 +133,9 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   const session = manifest.sessions.find(item => item.id === manifest.screens.grid.sessionId);
   const byState = state => session.agents.find(agent => agent.state === state);
   const normal = session.agents.find(agent => agent.id === manifest.chat.agentId), stalled = byState('stalled');
+  const resumable = session.agents.find(agent => agent.state === 'finished' && agent.providerSessionId);
+  const unavailableSession = manifest.sessions.find(item => item.state === 'Completed' && item.agents.some(agent => agent.state === 'finished' && !agent.providerSessionId));
+  const unavailable = unavailableSession.agents.find(agent => agent.state === 'finished' && !agent.providerSessionId);
   let settled = false;
   const prove = mutationProver(report, assert);
   const probe = async (name, fn, context) => { try { const result = await fn(); assert(name, result.passed, result.details, context); } catch (error) { assert(name, false, error.message, context); } };
@@ -173,6 +183,36 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       }
     }
     else report.modalBadgeObservation = { ...(await badgeGeometry(page)), scope: 'Modal backdrop intentionally interdicts background controls; normal-screen badge checks remain gating.' };
+  };
+  const resumeChecks = async (agent, expected, mode, viewport) => {
+    const pane = paneFor(page, agent);
+    const button = pane.getByRole('button', { name: `Resume ${agent.label}`, exact: true });
+    const name = `resume-${expected ? 'available' : 'unavailable'}-${mode.toLowerCase()}-${viewport.width}`;
+    const context = { screen: mode.toLowerCase(), viewport: `${viewport.width}x${viewport.height}`, agentId: agent.id };
+    const measure = async () => {
+      const paneExists = await pane.count() === 1;
+      const count = await button.count();
+      const status = paneExists ? await pane.locator('.pane-status-text').textContent() : null;
+      const visible = count === 1 ? await visibleTargetState(button) : { visible: false, visibleText: '' };
+      const enabled = count === 1 && !await button.isDisabled();
+      const buttonBox = count === 1 ? await button.boundingBox() : null;
+      const paneBox = paneExists ? await pane.boundingBox() : null;
+      const contained = !!buttonBox && !!paneBox && buttonBox.width > 0 && buttonBox.height > 0
+        && buttonBox.x >= Math.max(0, paneBox.x) - 1 && buttonBox.y >= Math.max(0, paneBox.y) - 1
+        && buttonBox.x + buttonBox.width <= Math.min(viewport.width, paneBox.x + paneBox.width) + 1
+        && buttonBox.y + buttonBox.height <= Math.min(viewport.height, paneBox.y + paneBox.height) + 1;
+      return { passed: paneExists && status === 'Completed' && (expected
+        ? count === 1 && visible.visible && visible.visibleText === 'Resume' && enabled && contained
+        : count === 0), details: { paneExists, status, count, visible, enabled, contained, buttonBox, paneBox, expected } };
+    };
+    await probe(name, measure, context);
+    if (expected) await prove(`resume-clip-${mode.toLowerCase()}-${viewport.width}`, measure, async () => {
+      const buttonBox = await button.boundingBox(), paneBox = await pane.boundingBox();
+      return styleChange(button, { transform: `translateX(${paneBox.x + paneBox.width - buttonBox.x - buttonBox.width + 6}px)` });
+    }, context);
+    await prove(name, measure, () => expected ? removeNode(button) : appendNode(pane.locator('.terminal-header'), {
+      tag: 'button', attributes: { 'aria-label': `Resume ${agent.label}` }, text: 'Resume',
+    }), context);
   };
   const gridChecks = async (viewport, stage) => {
     const context = { screen: 'grid', viewport: `${viewport.width}x${viewport.height}`, stage };
@@ -240,12 +280,12 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       const hold = async route => { await ready; await route.continue().catch(() => {}); };
       await page.route('**/agent-feeds', hold);
       try {
-        await selectSession(page, session);
+        await selectSession(page, session, report);
         const terminal = page.locator('.terminal-panel:not(.hidden) .xterm-helper-textarea').first();
         await terminal.waitFor({ state: 'attached' });
         await proveTerminalFocus({ page, target: page.locator('.session-button').filter({ hasText: session.name }).first(), terminal, prove });
       } finally { release(); await page.unroute('**/agent-feeds', hold); }
-    } else await selectSession(page, session);
+    } else await selectSession(page, session, report);
     await viewMode(page, 'Focus');
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(manifest.screens.focus.agentId)}]`).click();
     const focused = paneFor(page, normal);
@@ -269,6 +309,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       settled = true;
     }
     await gridChecks(viewport, 'after-stall-and-sweep');
+    await resumeChecks(resumable, true, 'Grid', viewport);
     // Full labels remain required in the DOM. Shipped headers truncate them;
     // visible fixture state text and each pane's viewport check prove content.
     await capture('grid', viewport, page.locator('.terminal-panel:not(.hidden) .terminal-grid'),
@@ -286,7 +327,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       // synthetic card, rather than empty leftmost columns at narrow widths.
       await capture('kanban', viewport, page.locator('.dashboard .board'), text => text.includes(item.name), item.id);
     }
-    await selectSession(page, session);
+    await selectSession(page, session, report);
     const recent = page.getByRole('button', { name: 'Recent', exact: true });
     if (await recent.getAttribute('aria-expanded') === 'false') await recent.click();
     for (const id of manifest.screens.sidebar.sessionIds) {
@@ -298,10 +339,88 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await capture('sidebar', viewport, page.locator('.session-agents[aria-label="Session agents"]'),
       text => session.agents.every(agent => text.includes(agent.label)), undefined,
       text => text.includes(normal.label) && text.includes(`Agents (${session.agents.length})`));
-    await page.locator(`.tree-row[data-agent-id=${JSON.stringify(manifest.screens.review.agentId)}]`).click();
+    const staleSession = manifest.sessions.find(item => item.id === manifest.screens.sidebar.staleSessionId);
+    const staleBadge = page.getByRole('button', { name: `1 need attention in ${staleSession.name}`, exact: true });
+    await staleBadge.scrollIntoViewIfNeeded();
+    const staleMeasure = async () => {
+      const count = await staleBadge.count();
+      const visible = count === 1 && (await visibleTargetState(staleBadge)).visible;
+      return { passed: visible, details: { sessionId: staleSession.id, count, visible } };
+    };
+    await probe('sidebar-inactive-stale-only', staleMeasure, { screen: 'sidebar', viewport: `${viewport.width}x${viewport.height}` });
+    await prove('sidebar-inactive-stale-only', staleMeasure, () => removeNode(staleBadge));
+    const staleRow = page.locator('.session-row').filter({ has: staleBadge });
+    const sessionName = staleRow.locator('.session-name');
+    const compactMeasure = async () => {
+      const details = await staleBadge.evaluate(node => {
+        const box = node.getBoundingClientRect();
+        return { width: box.width, height: box.height };
+      });
+      return { passed: details.width > 0 && details.height > 0 && details.height < 32, details };
+    };
+    const singleLineMeasure = async () => {
+      const details = await sessionName.evaluate(node => {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const lines = new Set([...range.getClientRects()]
+          .filter(rect => rect.width > 0 && rect.height > 0).map(rect => Math.round(rect.top))).size;
+        const box = node.getBoundingClientRect();
+        return { width: box.width, height: box.height, lines };
+      });
+      return { passed: details.width > 0 && details.height > 0 && details.lines === 1, details };
+    };
+    const sidebarContext = { screen: 'sidebar', viewport: String(viewport.width) + 'x' + String(viewport.height) };
+    await probe('sidebar-session-attention-compact', compactMeasure, sidebarContext);
+    await prove('sidebar-session-attention-compact', compactMeasure,
+      () => styleChange(staleBadge, { height: '90px', 'min-height': '90px' }), sidebarContext);
+    await probe('sidebar-session-name-single-line', singleLineMeasure, sidebarContext);
+    await prove('sidebar-session-name-single-line', singleLineMeasure,
+      () => styleChange(sessionName, { width: '32px', flex: '0 0 32px', 'white-space': 'normal' }), sidebarContext);
+    const fullNamesMeasure = async () => {
+      const details = [];
+      for (const expected of [session.name, staleSession.name]) {
+        const name = page.locator('.session-button .session-name').filter({ hasText: expected });
+        await name.scrollIntoViewIfNeeded();
+        const painted = await visibleTargetState(name);
+        const fit = await name.evaluate(node => ({ width: node.clientWidth, textWidth: node.scrollWidth }));
+        details.push({ expected, ...painted, ...fit });
+      }
+      return { passed: details.every(item => item.visible && item.visibleText.includes(item.expected)
+        && item.width > 0 && item.textWidth <= item.width + 1), details };
+    };
+    await probe('sidebar-session-names-painted', fullNamesMeasure, sidebarContext);
+    await prove('sidebar-session-names-painted', fullNamesMeasure,
+      () => styleChange(sessionName, { width: '32px', flex: '0 0 32px' }), sidebarContext);
+    await staleRow.scrollIntoViewIfNeeded();
+    await capture('sidebar', viewport, page.locator('.session-row').filter({ has: staleBadge }),
+      text => text.includes(staleSession.name) && text.includes('1'), 'inactive-stale');
+    const agentsDisclosure = page.getByRole('button', { name: `Agents (${session.agents.length})`, exact: true });
+    await agentsDisclosure.click();
+    const recentRows = page.locator('.session-item.recent');
+    const recentMeasure = async () => ({ passed: await recentRows.count() === manifest.sessions.length && await recentRows.count() >= manifest.screens.sidebar.recentMinimum,
+      details: { count: await recentRows.count(), expected: manifest.sessions.length } });
+    await probe('sidebar-all-recent-sessions', recentMeasure, { screen: 'sidebar', viewport: `${viewport.width}x${viewport.height}` });
+    await prove('sidebar-all-recent-sessions', recentMeasure, () => removeNode(recentRows.nth(5)));
+    await recentRows.last().scrollIntoViewIfNeeded();
+    await capture('sidebar', viewport, page.getByRole('list', { name: 'Recent sessions' }),
+      text => manifest.sessions.every(item => text.includes(item.name)), 'recent',
+      text => manifest.sessions.filter(item => text.includes(item.name)).length > 5);
+    await agentsDisclosure.click();
+    const reviewAgentSelector = `.tree-row[data-agent-id=${JSON.stringify(manifest.screens.review.agentId)}]`;
+    await page.locator(reviewAgentSelector).click();
+    await page.waitForFunction(selector => document.querySelector(selector)?.getAttribute('aria-selected') === 'true', reviewAgentSelector);
     await openReview(page);
-    await cellSelect(page).selectOption(manifest.screens.review.cellId);
-    await principalSelect(page).selectOption(manifest.screens.review.agentId);
+    const reviewCell = cellSelect(page), reviewPrincipal = principalSelect(page);
+    if (await reviewCell.inputValue() !== manifest.screens.review.cellId) await reviewCell.selectOption(manifest.screens.review.cellId);
+    if (await reviewPrincipal.inputValue() !== manifest.screens.review.agentId) await reviewPrincipal.selectOption(manifest.screens.review.agentId);
+    await page.waitForFunction(expected => {
+      const labels = [...document.querySelectorAll('.review-view .pickers > label')];
+      const value = name => labels.find(label => label.textContent.startsWith(name))?.querySelector('select')?.value;
+      return value('Cell') === expected.cellId && value('Principal') === expected.agentId;
+    }, manifest.screens.review);
+    (report.reviewSelectionEvidence ??= []).push({ viewport: viewport.width,
+      cellId: await reviewCell.inputValue(), agentId: await reviewPrincipal.inputValue(),
+      selectedAgent: await page.locator(reviewAgentSelector).getAttribute('aria-selected') });
     await page.locator(`.file-review[aria-label=${JSON.stringify(manifest.screens.review.file)}]`).waitFor();
     await capture('review', viewport, page.locator('.review-view'), text => text.includes(manifest.screens.review.file));
     if (!manifest.screens.dialog.action.includes('Keyboard Shortcuts')) throw new Error('Manifest dialog does not name the shipped Keyboard Shortcuts dialog');
@@ -311,6 +430,40 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await capture('dialog', viewport, dialog, text => text.includes('Keyboard Shortcuts'));
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
     if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
+  }
+  // Check completed history after baseline Review/dialog captures so this
+  // additional session navigation cannot change their selection state.
+  const resumePanelToggle = page.locator('#title-bar-panel-toggle');
+  if (await resumePanelToggle.getAttribute('aria-expanded') === 'true') await resumePanelToggle.click();
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 800, height: 900 }]) {
+    if (signal.aborted) throw new Error('Resume render checks interrupted');
+    await page.setViewportSize(viewport);
+    await selectSession(page, session, report);
+    await viewMode(page, 'Focus');
+    await page.locator(`.tree-row[data-agent-id=${JSON.stringify(resumable.id)}]`).click();
+    await resumeChecks(resumable, true, 'Focus', viewport);
+    await capture('focus', viewport, paneFor(page, resumable),
+      text => text.includes(resumable.label) && text.includes('Resume') && text.includes('Completed'), 'resume-available',
+      text => text.includes('Resume') && text.includes('Completed'));
+    await page.locator(`.tree-row[data-agent-id=${JSON.stringify(normal.id)}]`).click();
+    await page.getByRole('link', { name: 'Dashboard', exact: true }).click();
+    // Open the already-loaded completed fixture through the shipped Dashboard
+    // action. Recent's Load action intentionally refuses spawns in isolation.
+    const unavailableCard = page.locator(`article.card[aria-label=${JSON.stringify(unavailableSession.name)}]`);
+    await unavailableCard.scrollIntoViewIfNeeded();
+    await unavailableCard.getByRole('button', { name: 'Open session', exact: true }).click();
+    await page.locator('.terminal-panel:not(.hidden)').waitFor({ state: 'visible' });
+    await expandAgents(page, unavailableSession);
+    await viewMode(page, 'Focus');
+    await page.locator(`.tree-row[data-agent-id=${JSON.stringify(unavailable.id)}]`).click();
+    await resumeChecks(unavailable, false, 'Focus', viewport);
+    await capture('focus', viewport, paneFor(page, unavailable),
+      text => text.includes(unavailable.label) && text.includes('Completed'), 'resume-unavailable', text => text.includes('Completed'));
+    await viewMode(page, 'Grid');
+    await resumeChecks(unavailable, false, 'Grid', viewport);
+    await capture('grid', viewport, page.locator('.terminal-panel:not(.hidden) .terminal-grid'),
+      text => text.includes(unavailable.label) && text.includes('Completed'), 'resume-unavailable', text => text.includes('Completed'));
+    await selectSession(page, session, report);
   }
   const updater = await updaterState(page);
   assert('updater-invoke-rejected', updater.rejected, updater);
@@ -328,5 +481,10 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   await prove('updater-network-rejection', updaterMeasure, () => injectOutcome({ error: 'network failed after updater HTTP request' }), { boundary: 'in-memory outcome' });
   assert('all-screens-captured', Object.keys(manifest.screens).every(screen => [1440, 800].every(width => report.screenshots.some(item => item.screen === screen && item.viewport.width === width))), { captures: report.screenshots.map(item => `${item.screen}-${item.viewport.width}`) });
   const complete = () => Object.keys(manifest.screens).every(screen => [1440, 800].every(width => report.screenshots.some(item => item.screen === screen && item.viewport.width === width)));
-  await prove('all-screens-captured', async () => ({ passed: complete(), details: report.screenshots.map(item => `${item.screen}-${item.viewport.width}`) }), async () => { const removed = report.screenshots.pop(); return async () => { report.screenshots.push(removed); }; });
+  await prove('all-screens-captured', async () => ({ passed: complete(), details: report.screenshots.map(item => `${item.screen}-${item.viewport.width}`) }), async () => {
+    const original = report.screenshots;
+    const target = original.at(-1);
+    report.screenshots = original.filter(item => item.screen !== target.screen || item.viewport.width !== target.viewport.width);
+    return async () => { report.screenshots = original; };
+  });
 }

@@ -32,6 +32,7 @@ export function workStateFor(agent: AgentInfo, heartbeat?: Pick<HeartbeatInfo, '
 export function attentionReason(agent: AgentInfo, stale: Set<string>, workState = agent.work_state): Attention {
   const status = agent.status;
   if (typeof status === 'object' && status !== null) {
+    if ('WaitingForInput' in status && status.WaitingForInput === 'stopped_by_operator') return 'none';
     if ('WaitingForInput' in status && status.WaitingForInput.startsWith('injected_delivery_failed:')) {
       return 'delivery_failed';
     }

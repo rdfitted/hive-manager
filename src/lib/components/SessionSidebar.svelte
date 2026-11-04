@@ -12,6 +12,7 @@
   import { Dialog } from '$lib/components/ui';
   import { shortcutLabel } from '$lib/platform';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { onMount, tick } from 'svelte';
   import { COLORS } from './launch/launchForm';
   import AgentTree from './AgentTree.svelte';
@@ -79,7 +80,11 @@
   let persistedSessions = $state<SessionSummary[]>([]);
   let loadingPersisted = $state(false);
   let persistedLoaded = $state(false);
-  let currentDirectory = $state<string | null>(null);
+  let persistedRequestId = 0;
+  let activeProjectOnly = $state(false);
+  let recentSessions = $derived([...persistedSessions]
+    .filter(session => !activeProjectOnly || !$activeSession || session.project_path === $activeSession.project_path)
+    .sort((a, b) => Date.parse(b.last_activity_at || b.created_at) - Date.parse(a.last_activity_at || a.created_at)));
   let resumeModalOpen = $state(false);
   let resumeTargetSessionId = $state<string | null>(null);
   let resumeTargetName = $state<string | null>(null);
@@ -142,17 +147,15 @@
     const latest = [...persistedSessions].sort((a, b) =>
       Date.parse(b.last_activity_at || b.created_at) - Date.parse(a.last_activity_at || a.created_at),
     )[0];
-    launch.setDefaultProjectPath(latest?.project_path || currentDirectory || '');
+    launch.setDefaultProjectPath(latest?.project_path || '');
   });
 
-  onMount(async () => {
-    // Get current working directory first
-    try {
-      currentDirectory = await invoke<string>('get_current_directory');
-    } catch (err) {
-      console.error('Failed to get current directory:', err);
-    }
-    await loadPersistedSessions();
+  onMount(() => {
+    void loadPersistedSessions();
+    const unlisten = listen<{ session: Session }>('session-update', ({ payload }) => {
+      if (!isActiveState(payload.session.state)) void loadPersistedSessions();
+    })?.catch(() => undefined);
+    return () => { void unlisten?.then(stop => stop?.()); };
   });
 
   // Keep the shared heartbeat refresh alive even while the agent tree is collapsed.
@@ -160,17 +163,20 @@
   onMount(() => agentDependencies.subscribe(() => {}));
 
   async function loadPersistedSessions() {
+    const requestId = ++persistedRequestId;
     loadingPersisted = true;
     try {
-      // Filter by current directory if available
-      persistedSessions = await invoke<SessionSummary[]>('list_stored_sessions', {
-        projectPath: currentDirectory
+      const stored = await invoke<SessionSummary[]>('list_stored_sessions', {
+        projectPath: null
       });
+      if (requestId === persistedRequestId) persistedSessions = stored;
     } catch (err) {
       console.error('Failed to load persisted sessions:', err);
     } finally {
-      loadingPersisted = false;
-      persistedLoaded = true;
+      if (requestId === persistedRequestId) {
+        loadingPersisted = false;
+        persistedLoaded = true;
+      }
     }
   }
 
@@ -189,11 +195,15 @@
     return date.toLocaleDateString();
   }
 
-  function isActiveState(state: Session['state']): boolean {
+  function isActiveState(state: Session['state'] | string): boolean {
     if (typeof state === 'object' && state !== null && 'Failed' in state) return false;
     const v = serdeEnumVariantName(state);
     if (v === 'Completed' || v === 'Closed' || v === 'Closing' || v === 'Failed') return false;
     return true;
+  }
+
+  function projectFolder(path: string): string {
+    return path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
   }
 
   function selectSession(sessionId: string) {
@@ -399,11 +409,11 @@
           {#each projectGroups as group (group.path)}
           <div class="project-group">
           {#if projectGroups.length > 1}
-            <h4 class="project-heading" title={group.path}>{group.path}</h4>
+            <h4 class="project-heading" title={group.path}>{projectFolder(group.path)}</h4>
           {/if}
           <ul class="session-list" aria-label={projectGroups.length > 1 ? `Sessions in ${group.path}` : 'Active sessions'}>
             {#each group.items as session (session.id)}
-              {@const attentionAgents = session.agents.filter(agent => needsAttention(agent, $heartbeatStore.staleAgents, workStateFor(agent, $heartbeatStore.agents[agent.id])))}
+              {@const attentionAgents = session.agents.filter(agent => needsAttention(agent, $heartbeatStore.staleAgentsBySession?.[session.id] ?? new Set(), workStateFor(agent, $heartbeatStore.agentsBySession?.[session.id]?.[agent.id])))}
               <li class="session-item">
                 <div class="session-row">
                   <div
@@ -473,7 +483,7 @@
                     {:else}
                       <span class="session-path">
                         {#if session.color}<span class="session-color" style:background={session.color} aria-hidden="true"></span>{/if}
-                        {sessionDisplayName(session)}
+                        <span class="session-name" title={sessionDisplayName(session)}>{sessionDisplayName(session)}</span>
                         <button
                           class="lattice-btn lattice-btn--ghost lattice-btn--icon"
                           onclick={(e) => { e.stopPropagation(); startEdit(session); }}
@@ -489,16 +499,16 @@
                           <span class="type-tag solo">Solo</span>
                         {/if}
                         {formatTimestamp(session.last_activity_at ?? session.created_at)}
+                        {#if attentionAgents.length > 0}
+                          <button type="button" class="session-attention lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--chip"
+                            aria-label={`${attentionAgents.length} need attention in ${session.name || session.id}`}
+                            onclick={(event) => { event.stopPropagation(); selectSession(session.id); handleAgentSelect(new CustomEvent('select', { detail: attentionAgents[0].id })); }}
+                          >{attentionAgents.length} need you</button>
+                        {/if}
                       </span>
                     {/if}
                     </div>
                   </div>
-                  {#if attentionAgents.length > 0}
-                    <button type="button" class="lattice-btn lattice-btn--secondary"
-                      aria-label={`${attentionAgents.length} need attention in ${session.name || session.id}`}
-                      onclick={() => { selectSession(session.id); handleAgentSelect(new CustomEvent('select', { detail: attentionAgents[0].id })); }}
-                    >{attentionAgents.length} need you</button>
-                  {/if}
                   <button
                     class="close-session-button lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon"
                     class:lattice-btn--waiting={closingSessionId === session.id}
@@ -556,6 +566,10 @@
         <h3 class="section-title">Recent</h3>
       </button>
       {#if !$layout.recentCollapsed}
+        <label class="recent-project-filter">
+          <input type="checkbox" bind:checked={activeProjectOnly} disabled={!$activeSession} />
+          Active project only
+        </label>
         <Skeleton loading={loadingPersisted}>
           {#snippet skeleton()}
             <div class="recent-session-skeleton">
@@ -571,15 +585,18 @@
             </div>
           {/snippet}
           {#snippet children()}
-            {#if persistedSessions.length === 0}
+            {#if recentSessions.length === 0}
               <p class="empty-state">No recent sessions</p>
             {:else}
-              <ul class="session-list">
-                {#each persistedSessions.slice(0, 5) as session}
+              <ul class="session-list" aria-label="Recent sessions">
+                {#each recentSessions as session (session.id)}
                   <li class="session-item recent">
                     <div class="session-info">
                       <span class="session-path">{sessionDisplayName(session)}</span>
                       <span class="session-meta">
+                        {#if isActiveState(session.state) && !$sessions.sessions.some(live => live.id === session.id)}
+                          <span>Interrupted</span>
+                        {/if}
                         {#if session.session_type.startsWith('Solo') || (session.session_type === 'Hive (1)' && session.agent_count === 1)}
                           <span class="type-tag solo">Solo</span>
                         {/if}
@@ -643,6 +660,14 @@
 </Dialog>
 
 <style>
+  .recent-project-filter {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    color: var(--text-muted);
+    font-size: var(--text-small);
+  }
   .sidebar {
     position: relative;
     height: 100%;
@@ -798,6 +823,37 @@
     display: flex;
     align-items: stretch;
     gap: 6px;
+  }
+
+  .session-button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .session-attention {
+    align-self: center;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .session-row .session-path {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    width: 100%;
+    min-width: 0;
+  }
+
+  .session-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .session-row .session-path > button {
+    flex-shrink: 0;
   }
 
   .session-path {

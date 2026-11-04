@@ -294,18 +294,23 @@ impl Action for WritePty {
         require_frontend(ctx)?;
         let parsed: PtyDataInput = deserialize_input(input)?;
         let pty_manager = ctx.state.pty_manager.read();
+        let instance = pty_manager.instance_id(&parsed.id)
+            .ok_or_else(|| ActionError::internal(format!("PTY session not found: {}", parsed.id)))?;
+        let admitted_at = chrono::Utc::now();
         pty_manager
-            .write(&parsed.id, parsed.data.as_bytes())
+            .write_instance(&parsed.id, instance, parsed.data.as_bytes())
             .map_err(|e| ActionError::internal(e.to_string()))?;
+        drop(pty_manager);
+        ctx.state.session_controller.read().record_terminal_input_time(&parsed.id, instance, admitted_at);
         Ok(Value::Null)
     }
 }
 
 struct PastePty;
 
-fn paste_to_pty(pty_manager: &PtyManager, id: &str, data: &[u8]) -> Result<(), ActionError> {
+fn paste_to_pty(pty_manager: &PtyManager, id: &str, instance: uuid::Uuid, data: &[u8]) -> Result<(), ActionError> {
     pty_manager
-        .write_bracketed(id, data)
+        .write_bracketed_instance(id, instance, data)
         .map_err(|e| ActionError::internal(e.to_string()))
 }
 
@@ -328,7 +333,12 @@ impl Action for PastePty {
         require_frontend(ctx)?;
         let parsed: PtyDataInput = deserialize_input(input)?;
         let pty_manager = ctx.state.pty_manager.read();
-        paste_to_pty(&pty_manager, &parsed.id, parsed.data.as_bytes())?;
+        let instance = pty_manager.instance_id(&parsed.id)
+            .ok_or_else(|| ActionError::internal(format!("PTY session not found: {}", parsed.id)))?;
+        let admitted_at = chrono::Utc::now();
+        paste_to_pty(&pty_manager, &parsed.id, instance, parsed.data.as_bytes())?;
+        drop(pty_manager);
+        ctx.state.session_controller.read().record_terminal_input_time(&parsed.id, instance, admitted_at);
         Ok(Value::Null)
     }
 }
@@ -655,7 +665,7 @@ mod tests {
     fn pty_paste_stays_bracketed_without_enter() {
         let manager = test_manager();
 
-        paste_to_pty(&manager, AGENT_ID, b"hello").unwrap();
+        paste_to_pty(&manager, AGENT_ID, manager.instance_id(AGENT_ID).unwrap(), b"hello").unwrap();
 
         let writes = manager.write_records_for_test(AGENT_ID).unwrap();
         assert_eq!(

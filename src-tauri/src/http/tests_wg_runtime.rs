@@ -52,6 +52,67 @@ fn task(id: &str, outputs: &[&str]) -> WorkNode {
     )
 }
 
+#[test]
+fn g46_stopping_a_running_principal_releases_lane_without_completion() {
+    let mut node = task("stopped", &[]);
+    node.status = NodeStatus::Running;
+    let plan = TaskGraph::new(vec![node], vec![]);
+    let principals = std::collections::BTreeMap::from([("worker".to_string(), "backend".to_string())]);
+    let stopped = event("stop", EventType::AgentStopped, Some("worker"), json!({}));
+    let derived = derive_runtime_graph_with_principals(Some(&plan), &[stopped], &[], &[], &[], &principals);
+    let task = derived.runtime_graph.nodes.iter().find(|node| node.id == "stopped").unwrap();
+    assert_eq!(task.status, NodeStatus::Cancelled, "stop releases running lane work as interrupted");
+    assert!(derived.outcomes.iter().all(|outcome| outcome.completion_evidence.is_none()
+        && !matches!(outcome.status, RuntimeOutcomeStatus::Completed | RuntimeOutcomeStatus::Finalized)),
+        "AgentStopped must not map to Completion");
+}
+
+#[test]
+fn g46_stopping_a_completed_process_preserves_earned_completion() {
+    let plan = TaskGraph::new(vec![task("finished", &[])], vec![]);
+    let events = [
+        event("claim", EventType::WorkerClaimed, Some("worker"), json!({"task_id": "finished"})),
+        event("completed", EventType::AgentCompleted, Some("worker"), json!({})),
+        event("stop", EventType::AgentStopped, Some("worker"), json!({})),
+    ];
+    let derived = derive_runtime_graph(Some(&plan), &events, &[], &[], &[]);
+    let outcome = derived.outcomes.iter().find(|outcome| outcome.task_id.as_deref() == Some("finished")).unwrap();
+    assert_eq!(outcome.status, RuntimeOutcomeStatus::Completed);
+    assert_eq!(outcome.completion_evidence, Some(CompletionEvidenceClass::Observed));
+    assert_eq!(outcome.finished_at, Some(events[1].timestamp), "stop cannot create a new finish timestamp");
+}
+
+#[test]
+fn g46_delayed_old_stop_cannot_interrupt_replacement_claim() {
+    let plan = TaskGraph::new(vec![task("replacement", &[])], vec![]);
+    let mut old_stop = event("old-stop", EventType::AgentStopped, Some("worker"), json!({"instance_id": "old"}));
+    old_stop.timestamp = Utc::now() - chrono::Duration::seconds(1);
+    let claim = event("new-claim", EventType::WorkerClaimed, Some("worker"), json!({"task_id": "replacement"}));
+    // Publication order differs from operation order; timestamp belongs to the stop operation.
+    let derived = derive_runtime_graph(Some(&plan), &[claim, old_stop], &[], &[], &[]);
+    let outcome = derived.outcomes.iter().find(|outcome| outcome.task_id.as_deref() == Some("replacement")).unwrap();
+    assert_eq!(outcome.status, RuntimeOutcomeStatus::Running, "old stop cannot interrupt a newer claim");
+    assert_eq!(outcome.finished_at, None);
+}
+
+#[test]
+fn g46_delayed_old_stop_cannot_interrupt_replacement_launch() {
+    let mut node = task("resumed", &[]);
+    node.status = NodeStatus::Running;
+    let plan = TaskGraph::new(vec![node], vec![]);
+    let principals = std::collections::BTreeMap::from([("worker".into(), "backend".into())]);
+    let now = Utc::now();
+    let mut original = event("original", EventType::AgentLaunched, Some("worker"), json!({}));
+    original.timestamp = now - chrono::Duration::seconds(2);
+    let mut stopped = event("old-stop", EventType::AgentStopped, Some("worker"), json!({"instance_id": "old"}));
+    stopped.timestamp = now - chrono::Duration::seconds(1);
+    let replacement = event("replacement", EventType::AgentLaunched, Some("worker"), json!({}));
+    let derived = derive_runtime_graph_with_principals(Some(&plan), &[original, replacement, stopped], &[], &[], &[], &principals);
+    assert_eq!(derived.runtime_graph.nodes.iter().find(|node| node.id == "resumed").unwrap().status,
+        NodeStatus::Running, "old stop cannot interrupt a resumed principal without a new claim");
+    assert!(derived.outcomes.iter().all(|outcome| outcome.status == RuntimeOutcomeStatus::Running));
+}
+
 fn event(
     id: &str,
     event_type: EventType,

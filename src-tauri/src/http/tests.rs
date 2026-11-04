@@ -403,6 +403,7 @@ pub(super) fn make_test_session(id: &str, project_path: &str) -> Session {
         worktree_path: None,
         worktree_branch: None,
         no_git: false,
+        agent_resume_report: Vec::new(),
         resume_report: None,
     }
 }
@@ -414,6 +415,7 @@ pub(super) fn make_test_session_with_agents(id: &str, project_path: &str, agent_
         .map(|(i, aid)| AgentInfo {
             work_state: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
             id: (*aid).to_string(),
             role: AgentRole::Worker {
@@ -454,6 +456,7 @@ pub(super) fn make_test_session_with_agents(id: &str, project_path: &str, agent_
         worktree_path: None,
         worktree_branch: None,
         no_git: false,
+        agent_resume_report: Vec::new(),
         resume_report: None,
     }
 }
@@ -462,6 +465,7 @@ fn make_test_agent(id: &str, role: AgentRole) -> AgentInfo {
     AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: id.to_string(),
         role,
@@ -499,6 +503,7 @@ fn make_test_session_for_completion(
         session.agents.push(AgentInfo {
             work_state: None,
             transcript_spawned_at: None,
+            provider_session_id: None,
             transcript_session_id: None,
             id: format!("{id}-evaluator"),
             role: AgentRole::Evaluator,
@@ -1080,6 +1085,7 @@ async fn test_patch_session_omitted_field_preserves_existing_value() {
         worktree_path: None,
         worktree_branch: None,
         no_git: false,
+        agent_resume_report: Vec::new(),
         resume_report: None,
     });
 
@@ -1139,6 +1145,7 @@ async fn test_patch_session_null_clears_field() {
         worktree_path: None,
         worktree_branch: None,
         no_git: false,
+        agent_resume_report: Vec::new(),
         resume_report: None,
     });
 
@@ -4412,6 +4419,7 @@ async fn test_add_qa_worker_valid_request_reaches_controller() {
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: "session-qa-valid-evaluator".to_string(),
         role: AgentRole::Evaluator,
@@ -5349,6 +5357,7 @@ async fn milestone_ready_respawn_branch_arms_qa_and_preserves_iteration() {
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: format!("{}-evaluator", session_id),
         role: AgentRole::Evaluator,
@@ -5440,6 +5449,7 @@ async fn force_pass_is_allowed_before_the_milestone_handoff() {
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: format!("{}-evaluator", session_id),
         role: AgentRole::Evaluator,
@@ -7216,6 +7226,7 @@ async fn test_post_verdict_persists_commit_sha_and_rationale() {
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: format!("{session_id}-evaluator"),
         role: AgentRole::Evaluator,
@@ -7336,6 +7347,7 @@ async fn test_post_verdict_fail_persists_commit_sha_and_failure_state() {
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: format!("{session_id}-evaluator"),
         role: AgentRole::Evaluator,
@@ -9131,6 +9143,7 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         worktree_path: None,
         worktree_branch: None,
         no_git: false,
+        agent_resume_report: Vec::new(),
         resume_report: None,
     }
 }
@@ -10717,6 +10730,7 @@ async fn heartbeat_accepts_the_bare_queen_alias_and_canonicalizes_it() {
     session.agents.push(AgentInfo {
         work_state: None,
         transcript_spawned_at: None,
+        provider_session_id: None,
         transcript_session_id: None,
         id: queen_id.clone(),
         role: AgentRole::Queen,

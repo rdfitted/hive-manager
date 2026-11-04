@@ -227,12 +227,12 @@ pub async fn close_session(
 
 #[tauri::command]
 pub async fn stop_agent(
-    state: State<'_, SessionControllerState>,
+    app_state: State<'_, Arc<AppState>>,
     session_id: String,
     agent_id: String,
 ) -> Result<(), String> {
-    let controller = state.0.read();
-    controller.stop_agent(&session_id, &agent_id)
+    crate::http::handlers::agents::stop_agent_and_release(&app_state, &session_id, &agent_id)
+        .await.map_err(|error| error.message)
 }
 
 #[tauri::command]
@@ -425,14 +425,30 @@ pub async fn resume_session(
         controller.resume_session(&session_id)?
     };
 
-    // #126: repair queue rows orphaned by the crash. Any `agent_run_queue` row still marked
-    // `running` whose worker is NOT among the resumed session's live agents (its PTY did not
-    // survive) is flipped back to `queued` so it becomes claimable again. The queue table
-    // persisted across the restart on its own; reconcile only fixes orphaned `running` rows.
-    let live_worker_ids: Vec<String> = session.agents.iter().map(|a| a.id.clone()).collect();
+    // #126/#350/#416: observe assignment versions BEFORE runtime liveness. A Queen transfer
+    // after this snapshot must not be requeued using the older liveness observation.
+    let observed = match app_state.queue_manager.observe_running_assignments(&session_id) {
+        Ok(observed) => observed,
+        Err(e) => {
+            tracing::warn!("Queue reconcile observation on resume failed for {session_id}: {e}");
+            return Ok(session);
+        }
+    };
+    let live_worker_ids = {
+        let manager = app_state.pty_manager.read();
+        let mut ids = live_resume_agent_ids(&session, &manager);
+        // The returned Session is a clone; a running assignee may have joined since it was
+        // returned. Its actual runtime also prevents orphan repair.
+        for row in &observed {
+            if manager.is_alive(&row.worker_id) && !ids.contains(&row.worker_id) {
+                ids.push(row.worker_id.clone());
+            }
+        }
+        ids
+    };
     if let Err(e) = app_state
         .queue_manager
-        .reconcile(&session_id, &live_worker_ids)
+        .reconcile_observed(&session_id, &observed, &live_worker_ids)
         .await
     {
         tracing::warn!("Queue reconcile on resume failed for {session_id}: {e}");
@@ -440,6 +456,22 @@ pub async fn resume_session(
 
     Ok(session)
 }
+
+fn live_resume_agent_ids(session: &Session, manager: &crate::pty::PtyManager) -> Vec<String> {
+    session.agents.iter().filter(|agent| manager.is_alive(&agent.id))
+        .map(|agent| agent.id.clone()).collect()
+}
+
+#[tauri::command]
+pub async fn resume_agent(
+    state: State<'_, SessionControllerState>, session_id: String, agent_id: String,
+) -> Result<Session, String> {
+    let controller = state.0.read();
+    controller.resume_agent(&session_id, &agent_id)
+}
+
+#[cfg(test)]
+mod lane_e_resume_tests { include!("lane_e_resume_tests.rs"); }
 
 /// #125: read the run journal + side-effect ledger for a session, for the resume modal.
 #[tauri::command]

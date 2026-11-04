@@ -2,6 +2,7 @@
   import { Dialog } from './ui';
   import { createEventDispatcher } from 'svelte';
   import type { ResumeReport, RunJournalEntry, LedgerEntry } from '$lib/stores/sessions';
+  import { sessions } from '$lib/stores/sessions';
 
   /** Whether the modal is visible. */
   export let open = false;
@@ -124,6 +125,27 @@
       <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled" on:click={confirm} disabled={loading || confirming} aria-busy={confirming}>
         {confirming ? 'Resuming...' : 'Resume'}
       </button>
+    </footer>
+  </div>
+</Dialog>
+
+<Dialog open={!open && !!$sessions.resumeNotice} label="Resume report"
+  onOpenChange={(value) => { if (!value) sessions.dismissResumeNotice(); }}>
+  <div class="modal">
+    <header class="modal-header lattice-forced-colors-boundary">
+      <h2>Loaded {$sessions.resumeNotice?.sessionName ?? 'session'}</h2>
+    </header>
+    <div class="modal-body lattice-scroll-chrome">
+      <p>These agents have no saved conversation and remain stopped.</p>
+      <ul>
+        {#each $sessions.resumeNotice?.messages ?? [] as message (message)}
+          <li>{message}</li>
+        {/each}
+      </ul>
+    </div>
+    <footer class="modal-footer lattice-forced-colors-boundary">
+      <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled"
+        on:click={() => sessions.dismissResumeNotice()}>Close</button>
     </footer>
   </div>
 </Dialog>

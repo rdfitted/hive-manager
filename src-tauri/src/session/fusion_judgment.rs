@@ -340,6 +340,7 @@ mod tests {
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         });
 
@@ -446,6 +447,7 @@ mod tests {
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            agent_resume_report: Vec::new(),
             resume_report: None,
         });
 

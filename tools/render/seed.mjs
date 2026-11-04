@@ -77,7 +77,7 @@ export async function seed(root, now = new Date()) {
     HOME: path.join(root, 'home'), USERPROFILE: path.join(root, 'home'),
   });
   const gitAt = (cwd, args) => execFileSync('git', ['-c', 'core.hooksPath=disabled-hooks', ...args], { cwd, env: gitEnv, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-  // The app's cwd is the instance root; Recent is scoped to that exact project.
+  // The app's cwd is unrelated to most stored projects; Recent must still list them.
   // Give the completed fixture a real synthetic base repo while its worktree stays nested.
   gitAt(root, ['init', '--initial-branch=main', '--template=']);
   await write('.gitignore', '*\n!.gitignore\n!synthetic-base.txt\n');
@@ -102,11 +102,12 @@ export async function seed(root, now = new Date()) {
       config: { cli: 'codex', flags: [], label: agent.label, name: agent.label, initial_prompt: 'Inspect the synthetic orbital report.' },
       transcript_cwd: project, transcript_spawned_at: at(manifest.timing.createdSeconds),
       transcript_session_id: null, base_commit_sha: base,
+      provider_session_id: agent.providerSessionId ?? null,
     }));
     await json(`${relative}/session.json`, {
       id: session.id, name: session.name, session_type: { Hive: { worker_count: agents.length - 1 } },
       project_path: projectPath, worktree_path: project, worktree_branch: 'main',
-      created_at: at(manifest.timing.createdSeconds), last_activity_at: at(manifest.timing.recentActivitySeconds),
+      created_at: at(manifest.timing.createdSeconds), last_activity_at: at(session.lastActivitySeconds ?? manifest.timing.recentActivitySeconds),
       agents, state: session.state, default_cli: 'codex', auth_strategy: 'none',
       execution_policy: { workspace_strategy: 'shared_cell' }, qa_workers: [],
     });

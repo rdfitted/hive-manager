@@ -23,6 +23,11 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('G-attention-predicate', () => {
+  it('manually stopped agents never alarm even with an old heartbeat', () => {
+    const stopped = agent({ WaitingForInput: 'stopped_by_operator' });
+    expect(attentionReason(stopped, new Set(['a']))).toBe('none');
+    expect(needsAttention(stopped, new Set(['a']))).toBe(false);
+  });
   it.each(['finished', 'retired'])('G31: %s work has no stale attention or needs-you count', (work_state) => {
     const finished = { ...agent('Running'), work_state };
     const stale = new Set(['a']);

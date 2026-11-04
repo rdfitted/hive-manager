@@ -4,6 +4,8 @@ mod correlate;
 mod events;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod resume_tests;
 
 use crate::delivery::Delivery;
 use crate::transport::{
@@ -50,6 +52,7 @@ impl ClaudeOptions {
                     output.push(args[i].into());
                 }
                 "--session-id"
+                | "--resume"
                 | "--model"
                 | "--effort"
                 | "--append-system-prompt"
@@ -63,7 +66,7 @@ impl ClaudeOptions {
                     let value = *args
                         .get(i)
                         .ok_or("Missing Claude option value; select PTY")?;
-                    if flag == "--session-id" {
+                    if matches!(flag, "--session-id" | "--resume") {
                         if transcript_id.is_some() || uuid::Uuid::parse_str(value).is_err() {
                             return Err("Claude transport needs exactly one pinned session UUID; select PTY".into());
                         }
@@ -86,7 +89,7 @@ impl ClaudeOptions {
             return Err("Claude stream-json requires the same bypass permission policy as the automated PTY launch; select PTY".into());
         }
         let transcript_id = transcript_id
-            .ok_or("Claude stream-json needs the PTY launch's pinned --session-id; select PTY")?;
+            .ok_or("Claude stream-json needs one pinned --session-id or --resume UUID; select PTY")?;
         output.extend(
             [
                 "-p",
