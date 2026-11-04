@@ -482,6 +482,215 @@ fn g49_solo_load_resumes_original_agent_without_starting_evaluator() {
         .unwrap();
 }
 
+// The callback runs after the new instance is published and before Resume merges.
+// Channels make these races deterministic without holding either roster lock.
+fn g51_resume_during(
+    update: impl FnOnce(&SessionController, &str, &str),
+) -> (
+    tempfile::TempDir,
+    SessionController,
+    Arc<crate::storage::SessionStorage>,
+    Session,
+    Result<Session, String>,
+) {
+    let (temp, controller, storage, source) = resume_fixture(false);
+    let session_id = source.id.clone();
+    let worker = source.agents[1].id.clone();
+    controller.resume_session(&session_id).unwrap();
+    assert_eq!(controller.sessions.read()[&session_id].state, SessionState::Running);
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    SessionController::test_sync_hook(&session_id, "resume-agent-prepared", Some(Box::new(move || {
+        prepared_tx.send(()).unwrap();
+        release_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+    })));
+    let resumed = std::thread::scope(|scope| {
+        let resume = scope.spawn(|| controller.resume_agent(&session_id, &worker));
+        prepared_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        update(&controller, &session_id, &worker);
+        release_tx.send(()).unwrap();
+        resume.join().unwrap()
+    });
+    (temp, controller, storage, source, resumed)
+}
+
+fn g51_cleanup_resume(controller: &SessionController, source: &Session) {
+    for agent in &source.agents {
+        controller.pty_manager.read().kill(&agent.id).unwrap();
+    }
+}
+
+#[test]
+fn g51_resume_same_target_stop_cannot_resurrect_removed_runtime() {
+    let (_temp, controller, storage, source, resumed) = g51_resume_during(|controller, id, worker| {
+        let instance = controller.pty_manager.read().instance_id(worker).unwrap();
+        controller.stop_agent_instance(id, worker, instance).unwrap();
+    });
+    let worker = &source.agents[1].id;
+    let current = controller.sessions.read()[&source.id].clone();
+    let saved = storage.load_session(&source.id).unwrap();
+    assert_eq!(controller.pty_manager.read().instance_id(worker), None);
+    g51_cleanup_resume(&controller, &source);
+    assert!(resumed.is_err(), "Resume must reject an instance stopped before its merge");
+    let target = current.agents.iter().find(|agent| &agent.id == worker).unwrap();
+    assert_eq!(target.status, AgentStatus::WaitingForInput("stopped_by_operator".into()));
+    assert_eq!(target.work_state, Some(crate::session::work_state::WorkState::Working));
+    assert_eq!(saved.state, SessionController::session_to_persisted_snapshot(&current).state);
+}
+
+fn g51_check_same_target_injection(fail_before_merge: bool) {
+    let mut submission = None;
+    let (_temp, controller, _storage, source, resumed) = g51_resume_during(|controller, id, worker| {
+        let instance = controller.pty_manager.read().instance_id(worker).unwrap();
+        let submitted_at = chrono::Utc::now().max(controller.pty_manager.read().spawned_at(worker).unwrap());
+        controller.record_instance_injection_submission(id, worker, instance, submitted_at, true).unwrap();
+        if fail_before_merge {
+            controller.record_instance_injection_delivery(id, worker, instance, submitted_at,
+                &crate::delivery::Delivery::timeout(true)).unwrap();
+        }
+        submission = Some((instance, submitted_at));
+    });
+    let worker = &source.agents[1].id;
+    let (instance, submitted_at) = submission.unwrap();
+    let pending = format!("{}{}", SessionController::AWAITING_INJECTED_TURN_PREFIX, submitted_at.to_rfc3339());
+    let failed = format!("injected_delivery_failed:transcript-timeout:{}", submitted_at.to_rfc3339());
+    let expected = AgentStatus::WaitingForInput(if fail_before_merge { failed.clone() } else { pending });
+    let resumed = resumed.unwrap();
+    let current = controller.sessions.read()[&source.id].clone();
+    // Resolve after the merge too: losing the pending marker also discards this timeout.
+    controller.record_instance_injection_delivery(&source.id, worker, instance, submitted_at,
+        &crate::delivery::Delivery::timeout(true)).unwrap();
+    let after_delivery = controller.sessions.read()[&source.id].clone();
+    let spawned_at = controller.pty_manager.read().spawned_at(worker).unwrap();
+    g51_cleanup_resume(&controller, &source);
+    for snapshot in [&resumed, &current] {
+        let target = snapshot.agents.iter().find(|agent| &agent.id == worker).unwrap();
+        assert_eq!(target.status, expected, "same-instance delivery state must survive Resume");
+        assert_eq!(target.transcript_spawned_at, Some(spawned_at));
+        assert_eq!(target.provider_session_id, source.agents[1].transcript_session_id);
+    }
+    assert_eq!(after_delivery.agents.iter().find(|agent| &agent.id == worker).unwrap().status,
+        AgentStatus::WaitingForInput(failed), "visible timeout must still resolve the exact submission");
+}
+
+#[test]
+fn g51_resume_same_target_injection_preserves_pending_delivery() {
+    g51_check_same_target_injection(false);
+}
+
+#[test]
+fn g51_resume_same_target_injection_preserves_delivery_failure_before_merge() {
+    g51_check_same_target_injection(true);
+}
+
+#[tokio::test]
+async fn g51_resume_preserves_concurrent_qa_state_transition() {
+    let (_temp, controller, storage, source, resumed) = g51_resume_during(|controller, id, _| {
+        controller.begin_qa_window(id).unwrap();
+        assert!(matches!(controller.sessions.read()[id].state, SessionState::QaInProgress { .. }));
+    });
+    controller.cancel_qa_timeout(&source.id);
+    let current = controller.sessions.read()[&source.id].clone();
+    let saved = storage.load_session(&source.id).unwrap();
+    g51_cleanup_resume(&controller, &source);
+    assert!(matches!(resumed.unwrap().state, SessionState::QaInProgress { .. }));
+    assert!(matches!(current.state, SessionState::QaInProgress { .. }));
+    assert_eq!(saved.state, SessionController::session_to_persisted_snapshot(&current).state);
+}
+
+#[test]
+fn g51_resume_preserves_concurrent_remediation_and_completion_states() {
+    for state in [SessionState::PrinceRemediation, SessionState::QaPassed,
+        SessionState::Completed, SessionState::Paused] {
+        let (_temp, controller, storage, source, resumed) = g51_resume_during(|controller, id, _| {
+            controller.sessions.write().get_mut(id).unwrap().state = state.clone();
+        });
+        let current = controller.sessions.read()[&source.id].clone();
+        let saved = storage.load_session(&source.id).unwrap();
+        g51_cleanup_resume(&controller, &source);
+        assert_eq!(resumed.unwrap().state, state);
+        assert_eq!(current.state, state);
+        assert_eq!(saved.state, SessionController::session_to_persisted_snapshot(&current).state);
+    }
+}
+
+fn g51_resume_with_manager_contention(release_on_busy: bool) -> (
+    tempfile::TempDir, SessionController, Session, Result<Session, String>, bool,
+) {
+    let (temp, controller, _storage, source) = resume_fixture(false);
+    let session_id = source.id.clone();
+    let worker = source.agents[1].id.clone();
+    controller.resume_session(&session_id).unwrap();
+    let mut held = Some(controller.pty_manager.read());
+    let (events_tx, events_rx) = std::sync::mpsc::channel::<Option<Result<Session, String>>>();
+    let busy_tx = events_tx.clone();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    SessionController::test_sync_hook(&session_id, "resume-manager-busy", Some(Box::new(move || {
+        busy_tx.send(None).unwrap();
+        if release_on_busy {
+            release_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        }
+    })));
+    let (resumed, saw_busy) = std::thread::scope(|scope| {
+        let resume = scope.spawn(|| {
+            let result = controller.resume_agent(&session_id, &worker);
+            events_tx.send(Some(result)).unwrap();
+        });
+        let first = events_rx.recv_timeout(std::time::Duration::from_secs(5));
+        let saw_busy = matches!(&first, Ok(None));
+        if release_on_busy {
+            drop(held.take());
+            let _ = release_tx.send(());
+        }
+        let finished = match first {
+            Ok(Some(result)) => Ok(Some(result)),
+            Ok(None) => events_rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Err(error) => Err(error),
+        };
+        // Always release before joining, even under a blocking-lock mutation.
+        drop(held.take());
+        let _ = release_tx.send(());
+        resume.join().unwrap();
+        (finished.expect("Resume must finish within its contention budget").unwrap(), saw_busy)
+    });
+    drop(held);
+    // Consume an unused hook if a mutation bypassed the contention branch.
+    SessionController::test_sync_hook(&session_id, "resume-manager-busy", None);
+    (temp, controller, source, resumed, saw_busy)
+}
+
+#[test]
+fn g51_resume_retries_manager_contention_released_at_sync_hook() {
+    let (_temp, controller, source, resumed, saw_busy) = g51_resume_with_manager_contention(true);
+    let instance = controller.pty_manager.read().instance_id(&source.agents[1].id);
+    g51_cleanup_resume(&controller, &source);
+    assert!(saw_busy, "the test must reach the failed exclusive acquisition");
+    assert!(instance.is_some());
+    assert!(matches!(resumed.unwrap().agents[1].status, AgentStatus::Running));
+}
+
+#[test]
+fn g51_resume_manager_contention_past_budget_is_retryable_and_creates_nothing() {
+    let (_temp, controller, source, resumed, saw_busy) = g51_resume_with_manager_contention(false);
+    let instance = controller.pty_manager.read().instance_id(&source.agents[1].id);
+    g51_cleanup_resume(&controller, &source);
+    assert!(saw_busy, "the test must hold contention throughout the retry budget");
+    assert_eq!(instance, None, "a busy Resume must not create a runtime");
+    assert!(resumed.unwrap_err().contains("runtime manager remained busy after waiting; try again"));
+}
+
+#[test]
+fn g51_resume_raw_input_without_delivery_marker_updates_runtime_status() {
+    let (_temp, controller, _storage, source, resumed) = g51_resume_during(|controller, id, worker| {
+        let instance = controller.pty_manager.read().instance_id(worker).unwrap();
+        controller.record_input_time_for_instance(id, worker, instance, chrono::Utc::now());
+    });
+    let current = controller.sessions.read()[&source.id].clone();
+    g51_cleanup_resume(&controller, &source);
+    assert_eq!(resumed.unwrap().agents[1].status, AgentStatus::Running);
+    assert_eq!(current.agents[1].status, AgentStatus::Running);
+}
+
 #[test]
 fn g49_missing_worktree_or_saved_cwd_refuses_without_project_root_fallback() {
     for missing_path in [false, true] {
