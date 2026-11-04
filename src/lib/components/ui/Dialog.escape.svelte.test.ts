@@ -70,6 +70,7 @@ vi.mock('$lib/stores/sessions', async () => {
 
   return {
     sessions: {
+      ...writable({ sessions: [] }),
       loadSessions: testMocks.loadSessions,
       launchHiveV2: vi.fn(),
       launchFusion: vi.fn(),

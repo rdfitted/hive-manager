@@ -452,7 +452,7 @@
                   aria-label={`Resume ${pane.title}`} disabled={resumingAgents[pane.id]}
                   onmousedown={(event) => event.preventDefault()}
                   onclick={(event) => resumeAgent(event, pane.id)}>
-                  {resumingAgents[pane.id] ? 'Resuming?' : 'Resume'}
+                  {resumingAgents[pane.id] ? 'Resuming…' : 'Resume'}
                 </button>
               {/if}
               {#if resumeErrors[pane.id]}<span role="alert">{resumeErrors[pane.id]}</span>{/if}

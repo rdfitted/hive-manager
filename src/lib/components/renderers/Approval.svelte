@@ -2,14 +2,8 @@
   /**
    * Approval tool-render widget.
    *
-   * data shape: { title: string; description?: string; actionId?: string; destructive?: boolean }
-   *
-   * Invokes the optional `onapprove` / `onreject` callback props with
-   * { actionId } (Svelte 5 runes idiom). Wiring these to the queen/worker is OUT
-   * OF SCOPE for #127 (no general "approve tool result" endpoint exists; that
-   * belongs to #123's Action contract). For now ToolRenderHost re-emits them as
-   * Svelte events and ConversationViewer console-logs them, so the widget and
-   * the future contract are independently testable.
+   * data holds a server-issued approvalId. Legacy actionId-only cards are inert.
+   * The backend binds the ID to a pending request and makes the decision single-use.
    */
   import type { ToolRendererProps } from './registry';
 
@@ -19,6 +13,8 @@
     title?: string;
     description?: string;
     actionId?: string;
+    approvalId?: string;
+    requesterAgentId?: string;
     destructive?: boolean;
   }
 
@@ -28,33 +24,60 @@
   }
 
   const approval = $derived(asApproval(data));
+  let decided = $state(false);
+  let pending = $state(false);
+  let error = $state('');
+
+  async function decide(callback: ToolRendererProps['onapprove']) {
+    if (decided || pending || !approval.approvalId || !callback) return;
+    pending = true;
+    error = '';
+    try {
+      await callback({ approvalId: approval.approvalId });
+      decided = true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // The backend consumes before delivery; an ambiguous send cannot be retried.
+      decided = message.startsWith('[approval_consumed] ') || /Approval is stale/.test(message);
+      error = message.replace(/^\[approval_consumed\] /, '');
+    } finally {
+      pending = false;
+    }
+  }
 
   function approve() {
-    onapprove?.({ actionId: approval.actionId });
+    return decide(onapprove);
   }
 
   function reject() {
-    onreject?.({ actionId: approval.actionId });
+    return decide(onreject);
   }
 </script>
 
 <div class="approval-widget lattice-forced-colors-boundary">
   <div class="approval-body">
     <div class="approval-title">{approval.title ?? 'Approval required'}</div>
+    {#if approval.requesterAgentId}
+      <div class="approval-desc">Requested by {approval.requesterAgentId}</div>
+    {/if}
     {#if approval.description}
       <div class="approval-desc">{approval.description}</div>
     {/if}
   </div>
+  {#if error}
+    <div role="alert">{error}</div>
+  {/if}
   <div class="approval-actions">
     <button
       type="button"
       class="lattice-btn lattice-btn--compact lattice-btn--filled {approval.destructive ? 'lattice-btn--danger' : 'lattice-btn--success'}"
       data-testid="approve"
+      disabled={decided || pending || !approval.approvalId || !onapprove}
       onclick={approve}
     >
       Approve
     </button>
-    <button type="button" class="lattice-btn lattice-btn--compact lattice-btn--danger" data-testid="reject" onclick={reject}>
+    <button type="button" class="lattice-btn lattice-btn--compact lattice-btn--danger" data-testid="reject" disabled={decided || pending || !approval.approvalId || !onreject} onclick={reject}>
       Reject
     </button>
   </div>

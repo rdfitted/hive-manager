@@ -104,12 +104,13 @@ impl EventEmitter {
         agent_id: &str,
         instance_id: uuid::Uuid,
         stopped_at: chrono::DateTime<Utc>,
+        preserved: bool,
     ) -> Result<(), String> {
         self.bus.publish(Event {
             id: uuid::Uuid::new_v4().to_string(), session_id: session_id.to_owned(),
             cell_id: Some(cell_id.to_owned()), agent_id: Some(agent_id.to_owned()),
             event_type: EventType::AgentStopped, severity: Severity::Info, timestamp: stopped_at,
-            payload: json!({"instance_id": instance_id, "reason": "manual_stop"}),
+            payload: json!({"instance_id": instance_id, "reason": "manual_stop", "preserved": preserved}),
         }).await
     }
 
@@ -188,6 +189,24 @@ impl EventEmitter {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn g52_agent_stopped_payload_records_completion_preservation() {
+        let tmp = TempDir::new().unwrap();
+        let bus = EventBus::new(tmp.path().to_path_buf());
+        let emitter = EventEmitter::new(bus.clone());
+        let mut rx = bus.subscribe();
+        for preserved in [false, true] {
+            let instance = uuid::Uuid::new_v4();
+            let stopped_at = Utc::now();
+            emitter.emit_agent_stopped("s1", "c1", "a1", instance, stopped_at, preserved).await.unwrap();
+            let event = rx.recv().await.unwrap();
+            assert_eq!(event.event_type, EventType::AgentStopped);
+            assert_eq!(event.timestamp, stopped_at);
+            assert_eq!(event.payload["instance_id"], instance.to_string());
+            assert_eq!(event.payload["preserved"], preserved);
+        }
+    }
 
     #[tokio::test]
     async fn test_emit_session_created() {

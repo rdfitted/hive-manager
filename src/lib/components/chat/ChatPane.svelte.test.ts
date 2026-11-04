@@ -29,7 +29,7 @@ afterEach(() => { cleanup(); fixture.setSource('none'); fixture.setAgents([]); v
 describe('agent chat', () => {
   it('G30 source guard: prohibits raw HTML in every chat component and shared Markdown renderer', () => {
     const sources = import.meta.glob<string>([
-      './**/*.svelte', '../ui/MarkdownBlocks.svelte', '../knowledge/MarkdownInline.svelte',
+      './**/*.svelte', '../ui/MarkdownBlocks.svelte', '../ui/HtmlPreview.svelte', '../knowledge/MarkdownInline.svelte',
     ], { eager: true, query: '?raw', import: 'default' });
     expect(Object.keys(sources)).toEqual(expect.arrayContaining([
       './ChatPane.svelte', '../ui/MarkdownBlocks.svelte', '../knowledge/MarkdownInline.svelte',
@@ -38,6 +38,22 @@ describe('agent chat', () => {
       .filter(([, source]) => /\{\s*@html\b/.test(source))
       .map(([path]) => path);
     expect(rawHtmlFiles).toEqual([]);
+  });
+
+  it('offers HTML preview only for assistant fences and keeps source literal until clicked', async () => {
+    const text = '```html\n<h1>Orbital report</h1><script>parent.hacked=true</script>\n```';
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [
+      event('assistant-html', 'assistant_message', { text }), event('user-html', 'user_message', { text }),
+    ] } });
+    expect(view.getAllByRole('button', { name: 'Preview HTML' })).toHaveLength(1);
+    expect(view.container.querySelector('iframe, script, h1')).toBeNull();
+    const assistant = view.getByRole('article', { name: 'Assistant message' });
+    expect(assistant.querySelector('code')?.textContent).toContain('<script>parent.hacked=true</script>');
+    await fireEvent.click(view.getByRole('button', { name: 'Preview HTML' }));
+    const frame = view.getByTitle('HTML preview') as HTMLIFrameElement;
+    expect(frame.getAttribute('sandbox')).toBe('');
+    expect(frame.srcdoc).not.toContain('<script>');
+    expect(view.getByRole('article', { name: 'User message' }).querySelector('iframe, button')).toBeNull();
   });
 
   it('G30: keeps script, image handlers, iframe HTML and executable links inert and visible', () => {

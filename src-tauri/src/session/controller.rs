@@ -3879,33 +3879,44 @@ impl SessionController {
     /// Stop the named generation without earning task completion or harvesting output.
     pub fn stop_agent_instance(&self, session_id: &str, agent_id: &str, instance: uuid::Uuid) -> Result<(), String> {
         let completed_fence = self.pty_manager.read().input_fence(agent_id);
-        let was_finished = self.get_session(session_id).is_some_and(|session| session.agents.iter()
-            .any(|agent| agent.id == agent_id && agent.work_state == Some(super::work_state::WorkState::Finished)));
+        let was_finished = {
+            let session = self.get_session(session_id).ok_or_else(|| format!("Session not found: {session_id}"))?;
+            let agent = session.agents.iter().find(|agent| agent.id == agent_id)
+                .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+            agent.work_state == Some(super::work_state::WorkState::Finished)
+        };
         let pty_manager = self.pty_manager.read();
         let stopped_at = Utc::now();
-        let stopped_cell = {
+        // Cleanup may consume the bounded process-exit budget. Keep the roster
+        // readable and merge into the current session only after verified exit.
+        let preserved = if was_finished {
+            match completed_fence.filter(|(owner, _)| *owner == instance) {
+                Some((_, revision)) => pty_manager.kill_instance_at_input_revision(agent_id, instance, revision)
+                    .map_err(|e| e.to_string())?,
+                None => false,
+            }
+        } else { false };
+        if (!preserved && !pty_manager.kill_instance(agent_id, instance).map_err(|e| e.to_string())?)
+            || pty_manager.instance_id(agent_id).is_some() {
+            return Err(format!("Agent {agent_id} runtime instance was replaced; stop rejected"));
+        }
+        #[cfg(test)]
+        Self::test_sync_hook(session_id, "stop_after_verified_cleanup", None);
+        let (stopped_cell, preserved) = {
             let mut sessions = self.sessions.write();
+            if pty_manager.instance_id(agent_id).is_some() {
+                return Err(format!("Agent {agent_id} runtime instance was replaced; stop rejected"));
+            }
             let session = sessions.get_mut(session_id).ok_or_else(|| format!("Session not found: {session_id}"))?;
             let index = session.agents.iter().position(|agent| agent.id == agent_id)
                 .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
-            let preserved = if was_finished {
-                match completed_fence.filter(|(owner, _)| *owner == instance) {
-                    Some((_, revision)) => pty_manager.kill_instance_at_input_revision(agent_id, instance, revision)
-                        .map_err(|e| e.to_string())?,
-                    None => false,
-                }
-            } else { false };
-            if (!preserved && !pty_manager.kill_instance(agent_id, instance).map_err(|e| e.to_string())?)
-                || pty_manager.instance_id(agent_id).is_some() {
-                return Err(format!("Agent {agent_id} runtime instance was replaced; stop rejected"));
-            }
             session.agents[index].status = if preserved { AgentStatus::Completed } else {
                 AgentStatus::WaitingForInput("stopped_by_operator".into())
             };
             session.agents[index].work_state = Some(if preserved {
                 super::work_state::WorkState::Finished
             } else { super::work_state::WorkState::Working });
-            agent_cell_id(session, &session.agents[index])
+            (agent_cell_id(session, &session.agents[index]), preserved)
         };
         drop(pty_manager);
         self.update_session_storage(session_id);
@@ -3914,7 +3925,7 @@ impl SessionController {
             let session_id = session_id.to_owned();
             let agent_id = agent_id.to_owned();
             tokio::spawn(async move {
-                if let Err(error) = emitter.emit_agent_stopped(&session_id, &stopped_cell, &agent_id, instance, stopped_at).await {
+                if let Err(error) = emitter.emit_agent_stopped(&session_id, &stopped_cell, &agent_id, instance, stopped_at, preserved).await {
                     tracing::debug!("Failed to emit agent stopped event: {error}");
                 }
             });
@@ -3926,12 +3937,8 @@ impl SessionController {
     /// Stop the Master Planner and drop it from the session's agents before the
     /// post-planning agents spawn.
     ///
-    /// A Windows tree-kill can report failure after the planner itself has
-    /// exited (for example when a descendant disappears mid-enumeration). The
-    /// record is then retired anyway: keeping it leaves a dead planner pane in
-    /// the terminal grid, and `/T` cannot reach descendants once the root has
-    /// gone, so a later retry gains nothing. The record stays only when the
-    /// planner process is still running, so the operator can see and stop it.
+    /// Tree verification lives below the controller. Advisory root liveness
+    /// can prompt a retry, but only a successful verified stop retires a record.
     fn retire_master_planner(&self, session_id: &str, successor: &str) {
         let planner_id = format!("{}-master-planner", session_id);
         let instance = self.pty_manager.read().instance_id(&planner_id);
@@ -3960,20 +3967,16 @@ impl SessionController {
                     );
                     return;
                 }
-                tracing::warn!(
-                    "Master Planner {} kill reported an error after the process exited: {}; retiring it",
-                    planner_id,
-                    error
-                );
-                // With the root gone taskkill answers "not found", which releases
-                // the PTY handle the manager kept for this retry.
+                // A root exit alone does not prove descendants gone. Retry the
+                // same exact-instance verified stop, including storage/event work.
                 if let Some(instance) = instance {
-                if let Err(error) = self.pty_manager.read().kill_instance(&planner_id, instance) {
+                if let Err(error) = self.stop_agent_instance(session_id, &planner_id, instance) {
                     tracing::warn!(
                         "Retrying cleanup of exited Master Planner {} failed: {}",
                         planner_id,
                         error
                     );
+                    return;
                 }
                 }
             }
@@ -16378,7 +16381,7 @@ The backend composed and persisted the following authoritative skeleton before l
     }
 
     /// Caller holds the session lifecycle lock. Always create a fresh runtime.
-    fn respawn_saved_agent(&self, session: &mut Session, agent_id: &str) -> Result<(), String> {
+    fn respawn_saved_agent(&self, session: &mut Session, agent_id: &str) -> Result<Uuid, String> {
         crate::instance::refuse("conversation resume")?;
         let index = session.agents.iter().position(|agent| agent.id == agent_id)
             .ok_or_else(|| format!("Agent {agent_id} not found in session {}", session.id))?;
@@ -16397,7 +16400,21 @@ The backend composed and persisted the following authoritative skeleton before l
         if !Path::new(&cwd).is_absolute() || !Path::new(&cwd).is_dir() {
             return Err(format!("Cannot resume {agent_id}: saved working directory no longer exists or is not absolute: {cwd}"));
         }
-        let manager = self.pty_manager.read();
+        // Keep stop/replacement out until this spawn's exact identity is captured.
+        // Do not queue a writer: roster-first readers can overlap a stop holding
+        // the manager while waiting for the roster. Retry briefly without either
+        // guard, keeping only the caller's session lifecycle serialization.
+        let manager_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let manager = loop {
+            if let Some(manager) = self.pty_manager.try_write() { break manager; }
+            #[cfg(test)]
+            Self::test_sync_hook(&session.id, "resume-manager-busy", None);
+            let remaining = manager_deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(format!("Cannot resume {agent_id}: runtime manager remained busy after waiting; try again"));
+            }
+            std::thread::sleep(remaining.min(std::time::Duration::from_millis(250)));
+        };
         if manager.is_alive(agent_id) || manager.instance_id(agent_id) != previous_instance {
             return Err(format!("Agent {agent_id} runtime changed while preparing Resume; try again"));
         }
@@ -16409,6 +16426,8 @@ The backend composed and persisted the following authoritative skeleton before l
         manager.create_session(agent_id.to_string(), agent.role.clone(), &command,
             &args.iter().map(String::as_str).collect::<Vec<_>>(), Some(&cwd), 80, 24)
             .map_err(|error| format!("Cannot resume {agent_id}: {error}"))?;
+        let instance = manager.instance_id(agent_id)
+            .ok_or_else(|| format!("Agent {agent_id} did not publish a resumed runtime identity"))?;
         let spawned_at = manager.spawned_at(agent_id)
             .ok_or_else(|| format!("Agent {agent_id} did not publish a resumed runtime identity"))?;
         let status = if manager.is_alive(agent_id) { AgentStatus::Running }
@@ -16424,7 +16443,7 @@ The backend composed and persisted the following authoritative skeleton before l
         if session.state.is_terminal() || matches!(session.state, SessionState::Closing | SessionState::Paused) {
             session.state = SessionState::Running;
         }
-        Ok(())
+        Ok(instance)
     }
 
     pub fn resume_agent(&self, session_id: &str, agent_id: &str) -> Result<Session, String> {
@@ -16436,9 +16455,43 @@ The backend composed and persisted the following authoritative skeleton before l
         let mut session = self.sessions.read().get(session_id).cloned()
             .ok_or_else(|| format!("Session not found: {session_id}"))?;
         self.populate_provider_ids(&mut session);
-        self.respawn_saved_agent(&mut session, agent_id)?;
-        session.agent_resume_report = Self::agent_resume_report(&session);
-        self.sessions.write().insert(session_id.to_string(), session.clone());
+        let previous_state = session.state.clone();
+        let previous_runtime = session.agents.iter().find(|agent| agent.id == agent_id)
+            .map(|agent| (agent.status.clone(), agent.work_state))
+            .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+        let instance = self.respawn_saved_agent(&mut session, agent_id)?;
+        #[cfg(test)]
+        Self::test_sync_hook(session_id, "resume-agent-prepared", None);
+        let resumed = session.agents.iter().find(|agent| agent.id == agent_id)
+            .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+        let session = {
+            // Respawn can overlap roster registration, heartbeats and input delivery.
+            // Merge only its runtime changes into the current session, never the old roster.
+            let mut sessions = self.sessions.write();
+            let current = sessions.get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {session_id}"))?;
+            let index = current.agents.iter().position(|agent| agent.id == agent_id)
+                .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+            let manager = self.pty_manager.read();
+            manager.with_current_instance(agent_id, instance, |_| {
+                let target = &mut current.agents[index];
+                target.provider_session_id = resumed.provider_session_id.clone();
+                target.transcript_session_id = resumed.transcript_session_id.clone();
+                target.transcript_spawned_at = resumed.transcript_spawned_at;
+                // Clear only the old runtime's unchanged state. In particular, a
+                // same-instance pending or failed delivery owns its newer status.
+                if target.status == previous_runtime.0 && target.work_state == previous_runtime.1 {
+                    target.status = resumed.status.clone();
+                    target.work_state = resumed.work_state;
+                }
+                current.last_activity_at = current.last_activity_at.max(session.last_activity_at);
+                if session.state == SessionState::Running && current.state == previous_state {
+                    current.state = SessionState::Running;
+                }
+                current.agent_resume_report = Self::agent_resume_report(current);
+                current.clone()
+            }).ok_or_else(|| format!("Agent {agent_id} runtime changed before Resume could finish; try again"))?
+        };
         self.update_session_storage(session_id);
         let session = self.project_work_states(session);
         if let Some(app_handle) = &self.app_handle {

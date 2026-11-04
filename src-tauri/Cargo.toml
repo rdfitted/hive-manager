@@ -1,6 +1,6 @@
 [package]
 name = "hive-manager"
-version = "0.67.1"
+version = "0.68.0"
 description = "Multi-agent orchestration and monitoring for Claude Code workflows"
 authors = ["RDuff"]
 edition = "2021"
@@ -44,3 +44,6 @@ schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 async-trait = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 base64 = "0.22"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

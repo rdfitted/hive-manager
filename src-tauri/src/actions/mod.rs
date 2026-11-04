@@ -17,6 +17,7 @@
 //! this contract.
 
 pub mod context;
+pub mod approval;
 pub mod coordination;
 pub mod error;
 pub mod git;

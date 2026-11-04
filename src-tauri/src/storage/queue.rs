@@ -1255,8 +1255,12 @@ impl QueueRepo {
                 .unwrap_or_else(|| serde_json::json!([]));
             let retired_ids = retired.as_array_mut().ok_or_else(||
                 QueueReassignmentError::Conflict("Invalid reassigned_from history".into()))?;
+            // Recovery resets worker_id to pending while retaining spawned_worker_id.
+            // Principal fallback is only for a row that has never had a concrete holder.
+            let has_holder = std::iter::once(expected.worker_id.as_str()).chain(spawned.as_deref())
+                .any(|id| !id.starts_with("pending:"));
             for previous in std::iter::once(expected.worker_id.as_str()).chain(spawned.as_deref())
-                .chain(transfer.retired_worker_ids.iter().map(String::as_str))
+                .chain(transfer.retired_worker_ids.iter().filter(|_| !has_holder).map(String::as_str))
             {
                 if previous != target && !previous.starts_with("pending:")
                 {

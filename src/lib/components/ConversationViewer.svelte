@@ -15,7 +15,6 @@
   let messageInput = '';
   let lastMessageCount = 0;
   let pollInterval: ReturnType<typeof setInterval>;
-  let approvalError = '';
 
   $: sessionId = $activeSession?.id ?? null;
   $: agents = $activeSession?.agents ?? [];
@@ -101,47 +100,28 @@
     await conversationStore.sendMessage(sessionId, selectedAgent, 'operator', text.trim());
   }
 
-  function queenAgentId(): string | null {
-    const queen = agents.find((agent) => agent.role === 'Queen' || agent.id.endsWith('-queen'));
-    return queen?.id ?? null;
-  }
-
-  async function injectApprovalDecision(decision: 'approved' | 'rejected', detail: { actionId?: string }) {
-    if (!sessionId) return;
-    const targetAgentId = queenAgentId() ?? (selectedAgent !== 'shared' ? selectedAgent : null);
-    if (!targetAgentId) {
-      approvalError = 'No agent is available for approval injection.';
-      return;
-    }
-
-    const actionId = detail?.actionId ?? 'unknown';
-    const message = [
-      `Operator ${decision} approval request.`,
-      `action_id: ${actionId}`,
-      `decision: ${decision}`,
-    ].join('\n');
-
-    try {
-      approvalError = '';
-      await invoke('operator_inject', {
+  async function resolveApproval(decision: 'approved' | 'rejected', detail: { approvalId?: string }) {
+    if (!sessionId || !detail.approvalId) throw new Error('No active session for this approval');
+    await invoke('resolve_approval', {
         request: {
           session_id: sessionId,
-          target_agent_id: targetAgentId,
-          message,
+          approval_id: detail.approvalId,
+          decision,
         },
-      });
-    } catch (err) {
-      approvalError = String(err);
-      console.error('[tool-render] approval injection failed', err);
-    }
+    });
   }
 
-  function handleApprove(detail: { actionId?: string }) {
-    void injectApprovalDecision('approved', detail);
+  function handleApprove(detail: { approvalId?: string }) {
+    return resolveApproval('approved', detail);
   }
 
-  function handleReject(detail: { actionId?: string }) {
-    void injectApprovalDecision('rejected', detail);
+  function handleReject(detail: { approvalId?: string }) {
+    return resolveApproval('rejected', detail);
+  }
+
+  function approvalIdentity(data: unknown): string | null {
+    if (!data || typeof data !== 'object' || !('approvalId' in data)) return null;
+    return typeof data.approvalId === 'string' ? data.approvalId : null;
   }
 
   function getSenderColor(from: string): string {
@@ -236,11 +216,14 @@
               <span class="msg-sender" style="color: {getSenderColor(msg.from)}">{msg.from}</span>
               {#if msg.renderer || msg.data}
                 <div class="msg-content msg-widget">
-                  <ToolRenderHost
-                    message={msg}
-                    onapprove={handleApprove}
-                    onreject={handleReject}
-                  />
+                  {#key JSON.stringify([sessionId, approvalIdentity(msg.data)])}
+                    <!-- Keep decisions and async completions scoped to this approval. -->
+                    <ToolRenderHost
+                      message={msg}
+                      onapprove={handleApprove}
+                      onreject={handleReject}
+                    />
+                  {/key}
                 </div>
               {:else}
                 <span class="msg-content">{msg.content}</span>
@@ -272,12 +255,6 @@
     </div>
   {/if}
 
-  {#if approvalError}
-    <div class="error lattice-forced-colors-boundary">
-      {approvalError}
-      <button class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon" onclick={() => approvalError = ''} aria-label="Dismiss approval error">&#10005;</button>
-    </div>
-  {/if}
 </div>
 
 <style>

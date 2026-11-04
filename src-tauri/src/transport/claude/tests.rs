@@ -766,3 +766,29 @@ fn g15_claude_drop_unregistered_runtime_and_bounded_control_failure() {
         wait_for_signal("descendant process exit", || !child_alive(pid));
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn g53_live_process_cleanup_fails_and_retains_exact_client_until_verified_exit() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let temp = tempfile::tempdir().unwrap();
+    let ready = Arc::new(AtomicBool::new(false));
+    let observed = ready.clone();
+    let client = client::JsonClient::new();
+    client.spawn("powershell.exe", &[
+        "-NoProfile".into(), "-NonInteractive".into(), "-Command".into(),
+        r#"Write-Output '{"method":"ready","type":"ready"}'; Start-Sleep -Seconds 600"#.into(),
+    ], temp.path(), &[], Arc::new(move |_| { observed.store(true, Ordering::SeqCst); })).unwrap();
+    wait_for_signal("synthetic cleanup process startup", || ready.load(Ordering::SeqCst));
+    let error = client.stop_with_cleanup(|child, tree| {
+        crate::transport::process::wait_for_child_exit(child, tree, Ok(()), Duration::ZERO)
+    }).unwrap_err();
+    assert!(error.contains("still alive"), "{error}");
+    client.stop_with_cleanup(|child, tree| {
+        tree.expect("fixture owns an exact job").terminate().unwrap();
+        crate::transport::process::wait_for_child_exit(child, tree,
+            Err("synthetic late termination report".into()), crate::transport::process::STOP_BUDGET)
+    }).unwrap();
+    client.stop_with_cleanup(|_, _| panic!("verified stop must release the child handle")).unwrap();
+    client.stop().unwrap();
+}

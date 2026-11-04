@@ -399,6 +399,72 @@ fn g49_load_resumes_only_queen_then_explicitly_resumes_one_worker_in_saved_cwd()
 }
 
 #[test]
+fn g51_resume_preserves_concurrent_roster_status_activity_and_target_metadata() {
+    let (_temp, controller, storage, source) = resume_fixture(false);
+    let session_id = source.id.clone();
+    let worker = source.agents[1].id.clone();
+    let other = source.agents[0].id.clone();
+    controller.resume_session(&session_id).unwrap();
+    let before = controller.sessions.read()[&session_id].clone();
+    let newer_activity = chrono::Utc::now() + chrono::Duration::days(1);
+    let mut added = before.agents[2].clone();
+    added.id = format!("{session_id}-worker-concurrent");
+    let added_id = added.id.clone();
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    SessionController::test_sync_hook(&session_id, "resume-agent-prepared", Some(Box::new(move || {
+        prepared_tx.send(()).unwrap();
+        release_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+    })));
+    let resumed = std::thread::scope(|scope| {
+        let resume = scope.spawn(|| controller.resume_agent(&session_id, &worker));
+        prepared_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        controller.update_heartbeat(&session_id, &other, "working", Some("concurrent activity")).unwrap();
+        controller.record_injection_submission(&session_id, &other, chrono::Utc::now(), true).unwrap();
+        {
+            let mut sessions = controller.sessions.write();
+            let current = sessions.get_mut(&session_id).unwrap();
+            current.agents.push(added);
+            if let SessionType::Hive { worker_count } = &mut current.session_type {
+                *worker_count += 1;
+            } else { panic!("expected Hive fixture"); }
+            current.agents.iter_mut().find(|agent| agent.id == worker).unwrap().config.label = Some("concurrent label".into());
+            current.last_activity_at = newer_activity;
+            current.name = Some("concurrent session name".into());
+        }
+        release_tx.send(()).unwrap();
+        resume.join().unwrap().unwrap()
+    });
+    for snapshot in [&resumed, &controller.sessions.read()[&session_id]] {
+        assert!(snapshot.agents.iter().any(|agent| agent.id == added_id), "CR3 concurrent worker survives Resume");
+        assert!(matches!(snapshot.session_type, SessionType::Hive { worker_count: 3 }));
+        assert!(matches!(&snapshot.agents.iter().find(|agent| agent.id == other).unwrap().status,
+            AgentStatus::WaitingForInput(reason) if reason.starts_with(SessionController::AWAITING_INJECTED_TURN_PREFIX)));
+        assert_eq!(snapshot.last_activity_at, newer_activity);
+        assert_eq!(snapshot.name.as_deref(), Some("concurrent session name"));
+        let target = snapshot.agents.iter().find(|agent| agent.id == worker).unwrap();
+        assert_eq!(target.config.label.as_deref(), Some("concurrent label"));
+        assert!(matches!(target.status, AgentStatus::Running));
+        assert_eq!(target.provider_session_id, source.agents[1].transcript_session_id);
+        assert_eq!(target.transcript_spawned_at, controller.pty_manager.read().spawned_at(&worker));
+        assert_ne!(target.transcript_spawned_at, before.agents[1].transcript_spawned_at);
+        assert!(snapshot.agent_resume_report.iter().any(|line| line.contains(&added_id)));
+    }
+    let saved = storage.load_session(&session_id).unwrap();
+    assert!(saved.agents.iter().any(|agent| agent.id == added_id));
+    assert_eq!(saved.agents.len(), before.agents.len() + 1);
+    assert!(matches!(saved.session_type, crate::storage::SessionTypeInfo::Hive { worker_count: 3 }));
+    assert_eq!(saved.last_activity_at, Some(newer_activity));
+    assert_eq!(saved.name.as_deref(), Some("concurrent session name"));
+    let target = saved.agents.iter().find(|agent| agent.id == worker).unwrap();
+    assert_eq!(target.config.label.as_deref(), Some("concurrent label"));
+    assert_eq!(target.provider_session_id, source.agents[1].transcript_session_id);
+    assert_eq!(target.transcript_spawned_at, controller.pty_manager.read().spawned_at(&worker));
+    controller.pty_manager.read().kill(&source.agents[0].id).unwrap();
+    controller.pty_manager.read().kill(&worker).unwrap();
+}
+
+#[test]
 fn g49_solo_load_resumes_original_agent_without_starting_evaluator() {
     let (_temp, controller, _storage, source) = resume_fixture(true);
     let resumed = controller.resume_session(&source.id).unwrap();
@@ -414,6 +480,215 @@ fn g49_solo_load_resumes_original_agent_without_starting_evaluator() {
         .read()
         .kill(&source.agents[0].id)
         .unwrap();
+}
+
+// The callback runs after the new instance is published and before Resume merges.
+// Channels make these races deterministic without holding either roster lock.
+fn g51_resume_during(
+    update: impl FnOnce(&SessionController, &str, &str),
+) -> (
+    tempfile::TempDir,
+    SessionController,
+    Arc<crate::storage::SessionStorage>,
+    Session,
+    Result<Session, String>,
+) {
+    let (temp, controller, storage, source) = resume_fixture(false);
+    let session_id = source.id.clone();
+    let worker = source.agents[1].id.clone();
+    controller.resume_session(&session_id).unwrap();
+    assert_eq!(controller.sessions.read()[&session_id].state, SessionState::Running);
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    SessionController::test_sync_hook(&session_id, "resume-agent-prepared", Some(Box::new(move || {
+        prepared_tx.send(()).unwrap();
+        release_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+    })));
+    let resumed = std::thread::scope(|scope| {
+        let resume = scope.spawn(|| controller.resume_agent(&session_id, &worker));
+        prepared_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        update(&controller, &session_id, &worker);
+        release_tx.send(()).unwrap();
+        resume.join().unwrap()
+    });
+    (temp, controller, storage, source, resumed)
+}
+
+fn g51_cleanup_resume(controller: &SessionController, source: &Session) {
+    for agent in &source.agents {
+        controller.pty_manager.read().kill(&agent.id).unwrap();
+    }
+}
+
+#[test]
+fn g51_resume_same_target_stop_cannot_resurrect_removed_runtime() {
+    let (_temp, controller, storage, source, resumed) = g51_resume_during(|controller, id, worker| {
+        let instance = controller.pty_manager.read().instance_id(worker).unwrap();
+        controller.stop_agent_instance(id, worker, instance).unwrap();
+    });
+    let worker = &source.agents[1].id;
+    let current = controller.sessions.read()[&source.id].clone();
+    let saved = storage.load_session(&source.id).unwrap();
+    assert_eq!(controller.pty_manager.read().instance_id(worker), None);
+    g51_cleanup_resume(&controller, &source);
+    assert!(resumed.is_err(), "Resume must reject an instance stopped before its merge");
+    let target = current.agents.iter().find(|agent| &agent.id == worker).unwrap();
+    assert_eq!(target.status, AgentStatus::WaitingForInput("stopped_by_operator".into()));
+    assert_eq!(target.work_state, Some(crate::session::work_state::WorkState::Working));
+    assert_eq!(saved.state, SessionController::session_to_persisted_snapshot(&current).state);
+}
+
+fn g51_check_same_target_injection(fail_before_merge: bool) {
+    let mut submission = None;
+    let (_temp, controller, _storage, source, resumed) = g51_resume_during(|controller, id, worker| {
+        let instance = controller.pty_manager.read().instance_id(worker).unwrap();
+        let submitted_at = chrono::Utc::now().max(controller.pty_manager.read().spawned_at(worker).unwrap());
+        controller.record_instance_injection_submission(id, worker, instance, submitted_at, true).unwrap();
+        if fail_before_merge {
+            controller.record_instance_injection_delivery(id, worker, instance, submitted_at,
+                &crate::delivery::Delivery::timeout(true)).unwrap();
+        }
+        submission = Some((instance, submitted_at));
+    });
+    let worker = &source.agents[1].id;
+    let (instance, submitted_at) = submission.unwrap();
+    let pending = format!("{}{}", SessionController::AWAITING_INJECTED_TURN_PREFIX, submitted_at.to_rfc3339());
+    let failed = format!("injected_delivery_failed:transcript-timeout:{}", submitted_at.to_rfc3339());
+    let expected = AgentStatus::WaitingForInput(if fail_before_merge { failed.clone() } else { pending });
+    let resumed = resumed.unwrap();
+    let current = controller.sessions.read()[&source.id].clone();
+    // Resolve after the merge too: losing the pending marker also discards this timeout.
+    controller.record_instance_injection_delivery(&source.id, worker, instance, submitted_at,
+        &crate::delivery::Delivery::timeout(true)).unwrap();
+    let after_delivery = controller.sessions.read()[&source.id].clone();
+    let spawned_at = controller.pty_manager.read().spawned_at(worker).unwrap();
+    g51_cleanup_resume(&controller, &source);
+    for snapshot in [&resumed, &current] {
+        let target = snapshot.agents.iter().find(|agent| &agent.id == worker).unwrap();
+        assert_eq!(target.status, expected, "same-instance delivery state must survive Resume");
+        assert_eq!(target.transcript_spawned_at, Some(spawned_at));
+        assert_eq!(target.provider_session_id, source.agents[1].transcript_session_id);
+    }
+    assert_eq!(after_delivery.agents.iter().find(|agent| &agent.id == worker).unwrap().status,
+        AgentStatus::WaitingForInput(failed), "visible timeout must still resolve the exact submission");
+}
+
+#[test]
+fn g51_resume_same_target_injection_preserves_pending_delivery() {
+    g51_check_same_target_injection(false);
+}
+
+#[test]
+fn g51_resume_same_target_injection_preserves_delivery_failure_before_merge() {
+    g51_check_same_target_injection(true);
+}
+
+#[tokio::test]
+async fn g51_resume_preserves_concurrent_qa_state_transition() {
+    let (_temp, controller, storage, source, resumed) = g51_resume_during(|controller, id, _| {
+        controller.begin_qa_window(id).unwrap();
+        assert!(matches!(controller.sessions.read()[id].state, SessionState::QaInProgress { .. }));
+    });
+    controller.cancel_qa_timeout(&source.id);
+    let current = controller.sessions.read()[&source.id].clone();
+    let saved = storage.load_session(&source.id).unwrap();
+    g51_cleanup_resume(&controller, &source);
+    assert!(matches!(resumed.unwrap().state, SessionState::QaInProgress { .. }));
+    assert!(matches!(current.state, SessionState::QaInProgress { .. }));
+    assert_eq!(saved.state, SessionController::session_to_persisted_snapshot(&current).state);
+}
+
+#[test]
+fn g51_resume_preserves_concurrent_remediation_and_completion_states() {
+    for state in [SessionState::PrinceRemediation, SessionState::QaPassed,
+        SessionState::Completed, SessionState::Paused] {
+        let (_temp, controller, storage, source, resumed) = g51_resume_during(|controller, id, _| {
+            controller.sessions.write().get_mut(id).unwrap().state = state.clone();
+        });
+        let current = controller.sessions.read()[&source.id].clone();
+        let saved = storage.load_session(&source.id).unwrap();
+        g51_cleanup_resume(&controller, &source);
+        assert_eq!(resumed.unwrap().state, state);
+        assert_eq!(current.state, state);
+        assert_eq!(saved.state, SessionController::session_to_persisted_snapshot(&current).state);
+    }
+}
+
+fn g51_resume_with_manager_contention(release_on_busy: bool) -> (
+    tempfile::TempDir, SessionController, Session, Result<Session, String>, bool,
+) {
+    let (temp, controller, _storage, source) = resume_fixture(false);
+    let session_id = source.id.clone();
+    let worker = source.agents[1].id.clone();
+    controller.resume_session(&session_id).unwrap();
+    let mut held = Some(controller.pty_manager.read());
+    let (events_tx, events_rx) = std::sync::mpsc::channel::<Option<Result<Session, String>>>();
+    let busy_tx = events_tx.clone();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    SessionController::test_sync_hook(&session_id, "resume-manager-busy", Some(Box::new(move || {
+        busy_tx.send(None).unwrap();
+        if release_on_busy {
+            release_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        }
+    })));
+    let (resumed, saw_busy) = std::thread::scope(|scope| {
+        let resume = scope.spawn(|| {
+            let result = controller.resume_agent(&session_id, &worker);
+            events_tx.send(Some(result)).unwrap();
+        });
+        let first = events_rx.recv_timeout(std::time::Duration::from_secs(5));
+        let saw_busy = matches!(&first, Ok(None));
+        if release_on_busy {
+            drop(held.take());
+            let _ = release_tx.send(());
+        }
+        let finished = match first {
+            Ok(Some(result)) => Ok(Some(result)),
+            Ok(None) => events_rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Err(error) => Err(error),
+        };
+        // Always release before joining, even under a blocking-lock mutation.
+        drop(held.take());
+        let _ = release_tx.send(());
+        resume.join().unwrap();
+        (finished.expect("Resume must finish within its contention budget").unwrap(), saw_busy)
+    });
+    drop(held);
+    // Consume an unused hook if a mutation bypassed the contention branch.
+    SessionController::test_sync_hook(&session_id, "resume-manager-busy", None);
+    (temp, controller, source, resumed, saw_busy)
+}
+
+#[test]
+fn g51_resume_retries_manager_contention_released_at_sync_hook() {
+    let (_temp, controller, source, resumed, saw_busy) = g51_resume_with_manager_contention(true);
+    let instance = controller.pty_manager.read().instance_id(&source.agents[1].id);
+    g51_cleanup_resume(&controller, &source);
+    assert!(saw_busy, "the test must reach the failed exclusive acquisition");
+    assert!(instance.is_some());
+    assert!(matches!(resumed.unwrap().agents[1].status, AgentStatus::Running));
+}
+
+#[test]
+fn g51_resume_manager_contention_past_budget_is_retryable_and_creates_nothing() {
+    let (_temp, controller, source, resumed, saw_busy) = g51_resume_with_manager_contention(false);
+    let instance = controller.pty_manager.read().instance_id(&source.agents[1].id);
+    g51_cleanup_resume(&controller, &source);
+    assert!(saw_busy, "the test must hold contention throughout the retry budget");
+    assert_eq!(instance, None, "a busy Resume must not create a runtime");
+    assert!(resumed.unwrap_err().contains("runtime manager remained busy after waiting; try again"));
+}
+
+#[test]
+fn g51_resume_raw_input_without_delivery_marker_updates_runtime_status() {
+    let (_temp, controller, _storage, source, resumed) = g51_resume_during(|controller, id, worker| {
+        let instance = controller.pty_manager.read().instance_id(worker).unwrap();
+        controller.record_input_time_for_instance(id, worker, instance, chrono::Utc::now());
+    });
+    let current = controller.sessions.read()[&source.id].clone();
+    g51_cleanup_resume(&controller, &source);
+    assert_eq!(resumed.unwrap().agents[1].status, AgentStatus::Running);
+    assert_eq!(current.agents[1].status, AgentStatus::Running);
 }
 
 #[test]
@@ -548,10 +823,136 @@ fn g49_pre_resume_receipt_cannot_mark_or_write_the_respawned_instance() {
 }
 
 #[cfg(windows)]
-#[test]
-fn g49_real_pty_resume_uses_only_fake_cli_shims_in_saved_worktrees() {
+fn g49_assert_no_visible_windows(roots: &[u32]) -> Vec<u32> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct Entry {
+        size: u32, usage: u32, pid: u32, heap: usize, module: u32,
+        threads: u32, parent: u32, priority: i32, flags: u32, exe: [u16; 260],
+    }
+    extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> *mut c_void;
+        fn Process32FirstW(snapshot: *mut c_void, entry: *mut Entry) -> i32;
+        fn Process32NextW(snapshot: *mut c_void, entry: *mut Entry) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    // Include compiler/linker children and ConPTY hosts, not just fixture roots.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(2, 0) };
+    assert_ne!(snapshot as isize, -1);
+    let mut entry: Entry = unsafe { std::mem::zeroed() };
+    entry.size = std::mem::size_of::<Entry>() as u32;
+    let mut links = Vec::new();
+    let mut found = unsafe { Process32FirstW(snapshot, &mut entry) };
+    while found != 0 {
+        links.push((entry.pid, entry.parent));
+        found = unsafe { Process32NextW(snapshot, &mut entry) };
+    }
+    unsafe { CloseHandle(snapshot); }
+    let mut pids = roots.to_vec();
+    loop {
+        let count = pids.len();
+        for &(pid, parent) in &links {
+            if pids.contains(&parent) && !pids.contains(&pid) { pids.push(pid); }
+        }
+        if pids.len() == count { break; }
+    }
+    struct Check<'a> { pids: &'a [u32], visible: Vec<u32> }
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(callback: unsafe extern "system" fn(*mut c_void, isize) -> i32, data: isize) -> i32;
+        fn IsWindowVisible(window: *mut c_void) -> i32;
+        fn GetWindowThreadProcessId(window: *mut c_void, pid: *mut u32) -> u32;
+    }
+    unsafe extern "system" fn visit(window: *mut c_void, data: isize) -> i32 {
+        let check = &mut *(data as *mut Check<'_>);
+        let mut pid = 0;
+        GetWindowThreadProcessId(window, &mut pid);
+        if check.pids.contains(&pid) && IsWindowVisible(window) != 0 { check.visible.push(pid); }
+        1
+    }
+    let mut check = Check { pids: &pids, visible: Vec::new() };
+    assert_ne!(unsafe { EnumWindows(visit, &mut check as *mut _ as isize) }, 0);
+    assert!(check.visible.is_empty(), "G49 visible fixture windows: {:?}", check.visible);
+    pids
+}
+
+#[cfg(windows)]
+fn g49_hidden_output(command: &mut std::process::Command) -> std::process::Output {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0800_0000)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = command.spawn().unwrap();
+    let pid = child.id();
+    let mut observed = std::collections::BTreeSet::new();
+    let result = std::thread::scope(|scope| {
+        let wait = scope.spawn(move || child.wait_with_output().unwrap());
+        while !wait.is_finished() {
+            observed.extend(g49_assert_no_visible_windows(&[pid]));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        wait.join().unwrap()
+    });
+    eprintln!("G49 D6: zero visible windows for hidden helper tree {observed:?}");
+    result
+}
+
+#[cfg(windows)]
+fn g49_build_synthetic_executable(root: &std::path::Path) {
+    let source = root.join("synthetic-resume-fixture.rs");
+    std::fs::write(&source, r###"
+#![windows_subsystem = "windows"]
+fn main() {
+    let mut input = std::env::args().skip(1);
+    let cli = input.next().unwrap();
+    let output = std::path::PathBuf::from(input.next().unwrap());
+    let args: Vec<_> = input.collect();
+    let flag = if cli == "claude" { "--resume" } else { "resume" };
+    let index = args.iter().position(|arg| arg == flag).unwrap();
+    let provider = &args[index + 1];
+    let memory = std::fs::read_to_string("memory.json").unwrap();
+    let key = format!("\"{provider}\":\"");
+    let remembered = memory.split_once(&key).unwrap().1.split('"').next().unwrap();
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let result = format!(r#"{{"executable":{:?},"pid":{},"fixture":"g49-fake-resume","cli":{:?},"provider":{:?},"remembered":{:?},"cwd":{:?},"args":{:?}}}"#,
+        executable.to_str().unwrap(), std::process::id(), cli, provider, remembered, cwd.to_str().unwrap(), args);
+    let pending = output.with_extension("pending");
+    std::fs::write(&pending, result).unwrap();
+    std::fs::rename(pending, output).unwrap();
+    std::thread::park();
+}
+"###).unwrap();
+    let output = g49_hidden_output(std::process::Command::new("rustc")
+        .arg("--crate-name").arg("synthetic_resume_fixture")
+        .arg("--edition=2021").arg(&source)
+        .arg("-o").arg(root.join("synthetic-resume-fixture.exe")));
+    assert!(output.status.success(), "synthetic executable build: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[cfg(windows)]
+fn g49_run_real_pty_resume_fixture(test: &str, reject_non_fixture: bool) {
     if let Some(root) = std::env::var_os("HM_RESUME_PTY_CHILD") {
         let root = std::path::PathBuf::from(root);
+        if reject_non_fixture {
+            // These selections reach the same guard as the actual Resume, but
+            // must be refused before openpty or any provider process can start.
+            let other = root.join("other-synthetic.exe");
+            std::fs::copy(root.join("synthetic-resume-fixture.exe"), &other).unwrap();
+            for selected in ["claude".into(), "codex".into(), "synthetic-resume-fixture.exe".into(), other.into_os_string()] {
+                std::env::set_var("HM_RESUME_PTY_SELECTED", &selected);
+                let (_temp, controller, storage, source) = resume_fixture(true);
+                let mut saved = storage.load_session(&source.id).unwrap();
+                saved.agents[0].config.flags.push("--real-pty-fixture".into());
+                storage.save_session(&saved).unwrap();
+                let error = controller.resume_session(&source.id).unwrap_err();
+                assert!(error.contains("G49 launch guard refused non-fixture executable before OS launch"), "{error}");
+                assert!(controller.pty_manager.read().instance_id(&source.agents[0].id).is_none());
+                assert!(!root.join("claude-result.json").exists());
+            }
+            std::env::remove_var("HM_RESUME_PTY_SELECTED");
+        }
         for cli in ["claude", "codex"] {
             let (temp, controller, storage, source) = resume_fixture(true);
             let mut saved = storage.load_session(&source.id).unwrap();
@@ -576,35 +977,7 @@ fn g49_real_pty_resume_uses_only_fake_cli_shims_in_saved_worktrees() {
             }
             let provider = agent.provider_session_id.clone().unwrap();
             let cwd = temp.path().join("saved worktree");
-            // ConPTY reconstructs PATH from the registry. CMD searches its cwd
-            // first, so place the fake there rather than trusting a PATH override.
-            let shim = cwd.join(format!("{cli}.cmd"));
-            if std::env::var_os("HM_RESUME_PTY_MISSING_SHIM").is_none() {
-                std::fs::write(&shim, format!("@echo off\r\nset \"SYNTHETIC_CLI={cli}\"\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\" %*\r\n", root.join("resume.ps1").display())).unwrap();
-            }
-            assert!(
-                shim.is_file(),
-                "G49 fake shim missing; refusing to launch a provider"
-            );
-            let resolved = std::process::Command::new("cmd.exe")
-                .args(["/d", "/c", "where", cli])
-                .current_dir(&cwd)
-                .output()
-                .unwrap();
-            assert!(resolved.status.success());
-            assert_eq!(
-                std::path::Path::new(
-                    String::from_utf8_lossy(&resolved.stdout)
-                        .lines()
-                        .next()
-                        .unwrap()
-                        .trim()
-                )
-                .canonicalize()
-                .unwrap(),
-                shim.canonicalize().unwrap(),
-                "G49 only the saved-cwd fake CLI may resolve"
-            );
+            let shim = root.join("synthetic-resume-fixture.exe");
             let remembered = format!("synthetic-{cli}-memory");
             std::fs::write(
                 cwd.join("memory.json"),
@@ -612,17 +985,19 @@ fn g49_real_pty_resume_uses_only_fake_cli_shims_in_saved_worktrees() {
             )
             .unwrap();
             storage.save_session(&saved).unwrap();
-            let resumed = controller.resume_session(&source.id).unwrap();
+            let resumed = controller.resume_session(&source.id).expect(
+                "G49 launch guard must accept the canonical absolute synthetic executable before OS launch");
             let agent_id = &resumed.agents[0].id;
+            struct Cleanup<'a>(&'a SessionController, &'a str);
+            impl Drop for Cleanup<'_> {
+                fn drop(&mut self) { let _ = self.0.pty_manager.read().kill(self.1); }
+            }
+            let _cleanup = Cleanup(&controller, agent_id);
             let captured = controller
                 .pty_manager
                 .read()
                 .spawn_args_for_test(agent_id)
                 .unwrap();
-            assert!(
-                captured.iter().any(|arg| arg == "--real-pty-fixture"),
-                "G49 real-PTY opt-in reaches spawn: {captured:?}"
-            );
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
             let result = loop {
                 if let Ok(bytes) = std::fs::read(root.join(format!("{cli}-result.json"))) {
@@ -641,6 +1016,17 @@ fn g49_real_pty_resume_uses_only_fake_cli_shims_in_saved_worktrees() {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             };
+            // Identity is the first assertion about the launched process. The
+            // launch seam also checks its OS image handle before publication.
+            assert_eq!(std::path::Path::new(result["executable"].as_str().unwrap())
+                .canonicalize().unwrap(), shim.canonicalize().unwrap(),
+                "G49 only the synthetic executable may have run");
+            assert!(
+                captured.iter().any(|arg| arg == "--real-pty-fixture"),
+                "G49 real-PTY opt-in reaches spawn: {captured:?}"
+            );
+            g49_assert_no_visible_windows(&[std::process::id(), result["pid"].as_u64().unwrap() as u32]);
+            eprintln!("G49 D6: zero visible windows for resumed {cli} fixture");
             controller.pty_manager.read().kill(agent_id).unwrap();
             assert_eq!(result["fixture"], "g49-fake-resume");
             assert_eq!(result["cli"], cli);
@@ -682,29 +1068,17 @@ fn g49_real_pty_resume_uses_only_fake_cli_shims_in_saved_worktrees() {
         }
         return;
     }
-    // A separate exact-test child contains environment overrides. The actual
-    // ConPTY command resolves its fake shim from the synthetic saved cwd above.
+    // The exact-test child contains all process-global fixture settings. Neither
+    // provider name is installed on PATH or used as an executable filename.
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("resume.ps1"), r#"
-$ErrorActionPreference='Stop'
-$cli=$env:SYNTHETIC_CLI
-$flag=if($cli -eq 'claude'){'--resume'}else{'resume'}
-$index=[Array]::IndexOf($args,$flag)
-if($index -lt 0){exit 9}
-$provider=$args[$index+1]
-$memory=Get-Content -LiteralPath 'memory.json' -Raw | ConvertFrom-Json
-$remembered=$memory.$provider
-if(!$remembered){exit 10}
-$result=@{fixture='g49-fake-resume';cli=$cli;provider=$provider;remembered=$remembered;cwd=[Environment]::CurrentDirectory;args=@($args)}|ConvertTo-Json -Compress -Depth 8
-$path=Join-Path $PSScriptRoot "$cli-result.json"
-[IO.File]::WriteAllText("$path.pending",$result)
-[IO.File]::Move("$path.pending",$path)
-Start-Sleep -Seconds 300
-"#).unwrap();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "session::controller::tests::lane_e_tests::g49_real_pty_resume_uses_only_fake_cli_shims_in_saved_worktrees", "--nocapture"])
-        .env("HM_RESUME_PTY_CHILD", root.path())
-        .output().unwrap();
+    let fixture_root = root.path().join("synthetic executable with spaces");
+    std::fs::create_dir(&fixture_root).unwrap();
+    if std::env::var_os("HM_RESUME_PTY_MISSING_SHIM").is_none() {
+        g49_build_synthetic_executable(&fixture_root);
+    }
+    let output = g49_hidden_output(std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &format!("session::controller::tests::lane_e_tests::{test}"), "--nocapture"])
+        .env("HM_RESUME_PTY_CHILD", &fixture_root));
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -714,4 +1088,16 @@ Start-Sleep -Seconds 300
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed; 0 failed;")
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn g49_real_pty_resume_uses_only_fake_cli_shims_in_saved_worktrees() {
+    g49_run_real_pty_resume_fixture("g49_real_pty_resume_uses_only_fake_cli_shims_in_saved_worktrees", false);
+}
+
+#[cfg(windows)]
+#[test]
+fn g49_real_pty_resume_refuses_non_fixture_executable_before_spawn() {
+    g49_run_real_pty_resume_fixture("g49_real_pty_resume_refuses_non_fixture_executable_before_spawn", true);
 }

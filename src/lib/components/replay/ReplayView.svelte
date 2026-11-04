@@ -24,7 +24,7 @@
                 if (event.agent_id) acc.agents[event.agent_id] = 'completed';
                 break;
             case 'agent_stopped':
-                if (event.agent_id) acc.agents[event.agent_id] = 'killed';
+                if (event.agent_id) acc.agents[event.agent_id] = event.payload.preserved === true ? 'completed' : 'killed';
                 break;
             case 'agent_failed':
                 if (event.agent_id) acc.agents[event.agent_id] = 'failed';
@@ -54,6 +54,7 @@
                 return 'status-blocked';
             case 'canceled':
             case 'cancelled':
+            case 'killed':
                 return 'status-canceled';
             default:
                 return 'status-queued';

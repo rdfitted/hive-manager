@@ -30,6 +30,13 @@
     return response;
   }
 
+  function selectCell(nextId: string) {
+    if (nextId === cellId) return;
+    const nextAgents = cells.find((cell) => cell.id === nextId)?.agents ?? [];
+    cellId = nextId;
+    if (!nextAgents.includes(agentId)) agentId = nextAgents[0] ?? '';
+  }
+
   $effect(() => {
     const id = sessionId;
     let current = true;
@@ -101,7 +108,7 @@
 <div class="review-view lattice-scroll-content">
   {#if !sessionId}<p>Select a session to review changes.</p>{:else}
     <div class="pickers">
-      <label>Cell<select value={cellId} disabled={sending} onchange={(event) => { cellId = event.currentTarget.value; agentId = cells.find((cell) => cell.id === cellId)?.agents[0] ?? ''; }}>
+      <label>Cell<select value={cellId} disabled={sending} onchange={(event) => selectCell(event.currentTarget.value)}>
         {#each cells as cell (cell.id)}<option value={cell.id}>{cell.name}</option>{/each}
       </select></label>
       <label>Principal<select bind:value={agentId} disabled={sending}>

@@ -121,5 +121,6 @@ pub fn build_registry() -> ActionRegistry {
     super::git::register(&mut registry);
     super::pty::register(&mut registry);
     super::coordination::register(&mut registry);
+    super::approval::register(&mut registry);
     registry
 }

@@ -3,10 +3,16 @@ import { get } from 'svelte/store';
 import type { AgentInfo } from './sessions';
 
 const mocks = vi.hoisted(() => ({ loadHeartbeats: vi.fn().mockResolvedValue(undefined) }));
-vi.mock('./sessions', async () => ({ activeAgents: (await import('svelte/store')).writable([]), activeSession: (await import('svelte/store')).writable(null) }));
+vi.mock('./sessions', async () => ({
+  activeAgents: (await import('svelte/store')).writable([]),
+  activeSession: (await import('svelte/store')).writable(null),
+  sessions: (await import('svelte/store')).writable({ sessions: [] }),
+  serdeEnumVariantName: (value: unknown) => typeof value === 'string' ? value : value && typeof value === 'object' ? Object.keys(value)[0] : undefined,
+}));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock('./conversations', async () => ({ heartbeatStore: { ...(await import('svelte/store')).writable({ agents: {}, staleAgents: new Set() }), loadHeartbeats: mocks.loadHeartbeats } }));
 vi.mock('./events', async () => ({ events: (await import('svelte/store')).writable({ events: [] }) }));
-import { activeAgents, activeSession } from './sessions';
+import { activeAgents, activeSession, sessions } from './sessions';
 import { heartbeatStore } from './conversations';
 import { events } from './events';
 import { agentActivity, attentionReason, needsAttention, now } from './agentActivity';
@@ -16,11 +22,12 @@ const set = (store: unknown, value: unknown) => (store as { set(value: unknown):
 beforeEach(() => {
   mocks.loadHeartbeats.mockReset().mockResolvedValue(undefined);
   set(activeSession, null);
+  set(sessions, { sessions: [] });
   set(activeAgents, [agent('Running')]);
   set(heartbeatStore, { agents: {}, staleAgents: new Set() });
   set(events, { events: [] });
 });
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('G-attention-predicate', () => {
   it('manually stopped agents never alarm even with an old heartbeat', () => {
@@ -112,6 +119,7 @@ describe('activity derivation', () => {
 describe('shared heartbeat refresh without Chat mounted', () => {
   it('starts once, uses the existing loader every 10s, re-keys, and stops at the last subscriber', async () => {
     vi.useFakeTimers();
+    set(sessions, { sessions: [{ id: 'one', state: 'Running' }] });
     set(activeSession, { id: 'one' });
     const stopOne = agentActivity.subscribe(() => {});
     const stopTwo = agentActivity.subscribe(() => {});
@@ -133,11 +141,12 @@ describe('shared heartbeat refresh without Chat mounted', () => {
       expect(mocks.loadHeartbeats).toHaveBeenCalledTimes(calls);
     } finally { stopOne(); stopTwo(); }
   });
-  it('loads summary data without a Chat component and stops polling when no session is selected', async () => {
+  it('loads summary data without a Chat component and stops polling after the last active session finishes', async () => {
     vi.useFakeTimers();
     mocks.loadHeartbeats.mockImplementation(async () => {
       set(heartbeatStore, { agents: { a: { summary: 'Loaded outside Chat', timestamp: '2026-10-21T12:00:00Z' } }, staleAgents: new Set() });
     });
+    set(sessions, { sessions: [{ id: 'one', state: 'Running' }] });
     set(activeSession, { id: 'one' });
     const values: string[] = [];
     const stop = agentActivity.subscribe(value => values.push(value.a.summary));
@@ -145,7 +154,44 @@ describe('shared heartbeat refresh without Chat mounted', () => {
       await Promise.resolve();
       expect(values.at(-1)).toBe('Loaded outside Chat');
       set(activeSession, null);
+      set(sessions, { sessions: [{ id: 'one', state: 'Completed' }] });
       expect(vi.getTimerCount()).toBe(0);
     } finally { stop(); }
+  });
+});
+
+
+describe('G52 no-selection sidebar polling', () => {
+  it('fetches once per tick for all rows and stops for a finished-only list', async () => {
+    vi.useFakeTimers();
+    const actual = await vi.importActual<typeof import('./conversations')>('./conversations');
+    const old = new Date(Date.now() - 4 * 60_000).toISOString();
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ sessions: [
+      { id: 'one', agents: [{ id: 'stale-one', last_activity: old, work_state: 'working' }] },
+      { id: 'two', agents: [{ id: 'stale-two', last_activity: old, work_state: 'working' }] },
+    ] }) });
+    vi.stubGlobal('fetch', fetchMock);
+    mocks.loadHeartbeats.mockImplementation((id) => actual.heartbeatStore.loadHeartbeats(id));
+    set(sessions, { sessions: [{ id: 'one', state: 'Running' }, { id: 'two', state: 'Paused' }] });
+    const stopOne = agentActivity.subscribe(() => {});
+    const stopTwo = agentActivity.subscribe(() => {});
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(mocks.loadHeartbeats).toHaveBeenLastCalledWith(null);
+      expect(get(actual.heartbeatStore).agents).toEqual({});
+      expect([...get(actual.heartbeatStore).staleAgentsBySession.one]).toEqual(['stale-one']);
+      expect([...get(actual.heartbeatStore).staleAgentsBySession.two]).toEqual(['stale-two']);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      stopOne();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      set(sessions, { sessions: [{ id: 'one', state: 'Completed' }, { id: 'two', state: { Failed: 'synthetic' } },
+        { id: 'three', state: 'Closed' }, { id: 'four', state: 'Closing' }] });
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    } finally { stopOne(); stopTwo(); }
   });
 });

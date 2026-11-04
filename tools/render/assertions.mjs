@@ -4,6 +4,7 @@ import { mutationProver, styleChange, removeNode, textChange, appendNode, offscr
 import { updaterState, classifyUpdater } from './updater.mjs';
 import { classifyFinding } from './findings.mjs';
 import { pressOutsideTerminal, proveTerminalFocus } from './keyboard.mjs';
+import { runSecurityAssertions } from './security.mjs';
 
 const attention = 'section[aria-label="Agent needs attention"]';
 const composer = '.composer-wrap[aria-label="Message composer"]';
@@ -129,7 +130,7 @@ export async function diagnoseReview({ page, manifest, report, out }) {
   report.reviewDiagnostic = await page.locator('.review-view').evaluate(node => ({ text: node.innerText, selects: [...node.querySelectorAll('select')].map(select => ({ id: select.id, name: select.name, aria: select.getAttribute('aria-label'), labels: [...select.labels].map(label => label.textContent), options: [...select.options].map(option => ({ value: option.value, text: option.text })) })) }));
   await page.screenshot({ path: path.join(out, 'review-diagnostic.png') });
 }
-export async function runRenderAssertions({ page, manifest, report, assert, out, repo, signal }) {
+export async function runRenderAssertions({ page, manifest, report, assert, out, repo, signal, consoleErrors }) {
   const session = manifest.sessions.find(item => item.id === manifest.screens.grid.sessionId);
   const byState = state => session.agents.find(agent => agent.state === state);
   const normal = session.agents.find(agent => agent.id === manifest.chat.agentId), stalled = byState('stalled');
@@ -297,6 +298,8 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     for (const key of ['table', 'code', 'literal']) await prove(`chat-${key}`, async () => { const details = await chatState(focused, manifest); return { passed: details[key], details }; }, () => key === 'table' ? removeNode(focused.locator('[aria-label="Markdown table"] table').first()) : key === 'code' ? textChange(focused.locator('pre[aria-label^="Code block"] code').first(), 'mutated code') : appendNode(focused.locator(`${chatSelector}:visible`).first(), { attributes: { 'data-fixture': 'literal' } }), { screen: 'focus' });
     for (const key of ['table', 'code']) await prove(`chat-empty-${key}`, async () => { const details = await chatState(focused, manifest); return { passed: details[key], details }; }, () => emptyContents(focused.locator(key === 'table' ? '[aria-label="Markdown table"] table' : 'pre[aria-label^="Code block"] code').first()), { screen: 'focus' });
     await capture('focus', viewport, focused, text => text.includes(manifest.chat.tableText) && text.includes(manifest.chat.codeText));
+    await runSecurityAssertions({ page, pane: focused, report, assert, consoleErrors, sessionId: manifest.chat.sessionId,
+      capture: () => capture('focus', viewport, focused, text => text.includes('Close HTML preview'), 'html') });
     const toggle = page.locator('#title-bar-panel-toggle');
     if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
     await viewMode(page, 'Grid');
@@ -429,6 +432,27 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await dialog.waitFor();
     await capture('dialog', viewport, dialog, text => text.includes('Keyboard Shortcuts'));
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    // Exercise the persisted result envelope through the shipped conversation UI.
+    const conversationFixture = manifest.conversation;
+    if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
+    const activity = page.getByRole('group', { name: 'Panel views', exact: true }).getByRole('button', { name: 'Activity', exact: true });
+    if (await activity.getAttribute('aria-pressed') !== 'true') await activity.click();
+    await page.getByRole('group', { name: 'Activity sections', exact: true }).getByRole('button', { name: 'Chat', exact: true }).click();
+    const viewer = page.locator('.conversation-viewer');
+    await viewer.getByRole('tab', { name: 'Queen', exact: true }).click();
+    const diffWidget = viewer.locator('.diff-widget').first();
+    await diffWidget.waitFor({ state: 'visible' });
+    await diffWidget.scrollIntoViewIfNeeded();
+    const measureDiff = async () => {
+      const widgets = await viewer.locator('.diff-widget').count();
+      const visible = widgets === 1 && (await visibleTargetState(diffWidget)).visible;
+      const additions = await viewer.locator('.diff-widget .diff-line.add .line-text').allTextContents();
+      const deletions = await viewer.locator('.diff-widget .diff-line.del .line-text').allTextContents();
+      return { passed: visible && additions.includes(conversationFixture.added) && deletions.includes(conversationFixture.removed), details: { widgets, visible, additions, deletions } };
+    };
+    await probe('conversation-diff-envelope', measureDiff, { screen: 'conversation', viewport: `${viewport.width}x${viewport.height}` });
+    await prove(`conv-diff-${viewport.width}`, measureDiff, () => emptyContents(diffWidget), { screen: 'conversation' });
+    await capture('conversation', viewport, viewer, text => text.includes(conversationFixture.added) && text.includes(conversationFixture.removed));
     if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
   }
   // Check completed history after baseline Review/dialog captures so this

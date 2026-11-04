@@ -140,6 +140,11 @@ export async function seed(root, now = new Date()) {
     }
     overlay.sessions.push({ session_id: session.id, agents: projected });
   }
+  const conversationFixture = manifest.conversation;
+  const diffContent = conversationFixture.data.unified;
+  const conversationEnvelope = { renderer: conversationFixture.renderer, data: conversationFixture.data, body_bytes: Buffer.byteLength(diffContent, 'utf8') };
+  const conversationPath = path.relative(root, path.join(dataDir, 'sessions', conversationFixture.sessionId, 'conversations', `${conversationFixture.agentId}.md`));
+  await write(conversationPath, `---\n[${at(0)}] from @${conversationFixture.from}\n<!-- hive-envelope: ${JSON.stringify(conversationEnvelope)} -->\n${diffContent}\n\n`);
   await json('fixture-state.json', overlay);
   return { root, dataDir, manifest, seededAt: instant.toISOString() };
 }

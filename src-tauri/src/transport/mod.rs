@@ -136,6 +136,8 @@ pub trait AgentTransport: Send + Sync {
     fn is_alive(&self) -> bool {
         true
     }
+    /// Return Ok only after exact process-tree exit is verified. Advisory
+    /// `is_alive` flags and termination-helper completion are insufficient.
     fn stop_sync(&self) -> Result<(), String> {
         Err("Transport does not support synchronous stop".into())
     }
@@ -237,7 +239,8 @@ impl TransportRegistry {
         if let Some(entry) = self.get(session_id, agent_id) {
             // Keep the handle available for retries until stopping succeeds.
             // Do not hold the registry lock while calling the transport.
-            entry.transport.stop_sync()?;
+            process::wait_for_exit(Ok(()), std::time::Duration::ZERO,
+                || entry.transport.stop_sync().map(|_| true))?;
             let mut entries = self.entries.write();
             let key = (session_id.into(), agent_id.into());
             if entries

@@ -729,6 +729,7 @@ pub fn run() {
             queen_inject,
             queen_switch_branch,
             operator_inject,
+            actions::approval::resolve_approval,
             add_worker_to_session,
             get_coordination_log,
             log_coordination_message,

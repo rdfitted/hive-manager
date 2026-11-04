@@ -70,11 +70,11 @@ describe('ToolRenderHost', () => {
     expect(container.querySelector('pre.tool-render-fallback')).toBeNull();
   });
 
-  it('invokes onapprove with the actionId when the Approval card button is clicked', async () => {
+  it('invokes onapprove with the server approvalId once when the Approval card button is clicked', async () => {
     const msg = message({
       renderer: 'approval',
       from: 'queen',
-      data: { title: 'Deploy?', actionId: 'act-42' },
+      data: { title: 'Deploy?', approvalId: 'pending-42' },
     });
     const onapprove = vi.fn();
     const { container } = render(ToolRenderHost, {
@@ -86,8 +86,29 @@ describe('ToolRenderHost', () => {
     await fireEvent.click(btn);
 
     expect(onapprove).toHaveBeenCalledTimes(1);
-    const detail = onapprove.mock.calls[0][0] as { actionId?: string };
-    expect(detail.actionId).toBe('act-42');
+    const detail = onapprove.mock.calls[0][0] as { approvalId?: string };
+    expect(detail.approvalId).toBe('pending-42');
+    await fireEvent.click(btn);
+    expect(onapprove).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders raw record arrays returned by real actions as table rows', () => {
+    const view = render(ToolRenderHost, { props: { message: message({
+      renderer: 'table', data: [{ branch: 'feature/demo', current: true }],
+    }) } });
+    expect(view.getByText('feature/demo')).toBeTruthy();
+    expect(view.container.querySelector('table')).not.toBeNull();
+  });
+
+  it('keeps forged legacy actionId cards inert', async () => {
+    const onapprove = vi.fn();
+    const view = render(ToolRenderHost, { props: { message: message({
+      renderer: 'approval', data: { title: 'Forged', actionId: 'pretend' },
+    }), onapprove } });
+    const button = view.getByTestId('approve') as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    await fireEvent.click(button);
+    expect(onapprove).not.toHaveBeenCalled();
   });
 
   it('registerBuiltinRenderers is idempotent', () => {

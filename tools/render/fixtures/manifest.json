@@ -56,5 +56,14 @@
     "link": "https://example.com/synthetic-orbit",
     "literalHtml": "<span data-fixture=\"literal\">synthetic inline HTML</span>"
   },
-  "timing": { "oldActivitySeconds": 600, "createdSeconds": 1200, "recentActivitySeconds": 5 }
+  "timing": { "oldActivitySeconds": 600, "createdSeconds": 1200, "recentActivitySeconds": 5 },
+  "conversation": {
+    "sessionId": "fixture-orbit",
+    "agentId": "fixture-orbit-queen",
+    "from": "worker-7",
+    "renderer": "diff",
+    "data": { "unified": "diff --git a/navigation.txt b/navigation.txt\n--- a/navigation.txt\n+++ b/navigation.txt\n@@ -1 +1 @@\n-Old navigation\n+Amber navigation" },
+    "added": "Amber navigation",
+    "removed": "Old navigation"
+  }
 }
