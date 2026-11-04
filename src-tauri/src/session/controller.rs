@@ -3879,26 +3879,37 @@ impl SessionController {
     /// Stop the named generation without earning task completion or harvesting output.
     pub fn stop_agent_instance(&self, session_id: &str, agent_id: &str, instance: uuid::Uuid) -> Result<(), String> {
         let completed_fence = self.pty_manager.read().input_fence(agent_id);
-        let was_finished = self.get_session(session_id).is_some_and(|session| session.agents.iter()
-            .any(|agent| agent.id == agent_id && agent.work_state == Some(super::work_state::WorkState::Finished)));
+        let was_finished = {
+            let session = self.get_session(session_id).ok_or_else(|| format!("Session not found: {session_id}"))?;
+            let agent = session.agents.iter().find(|agent| agent.id == agent_id)
+                .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+            agent.work_state == Some(super::work_state::WorkState::Finished)
+        };
         let pty_manager = self.pty_manager.read();
         let stopped_at = Utc::now();
+        // Cleanup may consume the bounded process-exit budget. Keep the roster
+        // readable and merge into the current session only after verified exit.
+        let preserved = if was_finished {
+            match completed_fence.filter(|(owner, _)| *owner == instance) {
+                Some((_, revision)) => pty_manager.kill_instance_at_input_revision(agent_id, instance, revision)
+                    .map_err(|e| e.to_string())?,
+                None => false,
+            }
+        } else { false };
+        if (!preserved && !pty_manager.kill_instance(agent_id, instance).map_err(|e| e.to_string())?)
+            || pty_manager.instance_id(agent_id).is_some() {
+            return Err(format!("Agent {agent_id} runtime instance was replaced; stop rejected"));
+        }
+        #[cfg(test)]
+        Self::test_sync_hook(session_id, "stop_after_verified_cleanup", None);
         let (stopped_cell, preserved) = {
             let mut sessions = self.sessions.write();
+            if pty_manager.instance_id(agent_id).is_some() {
+                return Err(format!("Agent {agent_id} runtime instance was replaced; stop rejected"));
+            }
             let session = sessions.get_mut(session_id).ok_or_else(|| format!("Session not found: {session_id}"))?;
             let index = session.agents.iter().position(|agent| agent.id == agent_id)
                 .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
-            let preserved = if was_finished {
-                match completed_fence.filter(|(owner, _)| *owner == instance) {
-                    Some((_, revision)) => pty_manager.kill_instance_at_input_revision(agent_id, instance, revision)
-                        .map_err(|e| e.to_string())?,
-                    None => false,
-                }
-            } else { false };
-            if (!preserved && !pty_manager.kill_instance(agent_id, instance).map_err(|e| e.to_string())?)
-                || pty_manager.instance_id(agent_id).is_some() {
-                return Err(format!("Agent {agent_id} runtime instance was replaced; stop rejected"));
-            }
             session.agents[index].status = if preserved { AgentStatus::Completed } else {
                 AgentStatus::WaitingForInput("stopped_by_operator".into())
             };
@@ -3926,12 +3937,8 @@ impl SessionController {
     /// Stop the Master Planner and drop it from the session's agents before the
     /// post-planning agents spawn.
     ///
-    /// A Windows tree-kill can report failure after the planner itself has
-    /// exited (for example when a descendant disappears mid-enumeration). The
-    /// record is then retired anyway: keeping it leaves a dead planner pane in
-    /// the terminal grid, and `/T` cannot reach descendants once the root has
-    /// gone, so a later retry gains nothing. The record stays only when the
-    /// planner process is still running, so the operator can see and stop it.
+    /// Tree verification lives below the controller. Advisory root liveness
+    /// can prompt a retry, but only a successful verified stop retires a record.
     fn retire_master_planner(&self, session_id: &str, successor: &str) {
         let planner_id = format!("{}-master-planner", session_id);
         let instance = self.pty_manager.read().instance_id(&planner_id);
@@ -3960,20 +3967,16 @@ impl SessionController {
                     );
                     return;
                 }
-                tracing::warn!(
-                    "Master Planner {} kill reported an error after the process exited: {}; retiring it",
-                    planner_id,
-                    error
-                );
-                // With the root gone taskkill answers "not found", which releases
-                // the PTY handle the manager kept for this retry.
+                // A root exit alone does not prove descendants gone. Retry the
+                // same exact-instance verified stop, including storage/event work.
                 if let Some(instance) = instance {
-                if let Err(error) = self.pty_manager.read().kill_instance(&planner_id, instance) {
+                if let Err(error) = self.stop_agent_instance(session_id, &planner_id, instance) {
                     tracing::warn!(
                         "Retrying cleanup of exited Master Planner {} failed: {}",
                         planner_id,
                         error
                     );
+                    return;
                 }
                 }
             }

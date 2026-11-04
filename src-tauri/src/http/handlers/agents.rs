@@ -108,6 +108,54 @@ pub async fn stop_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn g53_delete_verified_exited_runtime_returns_204_and_releases_instance() {
+        let temp = tempfile::tempdir().unwrap();
+        let (app, controller, storage, state) = crate::http::tests::setup_test_app_full(temp.path().to_path_buf()).await;
+        let session_id = "g53-delete-exited";
+        let agent_id = "g53-delete-exited-worker-1";
+        let mut session = crate::http::tests::make_test_session_with_agents(session_id, temp.path().to_str().unwrap(), &[agent_id]);
+        session.no_git = true;
+        controller.read().insert_test_session(session);
+        state.pty_manager.read().create_session(agent_id.into(), PtyAgentRole::Worker { index: 1, parent: None },
+            "fixture", &["--stub-die-on-start"], None, 80, 24).unwrap();
+        let response = app.oneshot(Request::builder().method("DELETE")
+            .uri(format!("/api/sessions/{session_id}/agents/{agent_id}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(state.pty_manager.read().instance_id(agent_id), None);
+        assert!(matches!(controller.read().get_session(session_id).unwrap().agents[0].status,
+            PtyAgentStatus::WaitingForInput(_)));
+        assert!(storage.load_session(session_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn g53_delete_failed_live_cleanup_keeps_running_roster_and_instance() {
+        let temp = tempfile::tempdir().unwrap();
+        let (app, controller, _storage, state) = crate::http::tests::setup_test_app_full(temp.path().to_path_buf()).await;
+        let session_id = "g53-delete-live";
+        let agent_id = "g53-delete-live-worker-1";
+        controller.read().insert_test_session(crate::http::tests::make_test_session_with_agents(
+            session_id, temp.path().to_str().unwrap(), &[agent_id]));
+        state.pty_manager.read().create_session(agent_id.into(), PtyAgentRole::Worker { index: 1, parent: None },
+            "fixture", &["--stub-tree-kill-fails-once"], None, 80, 24).unwrap();
+        let instance = state.pty_manager.read().instance_id(agent_id).unwrap();
+        let response = app.oneshot(Request::builder().method("DELETE")
+            .uri(format!("/api/sessions/{session_id}/agents/{agent_id}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(state.pty_manager.read().instance_id(agent_id), Some(instance));
+        assert!(matches!(controller.read().get_session(session_id).unwrap().agents[0].status, PtyAgentStatus::Running));
+        state.pty_manager.read().kill_instance(agent_id, instance).unwrap();
+    }
+}
+
 /// Share exact-target stopping and durable claim release with the Tauri command.
 pub(crate) async fn stop_agent_and_release(state: &AppState, session_id: &str, agent_id: &str) -> Result<(), ApiError> {
     let instance = {
@@ -129,7 +177,9 @@ pub(crate) async fn stop_agent_and_release(state: &AppState, session_id: &str, a
             if !stopped && instance.is_some() {
                 let instance = instance.expect("captured runtime");
                 state.session_controller.read().stop_agent_instance(session_id, agent_id, instance)
-                    .map_err(ApiError::internal)?;
+                    .map_err(|error| if error.contains("runtime instance was replaced") {
+                        ApiError::new(StatusCode::CONFLICT, error)
+                    } else { ApiError::internal(error) })?;
             } else if state.pty_manager.read().instance_id(agent_id).is_some() {
                 return Err(ApiError::new(StatusCode::CONFLICT, "Agent runtime was replaced; stop rejected"));
             }
