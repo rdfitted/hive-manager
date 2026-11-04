@@ -6,6 +6,7 @@
 
 use axum::{
     extract::{Path, State},
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use serde::Serialize;
@@ -55,10 +56,38 @@ pub async fn list_actions(
 pub async fn dispatch_action(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     body: Option<Json<Value>>,
 ) -> Result<Json<Value>, ApiError> {
     let input = body.map(|Json(value)| value).unwrap_or(Value::Null);
-    let ctx = ActionContext::new(Caller::Http, Arc::clone(&state));
+    let mut ctx = ActionContext::new(Caller::Http, Arc::clone(&state));
+    // Only approval requests require spawn credentials here. Other actions retain
+    // their existing authentication policy and caller provenance.
+    if name == "approval.request" {
+        let requester = input
+            .get("session_id")
+            .and_then(Value::as_str)
+            .and_then(|session_id| {
+                if headers.get_all("X-Hive-Agent-Token").iter().count() != 1 {
+                    return None;
+                }
+                let token = headers.get("X-Hive-Agent-Token")?.to_str().ok()?;
+                state
+                    .pty_manager
+                    .read()
+                    .authenticate_heartbeat(session_id, token)
+            });
+        ctx.requester_agent_id = Some(
+            requester
+                .ok_or_else(|| {
+                    ApiError::new(
+                        StatusCode::UNAUTHORIZED,
+                        "Approval requests require a valid X-Hive-Agent-Token for this session",
+                    )
+                })?
+                .0,
+        );
+    }
     let output = state.registry().dispatch(&name, &ctx, input).await?;
     Ok(Json(envelope_for_action_result(&name, output)))
 }

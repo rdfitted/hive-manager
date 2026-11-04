@@ -21,8 +21,8 @@
     onreject,
   }: {
     message: ConversationMessage;
-    onapprove?: (detail: ApprovalActionDetail) => void;
-    onreject?: (detail: ApprovalActionDetail) => void;
+    onapprove?: (detail: ApprovalActionDetail) => void | Promise<void>;
+    onreject?: (detail: ApprovalActionDetail) => void | Promise<void>;
   } = $props();
 
   // Ensure built-ins are registered before the first resolve. Idempotent.
@@ -56,11 +56,11 @@
   });
 
   function forwardApprove(detail: ApprovalActionDetail) {
-    onapprove?.(detail);
+    return onapprove?.(detail);
   }
 
   function forwardReject(detail: ApprovalActionDetail) {
-    onreject?.(detail);
+    return onreject?.(detail);
   }
 </script>
 

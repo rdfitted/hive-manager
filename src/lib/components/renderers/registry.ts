@@ -37,8 +37,8 @@ export interface ApprovalActionDetail {
  */
 export interface ToolRendererProps {
   data: unknown;
-  onapprove?: (detail: ApprovalActionDetail) => void;
-  onreject?: (detail: ApprovalActionDetail) => void;
+  onapprove?: (detail: ApprovalActionDetail) => void | Promise<void>;
+  onreject?: (detail: ApprovalActionDetail) => void | Promise<void>;
 }
 
 /** A dynamically-mountable tool-render widget. */

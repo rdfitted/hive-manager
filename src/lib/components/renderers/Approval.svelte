@@ -14,6 +14,7 @@
     description?: string;
     actionId?: string;
     approvalId?: string;
+    requesterAgentId?: string;
     destructive?: boolean;
   }
 
@@ -24,38 +25,59 @@
 
   const approval = $derived(asApproval(data));
   let decided = $state(false);
+  let pending = $state(false);
+  let error = $state('');
+
+  async function decide(callback: ToolRendererProps['onapprove']) {
+    if (decided || pending || !approval.approvalId || !callback) return;
+    pending = true;
+    error = '';
+    try {
+      await callback({ approvalId: approval.approvalId });
+      decided = true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // The backend consumes before delivery; an ambiguous send cannot be retried.
+      decided = message.startsWith('[approval_consumed] ') || /Approval is stale/.test(message);
+      error = message.replace(/^\[approval_consumed\] /, '');
+    } finally {
+      pending = false;
+    }
+  }
 
   function approve() {
-    if (decided || !approval.approvalId || !onapprove) return;
-    decided = true;
-    onapprove({ approvalId: approval.approvalId });
+    return decide(onapprove);
   }
 
   function reject() {
-    if (decided || !approval.approvalId || !onreject) return;
-    decided = true;
-    onreject({ approvalId: approval.approvalId });
+    return decide(onreject);
   }
 </script>
 
 <div class="approval-widget lattice-forced-colors-boundary">
   <div class="approval-body">
     <div class="approval-title">{approval.title ?? 'Approval required'}</div>
+    {#if approval.requesterAgentId}
+      <div class="approval-desc">Requested by {approval.requesterAgentId}</div>
+    {/if}
     {#if approval.description}
       <div class="approval-desc">{approval.description}</div>
     {/if}
   </div>
+  {#if error}
+    <div role="alert">{error}</div>
+  {/if}
   <div class="approval-actions">
     <button
       type="button"
       class="lattice-btn lattice-btn--compact lattice-btn--filled {approval.destructive ? 'lattice-btn--danger' : 'lattice-btn--success'}"
       data-testid="approve"
-      disabled={decided || !approval.approvalId || !onapprove}
+      disabled={decided || pending || !approval.approvalId || !onapprove}
       onclick={approve}
     >
       Approve
     </button>
-    <button type="button" class="lattice-btn lattice-btn--compact lattice-btn--danger" data-testid="reject" disabled={decided || !approval.approvalId || !onreject} onclick={reject}>
+    <button type="button" class="lattice-btn lattice-btn--compact lattice-btn--danger" data-testid="reject" disabled={decided || pending || !approval.approvalId || !onreject} onclick={reject}>
       Reject
     </button>
   </div>

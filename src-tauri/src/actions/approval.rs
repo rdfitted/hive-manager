@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub(crate) struct PendingApproval {
     session_id: String,
     target_agent_id: String,
+    requester_agent_id: String,
     instance_id: uuid::Uuid,
     title: String,
     description: String,
@@ -84,6 +85,9 @@ impl Action for CreateApproval {
         schemars::schema_for!(RequestApproval)
     }
     async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
+        let requester_agent_id = ctx.requester_agent_id.as_ref().ok_or_else(|| {
+            ActionError::bad_request("Approval requests require an authenticated agent credential")
+        })?;
         let request: RequestApproval =
             serde_json::from_value(input).map_err(|e| ActionError::bad_request(e.to_string()))?;
         if request.title.trim().is_empty()
@@ -112,11 +116,28 @@ impl Action for CreateApproval {
         }
         let instance_id =
             validate_target(&ctx.state, &request.session_id, &request.target_agent_id)?;
+        if !ctx
+            .state
+            .session_controller
+            .read()
+            .get_session(&request.session_id)
+            .is_some_and(|session| {
+                session
+                    .agents
+                    .iter()
+                    .any(|agent| agent.id == *requester_agent_id)
+            })
+        {
+            return Err(ActionError::conflict(
+                "Approval requester is not in this session",
+            ));
+        }
         let approval_id = uuid::Uuid::new_v4().to_string();
         let expires_at = Utc::now() + chrono::Duration::minutes(15);
         let pending = PendingApproval {
             session_id: request.session_id.clone(),
             target_agent_id: request.target_agent_id.clone(),
+            requester_agent_id: requester_agent_id.clone(),
             instance_id,
             title: request.title.clone(),
             description: request.description.clone(),
@@ -125,13 +146,19 @@ impl Action for CreateApproval {
         {
             let mut approvals = ctx.state.pending_approvals.lock();
             approvals.retain(|_, request| request.expires_at > Utc::now());
-            if approvals.len() >= 1024 {
+            if approvals.len() >= 8192
+                || approvals
+                    .values()
+                    .filter(|pending| pending.requester_agent_id == *requester_agent_id)
+                    .count()
+                    >= 1024
+            {
                 return Err(ActionError::conflict("Too many pending approvals"));
             }
             approvals.insert(approval_id.clone(), pending);
         }
         let data = json!({"approvalId":approval_id, "title":request.title, "description":request.description,
-            "targetAgentId":request.target_agent_id, "expiresAt":expires_at});
+            "targetAgentId":request.target_agent_id, "requesterAgentId":requester_agent_id, "expiresAt":expires_at});
         let stored = ctx
             .state
             .storage
@@ -163,6 +190,14 @@ impl Action for CreateApproval {
 }
 
 struct ResolveApproval;
+
+fn consumed_approval_error(mut error: ActionError) -> ActionError {
+    // Stable signal across Tauri's string error channel. Delivery may have
+    // written bytes even if its acknowledgement failed, so retry is unsafe.
+    error.message = format!("[approval_consumed] {}", error.message);
+    error
+}
+
 #[async_trait]
 impl Action for ResolveApproval {
     fn name(&self) -> &'static str {
@@ -181,9 +216,11 @@ impl Action for ResolveApproval {
             serde_json::from_value(input).map_err(|e| ActionError::bad_request(e.to_string()))?;
         let pending = {
             let mut approvals = ctx.state.pending_approvals.lock();
-            let pending = approvals
-                .get(&request.approval_id)
-                .ok_or_else(|| ActionError::conflict("Approval is stale or already resolved"))?;
+            let pending = approvals.get(&request.approval_id).ok_or_else(|| {
+                consumed_approval_error(ActionError::conflict(
+                    "Approval is stale or already resolved",
+                ))
+            })?;
             if pending.session_id != request.session_id {
                 return Err(ActionError::conflict("Approval belongs to another session"));
             }
@@ -192,6 +229,7 @@ impl Action for ResolveApproval {
                 .remove(&request.approval_id)
                 .expect("pending approval held under lock")
         };
+        async {
         if pending.expires_at <= Utc::now()
             || validate_target(&ctx.state, &pending.session_id, &pending.target_agent_id)?
                 != pending.instance_id
@@ -203,7 +241,8 @@ impl Action for ResolveApproval {
         let state = Arc::clone(&ctx.state);
         let result = tokio::task::spawn_blocking(move || -> Result<Value, ActionError> {
             let message = json!({"type":"approval_decision", "approval_id":request.approval_id,
-                "decision":request.decision, "title":pending.title, "description":pending.description}).to_string();
+                "decision":request.decision, "requester_agent_id":pending.requester_agent_id,
+                "title":pending.title, "description":pending.description}).to_string();
             let manager = state.pty_manager.read();
             let protocol = manager.with_current_instance(&pending.target_agent_id, pending.instance_id,
                 |_| manager.protocol_agent(&pending.target_agent_id))
@@ -229,6 +268,7 @@ impl Action for ResolveApproval {
             Ok(json!({"approval_id":request.approval_id, "decision":request.decision, "delivered":true}))
         }).await.map_err(|e| ActionError::internal(e.to_string()))?;
         result
+        }.await.map_err(consumed_approval_error)
     }
 }
 

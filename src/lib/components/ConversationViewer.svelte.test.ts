@@ -138,5 +138,64 @@ describe('G57 conversation widgets', () => {
     await waitFor(() => expect(view.getByTestId('approve')).toBeTruthy());
     await fireEvent.click(view.getByTestId('approve'));
     await waitFor(() => expect(view.getByText('Approval is stale or already resolved')).toBeTruthy());
+    expect((view.getByTestId('approve') as HTMLButtonElement).disabled).toBe(true);
+    expect((view.getByTestId('reject') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('shows the authenticated requester on a reloaded approval card', async () => {
+    saved = [{ ...diff, renderer: 'approval', data: { title: 'Review patch', approvalId: 'pending-demo', requesterAgentId: 'render-session-worker-1' } }];
+    const view = render(ConversationViewer);
+    await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));
+    await waitFor(() => expect(view.getByText('Requested by render-session-worker-1')).toBeTruthy());
+  });
+
+  it('keeps both buttons disabled until the decision invoke settles', async () => {
+    let finish!: () => void;
+    invokeMock.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    saved = [{ ...diff, renderer: 'approval', data: { approvalId: 'pending-demo' } }];
+    const view = render(ConversationViewer);
+    await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));
+    await waitFor(() => expect(view.getByTestId('approve')).toBeTruthy());
+    await fireEvent.click(view.getByTestId('approve'));
+    expect((view.getByTestId('approve') as HTMLButtonElement).disabled).toBe(true);
+    expect((view.getByTestId('reject') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(view.getByTestId('reject'));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    finish();
+    await tick();
+    expect((view.getByTestId('approve') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('re-enables both buttons after a retryable invoke failure and permits a retry', async () => {
+    invokeMock.mockRejectedValueOnce('Temporary invoke failure').mockResolvedValueOnce({ delivered: true });
+    saved = [{ ...diff, renderer: 'approval', data: { approvalId: 'pending-demo' } }];
+    const view = render(ConversationViewer);
+    await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));
+    await waitFor(() => expect(view.getByTestId('approve')).toBeTruthy());
+    await fireEvent.click(view.getByTestId('approve'));
+    await waitFor(() => expect(view.getByText('Temporary invoke failure')).toBeTruthy());
+    expect((view.getByTestId('approve') as HTMLButtonElement).disabled).toBe(false);
+    expect((view.getByTestId('reject') as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(view.getByTestId('reject'));
+    await waitFor(() => expect(invokeMock).toHaveBeenLastCalledWith('resolve_approval', { request: {
+      session_id: 'render-session', approval_id: 'pending-demo', decision: 'rejected',
+    } }));
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+    expect((view.getByTestId('reject') as HTMLButtonElement).disabled).toBe(true);
+    expect(view.queryByText('Temporary invoke failure')).toBeNull();
+  });
+
+  it('keeps a consumed approval disabled after an ambiguous delivery failure', async () => {
+    invokeMock.mockRejectedValue('[approval_consumed] Delivery acknowledgement failed');
+    saved = [{ ...diff, renderer: 'approval', data: { approvalId: 'pending-demo' } }];
+    const view = render(ConversationViewer);
+    await fireEvent.click(view.getByRole('tab', { name: 'Shared' }));
+    await waitFor(() => expect(view.getByTestId('approve')).toBeTruthy());
+    await fireEvent.click(view.getByTestId('approve'));
+    await waitFor(() => expect(view.getByText('Delivery acknowledgement failed')).toBeTruthy());
+    expect((view.getByTestId('approve') as HTMLButtonElement).disabled).toBe(true);
+    expect((view.getByTestId('reject') as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(view.getByTestId('reject'));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
   });
 });

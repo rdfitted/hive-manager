@@ -15,7 +15,6 @@
   let messageInput = '';
   let lastMessageCount = 0;
   let pollInterval: ReturnType<typeof setInterval>;
-  let approvalError = '';
 
   $: sessionId = $activeSession?.id ?? null;
   $: agents = $activeSession?.agents ?? [];
@@ -102,27 +101,22 @@
   }
 
   async function resolveApproval(decision: 'approved' | 'rejected', detail: { approvalId?: string }) {
-    if (!sessionId || !detail.approvalId) return;
-    try {
-      approvalError = '';
-      await invoke('resolve_approval', {
+    if (!sessionId || !detail.approvalId) throw new Error('No active session for this approval');
+    await invoke('resolve_approval', {
         request: {
           session_id: sessionId,
           approval_id: detail.approvalId,
           decision,
         },
-      });
-    } catch (err) {
-      approvalError = String(err);
-    }
+    });
   }
 
   function handleApprove(detail: { approvalId?: string }) {
-    void resolveApproval('approved', detail);
+    return resolveApproval('approved', detail);
   }
 
   function handleReject(detail: { approvalId?: string }) {
-    void resolveApproval('rejected', detail);
+    return resolveApproval('rejected', detail);
   }
 
   function getSenderColor(from: string): string {
@@ -253,12 +247,6 @@
     </div>
   {/if}
 
-  {#if approvalError}
-    <div class="error lattice-forced-colors-boundary">
-      {approvalError}
-      <button class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon" onclick={() => approvalError = ''} aria-label="Dismiss approval error">&#10005;</button>
-    </div>
-  {/if}
 </div>
 
 <style>

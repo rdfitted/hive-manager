@@ -11168,7 +11168,7 @@ async fn g57_approval_fixture() -> (
 ) {
     let state = setup_test_state().await;
     let agent_id = "approval-session-queen";
-    let mut session = make_test_session_with_agents("approval-session", ".", &[agent_id]);
+    let mut session = make_test_session_with_agents("approval-session", ".", &[agent_id, "approval-session-worker-1", "approval-session-worker-2"]);
     session.agents[0].role = AgentRole::Queen;
     state.session_controller.read().insert_test_session(session);
     state
@@ -11199,8 +11199,92 @@ async fn g57_approval_fixture() -> (
         .unwrap();
     (state, crate::actions::build_registry(), transport)
 }
+fn g57_request_input() -> serde_json::Value {
+    serde_json::json!({"session_id":"approval-session", "target_agent_id":"approval-session-queen", "title":"Review patch", "description":"Synthetic change"})
+}
+async fn g57_http_request(state: &Arc<AppState>, input: serde_json::Value, tokens: &[axum::http::HeaderValue]) -> axum::response::Response {
+    let mut request = Request::builder().method("POST").uri("/api/actions/approval.request")
+        .header("Content-Type", "application/json");
+    for token in tokens {
+        request = request.header("X-Hive-Agent-Token", token);
+    }
+    create_router(state.clone()).oneshot(request.body(Body::from(input.to_string())).unwrap()).await.unwrap()
+}
+
+#[tokio::test]
+async fn g57_approval_request_requires_a_valid_same_session_agent_credential() {
+    let (state, registry, _) = g57_approval_fixture().await;
+    let token = state.pty_manager.read().mint_heartbeat_token_for_test("approval-session-worker-1", "approval-session", false);
+    let foreign = state.pty_manager.read().mint_heartbeat_token_for_test("other-worker", "other-session", false);
+    let orphan = state.pty_manager.read().mint_heartbeat_token_for_test("removed-worker", "approval-session", false);
+    for tokens in [vec![], vec!["invalid".parse().unwrap()], vec!["".parse().unwrap()],
+        vec![axum::http::HeaderValue::from_bytes(&[0xff]).unwrap()], vec![foreign.parse().unwrap()],
+        vec![token.parse().unwrap(), token.parse().unwrap()]] {
+        assert_eq!(g57_http_request(&state, g57_request_input(), &tokens).await.status(), StatusCode::UNAUTHORIZED,
+            "approval requests require one valid same-session credential");
+    }
+    assert!(!g57_http_request(&state, g57_request_input(), &[orphan.parse().unwrap()]).await.status().is_success(),
+        "a credential whose owner left the session has no approval authority");
+    let mut forged = g57_request_input();
+    forged["requester_agent_id"] = serde_json::json!("approval-session-worker-2");
+    assert_eq!(g57_http_request(&state, forged, &[token.parse().unwrap()]).await.status(), StatusCode::BAD_REQUEST);
+    assert!(registry.dispatch("approval.request", &crate::actions::ActionContext::new(crate::actions::Caller::Http, state.clone()), g57_request_input()).await.is_err(),
+        "direct dispatch cannot bypass requester authentication");
+    assert!(state.pending_approvals.lock().is_empty());
+    assert!(state.storage.read_conversation("approval-session", "approval-session-queen", None).await.unwrap().is_empty());
+    // Approval-specific authentication leaves the other action endpoints unchanged.
+    let response = create_router(state).oneshot(Request::builder().method("POST").uri("/api/actions/no-such-action")
+        .header("Content-Type", "application/json").body(Body::from("{}" )).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn g57_approval_request_persists_and_delivers_authenticated_provenance() {
+    use crate::actions::{ActionContext, Caller};
+    let (state, registry, transport) = g57_approval_fixture().await;
+    let requester = "approval-session-worker-1";
+    let token = state.pty_manager.read().mint_heartbeat_token_for_test(requester, "approval-session", false);
+    let mut events = state.event_bus.subscribe_session("approval-session".into());
+    let response = g57_http_request(&state, g57_request_input(), &[token.parse().unwrap()]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let output: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(output["data"]["requesterAgentId"], requester, "the credential owner is the requester");
+    let id = output["data"]["approvalId"].as_str().unwrap();
+    let messages = state.storage.read_conversation("approval-session", "approval-session-queen", None).await.unwrap();
+    assert_eq!(messages[0].data.as_ref().unwrap()["requesterAgentId"], requester);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await.unwrap().unwrap();
+    assert_eq!(event.payload["data"]["requesterAgentId"], requester);
+    registry.dispatch("approval.resolve", &ActionContext::new(Caller::Frontend, state.clone()), g57_decision(id)).await.unwrap();
+    let delivered: serde_json::Value = serde_json::from_str(&transport.messages.lock()[0]).unwrap();
+    assert_eq!(delivered["requester_agent_id"], requester);
+}
+
+#[tokio::test]
+async fn g57_approval_cap_is_per_requester_with_a_global_ceiling() {
+    let (state, registry, _) = g57_approval_fixture().await;
+    let id = g57_request(&state, &registry).await;
+    let pending = state.pending_approvals.lock()[&id].clone();
+    {
+        let mut approvals = state.pending_approvals.lock();
+        for index in 1..1024 { approvals.insert(format!("cap-{index}"), pending.clone()); }
+    }
+    let queen_token = state.pty_manager.read().mint_heartbeat_token_for_test("approval-session-queen", "approval-session", true);
+    assert_eq!(g57_http_request(&state, g57_request_input(), &[queen_token.parse().unwrap()]).await.status(), StatusCode::CONFLICT);
+    let worker_token = state.pty_manager.read().mint_heartbeat_token_for_test("approval-session-worker-1", "approval-session", false);
+    assert_eq!(g57_http_request(&state, g57_request_input(), &[worker_token.parse().unwrap()]).await.status(), StatusCode::OK,
+        "another requester retains capacity when one reaches its cap");
+    {
+        let mut approvals = state.pending_approvals.lock();
+        for index in 1025..8192 { approvals.insert(format!("cap-{index}"), pending.clone()); }
+    }
+    let worker_token = state.pty_manager.read().mint_heartbeat_token_for_test("approval-session-worker-2", "approval-session", false);
+    assert_eq!(g57_http_request(&state, g57_request_input(), &[worker_token.parse().unwrap()]).await.status(), StatusCode::CONFLICT,
+        "a separate global ceiling still bounds memory");
+}
 async fn g57_request(state: &Arc<AppState>, registry: &crate::actions::ActionRegistry) -> String {
-    let output = registry.dispatch("approval.request", &crate::actions::ActionContext::new(crate::actions::Caller::Http, state.clone()), serde_json::json!({
+    let mut context = crate::actions::ActionContext::new(crate::actions::Caller::Http, state.clone());
+    context.requester_agent_id = Some("approval-session-queen".into());
+    let output = registry.dispatch("approval.request", &context, serde_json::json!({
         "session_id":"approval-session", "target_agent_id":"approval-session-queen", "title":"Apply the reviewed patch?", "description":"Synthetic demo change"
     })).await.unwrap();
     output["data"]["approvalId"].as_str().unwrap().into()
@@ -11282,10 +11366,11 @@ async fn g57_approval_rejects_nonfrontend_forged_cross_session_and_expired() {
         .get_mut(&id)
         .unwrap()
         .expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
-    assert!(registry
+    let error = registry
         .dispatch("approval.resolve", &context, g57_decision(&id))
         .await
-        .is_err());
+        .unwrap_err();
+    assert!(error.message.starts_with("[approval_consumed] "), "expired approvals must keep the UI card consumed");
     assert!(transport.messages.lock().is_empty());
 }
 #[tokio::test]
@@ -11304,10 +11389,11 @@ async fn g57_concurrent_and_ambiguous_approval_decisions_are_single_use() {
     transport
         .fail
         .store(true, std::sync::atomic::Ordering::Release);
-    assert!(registry
+    let error = registry
         .dispatch("approval.resolve", &context, g57_decision(&id))
         .await
-        .is_err());
+        .unwrap_err();
+    assert!(error.message.starts_with("[approval_consumed] "), "ambiguous delivery failures must keep the UI card consumed");
     assert!(registry
         .dispatch("approval.resolve", &context, g57_decision(&id))
         .await
@@ -11358,7 +11444,8 @@ async fn g57_approval_request_rejects_credentials_before_any_persistence() {
         true,
     );
     let split = format!("{}\t{}", &token[..32], &token[32..]);
-    let context = ActionContext::new(Caller::Http, state.clone());
+    let mut context = ActionContext::new(Caller::Http, state.clone());
+    context.requester_agent_id = Some("approval-session-queen".into());
     let mut events = state.event_bus.subscribe_session("approval-session".into());
     for field in ["title", "description"] {
         for credential in [&token, &split] {

@@ -31,10 +31,16 @@ pub enum Caller {
 pub struct ActionContext {
     pub caller: Caller,
     pub state: Arc<AppState>,
+    /// Credential owner resolved by the HTTP boundary, never from action input.
+    pub(crate) requester_agent_id: Option<String>,
 }
 
 impl ActionContext {
     pub fn new(caller: Caller, state: Arc<AppState>) -> Self {
-        Self { caller, state }
+        Self {
+            caller,
+            state,
+            requester_agent_id: None,
+        }
     }
 }
