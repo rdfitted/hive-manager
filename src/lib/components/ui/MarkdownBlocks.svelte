@@ -1,8 +1,9 @@
 <script lang="ts">
   import { parseMarkdown, type MarkdownBlock } from '$lib/knowledge/markdown';
   import MarkdownInline from '../knowledge/MarkdownInline.svelte';
+  import HtmlPreview from './HtmlPreview.svelte';
 
-  let { source }: { source: string } = $props();
+  let { source, allowHtmlPreview = false }: { source: string; allowHtmlPreview?: boolean } = $props();
   const blocks = $derived(parseMarkdown(source));
 </script>
 
@@ -20,6 +21,9 @@
         <!-- Scrollable code needs a tab stop so keyboard users can pan long lines. -->
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <pre class="lattice-scroll-content" tabindex="0" role="region" aria-label={block.language ? `Code block: ${block.language}` : 'Code block'}><code>{block.text}</code></pre>
+        {#if allowHtmlPreview && block.language.toLowerCase() === 'html'}
+          {#key block.text}<HtmlPreview source={block.text} />{/key}
+        {/if}
       </div>
     {:else if block.type === 'list'}
       {#if block.ordered}

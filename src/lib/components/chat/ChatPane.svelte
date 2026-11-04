@@ -105,7 +105,7 @@
           <article class="message" class:user-message={row.type === 'user'} aria-label={row.type === 'user' ? 'User message' : row.type === 'assistant' ? 'Assistant message' : row.type === 'decision' ? 'Approval decision' : 'Agent error'} title={new Date(row.ts).toLocaleString()}>
             {#if row.type === 'decision' || row.type === 'error'}<strong>{row.type === 'decision' ? 'Approval' : 'Error'}</strong>{/if}
             {#if row.type === 'assistant'}
-              <MarkdownBlocks source={row.text} />
+              <MarkdownBlocks source={row.text} allowHtmlPreview />
             {:else}
               <p use:measureOverflow={row.type === 'user' ? row.id : undefined} class:clamped={row.type === 'user' && !expandedMessages[row.id] && (canMeasure || longMessage)}>{row.text}</p>
             {/if}

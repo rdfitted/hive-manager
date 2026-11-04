@@ -8,6 +8,20 @@ const { readFileSync } = await vi.importActual<{ readFileSync(path: string, enco
 afterEach(() => { cleanup(); vi.clearAllMocks(); document.querySelector('[data-markdown-test]')?.remove(); });
 
 describe('shared Markdown blocks', () => {
+  it('keeps Knowledge and non-HTML fences unchanged; only opted-in HTML offers a preview', async () => {
+    const source = '```html\n<h1>Passive report</h1>\n```\n\n```javascript\nconsole.log(1)\n```';
+    const view = render(MarkdownBlocks, { source });
+    expect(view.queryByRole('button', { name: 'Preview HTML' })).toBeNull();
+    expect(view.container.querySelector('iframe')).toBeNull();
+    expect(view.container.querySelector('pre code')?.textContent).toBe('<h1>Passive report</h1>');
+    await view.rerender({ source, allowHtmlPreview: true });
+    expect(view.getAllByRole('button', { name: 'Preview HTML' })).toHaveLength(1);
+    expect(view.container.querySelector('iframe')).toBeNull();
+    await fireEvent.click(view.getByRole('button', { name: 'Preview HTML' }));
+    expect(view.getByTitle('HTML preview')).toBeTruthy();
+    expect(view.container.querySelector('pre code')?.textContent).toBe('<h1>Passive report</h1>');
+  });
+
   it('renders headings, inline styles, fenced code, quotes, rules and nested numbered lists', () => {
     const view = render(MarkdownBlocks, { source: '# **Title**\n\nUse *care* and `code`.\n\n3. **First**\n   - child\n     7. **Nested**\n\n4. **Second**\n\n> quote\n\n---\n\n```html\n<b>literal code</b>\n```' });
     expect(view.getByRole('heading', { level: 1, name: 'Title' }).querySelector('strong')).toBeTruthy();
