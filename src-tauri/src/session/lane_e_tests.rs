@@ -399,6 +399,72 @@ fn g49_load_resumes_only_queen_then_explicitly_resumes_one_worker_in_saved_cwd()
 }
 
 #[test]
+fn g51_resume_preserves_concurrent_roster_status_activity_and_target_metadata() {
+    let (_temp, controller, storage, source) = resume_fixture(false);
+    let session_id = source.id.clone();
+    let worker = source.agents[1].id.clone();
+    let other = source.agents[0].id.clone();
+    controller.resume_session(&session_id).unwrap();
+    let before = controller.sessions.read()[&session_id].clone();
+    let newer_activity = chrono::Utc::now() + chrono::Duration::days(1);
+    let mut added = before.agents[2].clone();
+    added.id = format!("{session_id}-worker-concurrent");
+    let added_id = added.id.clone();
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    SessionController::test_sync_hook(&session_id, "resume-agent-prepared", Some(Box::new(move || {
+        prepared_tx.send(()).unwrap();
+        release_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+    })));
+    let resumed = std::thread::scope(|scope| {
+        let resume = scope.spawn(|| controller.resume_agent(&session_id, &worker));
+        prepared_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        controller.update_heartbeat(&session_id, &other, "working", Some("concurrent activity")).unwrap();
+        controller.record_injection_submission(&session_id, &other, chrono::Utc::now(), true).unwrap();
+        {
+            let mut sessions = controller.sessions.write();
+            let current = sessions.get_mut(&session_id).unwrap();
+            current.agents.push(added);
+            if let SessionType::Hive { worker_count } = &mut current.session_type {
+                *worker_count += 1;
+            } else { panic!("expected Hive fixture"); }
+            current.agents.iter_mut().find(|agent| agent.id == worker).unwrap().config.label = Some("concurrent label".into());
+            current.last_activity_at = newer_activity;
+            current.name = Some("concurrent session name".into());
+        }
+        release_tx.send(()).unwrap();
+        resume.join().unwrap().unwrap()
+    });
+    for snapshot in [&resumed, &controller.sessions.read()[&session_id]] {
+        assert!(snapshot.agents.iter().any(|agent| agent.id == added_id), "CR3 concurrent worker survives Resume");
+        assert!(matches!(snapshot.session_type, SessionType::Hive { worker_count: 3 }));
+        assert!(matches!(&snapshot.agents.iter().find(|agent| agent.id == other).unwrap().status,
+            AgentStatus::WaitingForInput(reason) if reason.starts_with(SessionController::AWAITING_INJECTED_TURN_PREFIX)));
+        assert_eq!(snapshot.last_activity_at, newer_activity);
+        assert_eq!(snapshot.name.as_deref(), Some("concurrent session name"));
+        let target = snapshot.agents.iter().find(|agent| agent.id == worker).unwrap();
+        assert_eq!(target.config.label.as_deref(), Some("concurrent label"));
+        assert!(matches!(target.status, AgentStatus::Running));
+        assert_eq!(target.provider_session_id, source.agents[1].transcript_session_id);
+        assert_eq!(target.transcript_spawned_at, controller.pty_manager.read().spawned_at(&worker));
+        assert_ne!(target.transcript_spawned_at, before.agents[1].transcript_spawned_at);
+        assert!(snapshot.agent_resume_report.iter().any(|line| line.contains(&added_id)));
+    }
+    let saved = storage.load_session(&session_id).unwrap();
+    assert!(saved.agents.iter().any(|agent| agent.id == added_id));
+    assert_eq!(saved.agents.len(), before.agents.len() + 1);
+    assert!(matches!(saved.session_type, crate::storage::SessionTypeInfo::Hive { worker_count: 3 }));
+    assert_eq!(saved.last_activity_at, Some(newer_activity));
+    assert_eq!(saved.name.as_deref(), Some("concurrent session name"));
+    let target = saved.agents.iter().find(|agent| agent.id == worker).unwrap();
+    assert_eq!(target.config.label.as_deref(), Some("concurrent label"));
+    assert_eq!(target.provider_session_id, source.agents[1].transcript_session_id);
+    assert_eq!(target.transcript_spawned_at, controller.pty_manager.read().spawned_at(&worker));
+    controller.pty_manager.read().kill(&source.agents[0].id).unwrap();
+    controller.pty_manager.read().kill(&worker).unwrap();
+}
+
+#[test]
 fn g49_solo_load_resumes_original_agent_without_starting_evaluator() {
     let (_temp, controller, _storage, source) = resume_fixture(true);
     let resumed = controller.resume_session(&source.id).unwrap();

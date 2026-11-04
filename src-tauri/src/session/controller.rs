@@ -3883,7 +3883,7 @@ impl SessionController {
             .any(|agent| agent.id == agent_id && agent.work_state == Some(super::work_state::WorkState::Finished)));
         let pty_manager = self.pty_manager.read();
         let stopped_at = Utc::now();
-        let stopped_cell = {
+        let (stopped_cell, preserved) = {
             let mut sessions = self.sessions.write();
             let session = sessions.get_mut(session_id).ok_or_else(|| format!("Session not found: {session_id}"))?;
             let index = session.agents.iter().position(|agent| agent.id == agent_id)
@@ -3905,7 +3905,7 @@ impl SessionController {
             session.agents[index].work_state = Some(if preserved {
                 super::work_state::WorkState::Finished
             } else { super::work_state::WorkState::Working });
-            agent_cell_id(session, &session.agents[index])
+            (agent_cell_id(session, &session.agents[index]), preserved)
         };
         drop(pty_manager);
         self.update_session_storage(session_id);
@@ -3914,7 +3914,7 @@ impl SessionController {
             let session_id = session_id.to_owned();
             let agent_id = agent_id.to_owned();
             tokio::spawn(async move {
-                if let Err(error) = emitter.emit_agent_stopped(&session_id, &stopped_cell, &agent_id, instance, stopped_at).await {
+                if let Err(error) = emitter.emit_agent_stopped(&session_id, &stopped_cell, &agent_id, instance, stopped_at, preserved).await {
                     tracing::debug!("Failed to emit agent stopped event: {error}");
                 }
             });
@@ -16437,8 +16437,30 @@ The backend composed and persisted the following authoritative skeleton before l
             .ok_or_else(|| format!("Session not found: {session_id}"))?;
         self.populate_provider_ids(&mut session);
         self.respawn_saved_agent(&mut session, agent_id)?;
-        session.agent_resume_report = Self::agent_resume_report(&session);
-        self.sessions.write().insert(session_id.to_string(), session.clone());
+        #[cfg(test)]
+        Self::test_sync_hook(session_id, "resume-agent-prepared", None);
+        let resumed = session.agents.iter().find(|agent| agent.id == agent_id)
+            .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+        let session = {
+            // Respawn can overlap roster registration, heartbeats and input delivery.
+            // Merge only its runtime changes into the current session, never the old roster.
+            let mut sessions = self.sessions.write();
+            let current = sessions.get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {session_id}"))?;
+            let target = current.agents.iter_mut().find(|agent| agent.id == agent_id)
+                .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+            target.provider_session_id = resumed.provider_session_id.clone();
+            target.transcript_session_id = resumed.transcript_session_id.clone();
+            target.transcript_spawned_at = resumed.transcript_spawned_at;
+            target.status = resumed.status.clone();
+            target.work_state = resumed.work_state.clone();
+            current.last_activity_at = current.last_activity_at.max(session.last_activity_at);
+            if session.state == SessionState::Running {
+                current.state = SessionState::Running;
+            }
+            current.agent_resume_report = Self::agent_resume_report(current);
+            current.clone()
+        };
         self.update_session_storage(session_id);
         let session = self.project_work_states(session);
         if let Some(app_handle) = &self.app_handle {

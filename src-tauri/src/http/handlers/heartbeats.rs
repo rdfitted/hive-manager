@@ -858,9 +858,11 @@ async fn reassign_nodes_with_persistence(
             let mut transfer = QueueReassignment::new(row.clone(), target_id.clone());
             // A never-claimed queued row has only pending:<id> identities. Its prior
             // graph principal still needs a durable legacy-heartbeat fence.
-            transfer.retired_worker_ids = hierarchy.iter().filter(|agent|
-                agent.principal.as_deref().map(str::trim) == Some(previous_principal))
-                .map(|agent| agent.id.clone()).collect();
+            if row.worker_id.starts_with("pending:") {
+                transfer.retired_worker_ids = hierarchy.iter().filter(|agent|
+                    agent.principal.as_deref().map(str::trim) == Some(previous_principal))
+                    .map(|agent| agent.id.clone()).collect();
+            }
             transfers.push(transfer);
         }
         node.binding = match &previous {
@@ -2440,6 +2442,59 @@ test "$with_header" = 200 && test "$without_header" = 200 && test "$wrong_token"
                         .map(str::to_string)).collect();
                 assert_eq!(kinds, ["node_reassignment_requested", "node_reassignment_applied"]);
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn g51_queue_reassignment_preserves_same_principal_bystander_heartbeats() {
+        for (status, recovered) in [(QueueStatus::Running, false), (QueueStatus::Queued, false),
+            (QueueStatus::Queued, true)] {
+        let (fixture, manager, new_id) = queue_reassignment_fixture(status);
+        if recovered {
+            // Recovery leaves the concrete spawned holder behind the pending sentinel.
+            fixture.state.app_state_db.with_conn(|conn| {
+                conn.execute("UPDATE agent_run_queue SET worker_id = 'pending:run', spawned_worker_id = ?1
+                    WHERE id = ?2", rusqlite::params![WORKER_ID, ROW_ID])?;
+                Ok(())
+            }).unwrap();
+        }
+        let bystander_id = format!("{SESSION_ID}-worker-3");
+        let mut hierarchy = manager.read_hierarchy().unwrap();
+        hierarchy.push(HierarchyNode {
+            id: bystander_id.clone(), role: "Worker-3".into(), principal: Some("P3".into()),
+            parent_id: Some(QUEEN_ID.into()), children: vec![],
+        });
+        manager.update_hierarchy(&hierarchy).unwrap();
+        {
+            let controller = fixture.state.session_controller.read();
+            let mut session = controller.get_session(SESSION_ID).unwrap();
+            session.agents.push(agent(&bystander_id,
+                AgentRole::Worker { index: 3, parent: Some(QUEEN_ID.into()) }, Some(QUEEN_ID)));
+            controller.insert_test_session(session);
+        }
+        let before = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
+        let _ = expect_success(transfer_queue_node(&fixture, &new_id).await, "claimed-row transfer");
+        let transferred = fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap();
+
+        let _ = expect_success(heartbeat(fixture.state.clone(), &bystander_id, "working", None).await,
+            "same-principal bystander keeps assignment-free heartbeat compatibility");
+        assert_eq!(fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID)[&bystander_id].status,
+            "working", "the accepted bystander heartbeat must update controller liveness");
+        assert!(!transferred.payload["reassigned_from"].as_array().unwrap().iter()
+            .any(|entry| entry["worker_id"].as_str() == Some(bystander_id.as_str())),
+            "an unrelated agent must not enter the holder's retirement history");
+        for assignment in [None, Some(before.assignment_id)] {
+            let error = heartbeat(fixture.state.clone(), WORKER_ID, "completed", assignment)
+                .await.err().expect("actual holder remains fenced");
+            assert_eq!(error.status, StatusCode::CONFLICT);
+        }
+        assert!(!fixture.state.session_controller.read().get_heartbeat_info(SESSION_ID).contains_key(WORKER_ID));
+        assert_eq!(fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap(), transferred);
+        let _ = expect_success(heartbeat_with_completed_nodes(fixture.state.clone(), &new_id,
+            "completed", Some(transferred.assignment_id), &["T-review-3"]).await,
+            "the new holder completes the transferred row");
+        assert_eq!(fixture.state.queue_manager.repo().get_row(ROW_ID).unwrap().unwrap().status, QueueStatus::Finalized);
+        assert!(manager.read_node_completion_facts().unwrap().iter().all(|fact| fact.agent_id == new_id));
         }
     }
 

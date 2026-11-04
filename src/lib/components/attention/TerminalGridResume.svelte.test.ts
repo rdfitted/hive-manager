@@ -97,6 +97,27 @@ const session: Session = {
 };
 
 describe('G49 pane resume', () => {
+  it('shows an ellipsis while Resume is pending and restores the idle label', async () => {
+    layout.setSessionViewMode('focus');
+    let finishResume!: () => void;
+    const resumable: Session = { ...session, agents: [
+      { ...session.agents[0], status: 'Completed', provider_session_id: '00000000-0000-4000-8000-000000000001' },
+    ] };
+    const view = render(TerminalGrid, { session: resumable, focusedAgentId: 'claude', onSelect: vi.fn() });
+    const resume = view.getByRole('button', { name: 'Resume Claude agent' }) as HTMLButtonElement;
+    fixture.invoke.mockImplementationOnce(() => new Promise<undefined>((resolve) => {
+      finishResume = () => resolve(undefined);
+    }));
+    await fireEvent.click(resume);
+    expect(resume.disabled).toBe(true);
+    expect(resume.textContent?.trim()).toBe('Resuming\u2026');
+    finishResume();
+    await waitFor(() => {
+      expect(resume.disabled).toBe(false);
+      expect(resume.textContent?.trim()).toBe('Resume');
+    });
+  });
+
   it.each(['focus', 'grid'] as const)('shows Resume only for an eligible finished agent in %s', async (mode) => {
     layout.setSessionViewMode(mode);
     const resumable: Session = { ...session, agents: [

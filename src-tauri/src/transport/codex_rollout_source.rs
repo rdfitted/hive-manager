@@ -95,12 +95,29 @@ fn probe(root: &Path, path: &Path, key: &str, cwd: &str, spawned_at: DateTime<Ut
     let Ok(file) = File::open(path) else {
         return Probe::Pending;
     };
+    probe_reader(file, path, key, cwd, spawned_at)
+}
+
+fn probe_reader(
+    reader: impl Read,
+    path: &Path,
+    key: &str,
+    cwd: &str,
+    spawned_at: DateTime<Utc>,
+) -> Probe {
     let mut bytes = Vec::new();
-    if file
-        .take(feed::MAX_READ_BYTES)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
+    let mut reader = BufReader::with_capacity(8192, reader.take(feed::MAX_READ_BYTES));
+    let resumed = key
+        .strip_prefix("codex-resume-")
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+    // Resume identity lives entirely on physical line zero. Keep the cap under
+    // the buffer so read-ahead cannot exceed the normal probe window.
+    let read = if resumed {
+        reader.read_until(b'\n', &mut bytes)
+    } else {
+        reader.read_to_end(&mut bytes)
+    };
+    if read.is_err() {
         return Probe::Pending;
     }
     probe_bytes(path, &bytes, key, cwd, spawned_at)
@@ -1074,6 +1091,69 @@ mod binding_tests {
             binder.opened[&path], 1,
             "G16b rejected cold sidecar is cached before scans"
         );
+    }
+
+    #[test]
+    fn n1_resume_probe_reads_only_a_buffered_first_line() {
+        struct Counted<R> {
+            inner: R,
+            bytes_read: usize,
+        }
+        impl<R: Read> Read for Counted<R> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.inner.read(buffer)?;
+                self.bytes_read += count;
+                Ok(count)
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("rollouts");
+        let path = write(&root, 1, &[
+            meta(1, json!("cli"), "2026-11-01T12:00:00Z", "C:/fixture"),
+            user(&"x".repeat(feed::MAX_READ_BYTES as usize + 1)),
+        ]);
+        let key = format!("codex-resume-{}", id(1));
+        let mut reader = Counted { inner: File::open(&path).unwrap(), bytes_read: 0 };
+        assert!(matches!(
+            probe_reader(&mut reader, &path, &key, "c:/fixture", spawn()),
+            Probe::Match(thread) if thread == id(1)
+        ));
+        assert!(
+            reader.bytes_read <= 8192,
+            "N1 resume probe should read only one buffer, read {} bytes",
+            reader.bytes_read
+        );
+        assert!(matches!(probe(&root, &path, &key, "c:/fixture", spawn()), Probe::Match(thread) if thread == id(1)));
+    }
+
+    #[test]
+    fn n1_resume_probe_keeps_complete_line_and_identity_requirements() {
+        let path = PathBuf::from(format!("rollout-fixture-{}.jsonl", id(1)));
+        let key = format!("codex-resume-{}", id(1));
+        let valid = meta(1, json!("cli"), "2026-11-01T12:00:00Z", "C:/fixture");
+        let complete = format!("{valid}\n");
+        let check = |bytes: &[u8], key: &str, cwd: &str| {
+            probe_reader(bytes, &path, key, cwd, spawn() + chrono::Duration::days(2))
+        };
+        assert!(matches!(check(complete.as_bytes(), &key, "c:/fixture"), Probe::Match(thread) if thread == id(1)));
+        assert!(matches!(check(valid.to_string().as_bytes(), &key, "c:/fixture"), Probe::Pending));
+        let oversized = format!("{}\n", "x".repeat(feed::MAX_READ_BYTES as usize));
+        assert!(matches!(check(oversized.as_bytes(), &key, "c:/fixture"), Probe::Pending));
+        for bytes in [
+            format!("not-json\n{complete}"),
+            format!("\n{complete}"),
+            format!("{}\n", meta(2, json!("cli"), "2026-11-01T12:00:00Z", "C:/fixture")),
+            format!("{}\n", meta(1, json!({"subagent": {}}), "2026-11-01T12:00:00Z", "C:/fixture")),
+        ] {
+            assert!(matches!(check(bytes.as_bytes(), &key, "c:/fixture"), Probe::Rejected));
+        }
+        assert!(matches!(check(complete.as_bytes(), &format!("codex-resume-{}", id(2)), "c:/fixture"), Probe::Rejected));
+        assert!(matches!(check(complete.as_bytes(), &key, "c:/other"), Probe::Rejected));
+
+        let prompt = prompt("worker-a");
+        let bytes = format!("{valid}\n{}\n", user(&prompt));
+        assert!(matches!(probe_reader(bytes.as_bytes(), &path, &prompt_key(&prompt), "c:/fixture", spawn()), Probe::Match(thread) if thread == id(1)));
     }
 
     #[test]
