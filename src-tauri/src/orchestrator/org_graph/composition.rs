@@ -11,7 +11,7 @@ use super::schema::{
     ContextBoundary, KnowledgeRef, KnowledgeSource, RoleDefinition, RoleLens,
 };
 use crate::orchestrator::work_graph::context::{
-    ANTI_HUB_MIN_TASKS, ANTI_HUB_TASK_FRACTION,
+    GlobalRefExclusion, ANTI_HUB_MIN_TASKS, ANTI_HUB_TASK_FRACTION, EXCLUDED_CONTEXT_PARAMETER,
 };
 use crate::orchestrator::work_graph::{EdgeKind, EdgeProvenance, TaskGraph};
 
@@ -37,6 +37,13 @@ pub enum ContextDropReason {
     ConversationBudgetExceeded,
     BoundaryExcluded,
     SourceBoundsExceeded,
+    /// A `-> global:` wiki page whose scope is not eligible for this project.
+    ScopeExcluded,
+    /// A `-> global:` wiki page with no path rule, label-map entry or
+    /// frontmatter scope; excluded because isolation cannot be proven.
+    ScopeUnknown,
+    /// A `-> global:` link whose target is not a wiki page.
+    UnresolvedGlobalRef,
 }
 
 impl ContextDropReason {
@@ -47,6 +54,9 @@ impl ContextDropReason {
             Self::ConversationBudgetExceeded => "conversation context budget exceeded",
             Self::BoundaryExcluded => "role context boundary excluded this source",
             Self::SourceBoundsExceeded => "source pointer or summary exceeded declared bounds",
+            Self::ScopeExcluded => "wiki page scoped to another client",
+            Self::ScopeUnknown => "wiki page has no known scope, so it was withheld",
+            Self::UnresolvedGlobalRef => "wiki reference did not resolve to a wiki page",
         }
     }
 }
@@ -107,6 +117,10 @@ pub struct SpawnContext {
     pub conversation: ConversationContext,
     #[serde(default)]
     pub budget: ContextBudget,
+    /// Knowledge withheld before composition (wiki scope or resolution). It
+    /// never reaches `knowledge`; composition only records it as dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withheld: Vec<DroppedContext>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +285,8 @@ pub fn compose_context_with_remaining(
         }
     }
 
+    composed.dropped.extend(spawn.withheld.iter().cloned());
+
     let boundary = role
         .map(|definition| definition.context_boundary)
         .unwrap_or_default();
@@ -324,9 +340,27 @@ pub fn spawn_context_from_work_graph_task(
         .filter_map(|edge| graph.nodes.iter().find(|node| node.id == edge.source))
         .filter_map(knowledge_ref_from_work_node)
         .collect();
+    let mut withheld: Vec<DroppedContext> = graph
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.target == plan_task_id
+                && edge.kind == EdgeKind::Informs
+                && edge.provenance == EdgeProvenance::Knowledge
+        })
+        .filter_map(|edge| graph.nodes.iter().find(|node| node.id == edge.source))
+        .filter_map(withheld_from_work_node)
+        .collect();
+    withheld.sort_by(|left, right| {
+        left.pointer
+            .cmp(&right.pointer)
+            .then(drop_reason_rank(left.reason).cmp(&drop_reason_rank(right.reason)))
+    });
+    withheld.dedup();
 
     SpawnContext {
         task_scope,
+        withheld,
         task_summary: Some(bound_context_text(
             &task_node.title,
             MAX_KNOWLEDGE_SUMMARY_CHARS,
@@ -399,10 +433,40 @@ pub fn knowledge_refs_from_work_graph(graph: &TaskGraph) -> Vec<KnowledgeRef> {
         .collect()
 }
 
+/// The sidecar record for a derived node that withholds a wiki reference.
+fn withheld_from_work_node(
+    source_node: &crate::orchestrator::work_graph::WorkNode,
+) -> Option<DroppedContext> {
+    let expansion = source_node.expansion.as_ref()?;
+    let reason = match GlobalRefExclusion::from_tag(
+        expansion.parameters.get(EXCLUDED_CONTEXT_PARAMETER)?,
+    )? {
+        GlobalRefExclusion::ScopeExcluded => ContextDropReason::ScopeExcluded,
+        GlobalRefExclusion::ScopeUnknown => ContextDropReason::ScopeUnknown,
+        GlobalRefExclusion::UnresolvedGlobalRef => ContextDropReason::UnresolvedGlobalRef,
+    };
+    let source_ref = expansion.parameters.get("source_ref")?.trim();
+    let pointer = source_ref
+        .strip_prefix("institutional:")
+        .or_else(|| source_ref.strip_prefix("global:"))
+        .unwrap_or(source_ref)
+        .trim();
+    (!pointer.is_empty()).then(|| DroppedContext {
+        pointer: bound_context_text(pointer, MAX_KNOWLEDGE_POINTER_CHARS),
+        origin: ContextOrigin::Task,
+        reason,
+    })
+}
+
 fn knowledge_ref_from_work_node(
     source_node: &crate::orchestrator::work_graph::WorkNode,
 ) -> Option<KnowledgeRef> {
     let expansion = source_node.expansion.as_ref()?;
+    // A withheld wiki reference must never become knowledge: not in the
+    // prompt, not in miss sampling, not in edge captures.
+    if expansion.parameters.contains_key(EXCLUDED_CONTEXT_PARAMETER) {
+        return None;
+    }
     let source_ref = expansion.parameters.get("source_ref")?.trim();
     if source_ref.is_empty() {
         return None;
@@ -900,6 +964,9 @@ fn drop_reason_rank(reason: ContextDropReason) -> u8 {
         ContextDropReason::ConversationBudgetExceeded => 2,
         ContextDropReason::BoundaryExcluded => 3,
         ContextDropReason::SourceBoundsExceeded => 4,
+        ContextDropReason::ScopeExcluded => 5,
+        ContextDropReason::ScopeUnknown => 6,
+        ContextDropReason::UnresolvedGlobalRef => 7,
     }
 }
 

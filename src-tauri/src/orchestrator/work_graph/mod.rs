@@ -14,6 +14,7 @@ pub mod runtime;
 pub mod schema;
 pub mod toposort;
 pub mod validate;
+pub mod wiki_scope;
 #[cfg(test)] mod retrieval_golden;
 
 pub use schema::{

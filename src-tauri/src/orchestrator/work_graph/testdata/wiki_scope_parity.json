@@ -1,0 +1,51 @@
+{
+  "description": "Shared wiki-scope parity fixture (wiki schema.md section 11, strict order per Ryan 2026-11-04). Hive Manager's wiki_scope.rs and the Claude prompt hook must reach the same `expect` for every case. Page scope, first match wins: 1 entity path rule (honouring except), 2 label map pages{}, 3 page frontmatter scope:, 4 unknown -> scope_unknown. map=missing: built-in entity path rules + frontmatter only, eligibility universal-only. expect is one of eligible | scope_excluded | scope_unknown.",
+  "label_map": {
+    "version": 1,
+    "path_rules": [
+      {"match": "clients/*.md", "scope": "client:{stem}"},
+      {"match": "partners/*.md", "scope": "partner:{stem}"},
+      {"match": "pipeline/*.md", "scope": "pipeline:{stem}"},
+      {"match": "agents/hunter/prospects/*.md", "scope": "pipeline:{stem}", "except": ["README.md", "_TEMPLATE.md"]}
+    ],
+    "repos": [
+      {"match": ["TOG*", "ogmainbrain"], "scopes": ["client:tog"]},
+      {"match": ["axiom*"], "scopes": ["client:axiom-coherence"]},
+      {"match": ["egi*"], "scopes": ["client:egi"]},
+      {"match": ["tog-second"], "scopes": ["client:never-reached"]}
+    ],
+    "oversight": {"client:axiom-coherence": ["client:egi"]},
+    "pages": {
+      "agents/hunter/prospects/README.md": {"scope": "universal"},
+      "clients/axiom-coherence.md": {"scope": "client:axiom-coherence"},
+      "clients/egi.md": {"scope": "client:egi"},
+      "clients/mislabelled.md": {"scope": "universal"},
+      "clients/tog.md": {"scope": "client:tog"},
+      "patterns/guide.md": {"scope": "universal"},
+      "practices/labelled-pipeline.md": {"scope": "pipeline:acme"}
+    }
+  },
+  "cases": [
+    {"name": "universal page in unmapped repo", "repo": "hive-manager", "page": "patterns/guide.md", "frontmatter_scope": null, "expect": "eligible"},
+    {"name": "eligible client page in its own repo", "repo": "TOG Portal", "page": "clients/tog.md", "frontmatter_scope": "client:tog", "expect": "eligible"},
+    {"name": "client page in another repo", "repo": "hive-manager", "page": "clients/tog.md", "frontmatter_scope": "client:tog", "expect": "scope_excluded"},
+    {"name": "repo match is case-insensitive", "repo": "OGMAINBRAIN", "page": "clients/tog.md", "frontmatter_scope": null, "expect": "eligible"},
+    {"name": "first repo rule wins", "repo": "tog-second", "page": "clients/tog.md", "frontmatter_scope": null, "expect": "eligible"},
+    {"name": "oversight: office sees managed client", "repo": "axiom-coherence", "page": "clients/egi.md", "frontmatter_scope": null, "expect": "eligible"},
+    {"name": "oversight is one-way", "repo": "egi-portal", "page": "clients/axiom-coherence.md", "frontmatter_scope": null, "expect": "scope_excluded"},
+    {"name": "sibling client stays hidden from office's other clients", "repo": "TOG Portal", "page": "clients/egi.md", "frontmatter_scope": null, "expect": "scope_excluded"},
+    {"name": "path rule beats a mislabelled map entry", "repo": "hive-manager", "page": "clients/mislabelled.md", "frontmatter_scope": "universal", "expect": "scope_excluded"},
+    {"name": "stale map: entity page missing from pages{}", "repo": "hive-manager", "page": "clients/new-client.md", "frontmatter_scope": null, "expect": "scope_excluded"},
+    {"name": "stale map: hunter prospect missing from pages{}", "repo": "hive-manager", "page": "agents/hunter/prospects/acme.md", "frontmatter_scope": null, "expect": "scope_excluded"},
+    {"name": "path-rule except falls through to the map", "repo": "hive-manager", "page": "agents/hunter/prospects/README.md", "frontmatter_scope": null, "expect": "eligible"},
+    {"name": "map labels a non-entity page with a pipeline scope", "repo": "hive-manager", "page": "practices/labelled-pipeline.md", "frontmatter_scope": "universal", "expect": "scope_excluded"},
+    {"name": "frontmatter scope, no map entry, universal", "repo": "hive-manager", "page": "practices/added-after-map.md", "frontmatter_scope": "universal", "expect": "eligible"},
+    {"name": "frontmatter scope, no map entry, client", "repo": "hive-manager", "page": "research/client-notes.md", "frontmatter_scope": "client:tog", "expect": "scope_excluded"},
+    {"name": "anchor and ./ prefix are stripped", "repo": "hive-manager", "page": "./clients/tog.md#history", "frontmatter_scope": null, "expect": "scope_excluded"},
+    {"name": "frontmatter scope: unknown is still unknown", "repo": "hive-manager", "page": "practices/odd.md", "frontmatter_scope": "unknown", "expect": "scope_unknown"},
+    {"name": "unknown infrastructure page", "repo": "hive-manager", "page": "harness/entity-names.md", "frontmatter_scope": null, "expect": "scope_unknown"},
+    {"name": "missing map: client page stays blocked", "repo": "TOG Portal", "map": "missing", "page": "clients/tog.md", "frontmatter_scope": "client:tog", "expect": "scope_excluded"},
+    {"name": "missing map: universal frontmatter passes", "repo": "hive-manager", "map": "missing", "page": "patterns/guide.md", "frontmatter_scope": "universal", "expect": "eligible"},
+    {"name": "missing map: no frontmatter scope is unknown", "repo": "hive-manager", "map": "missing", "page": "patterns/guide.md", "frontmatter_scope": null, "expect": "scope_unknown"}
+  ]
+}
