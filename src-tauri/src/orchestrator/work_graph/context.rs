@@ -2,7 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +12,7 @@ use crate::http::handlers::knowledge::{first_h1, frontmatter_field, split_frontm
 
 use super::archetypes::{GotchaAttachment, GotchaAttachmentProvider};
 use super::schema::OmissionProducer;
+use super::wiki_scope::WikiScope;
 use super::{
     BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind,
     NodeStatus, TaskGraph, TaskId, WorkEdge, WorkGraphOmission,
@@ -22,6 +24,22 @@ pub const MAX_DERIVED_CONTEXT_NODES: usize = 128;
 pub const MAX_CONTEXT_SCOPES_PER_GOTCHA: usize = 16;
 pub const MAX_CONTEXT_SCOPE_CHARS: usize = 256;
 pub const DERIVED_CONTEXT_TEMPLATE: &str = "derived-project-context";
+/// Derived context-node parameter naming why a `-> global:` reference was
+/// withheld. Such nodes carry no summary and never reach a worker prompt; they
+/// exist so composition can record the exclusion in the spawn sidecar.
+pub const EXCLUDED_CONTEXT_PARAMETER: &str = "excluded";
+/// Marks a kept `-> global:` node as scope-checked at derivation. Persisted
+/// graphs from before the check lack it; composition withholds those that
+/// name an entity page by path.
+pub const WIKI_SCOPE_CHECKED_PARAMETER: &str = "wiki_scope";
+const MAX_GLOBAL_REF_POINTER_CHARS: usize = 200;
+const WIKI_LABEL_MAP_UNAVAILABLE: &str =
+    "wiki label map was unavailable, so only entity path rules and page frontmatter scoped wiki references";
+const WIKI_REFERENCE_SCOPE_EXCLUDED: &str =
+    "wiki references scoped to another client were excluded";
+const WIKI_REFERENCE_SCOPE_UNKNOWN: &str =
+    "wiki references with no path rule, label-map entry or frontmatter scope were excluded";
+const WIKI_REFERENCE_UNRESOLVED: &str = "wiki references did not resolve to a wiki page";
 /// Context linked to 75% or more of a multi-task plan is usually standing
 /// guidance, not discriminating task context. It is flagged and withheld from
 /// task edges so one generic gotcha cannot become a prompt-dominating hub.
@@ -846,7 +864,7 @@ pub fn derive_project_context<R: TouchesResolver>(
                 )
                 .with_producer(OmissionProducer::KnowledgeDerivation),
             );
-            append_context_nodes(graph, &load.gotchas, &load.inferred_scope_provenance);
+            append_context_nodes(graph, &load.gotchas, &load.excluded, &load.inferred_scope_provenance);
             return ContextDerivationReport {
                 gotchas: load.gotchas,
                 hub_lints: Vec::new(),
@@ -865,7 +883,7 @@ pub fn derive_project_context<R: TouchesResolver>(
                 )
                 .with_producer(OmissionProducer::KnowledgeDerivation),
             );
-            append_context_nodes(graph, &load.gotchas, &load.inferred_scope_provenance);
+            append_context_nodes(graph, &load.gotchas, &load.excluded, &load.inferred_scope_provenance);
             return ContextDerivationReport {
                 gotchas: load.gotchas,
                 hub_lints: Vec::new(),
@@ -926,7 +944,7 @@ pub(crate) fn derive_project_context_from_knowledge(
             )
             .with_producer(OmissionProducer::KnowledgeDerivation),
         );
-        append_context_nodes(graph, &load.gotchas, &load.inferred_scope_provenance);
+        append_context_nodes(graph, &load.gotchas, &load.excluded, &load.inferred_scope_provenance);
         return ContextDerivationReport {
             gotchas: load.gotchas,
             hub_lints: Vec::new(),
@@ -955,7 +973,7 @@ fn derive_loaded_context(
     expanded_touches: &BTreeMap<TaskId, BTreeSet<String>>,
     provenance_by_task: &BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
 ) -> ContextDerivationReport {
-    append_context_nodes(graph, &load.gotchas, &load.inferred_scope_provenance);
+    append_context_nodes(graph, &load.gotchas, &load.excluded, &load.inferred_scope_provenance);
     let all_task_ids: Vec<_> = graph
         .nodes
         .iter()
@@ -1110,6 +1128,7 @@ fn derive_loaded_context(
             knowledge_edge_count += 1;
         }
     }
+    mirror_excluded_reference_edges(graph, &load.excluded);
 
     ContextDerivationReport {
         gotchas: load.gotchas,
@@ -1207,6 +1226,7 @@ pub fn context_node_is_stale(
 
 struct KnowledgeLoad {
     gotchas: Vec<DerivedGotcha>,
+    excluded: Vec<ExcludedGlobalRef>,
     inferred_scope_provenance: BTreeMap<String, BTreeMap<String, String>>,
     fingerprints: Vec<KnowledgeSourceFingerprint>,
     omissions: Vec<WorkGraphOmission>,
@@ -1223,6 +1243,7 @@ fn load_project_knowledge(
     if !ai_docs.is_dir() {
         return KnowledgeLoad {
             gotchas: Vec::new(),
+            excluded: Vec::new(),
             inferred_scope_provenance: BTreeMap::new(),
             fingerprints: Vec::new(),
             omissions: vec![
@@ -1241,6 +1262,7 @@ fn load_project_knowledge(
     let mut inferred_scope_provenance = BTreeMap::new();
     let mut fingerprints = Vec::new();
     let mut omissions = Vec::new();
+    let mut global_refs = GlobalRefGate::new(institutional_wiki_root, project_path);
     let curated_line_limit = load_curated_line_limit(
         &ai_docs,
         &mut fingerprints,
@@ -1283,7 +1305,7 @@ fn load_project_knowledge(
                         filename,
                         &content,
                         &source_hash,
-                        institutional_wiki_root,
+                        &mut global_refs,
                         path_resolver,
                         config,
                         &mut gotchas,
@@ -1358,12 +1380,15 @@ fn load_project_knowledge(
         ));
     }
 
+    let excluded = global_refs.finish(&mut omissions);
+
     for omission in &mut omissions {
         omission.producer = Some(OmissionProducer::KnowledgeLoad);
     }
 
     KnowledgeLoad {
         gotchas,
+        excluded,
         inferred_scope_provenance,
         fingerprints,
         omissions,
@@ -1432,7 +1457,7 @@ fn parse_markdown(
     filename: &str,
     content: &str,
     source_hash: &str,
-    institutional_wiki_root: Option<&Path>,
+    global_refs: &mut GlobalRefGate<'_>,
     path_resolver: Option<&PathIntentResolver>,
     config: KnowledgeAttachmentConfig,
     gotchas: &mut Vec<DerivedGotcha>,
@@ -1458,7 +1483,7 @@ fn parse_markdown(
                 start_line,
                 &body,
                 source_hash,
-                institutional_wiki_root,
+                global_refs,
                 path_resolver,
                 config,
                 gotchas,
@@ -1478,7 +1503,7 @@ fn parse_markdown(
         start_line,
         &body,
         source_hash,
-        institutional_wiki_root,
+        global_refs,
         path_resolver,
         config,
         gotchas,
@@ -1504,7 +1529,7 @@ fn flush_markdown_section(
     start_line: usize,
     body: &[String],
     source_hash: &str,
-    institutional_wiki_root: Option<&Path>,
+    global_refs: &mut GlobalRefGate<'_>,
     path_resolver: Option<&PathIntentResolver>,
     config: KnowledgeAttachmentConfig,
     gotchas: &mut Vec<DerivedGotcha>,
@@ -1550,30 +1575,330 @@ fn flush_markdown_section(
         source_hash: source_hash.to_string(),
     });
     if !inferred.is_empty() {
-        inferred_scope_provenance.insert(gotcha_id, inferred.clone());
+        inferred_scope_provenance.insert(gotcha_id.clone(), inferred.clone());
     }
 
+    let section_gotcha_id = gotcha_id;
     for line in body {
-        if let Some(global_ref) = global_cross_ref(line) {
-            let source_ref = format!("global:{global_ref}");
-            let gotcha_id = stable_hash(format!("{source_ref}:{heading}").as_bytes());
-            gotchas.push(DerivedGotcha {
-                id: gotcha_id.clone(),
-                scope: scope.clone(),
-                summary: institutional_wiki_root
-                    .and_then(|root| read_global_summary(root, &global_ref))
-                    .unwrap_or_else(|| {
+        let Some(decision) = global_refs.decide(line) else {
+            continue;
+        };
+        let source_ref = format!("global:{}", decision.pointer);
+        let gotcha_id = stable_hash(format!("{source_ref}:{heading}").as_bytes());
+        match decision.outcome {
+            GlobalRefOutcome::Keep(summary) => {
+                gotchas.push(DerivedGotcha {
+                    id: gotcha_id.clone(),
+                    scope: scope.clone(),
+                    summary: summary.unwrap_or_else(|| {
                         bound_summary(&format!("{heading}: institutional context"))
                     }),
-                fingerprint_ref: format!(".ai-docs/{filename}"),
-                source_ref,
-                source_hash: source_hash.to_string(),
-            });
-            if !inferred.is_empty() {
-                inferred_scope_provenance.insert(gotcha_id, inferred.clone());
+                    fingerprint_ref: format!(".ai-docs/{filename}"),
+                    source_ref,
+                    source_hash: source_hash.to_string(),
+                });
+                if !inferred.is_empty() {
+                    inferred_scope_provenance.insert(gotcha_id, inferred.clone());
+                }
+            }
+            GlobalRefOutcome::Exclude(reason) => {
+                // Keyed by section too, so the same page linked from two
+                // same-named sections keeps both task associations.
+                global_refs.excluded.push(ExcludedGlobalRef {
+                    id: stable_hash(
+                        format!("{source_ref}:{heading}:{section_gotcha_id}").as_bytes(),
+                    ),
+                    section_gotcha_id: section_gotcha_id.clone(),
+                    scope: scope.clone(),
+                    reason,
+                    fingerprint_ref: format!(".ai-docs/{filename}"),
+                    source_ref,
+                    source_hash: source_hash.to_string(),
+                });
             }
         }
     }
+}
+
+/// Why a `-> global:` reference was withheld from worker context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GlobalRefExclusion {
+    /// The page's scope is not eligible for this project (schema.md §11).
+    ScopeExcluded,
+    /// No path rule, label-map entry or frontmatter `scope:` names a scope.
+    ScopeUnknown,
+    /// The link names no wiki page: unparseable, missing, or outside the root.
+    UnresolvedGlobalRef,
+}
+
+impl GlobalRefExclusion {
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::ScopeExcluded => "scope_excluded",
+            Self::ScopeUnknown => "scope_unknown",
+            Self::UnresolvedGlobalRef => "unresolved_global_ref",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "scope_excluded" => Some(Self::ScopeExcluded),
+            "scope_unknown" => Some(Self::ScopeUnknown),
+            "unresolved_global_ref" => Some(Self::UnresolvedGlobalRef),
+            _ => None,
+        }
+    }
+
+    const fn omission_detail(self) -> &'static str {
+        match self {
+            Self::ScopeExcluded => WIKI_REFERENCE_SCOPE_EXCLUDED,
+            Self::ScopeUnknown => WIKI_REFERENCE_SCOPE_UNKNOWN,
+            Self::UnresolvedGlobalRef => WIKI_REFERENCE_UNRESOLVED,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ExcludedGlobalRef {
+    id: String,
+    section_gotcha_id: String,
+    scope: Vec<String>,
+    reason: GlobalRefExclusion,
+    fingerprint_ref: String,
+    source_ref: String,
+    source_hash: String,
+}
+
+enum GlobalRefOutcome {
+    /// Keep the reference; `None` uses the local heading fallback summary.
+    Keep(Option<String>),
+    Exclude(GlobalRefExclusion),
+}
+
+struct GlobalRefDecision {
+    pointer: String,
+    outcome: GlobalRefOutcome,
+}
+
+/// Scope and resolution checks for every `-> global:` link in one load.
+///
+/// Strict order (Ryan, 2026-11-04): entity path rule, label-map entry, page
+/// frontmatter `scope:`, else excluded as unknown. A missing or corrupt map
+/// keeps the built-in entity path rules and frontmatter with universal-only
+/// eligibility, recorded once per derivation and logged once per process:
+/// fail closed on client data, open on everything else. With no readable wiki
+/// root nothing is read; entity paths are still excluded and other links keep
+/// today's heading-only fallback summary.
+struct GlobalRefGate<'a> {
+    wiki_root: Option<&'a Path>,
+    canonical_root: Option<PathBuf>,
+    scope: WikiScope,
+    map_error: Option<String>,
+    considered: usize,
+    excluded: Vec<ExcludedGlobalRef>,
+}
+
+impl<'a> GlobalRefGate<'a> {
+    fn new(wiki_root: Option<&'a Path>, project_path: &Path) -> Self {
+        let canonical_root = wiki_root
+            .and_then(|root| root.canonicalize().ok())
+            .filter(|root| root.is_dir());
+        let (scope, map_error) = match wiki_root {
+            Some(root) => WikiScope::load(root, project_path),
+            None => (
+                WikiScope::without_map(&super::wiki_scope::repo_of(project_path)),
+                None,
+            ),
+        };
+        Self {
+            wiki_root,
+            canonical_root,
+            scope,
+            map_error,
+            considered: 0,
+            excluded: Vec::new(),
+        }
+    }
+
+    fn decide(&mut self, line: &str) -> Option<GlobalRefDecision> {
+        let Some(global_ref) = global_cross_ref(line) else {
+            return unresolved_global_link(line).map(|pointer| GlobalRefDecision {
+                pointer,
+                outcome: GlobalRefOutcome::Exclude(GlobalRefExclusion::UnresolvedGlobalRef),
+            });
+        };
+        self.considered += 1;
+        let outcome = self.outcome(&global_ref);
+        Some(GlobalRefDecision {
+            pointer: global_ref,
+            outcome,
+        })
+    }
+
+    fn outcome(&self, global_ref: &str) -> GlobalRefOutcome {
+        // `.`/`..`/empty segments or backslashes could make the classified
+        // path differ from the page actually read.
+        if global_ref
+            .split('/')
+            .any(|segment| matches!(segment, "" | "." | ".."))
+            || global_ref.contains(['\\', ':'])
+        {
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::UnresolvedGlobalRef);
+        }
+        let ineligible = |scope: Option<String>| {
+            scope.is_some_and(|scope| !self.scope.is_eligible(&scope))
+        };
+        // Rules 1-2 decide without opening the page: an ineligible page is
+        // never read, not even its frontmatter.
+        if ineligible(self.scope.indexed_scope(global_ref)) {
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeExcluded);
+        }
+        // Rule 4: with no readable wiki no scope can be established.
+        let Some(root) = &self.canonical_root else {
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeUnknown);
+        };
+        let Some(canonical) = root
+            .join(global_ref)
+            .canonicalize()
+            .ok()
+            .filter(|candidate| candidate.starts_with(root) && candidate.is_file())
+        else {
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::UnresolvedGlobalRef);
+        };
+        // Classify the page actually resolved (real case, symlinks followed),
+        // not only the spelling in the link.
+        let resolved: Option<String> = canonical.strip_prefix(root).ok().map(|relative| {
+            relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        });
+        let Some(resolved) = resolved else {
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::UnresolvedGlobalRef);
+        };
+        if ineligible(self.scope.indexed_scope(&resolved)) {
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeExcluded);
+        }
+        let Ok(content) = fs::read_to_string(&canonical) else {
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::UnresolvedGlobalRef);
+        };
+        let (frontmatter, body) = split_frontmatter(&content);
+        let head_end = (0..=content.len().min(super::wiki_scope::FRONTMATTER_HEAD_BYTES))
+            .rev()
+            .find(|index| content.is_char_boundary(*index))
+            .unwrap_or(0);
+        let frontmatter_scope = super::wiki_scope::frontmatter_scope(&content[..head_end]);
+        // The resolved page is the identity: an alias (symlink, case variant)
+        // must not lend its own map entry to the page actually read.
+        match self.scope.page_scope(&resolved, frontmatter_scope.as_deref()) {
+            None => GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeUnknown),
+            Some(scope) if !self.scope.is_eligible(&scope) => {
+                GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeExcluded)
+            }
+            Some(_) => GlobalRefOutcome::Keep(global_summary(frontmatter, body)),
+        }
+    }
+
+    fn finish(mut self, omissions: &mut Vec<WorkGraphOmission>) -> Vec<ExcludedGlobalRef> {
+        if let (Some(root), Some(error), true) =
+            (self.wiki_root, &self.map_error, self.considered > 0)
+        {
+            warn_label_map_unavailable_once(root, error);
+            let mut omission = WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                self.considered,
+                vec![format!("global:{}", super::wiki_scope::LABEL_MAP_RELATIVE_PATH)],
+            );
+            omission.detail = WIKI_LABEL_MAP_UNAVAILABLE.to_string();
+            omissions.push(omission);
+        }
+
+        let mut seen = BTreeSet::new();
+        self.excluded.retain(|excluded| seen.insert(excluded.id.clone()));
+        self.excluded.sort_by(|left, right| {
+            left.reason
+                .cmp(&right.reason)
+                .then_with(|| left.source_ref.cmp(&right.source_ref))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        for reason in [
+            GlobalRefExclusion::ScopeExcluded,
+            GlobalRefExclusion::ScopeUnknown,
+            GlobalRefExclusion::UnresolvedGlobalRef,
+        ] {
+            let matching: Vec<_> = self
+                .excluded
+                .iter()
+                .filter(|excluded| excluded.reason == reason)
+                .collect();
+            if matching.is_empty() {
+                continue;
+            }
+            let examples: BTreeSet<_> = matching
+                .iter()
+                .map(|excluded| excluded.source_ref.clone())
+                .collect();
+            let mut omission = WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                matching.len(),
+                examples.into_iter().take(MAX_OMISSION_EXAMPLES).collect(),
+            );
+            omission.detail = reason.omission_detail().to_string();
+            omissions.push(omission);
+        }
+        if self.excluded.len() > MAX_DERIVED_CONTEXT_NODES {
+            let omitted = self.excluded.len() - MAX_DERIVED_CONTEXT_NODES;
+            self.excluded.truncate(MAX_DERIVED_CONTEXT_NODES);
+            omissions.push(WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                omitted,
+                vec![format!("withheld wiki reference cap {MAX_DERIVED_CONTEXT_NODES}")],
+            ));
+        }
+        self.excluded
+    }
+}
+
+/// One warning per wiki root per process; the graph omission is the
+/// per-derivation record.
+fn warn_label_map_unavailable_once(root: &Path, error: &str) {
+    static WARNED: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(BTreeSet::new()));
+    if warned
+        .lock()
+        .map(|mut roots| roots.insert(root.to_path_buf()))
+        .unwrap_or(false)
+    {
+        tracing::warn!(
+            wiki_root = %root.display(),
+            "LABEL MAP UNAVAILABLE: {error} -- entity path rules and frontmatter scope only"
+        );
+    }
+}
+
+/// A `-> global:` line that `global_cross_ref` could not parse but that still
+/// names a link target (a path or `.md` file), as opposed to prose that merely
+/// mentions the idiom.
+fn unresolved_global_link(line: &str) -> Option<String> {
+    let marker = line.find("-> global:")? + "-> global:".len();
+    let tail = line[marker..].trim();
+    let candidate = if let Some(start) = tail.find("](") {
+        let start = start + 2;
+        let end = tail[start..].find(')').map_or(tail.len(), |end| end + start);
+        &tail[start..end]
+    } else {
+        tail.split_whitespace().next().unwrap_or_default()
+    };
+    let candidate = candidate
+        .trim_matches(|character: char| {
+            matches!(character, '`' | '[' | ']' | '(' | ')' | ',' | ';')
+        })
+        .trim();
+    if candidate.is_empty() || !(candidate.contains('/') || candidate.contains(".md")) {
+        return None;
+    }
+    Some(candidate.chars().take(MAX_GLOBAL_REF_POINTER_CHARS).collect())
 }
 
 fn has_explicit_markdown_scope(body: &[String]) -> bool {
@@ -1666,14 +1991,7 @@ fn match_type_label(match_type: PathMatchType) -> &'static str {
     }
 }
 
-fn read_global_summary(institutional_wiki_root: &Path, global_ref: &str) -> Option<String> {
-    let root = institutional_wiki_root.canonicalize().ok()?;
-    let candidate = root.join(global_ref).canonicalize().ok()?;
-    if !candidate.starts_with(&root) || !candidate.is_file() {
-        return None;
-    }
-    let content = fs::read_to_string(candidate).ok()?;
-    let (frontmatter, body) = split_frontmatter(&content);
+fn global_summary(frontmatter: &str, body: &str) -> Option<String> {
     let title = frontmatter_field(frontmatter, "title").or_else(|| first_h1(body))?;
     let description = frontmatter_field(frontmatter, "description")?;
     Some(bound_summary(&format!("{title}: {description}")))
@@ -1773,11 +2091,76 @@ fn parse_learnings(
     }
 }
 
+/// An excluded reference informs exactly the tasks its section's own gotcha
+/// informs, so the exclusion is recorded where the page would have surfaced.
+/// These edges carry no summary and are not counted as knowledge edges.
+fn mirror_excluded_reference_edges(graph: &mut TaskGraph, excluded: &[ExcludedGlobalRef]) {
+    let mut mirrored = Vec::new();
+    for reference in excluded {
+        let section_id = context_node_id(&reference.section_gotcha_id);
+        let excluded_id = context_node_id(&reference.id);
+        let mut targets = BTreeSet::new();
+        for edge in &graph.edges {
+            if edge.source == section_id
+                && edge.kind == EdgeKind::Informs
+                && edge.provenance == EdgeProvenance::Knowledge
+                && targets.insert(edge.target.clone())
+            {
+                mirrored.push(
+                    WorkEdge::new(
+                        &excluded_id,
+                        &edge.target,
+                        EdgeKind::Informs,
+                        EdgeProvenance::Knowledge,
+                    )
+                    .with_rationale(format!(
+                        "wiki reference withheld ({}); recorded for this task's spawn sidecar",
+                        reference.reason.tag()
+                    )),
+                );
+            }
+        }
+    }
+    graph.edges.extend(mirrored);
+}
+
 fn append_context_nodes(
     graph: &mut TaskGraph,
     gotchas: &[DerivedGotcha],
+    excluded: &[ExcludedGlobalRef],
     inferred_scope_provenance: &BTreeMap<String, BTreeMap<String, String>>,
 ) {
+    for reference in excluded {
+        let mut parameters = BTreeMap::new();
+        parameters.insert("scope".to_string(), reference.scope.join(","));
+        parameters.insert("source_ref".to_string(), reference.source_ref.clone());
+        parameters.insert(
+            EXCLUDED_CONTEXT_PARAMETER.to_string(),
+            reference.reason.tag().to_string(),
+        );
+        parameters.insert(
+            "fingerprint_ref".to_string(),
+            reference.fingerprint_ref.clone(),
+        );
+        parameters.insert("source_hash".to_string(), reference.source_hash.clone());
+        let mut node = WorkNode::new(
+            context_node_id(&reference.id),
+            NodeKind::Context,
+            format!("Withheld wiki reference ({})", reference.reason.tag()),
+            NodeContract {
+                inputs: vec![reference.source_ref.clone()],
+                outputs: Vec::new(),
+                acceptance: Vec::new(),
+            },
+            BindingRef::Zone("knowledge".to_string()),
+            NodeStatus::Completed,
+        );
+        node.expansion = Some(CompositeExpansion {
+            template: DERIVED_CONTEXT_TEMPLATE.to_string(),
+            parameters,
+        });
+        graph.nodes.push(node);
+    }
     for gotcha in gotchas {
         let id = context_node_id(&gotcha.id);
         let mut parameters = BTreeMap::new();
@@ -1789,6 +2172,9 @@ fn append_context_nodes(
             gotcha.fingerprint_ref.clone(),
         );
         parameters.insert("source_hash".to_string(), gotcha.source_hash.clone());
+        if gotcha.source_ref.starts_with("global:") {
+            parameters.insert(WIKI_SCOPE_CHECKED_PARAMETER.to_string(), "checked".to_string());
+        }
         if let Some(provenance) = inferred_scope_provenance.get(&gotcha.id) {
             parameters.insert(
                 "knowledge_provenance".to_string(),
@@ -1883,6 +2269,11 @@ fn global_cross_ref(line: &str) -> Option<String> {
         "practices/",
         "research/",
         "tools/",
+        // Entity pages are parsed so the label scope, not this category
+        // list, decides whether they surface (wiki schema.md section 11).
+        "clients/",
+        "partners/",
+        "pipeline/",
     ] {
         let Some(start) = raw.find(category) else {
             continue;
@@ -1968,6 +2359,10 @@ fn expanded_edge_rationale(
         format!("knowledge attachment matched {}", labels.into_iter().collect::<Vec<_>>().join(", "))
     }
 }
+
+#[cfg(test)]
+#[path = "wiki_scope_context_tests.rs"]
+mod wiki_scope_context_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2401,12 +2796,12 @@ mod tests {
         fs::create_dir_all(wiki.path().join("practices")).expect("wiki category");
         fs::write(
             wiki.path().join("patterns/guide.md"),
-            "---\ntitle: Reliable planning\ndescription: Keep evidence attached to decisions.\n---\n# Ignored heading\n",
+            "---\ntitle: Reliable planning\nscope: universal\ndescription: Keep evidence attached to decisions.\n---\n# Ignored heading\n",
         )
         .expect("wiki page");
         fs::write(
             wiki.path().join("practices/heading.md"),
-            "---\ndescription: Use the first heading when title is absent.\n---\n# Heading fallback\n",
+            "---\nscope: universal\ndescription: Use the first heading when title is absent.\n---\n# Heading fallback\n",
         )
         .expect("wiki page");
         let coverage = TouchCoverageReport {
@@ -2452,10 +2847,21 @@ mod tests {
             None,
             enabled_config(),
         );
-        assert!(fallback.gotchas.iter().any(|gotcha| {
-            gotcha.source_ref == "global:patterns/guide.md"
-                && gotcha.summary == "Local heading: institutional context"
-        }));
+        // No readable wiki: no scope can be established, so the strict rule
+        // withholds the reference instead of keeping a heading fallback.
+        assert!(fallback
+            .gotchas
+            .iter()
+            .all(|gotcha| gotcha.source_ref != "global:patterns/guide.md"));
+        assert!(fallback_graph.nodes.iter().any(|node| node
+            .expansion
+            .as_ref()
+            .is_some_and(|expansion| {
+                expansion.parameters.get("source_ref").map(String::as_str)
+                    == Some("global:patterns/guide.md")
+                    && expansion.parameters.get(super::EXCLUDED_CONTEXT_PARAMETER).map(String::as_str)
+                        == Some("scope_unknown")
+            })));
     }
 
     #[test]
