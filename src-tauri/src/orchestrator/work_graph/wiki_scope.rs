@@ -30,7 +30,8 @@ pub const LABEL_MAP_RELATIVE_PATH: &str = "derived/labels.json";
 pub const UNIVERSAL_SCOPE: &str = "universal";
 /// The hook's sentinel for rule 4; never an eligible scope.
 pub const UNKNOWN_SCOPE: &str = "unknown";
-const FRONTMATTER_HEAD_BYTES: usize = 8192;
+/// Bytes of a page read for its frontmatter scope (the hook reads 8192).
+pub const FRONTMATTER_HEAD_BYTES: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PathRule {
@@ -57,6 +58,12 @@ fn builtin_path_rules() -> Vec<PathRule> {
             &["README.md", "_TEMPLATE.md"],
         ),
     ]
+}
+
+/// The entity scope a page has by path alone (rule 1 with the built-in rules),
+/// for callers with no label map at hand.
+pub fn builtin_entity_scope(page: &str) -> Option<String> {
+    WikiScope::without_map("").indexed_scope(page)
 }
 
 /// Eligibility filter for one project.
@@ -111,6 +118,7 @@ impl WikiScope {
             .and_then(Value::as_object)
             .ok_or("label map has no 'pages' object")?;
 
+        validate_structure(object)?;
         let page_scopes = pages
             .iter()
             .filter_map(|(page, entry)| {
@@ -202,6 +210,7 @@ impl WikiScope {
 
     /// Rules 1-3 against a wiki on disk, reading the page's frontmatter only
     /// when the path rules and the map are silent (the hook's `page_scope`).
+    #[cfg(test)]
     pub fn page_scope_in(&self, wiki_root: &Path, page: &str) -> Option<String> {
         if let Some(scope) = self.indexed_scope(page) {
             return known(scope);
@@ -236,16 +245,19 @@ impl WikiScope {
         self.page_scopes.is_some()
     }
 
+    #[cfg(test)]
     pub fn eligible_scopes(&self) -> &BTreeSet<String> {
         &self.eligible
     }
 
+    #[cfg(test)]
     pub fn repo(&self) -> &str {
         &self.repo
     }
 }
 
 /// The final decision for one page, as the parity fixture records it.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageDecision {
     Eligible,
@@ -253,6 +265,7 @@ pub enum PageDecision {
     ScopeUnknown,
 }
 
+#[cfg(test)]
 impl PageDecision {
     pub fn decide(scope: &WikiScope, page: &str, frontmatter_scope: Option<&str>) -> Self {
         match scope.page_scope(page, frontmatter_scope) {
@@ -269,6 +282,62 @@ impl PageDecision {
             Self::ScopeUnknown => "scope_unknown",
         }
     }
+}
+
+/// A map whose trusted tables are malformed is corrupt, not partially
+/// usable: the caller degrades to built-in rules and universal-only
+/// eligibility rather than trusting what it could parse.
+fn validate_structure(object: &serde_json::Map<String, Value>) -> Result<(), String> {
+    let is_string_list = |value: Option<&Value>| {
+        value.map_or(true, |value| {
+            value
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string))
+        })
+    };
+    let is_optional_string =
+        |value: Option<&Value>| value.map_or(true, Value::is_string);
+    if let Some(pages) = object.get("pages").and_then(Value::as_object) {
+        if !pages
+            .values()
+            .all(|entry| entry.is_object() && is_optional_string(entry.get("scope")))
+        {
+            return Err("label map 'pages' has a malformed entry".to_string());
+        }
+    }
+    if let Some(rules) = object.get("path_rules") {
+        let valid = rules.as_array().is_some_and(|rules| {
+            rules.iter().all(|rule| {
+                rule.get("match").is_some_and(Value::is_string)
+                    && is_optional_string(rule.get("scope"))
+                    && is_string_list(rule.get("except"))
+            })
+        });
+        if !valid {
+            return Err("label map 'path_rules' is malformed".to_string());
+        }
+    }
+    if let Some(repos) = object.get("repos") {
+        let valid = repos.as_array().is_some_and(|repos| {
+            repos.iter().all(|rule| {
+                rule.get("match").is_some_and(Value::is_array)
+                    && is_string_list(rule.get("match"))
+                    && is_string_list(rule.get("scopes"))
+            })
+        });
+        if !valid {
+            return Err("label map 'repos' is malformed".to_string());
+        }
+    }
+    if let Some(oversight) = object.get("oversight") {
+        let valid = oversight
+            .as_object()
+            .is_some_and(|offices| offices.values().all(|managed| is_string_list(Some(managed))));
+        if !valid {
+            return Err("label map 'oversight' is malformed".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn known(scope: String) -> Option<String> {
@@ -459,6 +528,15 @@ mod tests {
     fn missing_or_corrupt_maps_degrade_to_builtin_rules() {
         assert!(WikiScope::from_label_map(&serde_json::json!([]), "x").is_err());
         assert!(WikiScope::from_label_map(&serde_json::json!({"pages": []}), "x").is_err());
+        for corrupt in [
+            serde_json::json!({"pages": {}, "path_rules": [null]}),
+            serde_json::json!({"pages": {}, "path_rules": [{"scope": "client:{stem}"}]}),
+            serde_json::json!({"pages": {"clients/a.md": "client:a"}}),
+            serde_json::json!({"pages": {}, "repos": [{"match": "TOG*", "scopes": ["client:tog"]}]}),
+            serde_json::json!({"pages": {}, "oversight": {"client:a": "client:b"}}),
+        ] {
+            assert!(WikiScope::from_label_map(&corrupt, "TOG Portal").is_err(), "{corrupt}");
+        }
         let missing = tempfile::tempdir().unwrap();
         let (scope, error) = WikiScope::load(missing.path(), missing.path());
         assert!(error.is_some());

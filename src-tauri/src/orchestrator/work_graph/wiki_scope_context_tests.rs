@@ -179,8 +179,10 @@ fn ineligible_client_page_is_excluded_and_recorded_in_the_sidecar() {
     assert!(composed.dropped.iter().any(|dropped| {
         dropped.pointer == "clients/tog.md" && dropped.reason == ContextDropReason::ScopeExcluded
     }));
+    // Sidecar-only: the prompt names neither the page nor its content.
     let rendered = render_composed_context(&composed);
-    assert!(rendered.contains("wiki page scoped to another client"));
+    assert!(!rendered.contains("clients/tog.md"));
+    assert!(!rendered.contains("tog"));
     assert!(!rendered.contains(CLIENT_SECRET));
     assert!(omission_details(&graph)
         .contains(&"wiki references scoped to another client were excluded".to_string()));
@@ -285,6 +287,104 @@ fn missing_map_fails_closed_on_clients_and_open_on_universal_frontmatter() {
         1
     );
     assert!(!serde_json::to_string(&graph).unwrap().contains(CLIENT_SECRET));
+}
+
+#[test]
+fn dot_segments_cannot_route_around_the_entity_path_rule() {
+    let fixture = fixture("hive-manager", &["patterns/../clients/tog.md"], true);
+    let graph = derive(&fixture);
+    assert!(kept_pointers(&graph).is_empty());
+    assert_eq!(withheld(&graph)[0].1, ContextDropReason::UnresolvedGlobalRef);
+    assert!(!serde_json::to_string(&graph).unwrap().contains(CLIENT_SECRET));
+}
+
+#[test]
+fn no_readable_wiki_withholds_every_reference_as_unknown() {
+    let fixture = fixture("hive-manager", &["patterns/guide.md", "clients/tog.md"], true);
+    fs::remove_dir_all(&fixture.wiki).unwrap();
+    let graph = derive(&fixture);
+    assert!(kept_pointers(&graph).is_empty());
+    assert_eq!(
+        withheld(&graph),
+        vec![
+            ("clients/tog.md".to_string(), ContextDropReason::ScopeExcluded),
+            ("patterns/guide.md".to_string(), ContextDropReason::ScopeUnknown),
+        ]
+    );
+}
+
+#[test]
+fn same_page_from_two_same_named_sections_keeps_both_task_records() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("Code Projects").join("hive-manager");
+    fs::create_dir_all(project.join(".ai-docs")).unwrap();
+    fs::write(
+        project.join(".ai-docs/project-dna.md"),
+        "## Notes\n**Scope**: `src/a.rs`\nFirst.\n-> global: clients/tog.md\n\n## Notes\n**Scope**: `src/b.rs`\nSecond.\n-> global: clients/tog.md\n",
+    )
+    .unwrap();
+    let base = fixture("hive-manager", &[], true);
+    let tasks = ["TA", "TB"].map(|id| {
+        WorkNode::new(
+            id,
+            NodeKind::Task,
+            id,
+            NodeContract::default(),
+            BindingRef::Role("backend".to_string()),
+            NodeStatus::Pending,
+        )
+    });
+    let touches: BTreeMap<_, _> = BTreeMap::from([
+        ("TA".to_string(), BTreeSet::from(["src/a.rs".to_string()])),
+        ("TB".to_string(), BTreeSet::from(["src/b.rs".to_string()])),
+    ]);
+    let coverage = TouchCoverageReport {
+        available: true,
+        artifact_languages: BTreeSet::new(),
+        touches: touches.clone(),
+        unresolved_task_ids: Vec::new(),
+    };
+    let knowledge = KnowledgeTouchCoverage {
+        declared_touches: touches.clone(),
+        knowledge_attachment_touches: touches,
+        provenance_by_task: BTreeMap::new(),
+        resolution_omissions: Vec::new(),
+    };
+    let mut graph = TaskGraph::new(tasks.to_vec(), Vec::new());
+    derive_project_context_from_knowledge(
+        &mut graph,
+        &project,
+        Some(&base.wiki),
+        &coverage,
+        &knowledge,
+        None,
+        KnowledgeAttachmentConfig::production(),
+    );
+    for task in ["TA", "TB"] {
+        let withheld = spawn_context_from_work_graph_task(&graph, task).withheld;
+        assert_eq!(withheld.len(), 1, "task {task}");
+        assert_eq!(withheld[0].reason, ContextDropReason::ScopeExcluded);
+    }
+}
+
+#[test]
+fn legacy_persisted_entity_refs_are_withheld_without_a_scope_marker() {
+    let fixture = fixture("TOG Portal", &["clients/tog.md", "patterns/guide.md"], true);
+    let mut graph = derive(&fixture);
+    // Simulate a graph persisted before scope checking: strip the marker.
+    for node in &mut graph.nodes {
+        if let Some(expansion) = node.expansion.as_mut() {
+            expansion.parameters.remove(super::WIKI_SCOPE_CHECKED_PARAMETER);
+        }
+    }
+    assert_eq!(kept_pointers(&graph), vec!["patterns/guide.md"]);
+    assert_eq!(
+        withheld(&graph),
+        vec![("clients/tog.md".to_string(), ContextDropReason::ScopeUnknown)]
+    );
+    assert!(knowledge_refs_from_work_graph(&graph)
+        .iter()
+        .all(|reference| reference.pointer != "clients/tog.md"));
 }
 
 #[test]

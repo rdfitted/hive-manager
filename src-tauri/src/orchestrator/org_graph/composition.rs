@@ -12,7 +12,9 @@ use super::schema::{
 };
 use crate::orchestrator::work_graph::context::{
     GlobalRefExclusion, ANTI_HUB_MIN_TASKS, ANTI_HUB_TASK_FRACTION, EXCLUDED_CONTEXT_PARAMETER,
+    WIKI_SCOPE_CHECKED_PARAMETER,
 };
+use crate::orchestrator::work_graph::wiki_scope::builtin_entity_scope;
 use crate::orchestrator::work_graph::{EdgeKind, EdgeProvenance, TaskGraph};
 
 pub const ACK_SAMPLE_RATE: f64 = 0.33;
@@ -47,6 +49,15 @@ pub enum ContextDropReason {
 }
 
 impl ContextDropReason {
+    /// Withheld wiki references are sidecar-only: a worker prompt never names
+    /// them, not even by pointer.
+    pub const fn is_withheld_reference(self) -> bool {
+        matches!(
+            self,
+            Self::ScopeExcluded | Self::ScopeUnknown | Self::UnresolvedGlobalRef
+        )
+    }
+
     fn description(self) -> &'static str {
         match self {
             Self::RoleBudgetExceeded => "role context budget exceeded",
@@ -433,24 +444,44 @@ pub fn knowledge_refs_from_work_graph(graph: &TaskGraph) -> Vec<KnowledgeRef> {
         .collect()
 }
 
+fn institutional_pointer(source_ref: &str) -> Option<&str> {
+    source_ref
+        .strip_prefix("institutional:")
+        .or_else(|| source_ref.strip_prefix("global:"))
+        .map(str::trim)
+}
+
+/// A wiki reference persisted before scope checking existed (no
+/// `wiki_scope` marker) that names an entity page by path. Its stored summary
+/// was never scope-checked, so it is withheld rather than trusted; other
+/// legacy references keep their old behaviour.
+fn is_unchecked_legacy_entity_ref(
+    expansion: &crate::orchestrator::work_graph::CompositeExpansion,
+    institutional: Option<&str>,
+) -> bool {
+    !expansion.parameters.contains_key(WIKI_SCOPE_CHECKED_PARAMETER)
+        && institutional.is_some_and(|pointer| builtin_entity_scope(pointer).is_some())
+}
+
 /// The sidecar record for a derived node that withholds a wiki reference.
 fn withheld_from_work_node(
     source_node: &crate::orchestrator::work_graph::WorkNode,
 ) -> Option<DroppedContext> {
     let expansion = source_node.expansion.as_ref()?;
-    let reason = match GlobalRefExclusion::from_tag(
-        expansion.parameters.get(EXCLUDED_CONTEXT_PARAMETER)?,
-    )? {
-        GlobalRefExclusion::ScopeExcluded => ContextDropReason::ScopeExcluded,
-        GlobalRefExclusion::ScopeUnknown => ContextDropReason::ScopeUnknown,
-        GlobalRefExclusion::UnresolvedGlobalRef => ContextDropReason::UnresolvedGlobalRef,
-    };
     let source_ref = expansion.parameters.get("source_ref")?.trim();
-    let pointer = source_ref
-        .strip_prefix("institutional:")
-        .or_else(|| source_ref.strip_prefix("global:"))
-        .unwrap_or(source_ref)
-        .trim();
+    let institutional = institutional_pointer(source_ref);
+    let pointer = institutional.unwrap_or(source_ref);
+    let reason = match expansion.parameters.get(EXCLUDED_CONTEXT_PARAMETER) {
+        Some(tag) => match GlobalRefExclusion::from_tag(tag)? {
+            GlobalRefExclusion::ScopeExcluded => ContextDropReason::ScopeExcluded,
+            GlobalRefExclusion::ScopeUnknown => ContextDropReason::ScopeUnknown,
+            GlobalRefExclusion::UnresolvedGlobalRef => ContextDropReason::UnresolvedGlobalRef,
+        },
+        None if is_unchecked_legacy_entity_ref(expansion, institutional) => {
+            ContextDropReason::ScopeUnknown
+        }
+        None => return None,
+    };
     (!pointer.is_empty()).then(|| DroppedContext {
         pointer: bound_context_text(pointer, MAX_KNOWLEDGE_POINTER_CHARS),
         origin: ContextOrigin::Task,
@@ -466,6 +497,11 @@ fn knowledge_ref_from_work_node(
     // prompt, not in miss sampling, not in edge captures.
     if expansion.parameters.contains_key(EXCLUDED_CONTEXT_PARAMETER) {
         return None;
+    }
+    if let Some(source_ref) = expansion.parameters.get("source_ref") {
+        if is_unchecked_legacy_entity_ref(expansion, institutional_pointer(source_ref.trim())) {
+            return None;
+        }
     }
     let source_ref = expansion.parameters.get("source_ref")?.trim();
     if source_ref.is_empty() {
@@ -563,9 +599,14 @@ pub fn render_composed_context(context: &ComposedContext) -> String {
         }
         rendered.push('\n');
     }
-    if !context.dropped.is_empty() {
+    let rendered_drops: Vec<_> = context
+        .dropped
+        .iter()
+        .filter(|dropped| !dropped.reason.is_withheld_reference())
+        .collect();
+    if !rendered_drops.is_empty() {
         rendered.push_str("### Dropped Context\n\n");
-        for dropped in &context.dropped {
+        for dropped in rendered_drops {
             rendered.push_str(&format!(
                 "- `{}` [{}]: {}\n",
                 dropped.pointer,

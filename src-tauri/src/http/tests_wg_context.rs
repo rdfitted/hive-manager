@@ -453,17 +453,33 @@ fn global_cross_ref_is_bounded_and_inherits_only_explicit_parent_scope() {
     )]));
 
     let report = derive_project_context(&mut graph, &project, &touches);
-    let global = report
+    // No wiki root: the reference cannot be scope-checked, so it is withheld
+    // (strict wiki scope, 2026-11-04) but still bounded, parent-scoped and
+    // attached to the task that would have received it.
+    assert!(report
         .gotchas
         .iter()
-        .find(|gotcha| gotcha.source_ref.starts_with("global:"))
+        .all(|gotcha| !gotcha.source_ref.starts_with("global:")));
+    assert!(report
+        .gotchas
+        .iter()
+        .all(|gotcha| gotcha.summary.chars().count() <= MAX_CONTEXT_SUMMARY_CHARS));
+    let withheld = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.expansion.as_ref().is_some_and(|expansion| {
+                expansion.parameters.get("source_ref").map(String::as_str)
+                    == Some("global:patterns/safe-x.md")
+            })
+        })
         .unwrap();
-
-    assert_eq!(global.source_ref, "global:patterns/safe-x.md");
-    assert_eq!(global.scope, vec!["module/x"]);
-    assert!(global.summary.chars().count() <= MAX_CONTEXT_SUMMARY_CHARS);
+    let parameters = &withheld.expansion.as_ref().unwrap().parameters;
+    assert_eq!(parameters.get("excluded").map(String::as_str), Some("scope_unknown"));
+    assert_eq!(parameters.get("scope").map(String::as_str), Some("module/x"));
+    assert!(!parameters.contains_key("summary"));
     assert!(graph.edges.iter().any(|edge| {
-        edge.source == context_id(&global.id)
+        edge.source == withheld.id
             && edge.target == "task-x"
             && edge.kind == EdgeKind::Informs
     }));

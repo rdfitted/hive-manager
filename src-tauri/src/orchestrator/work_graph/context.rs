@@ -28,6 +28,10 @@ pub const DERIVED_CONTEXT_TEMPLATE: &str = "derived-project-context";
 /// withheld. Such nodes carry no summary and never reach a worker prompt; they
 /// exist so composition can record the exclusion in the spawn sidecar.
 pub const EXCLUDED_CONTEXT_PARAMETER: &str = "excluded";
+/// Marks a kept `-> global:` node as scope-checked at derivation. Persisted
+/// graphs from before the check lack it; composition withholds those that
+/// name an entity page by path.
+pub const WIKI_SCOPE_CHECKED_PARAMETER: &str = "wiki_scope";
 const MAX_GLOBAL_REF_POINTER_CHARS: usize = 200;
 const WIKI_LABEL_MAP_UNAVAILABLE: &str =
     "wiki label map was unavailable, so only entity path rules and page frontmatter scoped wiki references";
@@ -1598,8 +1602,12 @@ fn flush_markdown_section(
                 }
             }
             GlobalRefOutcome::Exclude(reason) => {
+                // Keyed by section too, so the same page linked from two
+                // same-named sections keeps both task associations.
                 global_refs.excluded.push(ExcludedGlobalRef {
-                    id: gotcha_id,
+                    id: stable_hash(
+                        format!("{source_ref}:{heading}:{section_gotcha_id}").as_bytes(),
+                    ),
                     section_gotcha_id: section_gotcha_id.clone(),
                     scope: scope.clone(),
                     reason,
@@ -1728,34 +1736,65 @@ impl<'a> GlobalRefGate<'a> {
     }
 
     fn outcome(&self, global_ref: &str) -> GlobalRefOutcome {
+        // `.`/`..`/empty segments or backslashes could make the classified
+        // path differ from the page actually read.
+        if global_ref
+            .split('/')
+            .any(|segment| matches!(segment, "" | "." | ".."))
+            || global_ref.contains(['\\', ':'])
+        {
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::UnresolvedGlobalRef);
+        }
+        let ineligible = |scope: Option<String>| {
+            scope.is_some_and(|scope| !self.scope.is_eligible(&scope))
+        };
         // Rules 1-2 decide without opening the page: an ineligible page is
         // never read, not even its frontmatter.
-        let indexed = self.scope.indexed_scope(global_ref);
-        if indexed
-            .as_deref()
-            .is_some_and(|scope| !self.scope.is_eligible(scope))
-        {
+        if ineligible(self.scope.indexed_scope(global_ref)) {
             return GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeExcluded);
         }
+        // Rule 4: with no readable wiki no scope can be established.
         let Some(root) = &self.canonical_root else {
-            return GlobalRefOutcome::Keep(None);
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeUnknown);
         };
-        let content = root
+        let Some(canonical) = root
             .join(global_ref)
             .canonicalize()
             .ok()
             .filter(|candidate| candidate.starts_with(root) && candidate.is_file())
-            .and_then(|candidate| fs::read_to_string(candidate).ok());
-        let Some(content) = content else {
+        else {
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::UnresolvedGlobalRef);
+        };
+        // Classify the page actually resolved (real case, symlinks followed),
+        // not only the spelling in the link.
+        let resolved: Option<String> = canonical.strip_prefix(root).ok().map(|relative| {
+            relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        });
+        let Some(resolved) = resolved else {
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::UnresolvedGlobalRef);
+        };
+        if ineligible(self.scope.indexed_scope(&resolved)) {
+            return GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeExcluded);
+        }
+        let Ok(content) = fs::read_to_string(&canonical) else {
             return GlobalRefOutcome::Exclude(GlobalRefExclusion::UnresolvedGlobalRef);
         };
         let (frontmatter, body) = split_frontmatter(&content);
-        let head_end = (0..=content.len().min(8192))
+        let head_end = (0..=content.len().min(super::wiki_scope::FRONTMATTER_HEAD_BYTES))
             .rev()
             .find(|index| content.is_char_boundary(*index))
             .unwrap_or(0);
         let frontmatter_scope = super::wiki_scope::frontmatter_scope(&content[..head_end]);
-        match self.scope.page_scope(global_ref, frontmatter_scope.as_deref()) {
+        let page = if self.scope.indexed_scope(global_ref).is_some() {
+            global_ref
+        } else {
+            resolved.as_str()
+        };
+        match self.scope.page_scope(page, frontmatter_scope.as_deref()) {
             None => GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeUnknown),
             Some(scope) if !self.scope.is_eligible(&scope) => {
                 GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeExcluded)
@@ -1811,7 +1850,15 @@ impl<'a> GlobalRefGate<'a> {
             omission.detail = reason.omission_detail().to_string();
             omissions.push(omission);
         }
-        self.excluded.truncate(MAX_DERIVED_CONTEXT_NODES);
+        if self.excluded.len() > MAX_DERIVED_CONTEXT_NODES {
+            let omitted = self.excluded.len() - MAX_DERIVED_CONTEXT_NODES;
+            self.excluded.truncate(MAX_DERIVED_CONTEXT_NODES);
+            omissions.push(WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                omitted,
+                vec![format!("withheld wiki reference cap {MAX_DERIVED_CONTEXT_NODES}")],
+            ));
+        }
         self.excluded
     }
 }
@@ -2128,6 +2175,9 @@ fn append_context_nodes(
             gotcha.fingerprint_ref.clone(),
         );
         parameters.insert("source_hash".to_string(), gotcha.source_hash.clone());
+        if gotcha.source_ref.starts_with("global:") {
+            parameters.insert(WIKI_SCOPE_CHECKED_PARAMETER.to_string(), "checked".to_string());
+        }
         if let Some(provenance) = inferred_scope_provenance.get(&gotcha.id) {
             parameters.insert(
                 "knowledge_provenance".to_string(),
@@ -2800,10 +2850,21 @@ mod tests {
             None,
             enabled_config(),
         );
-        assert!(fallback.gotchas.iter().any(|gotcha| {
-            gotcha.source_ref == "global:patterns/guide.md"
-                && gotcha.summary == "Local heading: institutional context"
-        }));
+        // No readable wiki: no scope can be established, so the strict rule
+        // withholds the reference instead of keeping a heading fallback.
+        assert!(fallback
+            .gotchas
+            .iter()
+            .all(|gotcha| gotcha.source_ref != "global:patterns/guide.md"));
+        assert!(fallback_graph.nodes.iter().any(|node| node
+            .expansion
+            .as_ref()
+            .is_some_and(|expansion| {
+                expansion.parameters.get("source_ref").map(String::as_str)
+                    == Some("global:patterns/guide.md")
+                    && expansion.parameters.get(super::EXCLUDED_CONTEXT_PARAMETER).map(String::as_str)
+                        == Some("scope_unknown")
+            })));
     }
 
     #[test]
