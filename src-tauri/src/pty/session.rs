@@ -410,6 +410,8 @@ pub struct PtySession {
     cleanup_tree: Mutex<Option<crate::transport::process::CapturedTree>>,
     #[cfg(unix)]
     process_tree: crate::transport::process::ProcessTree,
+    #[cfg(unix)]
+    stop_verified: AtomicBool,
     master: Mutex<Option<Arc<MasterPtyHandle>>>,
     #[cfg(windows)]
     needs_drain: AtomicBool,
@@ -585,6 +587,8 @@ impl PtySession {
             cleanup_tree: Mutex::new(None),
             #[cfg(unix)]
             process_tree,
+            #[cfg(unix)]
+            stop_verified: AtomicBool::new(false),
             master: Mutex::new(Some(Arc::new(MasterPtyHandle(master)))),
             #[cfg(windows)]
             needs_drain: AtomicBool::new(false),
@@ -717,14 +721,19 @@ impl PtySession {
     fn kill_unix_with(&self, killer: impl FnOnce(&crate::transport::process::ProcessTree) -> Result<(), String>, budget: Duration) -> Result<(), PtyError> {
         let deadline = Instant::now() + budget;
         let mut child = self.child.lock();
+        // A verified-empty group's numeric ID can later be reused. Serialize
+        // this check with verification so retries and Drop never signal it again.
+        if self.stop_verified.load(Ordering::Acquire) { return Ok(()); }
         let termination = killer(&self.process_tree);
-        crate::transport::process::wait_for_exit_until(termination, deadline, || {
+        let result = crate::transport::process::wait_for_exit_until(termination, deadline, || {
             let root_gone = match child.as_mut() {
                 Some(child) => child.try_wait().map_err(|error| error.to_string())?.is_some(),
                 None => false,
             };
             Ok(root_gone && self.process_tree.is_empty()?)
-        }).map(|_| ()).map_err(|error| PtyError::IoError(std::io::Error::other(error)))
+        });
+        if result.is_ok() { self.stop_verified.store(true, Ordering::Release); }
+        result.map(|_| ()).map_err(|error| PtyError::IoError(std::io::Error::other(error)))
     }
 
     #[cfg(windows)]
@@ -965,6 +974,22 @@ mod tests {
             session.kill().unwrap();
             session.kill().unwrap();
             assert!(session.process_tree.is_empty().unwrap());
+        }
+
+        #[test]
+        fn g53_unix_second_verified_stop_never_signals_a_recycled_group() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let session = session("while :; do sleep 1; done");
+            let signals = AtomicUsize::new(0);
+            session.kill_unix_with(|tree| {
+                signals.fetch_add(1, Ordering::SeqCst);
+                tree.terminate()
+            }, crate::transport::process::STOP_BUDGET).unwrap();
+            session.kill_unix_with(|_| {
+                signals.fetch_add(1, Ordering::SeqCst);
+                Err("a reused group must not be signalled".into())
+            }, Duration::ZERO).unwrap();
+            assert_eq!(signals.load(Ordering::SeqCst), 1);
         }
 
         #[test]
