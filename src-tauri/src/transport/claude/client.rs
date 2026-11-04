@@ -253,25 +253,17 @@ impl JsonClient {
         result
     }
     pub fn stop(&self) -> Result<(), String> {
+        self.stop_with_cleanup(crate::transport::process::stop_child)
+    }
+
+    pub(super) fn stop_with_cleanup(&self, cleanup: impl FnOnce(&mut Child, Option<&crate::transport::process::ProcessTree>) -> Result<(), String>) -> Result<(), String> {
         self.cancelled.store(true, Ordering::Release);
         self.alive.store(false, Ordering::Release);
         self.fail_pending("Claude transport cancelled");
         let mut slot = self.child.lock();
         if let Some(child) = slot.as_mut() {
-            if let Some(tree) = self.tree.lock().as_ref() {
-                tree.terminate()?;
-            }
-            if self.tree.lock().is_none() && child.try_wait().map_err(|e| e.to_string())?.is_none()
-            {
-                child.kill().map_err(|e| e.to_string())?;
-            }
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while child.try_wait().map_err(|e| e.to_string())?.is_none() {
-                if Instant::now() >= deadline {
-                    return Err("Claude cleanup timed out; retry stop".into());
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
+            let tree = self.tree.lock();
+            cleanup(child, tree.as_ref())?;
             *slot = None;
         }
         self.tree.lock().take();
