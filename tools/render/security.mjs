@@ -1,5 +1,6 @@
 import { mutationProver, appendNode, removeNode } from './mutations.mjs';
 import { scrubDiagnostic } from './diagnostics.mjs';
+import { htmlProbeName, htmlProbeMarker, htmlProbeSource } from './html-probe.mjs';
 
 // R-C3 retains html-ipc's live assertion and positive control, while the
 // independent html-script mutation remains gating. The stopped two-token IPC
@@ -183,13 +184,10 @@ export async function runSecurityAssertions({ page, pane, report, assert, consol
   const args = { id: sessionId };
   const productionSource = await preview.getAttribute('srcdoc');
   const origin = new URL(page.url()).origin;
-  const probeUrl = `${origin}/html-ipc-probe.js`;
-  const authorScript = "document.body.dataset.htmlAuthor = 'ran';";
-  const ipcScript = `${authorScript} window.__htmlIpcResult = 'pending'; try { Promise.resolve(window.__TAURI_INTERNALS__.invoke('get_session', ${JSON.stringify(args)})).then(reply => { document.body.dataset.htmlRust = JSON.stringify({ id: reply.id, createdAt: reply.created_at }); window.__htmlIpcResult = 'resolved'; }, error => { window.__htmlIpcResult = 'rejected: ' + String(error).slice(0, 200); }); } catch (error) { window.__htmlIpcResult = 'threw: ' + String(error).slice(0, 200); }`;
-  let probeScript = authorScript;
+  const probeUrl = `${origin}/${htmlProbeName}`;
   const probeSource = productionSource.replace("script-src 'none'", `script-src ${origin}`).replace("connect-src 'none'", 'connect-src ipc: http://ipc.localhost').replace('</body>', `<script src="${probeUrl}"></script></body>`);
   const context = page.context();
-  const delivery = report.security.scriptProbe = { url: probeUrl, route: 'context', events: [] };
+  const delivery = report.security.scriptProbe = { url: probeUrl, transport: 'packaged-asset', events: [] };
   const frameIds = new Map();
   const probeStarted = Date.now();
   let probePhase = 'base';
@@ -226,28 +224,25 @@ export async function runSecurityAssertions({ page, pane, report, assert, consol
     listeners.push(() => page.off(event, listener));
   }
   for (const child of page.frames()) if (child !== page.mainFrame()) record('frame-present', frameInfo(child));
-  const scriptRoute = async route => {
-    record('route', requestInfo(route.request()));
+  // CDP network events can omit opaque frame subresources. The native asset
+  // server supplies immutable bytes; verify them from the parent and require
+  // the frame's own load marker, independently of interception or observers.
+  const assetState = () => page.evaluate(async ({ url, source }) => {
     try {
-      await route.fulfill({ status: 200, contentType: 'application/javascript', headers: { 'Cache-Control': 'no-store' }, body: probeScript });
-      record('fulfilled', { url: probeUrl });
-    } catch (error) {
-      record('route-error', { url: probeUrl, error: error.message });
-      await route.abort().catch(() => {});
-    }
-  };
-  // Use context interception for the sandboxed frame's subresource. The event
-  // evidence distinguishes a missed route from a policy or execution failure.
+      const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+      const body = await response.text();
+      return { status: response.status, mime: response.headers.get('content-type'), bodyMatches: body === source, bytes: body.length, error: null };
+    } catch (error) { return { status: null, mime: null, bodyMatches: false, error: error.message }; }
+  }, { url: probeUrl, source: htmlProbeSource }).catch(error => ({ status: null, mime: null, bodyMatches: false, error: error.message }));
   try {
-    await context.route(probeUrl, scriptRoute);
     const reply = await page.evaluate(payload => window.__TAURI_INTERNALS__.invoke('get_session', payload), args);
     if (reply?.id !== sessionId || typeof reply?.created_at !== 'string') throw new Error('Allowed Rust read positive control did not return the seeded session');
     const expectedReceipt = JSON.stringify({ id: reply.id, createdAt: reply.created_at });
     report.security.rustIpcControl = { id: reply.id, createdAt: reply.created_at };
-    // The parent CSP permits this same-origin, driver-fulfilled script. Only the
+    // The parent CSP permits this same-origin, render-only asset. Only the
     // controlled test frame grants it; production srcdoc remains script-src none.
-    // First isolate the script restriction without making an opaque-origin IPC
-    // attempt: the separate IPC mutation removes both forbidden sandbox tokens.
+    // Isolate the script restriction without an opaque-origin IPC attempt.
+    // The IPC baseline below retains the stopped mutation's R-C3 disposition.
     await expectedViolations(() => reloadFrame((node, source) => { node.srcdoc = source; }, probeSource), 'frame');
     const authorInert = async () => {
       const author = await frame.evaluate(() => document.body.dataset.htmlAuthor ?? null);
@@ -261,35 +256,36 @@ export async function runSecurityAssertions({ page, pane, report, assert, consol
       };
       probePhase = 'script';
       const start = delivery.events.length;
-      const scriptState = () => {
+      const scriptState = async () => {
         const events = delivery.events.slice(start);
-        const response = events.find(item => item.event === 'response');
-        const error = events.find(item => item.event === 'route-error' || item.event === 'requestfailed');
-        return { url: probeUrl, hits: events.filter(item => item.event === 'route').length, status: response?.status ?? null, mime: response?.mime ?? null, error: error?.error ?? null };
+        const loaded = await frame.evaluate(() => document.querySelector('script[src]')?.dataset.htmlProbe ?? null)
+          .then(marker => ({ marker, error: null }), error => ({ marker: null, error: error.message }));
+        const asset = await assetState();
+        return { url: probeUrl, observedRequests: events.filter(item => item.event === 'request').length, ...asset, frameLoaded: loaded.marker, error: asset.error ?? loaded.error };
       };
       try {
         await reloadFrame(node => { node.setAttribute('sandbox', 'allow-scripts'); node.srcdoc = node.srcdoc; });
         // DOMContentLoaded follows this parser-blocking script's response. A
-        // missed route must name the URL and actual response, not time out on
-        // the author sentinel (or hide an HTML response's syntax error).
-        delivery.script = scriptState();
+        // missing asset must fail on delivery, without waiting on the author
+        // sentinel or hiding an HTML fallback's syntax error.
+        delivery.script = await scriptState();
         record('script-delivery', delivery.script);
-        if (!delivery.script.hits || delivery.script.error || delivery.script.status !== 200 || !/^application\/javascript(?:;|$)/i.test(delivery.script.mime ?? '')) {
+        if (delivery.script.error || delivery.script.status !== 200 || !/^(?:application|text)\/javascript(?:;|$)/i.test(delivery.script.mime ?? '') || !delivery.script.bodyMatches || delivery.script.frameLoaded !== htmlProbeMarker) {
           throw new Error('Script delivery failed');
         }
         await frame.waitForFunction(() => document.body.dataset.htmlAuthor === 'ran');
       } catch (error) {
-        delivery.script = scriptState();
+        delivery.script = await scriptState();
         record('script-error', { ...delivery.script, cause: error.message });
-        const { hits, status, mime } = delivery.script;
+        const { status, mime, bodyMatches, frameLoaded } = delivery.script;
         await undo();
-        throw new Error(`HTML probe ${probeUrl}: route=${hits} status=${status ?? 'none'} mime=${mime ?? 'none'}: ${delivery.script.error ?? error.message}`);
+        throw new Error(`HTML probe ${probeUrl}: packaged-asset status=${status ?? 'none'} mime=${mime ?? 'none'} body=${bodyMatches} loaded=${frameLoaded ?? 'none'}: ${delivery.script.error ?? error.message}`);
       }
       return undo;
     });
-    probeScript = ipcScript;
     probePhase = 'ipc-base';
-    await expectedViolations(() => reloadFrame(node => { node.srcdoc = node.srcdoc; }), 'frame');
+    const ipcSource = probeSource.replace('<script src=', `<script data-ipc-session="${encodeURIComponent(sessionId)}" src=`);
+    await expectedViolations(() => reloadFrame((node, source) => { node.srcdoc = source; }, ipcSource), 'frame');
     const ipc = async () => {
       const state = await frame.evaluate(() => ({ executed: document.body.dataset.htmlAuthor === 'ran', receipt: document.body.dataset.htmlRust ?? null, result: window.__htmlIpcResult ?? 'not-run' }));
       const details = { ...state, expectedReceipt, rustControl: report.security.rustIpcControl, bridge, protocolRequests: [...ipcRequests], sandbox: await preview.getAttribute('sandbox') };
@@ -312,7 +308,6 @@ export async function runSecurityAssertions({ page, pane, report, assert, consol
     console.log(`render:check R-C3 IPC evidence ${JSON.stringify(report.security.ipcEvidence)}`);
   } finally {
     try {
-      await context.unroute(probeUrl, scriptRoute);
       probePhase = 'production';
       await expectedViolations(() => reloadFrame((node, source) => { node.setAttribute('sandbox', ''); node.srcdoc = source; }, productionSource), 'frame');
     } finally { for (const remove of listeners) remove(); }

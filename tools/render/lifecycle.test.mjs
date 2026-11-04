@@ -5,6 +5,36 @@ import { sameProcess, inside, liveUnchanged } from './windows.mjs';
 import { JSDOM } from 'jsdom';
 import { runInContext } from 'node:vm';
 import { pressOutsideTerminal } from './keyboard.mjs';
+import { htmlProbeSource, htmlProbeMarker } from './html-probe.mjs';
+
+test('packaged HTML probe separates author-only execution from the allowed Rust read', async () => {
+  for (const mode of ['author', 'ipc', 'rejected']) {
+    const dom = new JSDOM('<body><script src="http://tauri.localhost/html-ipc-probe.js"></script></body>', { runScripts: 'outside-only' });
+    try {
+      const script = dom.window.document.querySelector('script');
+      Object.defineProperty(dom.window.document, 'currentScript', { value: script });
+      const session = 'fixture / orbital';
+      if (mode !== 'author') script.dataset.ipcSession = encodeURIComponent(session);
+      const calls = [];
+      dom.window.__TAURI_INTERNALS__ = { invoke: (command, args) => {
+        calls.push({ command, id: args.id });
+        return mode === 'rejected' ? Promise.reject('opaque origin') : Promise.resolve({ id: session, created_at: 'synthetic-time' });
+      } };
+      runInContext(htmlProbeSource, dom.getInternalVMContext());
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(script.dataset.htmlProbe, htmlProbeMarker);
+      assert.equal(dom.window.document.body.dataset.htmlAuthor, 'ran');
+      assert.deepEqual(calls, mode === 'author' ? [] : [{ command: 'get_session', id: session }]);
+      if (mode === 'ipc') {
+        assert.deepEqual(JSON.parse(dom.window.document.body.dataset.htmlRust), { id: session, createdAt: 'synthetic-time' });
+        assert.equal(dom.window.__htmlIpcResult, 'resolved');
+      } else {
+        assert.equal(dom.window.document.body.dataset.htmlRust, undefined);
+        assert.equal(dom.window.__htmlIpcResult, mode === 'author' ? undefined : 'rejected: opaque origin');
+      }
+    } finally { dom.window.close(); }
+  }
+});
 
 test('keyboard guard fails by name and blocks terminal input when focus changes before or during dispatch', async () => {
   for (const phase of ['safe', 'before', 'dispatch']) {

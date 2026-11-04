@@ -8,7 +8,7 @@ import { identity, killOwned } from './windows.mjs';
 export const repo = fileURLToPath(new URL('../../', import.meta.url));
 export const target = path.join(process.env.LOCALAPPDATA ?? '', 'hive-manager-target/loop1/debug/hive-manager.exe');
 const folders = ['src', 'src-tauri/src', 'src-tauri/capabilities', 'src-tauri/permissions', 'src-tauri/icons', 'static'];
-const files = ['package.json', 'package-lock.json', 'svelte.config.js', 'vite.config.js', 'tsconfig.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/tauri.conf.json', 'src-tauri/build.rs'];
+const files = ['package.json', 'package-lock.json', 'svelte.config.js', 'vite.config.js', 'tsconfig.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/tauri.conf.json', 'src-tauri/build.rs', 'tools/render/build.mjs', 'tools/render/build.ps1', 'tools/render/frontend.mjs', 'tools/render/html-probe.mjs'];
 async function walk(relative) {
   const entries = await readdir(path.join(repo, relative), { withFileTypes: true }).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
   const output = [];
@@ -45,7 +45,9 @@ export async function ensureBuild(out, gate, signal) {
   const log = await open(path.join(out, 'build.log'), 'w');
   const started = Date.now();
   console.log('render:check building the guarded custom-protocol executable');
-  const child = spawnBuildScript(path.join(repo, 'tools/render/build.ps1'), ['-Repo', repo, '-GateJson', JSON.stringify(gate)], { cwd: repo, windowsHide: true, stdio: ['ignore', log.fd, log.fd] });
+  const config = path.join(out, 'render-tauri-config.json');
+  await writeFile(config, JSON.stringify({ build: { beforeBuildCommand: 'node tools/render/frontend.mjs', frontendDist: '../tools/render/out/frontend' } }));
+  const child = spawnBuildScript(path.join(repo, 'tools/render/build.ps1'), ['-Repo', repo, '-GateJson', JSON.stringify(gate), '-Config', config], { cwd: repo, windowsHide: true, stdio: ['ignore', log.fd, log.fd] });
   const owned = identity(child.pid);
   const abort = () => { if (owned) void killOwned(owned).catch(() => {}); };
   signal.addEventListener('abort', abort, { once: true });

@@ -1,4 +1,4 @@
-param([Parameter(Mandatory = $true)][string]$Repo, [Parameter(Mandatory = $true)][string]$GateJson)
+param([Parameter(Mandatory = $true)][string]$Repo, [Parameter(Mandatory = $true)][string]$GateJson, [Parameter(Mandatory = $true)][string]$Config)
 $ErrorActionPreference = 'Continue'
 $gate = $GateJson | ConvertFrom-Json
 if ($gate.kind -eq 'fifo') {
@@ -25,7 +25,7 @@ $cargoPath=Join-Path $Repo 'src-tauri\Cargo.toml'
 $before=[IO.File]::ReadAllBytes($cargoPath)
 $code=1
 try {
-  npm run tauri -- build --debug --no-bundle
+  npm run tauri -- build --debug --no-bundle --config $Config
   $code=$LASTEXITCODE
 } finally {
   $after=[IO.File]::ReadAllBytes($cargoPath)
