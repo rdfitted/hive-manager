@@ -13,6 +13,7 @@ import { classifyFinding } from './findings.mjs';
 import { failureDiagnostic } from './diagnostics.mjs';
 import { mutationProver, reviewProofNames, consoleProofMessage } from './mutations.mjs';
 import { keyboardProofNames } from './keyboard.mjs';
+import { securityProofNames } from './security.mjs';
 import { ps, quote, identity, sameProcess, tree, killOwned, liveState, liveUnchanged, desktopState, environment, inside, plainPath, sleep } from './windows.mjs';
 
 if (process.platform !== 'win32') throw new Error('render:check requires Windows WebView2');
@@ -135,7 +136,8 @@ try {
   // Reloading that target races the custom-protocol navigation.
   await page.waitForURL(url => url.hostname === 'tauri.localhost', { timeout: 30000, waitUntil: 'domcontentloaded' });
   report.resourcesBeforeReload = await page.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name));
-  await page.reload({ waitUntil: 'domcontentloaded' });
+  const reloaded = await page.reload({ waitUntil: 'domcontentloaded' });
+  report.effectiveCsp = reloaded?.headers()['content-security-policy'] ?? null;
   // The default 250 entries fill during the 66-second observation. Keep late
   // requests observable, and fail through the console gate if capacity is hit.
   report.resourceTimingBufferSize = 20000;
@@ -167,7 +169,7 @@ try {
     await diagnoseReview({ page, manifest, report, out: captureOut });
   } else {
     report.phase = 'render';
-    await runRenderAssertions({ page, manifest, report, assert: assertion, out: captureOut, repo, signal: controller.signal });
+    await runRenderAssertions({ page, manifest, report, assert: assertion, out: captureOut, repo, signal: controller.signal, consoleErrors });
   }
   await Promise.all(errorReads);
   report.resourceUrls = await page.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name));
@@ -215,6 +217,7 @@ try {
     assertion('network-mutation-both-observers', report.blockedNetworkMutation?.fulfilledInsideDriver && report.blockedNetworkMutation.requests.length > 0 && report.blockedNetworkMutation.resources.length > 0, report.blockedNetworkMutation);
     const required = ['screen-not-empty', 'screenshot-has-pixels', 'version-badge-unobscured', 'grid-eight-panes', 'grid-composer-with-attention', 'grid-composer-without-attention', 'finished-attention-card', 'finished-needs-you-count', 'stalled-attention-card', 'stalled-needs-you-count', 'exited_during_startup-attention-card', 'exited_during_startup-needs-you-count', 'chat-table', 'chat-code', 'chat-literal', 'kanban-fixture-present', 'sidebar-fixture-present', 'viewport-1440', 'viewport-800', 'updater-invoke-rejected', 'all-screens-captured', 'no-live-api-request', 'no-console-errors'];
     required.push(...reviewProofNames, ...keyboardProofNames);
+    required.push(...securityProofNames);
     required.push('launch-project-verbatim-prefix');
     assertion('all-required-mutations-proved', required.every(name => report.mutations.some(item => item.name === name && item.passed)), { required, proved: report.mutations.filter(item => item.passed).map(item => item.name) });
   }

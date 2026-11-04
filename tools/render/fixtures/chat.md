@@ -46,3 +46,14 @@ A synthetic navigation check follows three steps: read the proposed course, comp
 A second pass examines the same labels from a different pane width. The content remains readable when the code block needs horizontal space and the table has several columns. This is useful evidence for the render driver and does not require a live agent.
 
 The final result is intentionally ordinary. Amber is ready, Violet is waiting, and Silver is finished. The fixture leaves the reader with a stable report, a small review diff, and a clear example of every required attention state.
+
+## Passive HTML report
+
+```html
+<style>body { color: #d8e2eb; background: #18232d; padding: 16px; } h1 { font-size: 20px; }</style>
+<h1>Orbital HTML report</h1>
+<p style="letter-spacing: 2px">A passive layout inside the preview.</p>
+<script>window.__fixtureScript = true</script>
+<img onerror="window.__fixtureError = true">
+<a href="http://127.0.0.1:18800/html-navigation">Navigation stays inert</a>
+```
