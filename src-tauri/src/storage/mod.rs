@@ -1779,6 +1779,17 @@ impl SessionStorage {
 }
 
 fn parse_conversation_messages(content: &str) -> Vec<ConversationMessage> {
+    fn split_entry(input: &str) -> Option<(&str, &str)> {
+        let (offset, width) = ["\n---\n", "\n---\r\n"]
+            .into_iter()
+            .filter_map(|delimiter| {
+                input
+                    .find(delimiter)
+                    .map(|offset| (offset, delimiter.len()))
+            })
+            .min_by_key(|(offset, _)| *offset)?;
+        Some((&input[..offset], &input[offset + width..]))
+    }
     let mut messages = Vec::new();
     let header_re = regex::Regex::new(r"^\[([^\]]+)\] from @([A-Za-z0-9\-]+)$")
         .expect("conversation header pattern");
@@ -1792,17 +1803,11 @@ fn parse_conversation_messages(content: &str) -> Vec<ConversationMessage> {
             break;
         };
         let Some(caps) = header_re.captures(header.trim()) else {
-            remaining = remaining
-                .split_once("\n---\n")
-                .map(|(_, next)| next)
-                .unwrap_or("");
+            remaining = split_entry(remaining).map(|(_, next)| next).unwrap_or("");
             continue;
         };
         let Ok(timestamp) = DateTime::parse_from_rfc3339(&caps[1]) else {
-            remaining = body
-                .split_once("\n---\n")
-                .map(|(_, next)| next)
-                .unwrap_or("");
+            remaining = split_entry(body).map(|(_, next)| next).unwrap_or("");
             continue;
         };
         let metadata = body.split_once('\n').and_then(|(line, rest)| {
@@ -1842,11 +1847,13 @@ fn parse_conversation_messages(content: &str) -> Vec<ConversationMessage> {
             )
         } else {
             // Pre-envelope files retain the original Markdown parsing behavior.
-            let (text, rest) = body
-                .split_once("\n---\n")
-                .or_else(|| body.split_once("\n---\r\n"))
-                .unwrap_or((body, ""));
-            (None, None, text.trim().to_string(), rest)
+            let (text, rest) = split_entry(body).unwrap_or((body, ""));
+            (
+                None,
+                None,
+                text.replace("\r\n", "\n").trim().to_string(),
+                rest,
+            )
         };
         messages.push(ConversationMessage {
             timestamp: timestamp.with_timezone(&Utc),
@@ -1966,22 +1973,54 @@ mod tests {
         let marker = "<!-- hive-envelope: {\"renderer\":\"approval\"} -->\nLegacy text";
         let marker_file = format!("---\n[2026-01-02T03:04:05Z] from @worker-1\n{marker}\n\n{legacy}");
         let marker_messages = parse_conversation_messages(&marker_file);
-        assert_eq!(marker_messages.len(), 2, "legacy markers must not drop subsequent history");
+        assert_eq!(
+            marker_messages.len(),
+            2,
+            "legacy markers must not drop subsequent history"
+        );
         assert_eq!(marker_messages[0].content, marker);
         assert!(marker_messages[0].renderer.is_none() && marker_messages[0].data.is_none());
-        fs::write(&path, legacy).unwrap();
-        let messages = storage
-            .read_conversation("render-session", "worker-1", None)
-            .await
-            .unwrap();
-        assert_eq!(messages.len(), 1);
+        let legacy_lf = legacy.replace("\r\n", "\n");
+        let mixed = format!("{}{}---\n[2026-01-02T03:04:05Z] from @worker-1\n<!-- hive-envelope: {{\"body_bytes\":3}} -->\nnew\n\n",
+            legacy_lf.replace('\n', "\r\n"), legacy_lf.replace('\n', "\r\n"));
+        let mixed_messages = parse_conversation_messages(&mixed);
         assert_eq!(
-            messages[0].content,
+            mixed_messages.len(),
+            3,
+            "mixed LF/CRLF history must split at the earliest entry"
+        );
+        assert_eq!(
+            mixed_messages[1].content,
             "Legacy conversation without renderer metadata."
         );
-        assert!(messages[0].renderer.is_none());
-        assert!(messages[0].data.is_none());
-        assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+        assert_eq!(mixed_messages[2].content, "new");
+        let multiline = legacy_lf.replace("metadata.", "metadata.\nSecond legacy line.");
+        for input in [
+            legacy_lf.clone(),
+            legacy_lf.replace('\n', "\r\n"),
+            multiline.clone(),
+            multiline.replace('\n', "\r\n"),
+        ] {
+            fs::write(&path, &input).unwrap();
+            let messages = storage
+                .read_conversation("render-session", "worker-1", None)
+                .await
+                .unwrap();
+            assert_eq!(messages.len(), 1);
+            let expected = if input.contains("Second legacy line.") {
+                "Legacy conversation without renderer metadata.\nSecond legacy line."
+            } else {
+                "Legacy conversation without renderer metadata."
+            };
+            assert_eq!(messages[0].content, expected);
+            assert!(messages[0].renderer.is_none());
+            assert!(messages[0].data.is_none());
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                input,
+                "loading must never rewrite a legacy file"
+            );
+        }
         let diff = "diff --git a/demo b/demo\n@@ -1 +1 @@\n-old\n+new";
         let appended = storage
             .append_conversation_message("render-session", "worker-1", "worker-1", diff)
