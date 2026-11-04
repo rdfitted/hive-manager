@@ -11347,3 +11347,50 @@ async fn g57_approval_rejects_a_replaced_runtime() {
         .is_err());
     assert!(transport.messages.lock().is_empty());
 }
+
+#[tokio::test]
+async fn g57_approval_request_rejects_credentials_before_any_persistence() {
+    use crate::actions::{ActionContext, Caller};
+    let (state, registry, transport) = g57_approval_fixture().await;
+    let token = state.pty_manager.read().mint_heartbeat_token_for_test(
+        "approval-session-queen",
+        "approval-session",
+        true,
+    );
+    let split = format!("{}\t{}", &token[..32], &token[32..]);
+    let context = ActionContext::new(Caller::Http, state.clone());
+    let mut events = state.event_bus.subscribe_session("approval-session".into());
+    for field in ["title", "description"] {
+        for credential in [&token, &split] {
+            let mut input = serde_json::json!({"session_id":"approval-session", "target_agent_id":"approval-session-queen", "title":"Review patch", "description":"Synthetic change"});
+            input[field] = serde_json::Value::String(credential.clone());
+            let result = registry.dispatch("approval.request", &context, input).await;
+            assert!(
+                result.is_err(),
+                "approval credentials must be rejected before persistence"
+            );
+            assert!(result.err().unwrap().message.contains("credential"));
+        }
+    }
+    assert!(
+        state.pending_approvals.lock().is_empty(),
+        "rejected payloads cannot create pending approvals"
+    );
+    assert!(
+        state
+            .storage
+            .read_conversation("approval-session", "approval-session-queen", None)
+            .await
+            .unwrap()
+            .is_empty(),
+        "credentials cannot enter conversation storage"
+    );
+    assert!(transport.messages.lock().is_empty());
+    while let Ok(Ok(event)) = tokio::time::timeout(std::time::Duration::from_millis(30), events.recv()).await {
+        assert_ne!(
+            event.event_type,
+            crate::domain::event::EventType::ConversationMessage,
+            "rejected credentials cannot enter live conversation events"
+        );
+    }
+}

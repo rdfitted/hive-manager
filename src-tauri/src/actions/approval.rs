@@ -94,6 +94,22 @@ impl Action for CreateApproval {
         {
             return Err(ActionError::bad_request("Invalid approval request"));
         }
+        let matcher = ctx.state.pty_manager.read().heartbeat_credential_matcher();
+        let values = [
+            request.session_id.clone(),
+            request.target_agent_id.clone(),
+            request.title.clone(),
+            request.description.clone(),
+        ];
+        let contains_credential =
+            tokio::task::spawn_blocking(move || values.iter().any(|value| matcher.contains(value)))
+                .await
+                .map_err(|_| ActionError::internal("Approval credential scan unavailable"))?;
+        if contains_credential {
+            return Err(ActionError::bad_request(
+                "Approval request must not contain a credential",
+            ));
+        }
         let instance_id =
             validate_target(&ctx.state, &request.session_id, &request.target_agent_id)?;
         let approval_id = uuid::Uuid::new_v4().to_string();
