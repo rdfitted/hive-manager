@@ -1080,25 +1080,37 @@ impl QueueManager {
         Ok(())
     }
 
-    /// Repair orphaned `running` rows on resume: any `running` row whose worker is NOT in
-    /// `live_worker_ids` (its PTY did not survive the crash) is flipped back to `queued`.
-    /// Returns the reclaimed ids.
-    pub async fn reconcile(
+    /// Capture assignment versions before observing runtime liveness. No queue or database
+    /// guard survives this call, so the caller can read the PTY manager without lock inversion.
+    pub fn observe_running_assignments(
         &self,
         session_id: &str,
+    ) -> Result<Vec<QueueRow>, StorageError> {
+        Ok(self.repo.rows_for_session(session_id)?.into_iter()
+            .filter(|row| row.status == QueueStatus::Running).collect())
+    }
+
+    /// Repair only running assignments present in the observation. A later transfer or claim
+    /// has a different assignment id and must not be erased by stale runtime liveness.
+    pub async fn reconcile_observed(
+        &self,
+        session_id: &str,
+        observed: &[QueueRow],
         live_worker_ids: &[String],
     ) -> Result<Vec<String>, StorageError> {
         let now = Self::now_ms();
         let reclaimed = {
             let spawn_in_flight = self.spawn_in_flight.lock();
-            let rows = self.repo.rows_for_session(session_id)?;
             let mut reclaimed = Vec::new();
-            for row in rows {
-                let orphaned = row.status == QueueStatus::Running
+            for row in observed {
+                let orphaned = row.session_id == session_id
+                    && row.status == QueueStatus::Running
                     && !spawn_in_flight.contains_key(&row.id)
                     && !live_worker_ids.iter().any(|w| w == &row.worker_id);
-                if orphaned && self.repo.requeue_running(&row.id, now)? {
-                    reclaimed.push(row.id);
+                if orphaned && self.repo.requeue_running_for_assignment(
+                    session_id, &row.id, row.assignment_id, now,
+                )? {
+                    reclaimed.push(row.id.clone());
                 }
             }
             reclaimed
@@ -1108,6 +1120,18 @@ impl QueueManager {
                 .await;
         }
         Ok(reclaimed)
+    }
+
+    /// Compatibility seam for existing fixtures. Production callers must capture assignment
+    /// versions before liveness and use reconcile_observed.
+    #[cfg(test)]
+    pub async fn reconcile(
+        &self,
+        session_id: &str,
+        live_worker_ids: &[String],
+    ) -> Result<Vec<String>, StorageError> {
+        let observed = self.observe_running_assignments(session_id)?;
+        self.reconcile_observed(session_id, &observed, live_worker_ids).await
     }
 
     /// Counts + rows for a session's queue (dashboard endpoint).
@@ -1341,6 +1365,46 @@ mod tests {
         repo.ensure_schema().unwrap();
         let event_bus = EventBus::new(dir.path().to_path_buf());
         (dir, QueueManager::new(repo, event_bus))
+    }
+
+    #[tokio::test]
+    async fn resume_reconcile_preserves_transfer_after_observation() {
+        let (_dir, mgr) = manager();
+        mgr.enqueue_worker("run", "s1", "old", "backend", "codex", json!({}), Some("T1".into()))
+            .await.unwrap();
+        let ClaimOutcome::Claimed { epoch } = mgr
+            .claim_and_reserve_spawn("run", "s1", "old", None).await.unwrap()
+            else { panic!("fixture claim must win") };
+        assert!(mgr.complete_spawn_handoff("run", epoch, "old").unwrap());
+
+        let observed = mgr.observe_running_assignments("s1").unwrap();
+        let before = mgr.repo.get_row("run").unwrap().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].status, QueueStatus::Running);
+        assert_eq!(observed[0].worker_id, "old");
+        assert_eq!(observed[0].assignment_id, before.assignment_id);
+        let stale_live_ids = Vec::new();
+
+        mgr.reassign_with_preparation(
+            "s1", &[QueueReassignment::new(before, "new".into())],
+            || Ok(()), || Ok(()),
+        ).unwrap();
+        let transferred = mgr.repo.get_row("run").unwrap().unwrap();
+        assert_ne!(transferred.assignment_id, observed[0].assignment_id);
+
+        let reclaimed = mgr.reconcile_observed("s1", &observed, &stale_live_ids)
+            .await.unwrap();
+        let after = mgr.repo.get_row("run").unwrap().unwrap();
+        assert_eq!(after.status, QueueStatus::Running);
+        assert_eq!(after.worker_id, "new");
+        assert_eq!(after.assignment_id, transferred.assignment_id);
+        assert_eq!(after, transferred, "stale repair must leave the transferred row unchanged");
+        assert!(reclaimed.is_empty());
+        assert_eq!(
+            mgr.record_heartbeat_checked("s1", "new", Some(after.assignment_id), "working")
+                .await.unwrap(),
+            QueueHeartbeatResult::Recorded("run".into()),
+        );
     }
 
     #[tokio::test]

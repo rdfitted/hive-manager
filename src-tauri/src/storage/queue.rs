@@ -1599,9 +1599,16 @@ impl QueueRepo {
         })
     }
 
-    /// Flip a specific `running` row back to `queued` (used by resume reconcile when the
-    /// PTY no longer exists). Returns `true` if a row changed.
-    pub fn requeue_running(&self, id: &str, now_ms: i64) -> Result<bool, StorageError> {
+    /// Flip a specific running row back to queued only while its observed assignment is
+    /// still current. Minting the replacement epoch and the conditional write share the
+    /// connection mutex; a transfer after observation leaves its row untouched.
+    pub fn requeue_running_for_assignment(
+        &self,
+        session_id: &str,
+        id: &str,
+        expected_assignment_id: i64,
+        now_ms: i64,
+    ) -> Result<bool, StorageError> {
         self.db.with_conn(|conn| {
             let assignment_id = next_assignment_id_for_row(conn, id)?;
             conn.execute(
@@ -1611,11 +1618,19 @@ impl QueueRepo {
                          WHEN task_id IS NOT NULL THEN 'pending:' || id ELSE worker_id END,
                      updated_at = ?2,
                      assignment_id = ?3
-                 WHERE id = ?1 AND status = 'running'",
-                params![id, now_ms, assignment_id],
+                 WHERE id = ?1 AND session_id = ?4 AND status = 'running'
+                   AND assignment_id = ?5",
+                params![id, now_ms, assignment_id, session_id, expected_assignment_id],
             )?;
             Ok(conn.changes() == 1)
         })
+    }
+
+    /// Existing fixtures repair the currently observed row through the same conditional SQL.
+    #[cfg(test)]
+    pub fn requeue_running(&self, id: &str, now_ms: i64) -> Result<bool, StorageError> {
+        let Some(row) = self.get_row(id)? else { return Ok(false) };
+        self.requeue_running_for_assignment(&row.session_id, id, row.assignment_id, now_ms)
     }
 
     /// Snapshot all running rows for coordination-layer liveness probing.

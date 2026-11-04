@@ -425,17 +425,30 @@ pub async fn resume_session(
         controller.resume_session(&session_id)?
     };
 
-    // #126: repair queue rows orphaned by the crash. Any `agent_run_queue` row still marked
-    // `running` whose worker is NOT among the resumed session's live agents (its PTY did not
-    // survive) is flipped back to `queued` so it becomes claimable again. The queue table
-    // persisted across the restart on its own; reconcile only fixes orphaned `running` rows.
+    // #126/#350/#416: observe assignment versions BEFORE runtime liveness. A Queen transfer
+    // after this snapshot must not be requeued using the older liveness observation.
+    let observed = match app_state.queue_manager.observe_running_assignments(&session_id) {
+        Ok(observed) => observed,
+        Err(e) => {
+            tracing::warn!("Queue reconcile observation on resume failed for {session_id}: {e}");
+            return Ok(session);
+        }
+    };
     let live_worker_ids = {
         let manager = app_state.pty_manager.read();
-        live_resume_agent_ids(&session, &manager)
+        let mut ids = live_resume_agent_ids(&session, &manager);
+        // The returned Session is a clone; a running assignee may have joined since it was
+        // returned. Its actual runtime also prevents orphan repair.
+        for row in &observed {
+            if manager.is_alive(&row.worker_id) && !ids.contains(&row.worker_id) {
+                ids.push(row.worker_id.clone());
+            }
+        }
+        ids
     };
     if let Err(e) = app_state
         .queue_manager
-        .reconcile(&session_id, &live_worker_ids)
+        .reconcile_observed(&session_id, &observed, &live_worker_ids)
         .await
     {
         tracing::warn!("Queue reconcile on resume failed for {session_id}: {e}");
