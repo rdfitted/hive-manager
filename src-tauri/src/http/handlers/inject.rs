@@ -817,6 +817,14 @@ pub async fn queen_inject(
     validate_session_id(&id)?;
     validate_agent_id(&payload.queen_id)?;
     validate_agent_id(&payload.target_worker_id)?;
+    crate::coordination::role_contract::observe_from_state(
+        &state,
+        &id,
+        &payload.queen_id,
+        crate::coordination::role_contract::Channel::QueenInject,
+        &payload.message,
+        false,
+    );
 
     let target_worker_id = payload.target_worker_id.clone();
     let transaction_lock = injection_transaction_lock(&state, &target_worker_id);
@@ -857,6 +865,14 @@ pub async fn evaluator_inject(
     validate_session_id(&id)?;
     validate_agent_id(&payload.evaluator_id)?;
     validate_agent_id(&payload.target_agent_id)?;
+    crate::coordination::role_contract::observe_from_state(
+        &state,
+        &id,
+        &payload.evaluator_id,
+        crate::coordination::role_contract::Channel::EvaluatorInject,
+        &payload.message,
+        false,
+    );
 
     let target_agent_id = payload.target_agent_id.clone();
     let transaction_lock = injection_transaction_lock(&state, &target_agent_id);

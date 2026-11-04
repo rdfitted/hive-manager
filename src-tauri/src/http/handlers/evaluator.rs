@@ -1520,6 +1520,36 @@ pub async fn post_verdict(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    {
+        // Report-only role-contract check on the Evaluator's verdict handoff.
+        let verdict_line = format!("Verdict: {}.", req.verdict.trim());
+        let commit_line = commit_sha.map(|sha| format!("commit {sha}"));
+        let criteria_evidence = req.criteria.as_ref().map(|criteria| {
+            criteria
+                .iter()
+                .flat_map(|criterion| {
+                    std::iter::once(criterion.evidence.as_str())
+                        .chain(criterion.evidence_refs.iter().map(String::as_str))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        let text = crate::coordination::role_contract::join_parts([
+            Some(verdict_line.as_str()),
+            commit_line.as_deref(),
+            rationale,
+            req.blocked_reason.as_deref(),
+            req.blocked_detail.as_deref(),
+            criteria_evidence.as_deref(),
+        ]);
+        crate::coordination::role_contract::observe_fixed_role(
+            &state,
+            &session_id,
+            "evaluator",
+            crate::coordination::role_contract::Channel::EvaluatorVerdict,
+            &text,
+        );
+    }
 
     // #175(a) self-heal. The QA window normally opens when the peer watcher
     // observes milestone-ready, but that watcher does not exist when the session
@@ -1964,6 +1994,18 @@ pub async fn post_prince_verdict(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    {
+        // Report-only role-contract check on the Prince's remediation handoff.
+        let commit_line = commit_sha.map(|sha| format!("commit {sha}"));
+        let text = crate::coordination::role_contract::join_parts([rationale, commit_line.as_deref()]);
+        crate::coordination::role_contract::observe_fixed_role(
+            &state,
+            &session_id,
+            "prince",
+            crate::coordination::role_contract::Channel::PrinceVerdict,
+            &text,
+        );
+    }
 
     let (project_path, prince_id, queen_id) = {
         let controller = state.session_controller.read();
