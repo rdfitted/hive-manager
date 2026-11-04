@@ -247,6 +247,16 @@ pub async fn append_conversation(
         .await?;
     }
 
+    // Report-only role-contract check: a violation is logged, never blocking.
+    crate::coordination::role_contract::observe_from_state(
+        &state,
+        &session_id,
+        &from,
+        crate::coordination::role_contract::Channel::Conversation,
+        &content,
+        false,
+    );
+
     let message = state
         .storage
         .append_conversation_message(&session_id, &agent_id, &from, &content)

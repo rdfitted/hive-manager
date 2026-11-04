@@ -1,6 +1,7 @@
 mod contracts;
 mod injection;
 pub mod queue_manager;
+pub mod role_contract;
 mod state;
 
 pub use contracts::*;

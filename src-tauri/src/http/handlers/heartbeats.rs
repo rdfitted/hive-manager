@@ -269,6 +269,10 @@ pub async fn post_heartbeat(
         validate_agent_id(target_id)?;
         req.agent_id = target_id.clone();
     }
+    // Report-only role-contract check on the sender (a Queen mark is the Queen's claim).
+    crate::coordination::role_contract::observe_from_state(&state, &session_id, &caller_id,
+        crate::coordination::role_contract::Channel::Heartbeat,
+        req.summary.as_deref().unwrap_or(""), req.status == "completed");
     let mutation_lock = heartbeat_mutation_lock(&session_id);
     let _mutation_guard = mutation_lock.lock().await;
     if !req.reassign_nodes.is_empty() {

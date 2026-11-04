@@ -765,3 +765,38 @@ async fn g35_conversation_controller_sessions_preserve_shared_and_windows_reserv
         ]
     );
 }
+
+#[tokio::test]
+async fn role_contract_violation_is_logged_and_the_message_is_still_admitted() {
+    use crate::coordination::role_contract::{MODE_ENV, ROLE_CONTRACT_ENV_LOCK, SURFACE};
+    let _guard = ROLE_CONTRACT_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    std::env::remove_var(MODE_ENV);
+    let (_temp, state, app) = crate::http::tests_agent_events::setup();
+    let mut session = crate::http::tests::make_test_session_with_agents("rc-1", "/repo", &["rc-1-worker-1"]);
+    session.agents[0].role_definition_id = Some("evaluator".to_string());
+    state.session_controller.read().insert_test_session(session);
+    let ledger = crate::coordination::role_contract::ledger_path(state.storage.base_dir());
+    assert!(!state.storage.base_dir().join("judgments").join("ledger.jsonl").exists());
+
+    let response = append(&app, "rc-1", "shared", "worker-1", "Found it at src/foo.rs:42 and I patched it myself.", &[]).await;
+    assert_eq!(response.status(), StatusCode::CREATED, "report-only must admit the message");
+    let rows = std::fs::read_to_string(&ledger).expect("violation row written");
+    let row: Value = serde_json::from_str(rows.lines().next().unwrap()).unwrap();
+    assert_eq!(row["surface"], SURFACE);
+    assert_eq!(row["subject_ref"]["role"], "evaluator");
+    assert_eq!(row["subject_ref"]["channel"], "conversation");
+    assert_eq!(row["answer"]["rules"][0]["rule_id"], "authority.may_commit");
+
+    let clean = append(&app, "rc-1", "shared", "worker-1", "Verdict: FAIL. cargo test exits 101 at queue.rs:88.", &[]).await;
+    assert_eq!(clean.status(), StatusCode::CREATED);
+    assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 1, "clean messages write nothing");
+
+    std::env::set_var(MODE_ENV, "off");
+    let killed = append(&app, "rc-1", "shared", "worker-1", "I patched it myself again.", &[]).await;
+    std::env::remove_var(MODE_ENV);
+    assert_eq!(killed.status(), StatusCode::CREATED);
+    assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 1, "kill switch disables logging");
+    assert!(!state.storage.base_dir().join("judgments").join("ledger.jsonl").exists(), "the shared decision ledger is untouched");
+    let messages = read_json(&app, "/api/sessions/rc-1/conversations/shared").await;
+    assert_eq!(messages["messages"].as_array().unwrap().len(), 3, "every message was admitted");
+}
