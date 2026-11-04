@@ -1789,12 +1789,9 @@ impl<'a> GlobalRefGate<'a> {
             .find(|index| content.is_char_boundary(*index))
             .unwrap_or(0);
         let frontmatter_scope = super::wiki_scope::frontmatter_scope(&content[..head_end]);
-        let page = if self.scope.indexed_scope(global_ref).is_some() {
-            global_ref
-        } else {
-            resolved.as_str()
-        };
-        match self.scope.page_scope(page, frontmatter_scope.as_deref()) {
+        // The resolved page is the identity: an alias (symlink, case variant)
+        // must not lend its own map entry to the page actually read.
+        match self.scope.page_scope(&resolved, frontmatter_scope.as_deref()) {
             None => GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeUnknown),
             Some(scope) if !self.scope.is_eligible(&scope) => {
                 GlobalRefOutcome::Exclude(GlobalRefExclusion::ScopeExcluded)

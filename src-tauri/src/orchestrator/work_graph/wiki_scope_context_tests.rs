@@ -377,14 +377,47 @@ fn legacy_persisted_entity_refs_are_withheld_without_a_scope_marker() {
             expansion.parameters.remove(super::WIKI_SCOPE_CHECKED_PARAMETER);
         }
     }
+    // A pre-fix parser also accepted dot segments after a category prefix.
+    let dotted = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.expansion.as_ref().is_some_and(|expansion| {
+                expansion.parameters.get("source_ref").map(String::as_str)
+                    == Some("global:patterns/guide.md")
+            })
+        })
+        .cloned()
+        .unwrap();
+    let mut legacy_dotted = dotted.clone();
+    legacy_dotted.id = "legacy-dotted".to_string();
+    legacy_dotted.expansion.as_mut().unwrap().parameters.insert(
+        "source_ref".to_string(),
+        "global:patterns/../clients/tog.md".to_string(),
+    );
+    let edges: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.source == dotted.id)
+        .map(|edge| {
+            let mut edge = edge.clone();
+            edge.source = legacy_dotted.id.clone();
+            edge
+        })
+        .collect();
+    graph.nodes.push(legacy_dotted);
+    graph.edges.extend(edges);
     assert_eq!(kept_pointers(&graph), vec!["patterns/guide.md"]);
     assert_eq!(
         withheld(&graph),
-        vec![("clients/tog.md".to_string(), ContextDropReason::ScopeUnknown)]
+        vec![
+            ("clients/tog.md".to_string(), ContextDropReason::ScopeUnknown),
+            ("patterns/../clients/tog.md".to_string(), ContextDropReason::ScopeUnknown),
+        ]
     );
     assert!(knowledge_refs_from_work_graph(&graph)
         .iter()
-        .all(|reference| reference.pointer != "clients/tog.md"));
+        .all(|reference| !reference.pointer.contains("clients/tog.md")));
 }
 
 #[test]

@@ -460,7 +460,15 @@ fn is_unchecked_legacy_entity_ref(
     institutional: Option<&str>,
 ) -> bool {
     !expansion.parameters.contains_key(WIKI_SCOPE_CHECKED_PARAMETER)
-        && institutional.is_some_and(|pointer| builtin_entity_scope(pointer).is_some())
+        && institutional.is_some_and(|pointer| {
+            // A dot-segment path could resolve to an entity page whatever its
+            // prefix, so it counts as one.
+            builtin_entity_scope(pointer).is_some()
+                || pointer.contains('\\')
+                || pointer
+                    .split('/')
+                    .any(|segment| matches!(segment, "." | ".."))
+        })
 }
 
 /// The sidecar record for a derived node that withholds a wiki reference.
