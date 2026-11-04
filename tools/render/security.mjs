@@ -1,4 +1,5 @@
 import { mutationProver, appendNode, removeNode } from './mutations.mjs';
+import { scrubDiagnostic } from './diagnostics.mjs';
 
 // R-C3 retains html-ipc's live assertion and positive control, while the
 // independent html-script mutation remains gating. The stopped two-token IPC
@@ -187,9 +188,58 @@ export async function runSecurityAssertions({ page, pane, report, assert, consol
   const ipcScript = `${authorScript} window.__htmlIpcResult = 'pending'; try { Promise.resolve(window.__TAURI_INTERNALS__.invoke('get_session', ${JSON.stringify(args)})).then(reply => { document.body.dataset.htmlRust = JSON.stringify({ id: reply.id, createdAt: reply.created_at }); window.__htmlIpcResult = 'resolved'; }, error => { window.__htmlIpcResult = 'rejected: ' + String(error).slice(0, 200); }); } catch (error) { window.__htmlIpcResult = 'threw: ' + String(error).slice(0, 200); }`;
   let probeScript = authorScript;
   const probeSource = productionSource.replace("script-src 'none'", `script-src ${origin}`).replace("connect-src 'none'", 'connect-src ipc: http://ipc.localhost').replace('</body>', `<script src="${probeUrl}"></script></body>`);
-  const scriptRoute = route => route.fulfill({ status: 200, contentType: 'application/javascript', body: probeScript });
-  await page.route(probeUrl, scriptRoute);
+  const context = page.context();
+  const delivery = report.security.scriptProbe = { url: probeUrl, route: 'context', events: [] };
+  const frameIds = new Map();
+  const probeStarted = Date.now();
+  let probePhase = 'base';
+  const frameInfo = child => {
+    if (!frameIds.has(child)) frameIds.set(child, `f${frameIds.size + 1}`);
+    return { frame: frameIds.get(child), frameUrl: child.url(), attached: !child.isDetached(), parent: child.parentFrame()?.url() ?? null };
+  };
+  const record = (event, details) => {
+    const entry = { phase: probePhase, event, ms: Date.now() - probeStarted, ...details };
+    delivery.events.push(entry);
+    console.log(`render:check html-probe ${scrubDiagnostic(entry)}`);
+  };
+  const requestInfo = request => {
+    let details;
+    try { details = frameInfo(request.frame()); }
+    catch { details = { frame: 'unavailable' }; }
+    return { url: request.url(), ...details };
+  };
+  const listeners = [];
+  for (const [scope, emitter] of [['page', page], ['context', context]]) {
+    for (const [event, describe] of [
+      ['request', request => requestInfo(request)],
+      ['response', response => ({ ...requestInfo(response.request()), status: response.status(), mime: response.headers()['content-type'] ?? null })],
+      ['requestfailed', request => ({ ...requestInfo(request), error: request.failure()?.errorText ?? null })],
+    ]) {
+      const listener = item => { if (item.url() === probeUrl) record(event, { scope, ...describe(item) }); };
+      emitter.on(event, listener);
+      listeners.push(() => emitter.off(event, listener));
+    }
+  }
+  for (const event of ['frameattached', 'framenavigated', 'framedetached']) {
+    const listener = child => { if (child !== page.mainFrame()) record(event, frameInfo(child)); };
+    page.on(event, listener);
+    listeners.push(() => page.off(event, listener));
+  }
+  for (const child of page.frames()) if (child !== page.mainFrame()) record('frame-present', frameInfo(child));
+  const scriptRoute = async route => {
+    record('route', requestInfo(route.request()));
+    try {
+      await route.fulfill({ status: 200, contentType: 'application/javascript', headers: { 'Cache-Control': 'no-store' }, body: probeScript });
+      record('fulfilled', { url: probeUrl });
+    } catch (error) {
+      record('route-error', { url: probeUrl, error: error.message });
+      await route.abort().catch(() => {});
+    }
+  };
+  // Use context interception for the sandboxed frame's subresource. The event
+  // evidence distinguishes a missed route from a policy or execution failure.
   try {
+    await context.route(probeUrl, scriptRoute);
     const reply = await page.evaluate(payload => window.__TAURI_INTERNALS__.invoke('get_session', payload), args);
     if (reply?.id !== sessionId || typeof reply?.created_at !== 'string') throw new Error('Allowed Rust read positive control did not return the seeded session');
     const expectedReceipt = JSON.stringify({ id: reply.id, createdAt: reply.created_at });
@@ -205,14 +255,40 @@ export async function runSecurityAssertions({ page, pane, report, assert, consol
     };
     await check('html-script', authorInert);
     await prove('html-script', authorInert, async () => {
-      const undo = () => expectedViolations(() => reloadFrame(node => { node.setAttribute('sandbox', ''); node.srcdoc = node.srcdoc; }), 'frame');
+      const undo = () => {
+        probePhase = 'restore';
+        return expectedViolations(() => reloadFrame(node => { node.setAttribute('sandbox', ''); node.srcdoc = node.srcdoc; }), 'frame');
+      };
+      probePhase = 'script';
+      const start = delivery.events.length;
+      const scriptState = () => {
+        const events = delivery.events.slice(start);
+        const response = events.find(item => item.event === 'response');
+        const error = events.find(item => item.event === 'route-error' || item.event === 'requestfailed');
+        return { url: probeUrl, hits: events.filter(item => item.event === 'route').length, status: response?.status ?? null, mime: response?.mime ?? null, error: error?.error ?? null };
+      };
       try {
         await reloadFrame(node => { node.setAttribute('sandbox', 'allow-scripts'); node.srcdoc = node.srcdoc; });
+        // DOMContentLoaded follows this parser-blocking script's response. A
+        // missed route must name the URL and actual response, not time out on
+        // the author sentinel (or hide an HTML response's syntax error).
+        delivery.script = scriptState();
+        record('script-delivery', delivery.script);
+        if (!delivery.script.hits || delivery.script.error || delivery.script.status !== 200 || !/^application\/javascript(?:;|$)/i.test(delivery.script.mime ?? '')) {
+          throw new Error('Script delivery failed');
+        }
         await frame.waitForFunction(() => document.body.dataset.htmlAuthor === 'ran');
-      } catch (error) { await undo(); throw error; }
+      } catch (error) {
+        delivery.script = scriptState();
+        record('script-error', { ...delivery.script, cause: error.message });
+        const { hits, status, mime } = delivery.script;
+        await undo();
+        throw new Error(`HTML probe ${probeUrl}: route=${hits} status=${status ?? 'none'} mime=${mime ?? 'none'}: ${delivery.script.error ?? error.message}`);
+      }
       return undo;
     });
     probeScript = ipcScript;
+    probePhase = 'ipc-base';
     await expectedViolations(() => reloadFrame(node => { node.srcdoc = node.srcdoc; }), 'frame');
     const ipc = async () => {
       const state = await frame.evaluate(() => ({ executed: document.body.dataset.htmlAuthor === 'ran', receipt: document.body.dataset.htmlRust ?? null, result: window.__htmlIpcResult ?? 'not-run' }));
@@ -235,8 +311,11 @@ export async function runSecurityAssertions({ page, pane, report, assert, consol
     };
     console.log(`render:check R-C3 IPC evidence ${JSON.stringify(report.security.ipcEvidence)}`);
   } finally {
-    await page.unroute(probeUrl, scriptRoute);
-    await expectedViolations(() => reloadFrame((node, source) => { node.setAttribute('sandbox', ''); node.srcdoc = source; }, productionSource), 'frame');
+    try {
+      await context.unroute(probeUrl, scriptRoute);
+      probePhase = 'production';
+      await expectedViolations(() => reloadFrame((node, source) => { node.setAttribute('sandbox', ''); node.srcdoc = source; }, productionSource), 'frame');
+    } finally { for (const remove of listeners) remove(); }
   }
   const apiBase = await page.evaluate(() => window.__HIVE_INSTANCE__.apiBase);
   const url = `${apiBase}/html-probe`;
