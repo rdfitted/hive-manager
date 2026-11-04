@@ -442,7 +442,6 @@
             <span class="pane-activity"><AgentActivityLine agentId={pane.id} compact /></span>
           {/if}
           <div class="terminal-meta">
-            {#if chatEligible}<PaneToggle {hasTerminal} mode={chatShowing ? mode === 'raw' ? 'raw' : 'chat' : 'terminal'} onchange={(next) => { paneModes[pane.id] = next; }} />{/if}
             {#if pane.kind === 'agent'}
               {@const status = serdeEnumVariantName(pane.agent.status)}
               {@const waiting = typeof pane.agent.status === 'object' && 'WaitingForInput' in pane.agent.status}
@@ -457,6 +456,7 @@
                 </button>
               {/if}
               {#if resumeErrors[pane.id]}<span role="alert">{resumeErrors[pane.id]}</span>{/if}
+              {#if chatEligible}<PaneToggle {hasTerminal} mode={chatShowing ? mode === 'raw' ? 'raw' : 'chat' : 'terminal'} onchange={(next) => { paneModes[pane.id] = next; }} />{/if}
               <span class="cli-badge">{pane.agent.config?.cli || 'unknown'}</span>
               <span class="pane-status-text">{status ?? 'Unknown'}</span>
               <span

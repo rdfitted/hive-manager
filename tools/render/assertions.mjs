@@ -481,5 +481,10 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   await prove('updater-network-rejection', updaterMeasure, () => injectOutcome({ error: 'network failed after updater HTTP request' }), { boundary: 'in-memory outcome' });
   assert('all-screens-captured', Object.keys(manifest.screens).every(screen => [1440, 800].every(width => report.screenshots.some(item => item.screen === screen && item.viewport.width === width))), { captures: report.screenshots.map(item => `${item.screen}-${item.viewport.width}`) });
   const complete = () => Object.keys(manifest.screens).every(screen => [1440, 800].every(width => report.screenshots.some(item => item.screen === screen && item.viewport.width === width)));
-  await prove('all-screens-captured', async () => ({ passed: complete(), details: report.screenshots.map(item => `${item.screen}-${item.viewport.width}`) }), async () => { const removed = report.screenshots.pop(); return async () => { report.screenshots.push(removed); }; });
+  await prove('all-screens-captured', async () => ({ passed: complete(), details: report.screenshots.map(item => `${item.screen}-${item.viewport.width}`) }), async () => {
+    const original = report.screenshots;
+    const target = original.at(-1);
+    report.screenshots = original.filter(item => item.screen !== target.screen || item.viewport.width !== target.viewport.width);
+    return async () => { report.screenshots = original; };
+  });
 }
