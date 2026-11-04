@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path};
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -383,19 +383,27 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
 
 /// The directory directly under a `Code Projects` root, else `""`.
 pub fn repo_of(project_path: &Path) -> String {
+    // Split the string on both separators rather than using
+    // `Path::components`: Hive Manager runs on Windows, but a Windows path
+    // must resolve the same way on a Linux host (CI) too. `.` and `..` are
+    // normalized like Python's `os.path.abspath`.
     let absolute =
         std::path::absolute(project_path).unwrap_or_else(|_| project_path.to_path_buf());
-    let parts: Vec<String> = absolute
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
+    let text = absolute.to_string_lossy();
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in text.split(['\\', '/']) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            segment => parts.push(segment),
+        }
+    }
     for (index, part) in parts.iter().enumerate() {
         if part.to_lowercase() == "code projects" {
             if let Some(repo) = parts.get(index + 1) {
-                return repo.clone();
+                return (*repo).to_string();
             }
         }
     }
@@ -508,6 +516,12 @@ mod tests {
         assert_eq!(repo_of(Path::new(r"C:\Users\x\code projects\hive-manager")), "hive-manager");
         assert_eq!(repo_of(Path::new(r"C:\Users\x\.t3\worktrees\hive-manager\a")), "");
         assert_eq!(repo_of(Path::new(r"D:\Code Projects")), "");
+        assert_eq!(repo_of(Path::new("/home/ci/Code Projects/acme-portal/src")), "acme-portal");
+        assert_eq!(repo_of(Path::new("D:/Code Projects/TOG Portal")), "TOG Portal");
+        assert_eq!(
+            repo_of(Path::new(r"D:\Code Projects\x\..\hive-manager\src")),
+            "hive-manager"
+        );
     }
 
     #[test]
