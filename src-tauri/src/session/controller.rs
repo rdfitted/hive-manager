@@ -3347,13 +3347,22 @@ impl SessionController {
         storage: Option<&SessionStorage>,
         session: &Session,
     ) {
+        if let Err(error) = Self::try_emit_work_graph_snapshot_for_session_state(storage, session) {
+            let stage = format!("{:?}", session.state.kind());
+            tracing::warn!(session_id = %session.id, stage, "Failed to emit work-graph lifecycle snapshot: {error}");
+        }
+    }
+
+    fn try_emit_work_graph_snapshot_for_session_state(
+        storage: Option<&SessionStorage>,
+        session: &Session,
+    ) -> Result<(), String> {
         if let Some(storage) = storage {
             let manager = StateManager::new(storage.session_dir(&session.id));
             let stage = format!("{:?}", session.state.kind());
-            if let Err(error) = manager.emit_work_graph_snapshot(&stage) {
-                tracing::warn!(session_id = %session.id, stage, "Failed to emit work-graph lifecycle snapshot: {error}");
-            }
+            manager.emit_work_graph_snapshot(&stage).map_err(|error| error.to_string())?;
         }
+        Ok(())
     }
 
     fn persist_then_emit_session_update(
@@ -3384,8 +3393,10 @@ impl SessionController {
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| format!("Session not found: {session_id}"))?;
-        self.set_session_state_with_events(session, new_state);
-        Ok(())
+        // Reuse the production transition without emitting twice, then expose
+        // persistence failures to the test instead of only logging them.
+        Self::set_session_state_with_snapshot(None, session, new_state);
+        Self::try_emit_work_graph_snapshot_for_session_state(self.storage.as_deref(), session)
     }
 
     /// Persist an in-memory test session to storage, so read paths that
