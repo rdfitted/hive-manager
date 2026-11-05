@@ -128,8 +128,13 @@
     });
     for (const { node, clip } of updates) node.style.setProperty('--wall-clip', `${clip}px`);
   }
+  function setWallScrollLeft(left: number) {
+    if (!wall) return;
+    wall.scrollLeft = left;
+    updateColumnClips();
+  }
   $effect(() => { void attentionSeats; void focusMode; void localMaximizedId; schedulePinMeasure(); });
-  $effect(() => { if ((focusMode || localMaximizedId !== null) && wall) wall.scrollLeft = 0; });
+  $effect(() => { if ((focusMode || localMaximizedId !== null) && wall) setWallScrollLeft(0); });
   const staleSeats = $derived.by(() => {
     const last = Object.fromEntries(session.agents.map(agent => {
       const history = $agentEvents.sessionId === session.id ? $agentEvents.histories[agent.id]?.events ?? [] : [];
@@ -306,7 +311,7 @@
   function toggleMaximized(event: MouseEvent, pane: TerminalPane) {
     event.stopPropagation();
     const restoring = gridMaximizedId === pane.id;
-    if (!restoring && wall) { savedGridScrollLeft = wall.scrollLeft; wall.scrollLeft = 0; }
+    if (!restoring && wall) { savedGridScrollLeft = wall.scrollLeft; setWallScrollLeft(0); }
     focusPane(pane);
     layout.toggleMaximizedTerminal(pane.id);
     if (restoring) void tick().then(() => { if (wall) { wall.scrollLeft = savedGridScrollLeft; updateColumnClips(); } });

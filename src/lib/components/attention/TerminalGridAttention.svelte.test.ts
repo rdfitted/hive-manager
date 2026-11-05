@@ -98,6 +98,37 @@ const session: Session = {
 };
 
 describe('attention across pane modes (real Terminal, renderer doubles)', () => {
+  it('G59 synchronous scroll clipping clears stale clips on maximize before any scroll event', async () => {
+    layout.setSessionViewMode('grid');
+    const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('terminal-grid')) return DOMRect.fromRect({ x: 100, width: 800, height: 500 });
+      if (this.classList.contains('terminal-item')) {
+        const index = ['claude', 'codex', 'tail'].indexOf(this.dataset.agentId!);
+        const grid = this.closest<HTMLElement>('.terminal-grid')!;
+        const left = this.dataset.pinned === 'true' ? 104 + parseFloat(this.style.getPropertyValue('--pin-left')) : 108 + [0, 432, 724][index] - grid.scrollLeft;
+        return DOMRect.fromRect({ x: left, width: index === 0 ? 420 : 280, height: 500 });
+      }
+      return DOMRect.fromRect({ width: 80, height: 40 });
+    });
+    const widthSpy = vi.spyOn(Element.prototype, 'clientWidth', 'get').mockImplementation(function (this: Element) { return this.classList.contains('terminal-grid') ? 800 : 80; });
+    try {
+      const roster: Session = { ...session, agents: [...session.agents, { ...session.agents[1], id: 'tail' }].map((agent, index) => ({ ...agent, role: index === 0 ? 'Queen' : { Worker: { index, parent: null } } })) };
+      const view = render(TerminalGrid, { session: roster, focusedAgentId: 'claude', onSelect: vi.fn() });
+      const wall = view.container.querySelector<HTMLElement>('.terminal-grid')!;
+      await waitFor(() => expect(Number.parseFloat(wall.style.getPropertyValue('--pin-space'))).toBeGreaterThan(0));
+      wall.scrollLeft = 212;
+      await fireEvent.scroll(wall);
+      let scrollEvents = 0;
+      wall.addEventListener('scroll', () => scrollEvents++);
+      const middle = view.container.querySelector<HTMLElement>('[data-agent-id="codex"]')!;
+      expect(Number.parseFloat(middle.style.getPropertyValue('--wall-clip'))).toBeGreaterThan(0);
+      view.getByRole('button', { name: 'Maximize Claude agent' }).click();
+      expect(wall.scrollLeft).toBe(0);
+      expect(scrollEvents).toBe(0);
+      expect(Number.parseFloat(middle.style.getPropertyValue('--wall-clip'))).toBe(0);
+      await tick();
+    } finally { rectSpy.mockRestore(); widthSpy.mockRestore(); }
+  });
   it('G59 scroll: maximize and Focus clear horizontal offset, restore retains the wall position and terminal instances', async () => {
     layout.setSessionViewMode('grid');
     const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });

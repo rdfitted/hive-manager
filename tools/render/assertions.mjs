@@ -24,6 +24,34 @@ export async function scrollColumn(pane) {
     const after = node.getBoundingClientRect();
     if (after.right > outer.right) grid.scrollLeft += after.right - outer.right;
   });
+  // Programmatic writes precede the browser's queued scroll/clip update.
+  // Matching clips and repeated animation-frame geometry signal completion.
+  await waitForPinLayout(pane.page());
+}
+export async function waitForPinLayout(page) {
+  await page.locator('.terminal-panel:not(.hidden) .terminal-grid').evaluate(grid => new Promise((resolve, reject) => {
+    const started = performance.now();
+    let previous, stable = 0;
+    const frame = () => {
+      const outer = grid.getBoundingClientRect();
+      const space = parseFloat(getComputedStyle(grid).getPropertyValue('--pin-space')) || 0;
+      const rows = [...grid.querySelectorAll(':scope > .terminal-item')].map(node => {
+        const box = node.getBoundingClientRect();
+        const pinned = node.dataset.pinned === 'true';
+        const clip = parseFloat(getComputedStyle(node).getPropertyValue('--wall-clip')) || 0;
+        const expected = pinned ? 0 : Math.min(box.width, Math.max(0, outer.left + space - box.left));
+        return { id: node.dataset.agentId, left: box.left, right: box.right, width: box.width, pinned, clip, expected };
+      });
+      const snapshot = JSON.stringify({ left: outer.left, width: outer.width, scroll: grid.scrollLeft, space, rows });
+      const ready = (!document.fonts || document.fonts.status === 'loaded') && rows.every(row => Math.abs(row.clip - row.expected) < 1 / 64);
+      stable = ready && snapshot === previous ? stable + 1 : 0;
+      previous = snapshot;
+      if (stable >= 2) return resolve();
+      if (performance.now() - started > 5000) return reject(new Error(`Wall scroll/clipping did not settle: ${snapshot}`));
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }));
 }
 export async function pinGeometry(page, selectedId) {
   return page.locator('.terminal-panel:not(.hidden) .terminal-grid').evaluate((grid, selectedId) => {
@@ -34,7 +62,7 @@ export async function pinGeometry(page, selectedId) {
       const top = document.elementFromPoint(header.x + header.width / 2, header.y + header.height / 2);
       const clip = parseFloat(css.getPropertyValue('--wall-clip')) || 0;
       return { id: node.dataset.agentId, pinned: css.position === 'sticky', queen: node.classList.contains('queen-column'), attention: node.classList.contains('attention-column'),
-        box: { left: box.left, right: box.right, width: box.width }, paint: { left: Math.max(outer.left, box.left + clip), right: Math.min(outer.right, box.right) },
+        clip, box: { left: box.left, right: box.right, width: box.width }, paint: { left: Math.max(outer.left, box.left + clip), right: Math.min(outer.right, box.right) },
         hit: !!top && (top === control || control.contains(top)) };
     });
     const pins = rows.filter(row => row.pinned);
@@ -42,13 +70,16 @@ export async function pinGeometry(page, selectedId) {
     const padding = parseFloat(getComputedStyle(grid).paddingLeft) || 0;
     let next = outer.left + grid.clientLeft + padding + 4;
     const offsets = pins.every(pin => { const fits = Math.abs(pin.box.left - next) <= 1; next = pin.box.right + 12; return fits; });
-    const noOverlap = pins.every((pin, index) => pins.slice(index + 1).every(other => !overlaps(pin.box, other.box)))
-      && rows.filter(row => !row.pinned && row.paint.right > row.paint.left).every(row => pins.every(pin => !overlaps(row.paint, pin.box)));
+    const overlapPairs = [
+      ...pins.flatMap((pin, index) => pins.slice(index + 1).filter(other => overlaps(pin.box, other.box)).map(other => ({ first: pin.id, second: other.id, kind: 'pinned', firstRect: pin.box, secondRect: other.box }))),
+      ...rows.filter(row => !row.pinned && row.paint.right > row.paint.left).flatMap(row => pins.filter(pin => overlaps(row.paint, pin.box)).map(pin => ({ first: row.id, second: pin.id, kind: 'scrolling', firstRect: row.paint, secondRect: pin.box }))),
+    ];
+    const noOverlap = overlapPairs.length === 0;
     const reserve = pins.length === 0 || outer.right - next >= 280 - 1;
     const selected = rows.find(row => row.id === selectedId);
     const unselected = pins.every(pin => pin.id !== selectedId);
     return { offsets, noOverlap, reserve, unselected, hits: pins.every(pin => pin.hit) && selected?.hit === true,
-      queen: pins.some(pin => pin.queen), attention: pins.some(pin => pin.attention), width: outer.width, left: outer.left, padding, pins, selected };
+      queen: pins.some(pin => pin.queen), attention: pins.some(pin => pin.attention), width: outer.width, left: outer.left, padding, pins, selected, rows, overlapPairs };
   }, selectedId);
 }
 export async function expandAgents(page, session) {
