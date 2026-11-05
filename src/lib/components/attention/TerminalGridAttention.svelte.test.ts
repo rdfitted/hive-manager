@@ -45,6 +45,7 @@ vi.mock('$lib/stores/sessions', async () => {
   const { writable } = await import('svelte/store');
   return {
     activeAgents: writable([]), activeSession: writable(null), sessions: writable({ sessions: [] }),
+    resumeBlockedReason: () => null,
     serdeEnumVariantName: (value: unknown) => typeof value === 'string' ? value : value && typeof value === 'object' ? Object.keys(value)[0] : undefined,
   };
 });
@@ -97,6 +98,118 @@ const session: Session = {
 };
 
 describe('attention across pane modes (real Terminal, renderer doubles)', () => {
+  it('G59 scroll: maximize and Focus clear horizontal offset, restore retains the wall position and terminal instances', async () => {
+    layout.setSessionViewMode('grid');
+    const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
+    await waitFor(() => expect(fixture.terminals).toHaveLength(2));
+    const original = [...fixture.terminals];
+    const wall = view.container.querySelector<HTMLElement>('.terminal-grid')!;
+    wall.scrollLeft = 500;
+    await fireEvent.click(view.getByRole('button', { name: 'Maximize Claude agent' }));
+    expect(wall.scrollLeft).toBe(0);
+    await fireEvent.click(view.getByRole('button', { name: 'Restore Claude agent' }));
+    await tick(); expect(wall.scrollLeft).toBe(500);
+    layout.setSessionViewMode('focus'); await tick();
+    expect(wall.scrollLeft).toBe(0);
+    expect(fixture.terminals).toEqual(original);
+    expect(fixture.terminalsDisposed).toBe(0);
+  });
+  it('CR-5 replacement: stable editors, per-agent drafts across both view cycles, exact routing and unchanged terminals', async () => {
+    layout.setSessionViewMode('grid');
+    const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
+    await waitFor(() => expect(fixture.terminals).toHaveLength(2));
+    const original = [...fixture.terminals];
+    const pane = view.container.querySelector<HTMLElement>('[data-agent-id="claude"]')!;
+    const shared = () => view.container.querySelector<HTMLElement>('.command-bar [data-composer]')!;
+    const focus = () => pane.querySelector<HTMLElement>('.chat-composer [data-composer]')!;
+    const type = async (editor: HTMLElement, text: string) => { editor.textContent = text; await fireEvent.input(editor); };
+    const gridEditor = shared();
+    expect(view.container.querySelectorAll('.terminal-item .chat-composer')).toHaveLength(0);
+    expect(view.container.querySelectorAll('.command-bar [data-composer]')).toHaveLength(1);
+    await type(gridEditor, 'Alpha private draft');
+    const waiting = { ...session, agents: session.agents.map(agent => agent.id === 'claude' ? { ...agent, status: { WaitingForInput: 'injected_delivery_failed:fixture' } } : agent) };
+    await view.rerender({ session: waiting });
+    expect(shared()).toBe(gridEditor);
+    for (const label of ['Terminal', 'Chat']) {
+      await fireEvent.click(within(pane).getByRole('button', { name: label }));
+      expect(shared()).toBe(gridEditor);
+    }
+    await fireEvent.click(within(pane).getByRole('button', { name: 'Maximize Claude agent' }));
+    expect(shared()).toBe(gridEditor);
+    await fireEvent.click(within(pane).getByRole('button', { name: 'Restore Claude agent' }));
+    expect(shared()).toBe(gridEditor);
+    await fireEvent.click(view.getByRole('button', { name: 'Focus Codex PTY' }));
+    expect(shared()).toBe(gridEditor);
+    expect(gridEditor.textContent).toBe('');
+    await type(gridEditor, 'Beta private draft');
+    await fireEvent.click(view.getByRole('button', { name: 'Focus Claude agent' }));
+    expect(shared()).toBe(gridEditor);
+    expect(gridEditor.textContent).toBe('Alpha private draft');
+    layout.setSessionViewMode('focus'); await tick();
+    const focusEditor = focus();
+    expect(focusEditor.textContent).toBe('Alpha private draft');
+    await type(focusEditor, 'Alpha Focus draft');
+    await view.rerender({ session });
+    expect(focus()).toBe(focusEditor);
+    expect(pane.querySelector('.agent-info')).toBeNull();
+    await view.rerender({ session: waiting });
+    expect(focus()).toBe(focusEditor);
+    expect(within(pane).getByRole('region', { name: 'Agent needs attention' })).toBeTruthy();
+    for (const label of ['Terminal', 'Chat']) {
+      await fireEvent.click(within(pane).getByRole('button', { name: label }));
+      expect(focus()).toBe(focusEditor);
+    }
+    layout.setSessionViewMode('grid'); await tick();
+    expect(shared().textContent).toBe('Alpha Focus draft');
+    expect(within(pane).getByRole('region', { name: 'Agent needs attention' })).toBeTruthy();
+    await fireEvent.click(view.getByRole('button', { name: 'Focus Codex PTY' }));
+    expect(shared().textContent).toBe('Beta private draft');
+    await fireEvent.click(view.getByRole('button', { name: 'Send message' }));
+    await waitFor(() => expect(fixture.invoke).toHaveBeenCalledWith('operator_inject', { request: { session_id: 's', target_agent_id: 'codex', message: 'Beta private draft' } }));
+    expect(fixture.invoke.mock.calls.filter(([command]) => command === 'operator_inject')).toHaveLength(1);
+    await fireEvent.click(view.getByRole('button', { name: 'Focus Claude agent' }));
+    expect(shared().textContent).toBe('Alpha Focus draft');
+    layout.setSessionViewMode('focus'); await tick();
+    expect(focus().textContent).toBe('Alpha Focus draft');
+    expect(fixture.terminals).toHaveLength(original.length);
+    original.forEach((terminal, index) => { expect(fixture.terminals[index]).toBe(terminal); expect(terminal.disposed).toBe(false); });
+    expect(fixture.terminalsDisposed).toBe(0);
+    expect(fixture.focuses).toBe(0);
+  });
+
+  it('G59: Queen leads the full roster, column clicks set the shared target and resource tiles highlight without unmounting', async () => {
+    layout.setSessionViewMode('grid');
+    const reordered = { ...session, state: 'QaInProgress' as const, agents: [...session.agents].reverse().map(agent => ({ ...agent, role: agent.id === 'claude' ? 'Queen' as const : { Worker: { index: 1, parent: null } }, status: agent.id === 'codex' ? { WaitingForInput: 'fixture' } : 'Running' as const })) };
+    const view = render(TerminalGrid, { session: reordered, focusedAgentId: 'claude', onSelect: vi.fn() });
+    await waitFor(() => expect(fixture.terminals).toHaveLength(2));
+    const original = [...fixture.terminals];
+    expect([...view.container.querySelectorAll('.terminal-item')].map(node => node.getAttribute('data-agent-id'))).toEqual(['claude', 'codex']);
+    expect(view.container.querySelector('.terminal-item')?.classList.contains('queen-column')).toBe(true);
+    await fireEvent.click(view.getByRole('button', { name: 'Focus Codex PTY' }));
+    expect(view.getByRole('button', { name: 'Command target: @Codex PTY' })).toBeTruthy();
+    expect(view.getByText('QaInProgress')).toBeTruthy();
+    await fireEvent.click(view.getByRole('button', { name: 'Waiting 1' }));
+    expect(view.container.querySelectorAll('.resource-match')).toHaveLength(1);
+    expect(view.container.querySelector('.resource-match')?.getAttribute('data-agent-id')).toBe('codex');
+    await fireEvent.click(view.getByRole('button', { name: 'Waiting 1' }));
+    expect(view.container.querySelectorAll('.resource-match')).toHaveLength(0);
+    expect(fixture.terminals).toEqual(original);
+    expect(fixture.terminalsDisposed).toBe(0);
+  });
+
+  it('G59 quiet seats dim in place with no terminal disposal or finished attention', async () => {
+    layout.setSessionViewMode('grid');
+    const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
+    await waitFor(() => expect(fixture.terminals).toHaveLength(2));
+    const original = [...fixture.terminals];
+    await view.rerender({ session: { ...session, agents: session.agents.map(agent => ({ ...agent, status: agent.id === 'claude' ? 'Completed' as const : 'Running' as const, work_state: agent.id === 'codex' ? 'idle' : undefined })) } });
+    expect(view.container.querySelectorAll('.quiet-column')).toHaveLength(2);
+    expect(view.container.querySelectorAll('.terminal-item')).toHaveLength(2);
+    expect(view.queryByRole('region', { name: 'Agent needs attention' })).toBeNull();
+    expect(fixture.terminals).toEqual(original);
+    expect(fixture.terminalsDisposed).toBe(0);
+  });
+
   it.each(['receipt', 'error'] as const)('CR-9: non-chat PTY retains pending and %s in Grid without granting Flush', async (result) => {
     layout.setSessionViewMode('focus');
     let resolve!: (response: unknown) => void;
@@ -220,7 +333,7 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     const pane = view.getByText('Claude agent').closest('.terminal-item')!;
     const content = pane.querySelector('.terminal-container')!;
     const original = [...fixture.terminals];
-    const composer = pane.querySelector('.chat-composer [role="textbox"]');
+    let composer = view.container.querySelector('.command-bar [role="textbox"]');
     expect(composer).toBeTruthy();
     expect(content.classList.contains('non-chat-attention'), 'chat panes retain their composer layout').toBe(false);
     expect(content.querySelector('.agent-info'), 'no opaque wrapper or padding without attention').toBeNull();
@@ -236,7 +349,8 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     for (const next of ['focus', 'grid'] as const) {
       layout.setSessionViewMode(next); await tick();
       expect(within(pane as HTMLElement).getByRole('region', { name: 'Agent needs attention' })).toBeTruthy();
-      expect(pane.querySelector('.chat-composer [role="textbox"]')).toBe(composer);
+      expect(next === 'focus' ? pane.querySelector('.chat-composer [role="textbox"]') : view.container.querySelector('.command-bar [role="textbox"]')).toBeTruthy();
+      if (next === 'grid') composer = view.container.querySelector('.command-bar [role="textbox"]');
       expect(fixture.terminals).toHaveLength(original.length);
       original.forEach((term, index) => expect(fixture.terminals[index]).toBe(term));
       expect(original.every((term) => !term.disposed)).toBe(true);
@@ -244,7 +358,8 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     await view.rerender({ session });
     expect(content.querySelector('.agent-info')).toBeNull();
     expect(within(pane as HTMLElement).queryByRole('region', { name: 'Agent needs attention' })).toBeNull();
-    expect(pane.querySelector('.chat-composer [role="textbox"]')).toBe(composer);
+    expect(view.container.querySelector('.command-bar [role="textbox"]')).toBe(composer);
+    expect(pane.querySelector('.chat-composer')).toBeNull();
     original.forEach((term, index) => expect(fixture.terminals[index]).toBe(term));
     expect(original.every((term) => !term.disposed)).toBe(true);
     expect(fixture.focuses).toBe(0);

@@ -27,6 +27,15 @@ export const event = (cursor: string, kind: AgentEvent['kind'] = 'assistant_mess
 afterEach(() => { cleanup(); fixture.setSource('none'); fixture.setAgents([]); vi.clearAllMocks(); });
 
 describe('agent chat', () => {
+  it('I1: column variant omits its composer and optional paging without changing bounded transcript rendering', () => {
+    const events = Array.from({ length: 500 }, (_, index) => event(`column-${index}`));
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events, composer: false, paging: false, variant: 'column' } });
+    expect(view.container.querySelector('.chat-pane')?.getAttribute('data-variant')).toBe('column');
+    expect(view.container.querySelectorAll('.chat-composer')).toHaveLength(0);
+    expect(view.queryByRole('textbox')).toBeNull();
+    expect(view.queryByRole('navigation', { name: 'Transcript history' })).toBeNull();
+    expect(view.getAllByRole('article')).toHaveLength(CHAT_WINDOW_SIZE);
+  });
   it('G30 source guard: prohibits raw HTML in every chat component and shared Markdown renderer', () => {
     const sources = import.meta.glob<string>([
       './**/*.svelte', '../ui/MarkdownBlocks.svelte', '../ui/HtmlPreview.svelte', '../knowledge/MarkdownInline.svelte',

@@ -35,6 +35,9 @@
     persistDraft?: boolean;
     /** Called with the flattened plain-text prompt (one-shot context already prepended). */
     onsubmit?: (text: string) => void;
+    /** Capture routing and draft ownership synchronously, before context is consumed. */
+    prepareSubmit?: () => { send: (text: string) => void; clear: () => void };
+    submissionKey?: string;
     disabled?: boolean;
     toolbar?: Snippet<[ComposerControls]>;
   }
@@ -46,6 +49,8 @@
     value = $bindable(''),
     persistDraft = true,
     onsubmit,
+    prepareSubmit,
+    submissionKey = '',
     disabled = false,
     toolbar,
   }: Props = $props();
@@ -126,6 +131,13 @@
       lastBoundSession = sessionId;
     }
     if (editor && value) editor.textContent = value;
+  });
+
+  // Target/view switches can restore a bound draft without replacing the editor.
+  // Equal flattened values leave mention tokens, selection and live typing intact.
+  $effect(() => {
+    const next = value;
+    if (editor && currentText() !== next) editor.textContent = next;
   });
 
   function flattenNode(node: Node): string {
@@ -312,21 +324,29 @@
     if (disabled || !onsubmit || submitting) return;
     submitting = true;
     try {
-      let text = currentText().trim();
+      const submittedSession = sessionId;
+      const submittedKey = submissionKey;
+      const originalText = currentText();
+      const prepared = prepareSubmit?.();
+      const submitTo = prepared?.send ?? onsubmit;
+      let text = originalText.trim();
       // Prepend one-shot operator context exactly once.
-      if (sessionId) {
-        const ctx = await pendingContext.consume(sessionId);
+      if (submittedSession) {
+        const ctx = await pendingContext.consume(submittedSession);
         if (ctx) {
           const block = pendingContext.render(ctx);
           text = text ? `${block}\n\n${text}` : block;
         }
       }
       if (!text) return;
-      onsubmit?.(text);
+      submitTo(text);
+      prepared?.clear();
       // Clear editor + draft.
-      editor.textContent = '';
-      value = '';
-      if (persistDraft && sessionId) composerDraft.clear();
+      if (sessionId === submittedSession && submissionKey === submittedKey && currentText() === originalText) {
+        editor.textContent = '';
+        value = '';
+        if (persistDraft && submittedSession) composerDraft.clear();
+      }
       closeMenu();
     } finally {
       submitting = false;

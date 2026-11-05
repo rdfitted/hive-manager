@@ -10,8 +10,9 @@
   import MarkdownBlocks from '../ui/MarkdownBlocks.svelte';
   import { CHAT_WINDOW_SIZE, formatRaw, liveActivityState, transcriptRows } from './transcript';
 
-  let { sessionId, agentId, events, raw = false, visible = true }: {
+  let { sessionId, agentId, events, raw = false, visible = true, composer = true, paging = true, variant = 'focus', draft = $bindable('') }: {
     sessionId: string; agentId: string; events: AgentEvent[]; raw?: boolean; visible?: boolean;
+    composer?: boolean; paging?: boolean; variant?: 'focus' | 'column'; draft?: string;
   } = $props();
   const history = $derived($agentEvents.sessionId === sessionId ? $agentEvents.histories[agentId] : undefined);
   const rows = $derived(transcriptRows(events));
@@ -57,11 +58,15 @@
     await tick();
     end = Math.max(CHAT_WINDOW_SIZE, count - previous);
   }
-  async function send(text: string) {
+  function prepareSubmit() {
+    const sid = sessionId, id = agentId, original = draft;
+    return { send: (text: string) => { void send(text, sid, id); }, clear: () => { if (sessionId === sid && agentId === id && draft === original) draft = ''; } };
+  }
+  async function send(text: string, sid = sessionId, id = agentId) {
     if (!text.trim() || sending) return;
     sending = true; error = '';
     try {
-      await invoke('operator_inject', { request: { session_id: sessionId, target_agent_id: agentId, message: text.trim() } });
+      await invoke('operator_inject', { request: { session_id: sid, target_agent_id: id, message: text.trim() } });
     } catch (cause) { error = String(cause); }
     finally { sending = false; }
   }
@@ -81,8 +86,8 @@
   }
 </script>
 
-<section class="chat-pane lattice-forced-colors-boundary" aria-label={raw ? 'Raw agent event log' : 'Agent chat'}>
-  {#if raw || start > 0 || history?.hasMore || end !== null}
+<section class="chat-pane lattice-forced-colors-boundary" data-variant={variant} aria-label={raw ? 'Raw agent event log' : 'Agent chat'}>
+  {#if paging && (raw || start > 0 || history?.hasMore || end !== null)}
   <nav class="history-controls" aria-label="Transcript history">
     {#if raw || start > 0 || history?.hasMore}<button type="button" class="lattice-btn lattice-btn--ghost" disabled={history?.loading || (start === 0 && !history?.hasMore)} onclick={older}>Older</button>{/if}
     <span>{count === 0 ? 'No events yet' : `${start + 1}–${stop} of ${count}`}</span>
@@ -126,9 +131,11 @@
     {/if}
   </div>
   {#if error}<p class="feed-error" role="alert">Message could not be sent: {error}</p>{/if}
-  <div class="chat-composer"><Composer {sessionId} {agentId} persistDraft={false} disabled={sending || !visible} onsubmit={send} placeholder={facts.placeholder}>
+  {#if composer}
+  <div class="chat-composer"><Composer {sessionId} {agentId} {prepareSubmit} submissionKey={`${sessionId}:${agentId}`} bind:value={draft} persistDraft={false} disabled={sending || !visible} onsubmit={send} placeholder={facts.placeholder}>
     {#snippet toolbar(controls)}{#if visible}<ComposerToolbar {controls} accessLabel={facts.accessLabel} model={facts.model} effort={facts.effort} {sending} />{/if}{/snippet}
   </Composer></div>
+  {/if}
 </section>
 
 <style>

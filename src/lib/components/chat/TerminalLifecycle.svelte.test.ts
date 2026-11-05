@@ -45,6 +45,7 @@ vi.mock('$lib/stores/sessions', async () => {
   const { writable } = await import('svelte/store');
   return {
     activeAgents: writable([]), activeSession: writable(null), sessions: writable({ sessions: [] }),
+    resumeBlockedReason: () => null,
     serdeEnumVariantName: (value: unknown) => typeof value === 'string' ? value : value && typeof value === 'object' ? Object.keys(value)[0] : undefined,
   };
 });
@@ -161,7 +162,7 @@ describe('real Terminal component behind chat (renderer doubles)', () => {
     const original = [...fixture.terminals];
     const allocations = fixture.webglCreated;
     expect(allocations).toBeGreaterThan(0);
-    const editor = view.getByRole('textbox', { name: 'Message this agent…' }); editor.focus();
+    const editor = view.getByRole('textbox', { name: mode === 'grid' ? 'Message Claude agent' : 'Message this agent…' }); editor.focus();
     const focuses = fixture.focuses;
     for (let index = 0; index < 20; index++) {
       await fireEvent.click(view.getByRole('button', { name: index % 2 === 0 ? 'Terminal' : 'Chat' }));
