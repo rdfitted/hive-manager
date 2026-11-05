@@ -31,7 +31,7 @@ def run_codegraph(command: str, *, root: Path, lang: str) -> subprocess.Complete
     if command == "dead":
         arguments.append("--json")
     return subprocess.run(
-        arguments,
+        arguments, creationflags=(0x08000000 if sys.platform == "win32" else 0),
         capture_output=True,
         text=True,
         check=False,
