@@ -1,12 +1,29 @@
 import type { AgentEvent } from '$lib/stores/agentEvents';
 import type { AgentStatus } from '$lib/stores/sessions';
+import type { CoordinationMessage } from '$lib/stores/coordination';
 import { activityLabel } from './activityLabel';
 
 export type TranscriptRow = {
   id: string; type: 'user' | 'assistant' | 'tool' | 'activity' | 'error' | 'decision'; ts: string; text: string;
   name?: string; input?: unknown; result?: unknown; complete?: boolean; failed?: boolean; truncated: boolean;
-  tools?: TranscriptRow[]; durationMs?: number; failedCount?: number;
+  tools?: TranscriptRow[]; durationMs?: number; failedCount?: number; sender?: 'queen' | 'operator';
 };
+
+export type TranscriptContext = { agentId: string; isQueen: boolean; log: CoordinationMessage[] };
+
+/** Backend format_agent_display aliases, matching opswall/ticker.ts coordinationName. */
+function coordinationTarget({ agentId, isQueen }: TranscriptContext): string {
+  if (isQueen) return 'QUEEN';
+  if (agentId.endsWith('-evaluator')) return 'EVALUATOR';
+  for (const [marker, prefix] of [['-qa-worker-', 'QA-WORKER-'], ['-worker-', 'WORKER-'], ['-planner-', 'PLANNER-']]) {
+    const index = agentId.lastIndexOf(marker);
+    if (index >= 0) {
+      const suffix = agentId.slice(index + marker.length);
+      return prefix + (marker === '-planner-' ? suffix.split('-')[0] : suffix);
+    }
+  }
+  return agentId;
+}
 
 export const CHAT_WINDOW_SIZE = 80;
 
@@ -31,7 +48,17 @@ function declinedDecision(event: AgentEvent): string | null {
 }
 
 /** Normalize snapshots and deltas without exposing protocol approval widgets. */
-export function transcriptRows(events: AgentEvent[]): TranscriptRow[] {
+export function transcriptRows(events: AgentEvent[], context?: TranscriptContext): TranscriptRow[] {
+  const operatorTexts = new Set<string>(), queenTexts = new Set<string>();
+  if (context) {
+    const target = coordinationTarget(context);
+    for (const entry of context.log) {
+      if (entry.to !== context.agentId && entry.to !== target) continue;
+      // Persisted coordination lines reload as Task, while live entries are System.
+      if (entry.from === 'SYSTEM' && entry.content.startsWith('[OPERATOR] ')) operatorTexts.add(entry.content.slice(11).trim());
+      if (entry.message_type === 'Task' && entry.from === 'QUEEN') queenTexts.add(entry.content.trim());
+    }
+  }
   const rows: TranscriptRow[] = [];
   const messages = new Map<string, TranscriptRow>();
   const tools = new Map<string, TranscriptRow>();
@@ -89,6 +116,10 @@ export function transcriptRows(events: AgentEvent[]): TranscriptRow[] {
       rows.push(row); messages.set(key, row);
     }
     row.text = event.kind === 'assistant_delta' ? row.text + text : text;
+    if (type === 'user' && context && event.agent_id === context.agentId) {
+      const match = row.text.trim();
+      row.sender = operatorTexts.has(match) ? 'operator' : queenTexts.has(match) ? 'queen' : undefined;
+    }
     row.truncated ||= event.truncated;
   }
   // Collapse the full history before the UI applies its bounded row window.

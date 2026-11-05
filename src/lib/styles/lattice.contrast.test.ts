@@ -55,9 +55,9 @@ function rgbLuminance(channels: number[]): number {
   return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
 }
 
-function queenTintContrast(foreground: string): number {
+function tintContrast(foreground: string, tint: number[]): number {
   const well = resolveToken('--chat-well');
-  const composite = [193, 66, 196].map((channel, index) =>
+  const composite = tint.map((channel, index) =>
     channel * 0.10 + parseInt(well.slice(1 + index * 2, 3 + index * 2), 16) * 0.90);
   const a = luminance(foreground), b = rgbLuminance(composite);
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
@@ -74,10 +74,16 @@ describe('G60 chat text contrast', () => {
     expect(contrast('--chat-text-meta', '--chat-well')).toBeGreaterThanOrEqual(4.5);
   });
   it('keeps chat body readable on the composited Queen tint', () => {
-    expect(queenTintContrast('--chat-text')).toBeGreaterThanOrEqual(4.5);
+    expect(tintContrast('--chat-text', [193, 66, 196])).toBeGreaterThanOrEqual(4.5);
   });
   it('keeps chat metadata readable on the composited Queen tint', () => {
-    expect(queenTintContrast('--chat-text-meta')).toBeGreaterThanOrEqual(4.5);
+    expect(tintContrast('--chat-text-meta', [193, 66, 196])).toBeGreaterThanOrEqual(4.5);
+  });
+  it('keeps chat body readable on the composited warning tint', () => {
+    expect(tintContrast('--chat-text', [236, 221, 165])).toBeGreaterThanOrEqual(4.5);
+  });
+  it('keeps chat metadata readable on the composited warning tint', () => {
+    expect(tintContrast('--chat-text-meta', [236, 221, 165])).toBeGreaterThanOrEqual(4.5);
   });
 });
 

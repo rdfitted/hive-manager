@@ -3,6 +3,7 @@
   import { tick } from 'svelte';
   import { agentEvents, type AgentEvent } from '$lib/stores/agentEvents';
   import { activeAgents } from '$lib/stores/sessions';
+  import { coordination } from '$lib/stores/coordination';
   import Composer from '../composer/Composer.svelte';
   import ComposerToolbar from '../composer/ComposerToolbar.svelte';
   import { toolbarFacts } from '../composer/toolbarFacts';
@@ -15,7 +16,7 @@
     composer?: boolean; paging?: boolean; variant?: 'focus' | 'column'; draft?: string;
   } = $props();
   const history = $derived($agentEvents.sessionId === sessionId ? $agentEvents.histories[agentId] : undefined);
-  const rows = $derived(transcriptRows(events));
+  const rows = $derived(transcriptRows(events, { agentId, isQueen: $activeAgents.some(candidate => candidate.id === agentId && candidate.role === 'Queen'), log: $coordination.sessionId === sessionId ? ($coordination.log ?? []) : [] }));
   const agent = $derived($activeAgents.find((candidate) => candidate.id === agentId));
   const facts = $derived(toolbarFacts(agent, $agentEvents.sessionId === sessionId ? $agentEvents.feeds?.[agentId]?.capabilities.event_source : undefined));
   let now = $state(Date.now());
@@ -107,7 +108,8 @@
           <ActivityGroup group={row} expanded={expandedTools[row.id] ?? false} onchange={(open) => { expandedTools[row.id] = open; }} />
         {:else}
           {@const longMessage = row.text.split('\n').length > 6 || row.text.length > 480}
-          <article class="message" class:user-message={row.type === 'user'} aria-label={row.type === 'user' ? 'User message' : row.type === 'assistant' ? 'Assistant message' : row.type === 'decision' ? 'Approval decision' : 'Agent error'} title={new Date(row.ts).toLocaleString()}>
+          <article class="message" class:user-message={row.type === 'user'} data-sender={row.type === 'user' ? row.sender : undefined} aria-label={row.type === 'user' ? 'User message' : row.type === 'assistant' ? 'Assistant message' : row.type === 'decision' ? 'Approval decision' : 'Agent error'} title={new Date(row.ts).toLocaleString()}>
+            {#if row.sender === 'queen'}<span class="sender-label">Queen</span>{/if}
             {#if row.type === 'decision' || row.type === 'error'}<strong>{row.type === 'decision' ? 'Approval' : 'Error'}</strong>{/if}
             {#if row.type === 'assistant'}
               <MarkdownBlocks source={row.text} allowHtmlPreview />
@@ -139,18 +141,24 @@
 </section>
 
 <style>
-  .chat-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; color: var(--text-primary); background: var(--surface); }
-  .history-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2); font-size: var(--text-small); color: var(--text-muted); }
+  .chat-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; color: var(--chat-text); background: var(--chat-well); font-size: 13.5px; line-height: 1.55; }
+  .chat-pane :global(.markdown-blocks) { color: var(--chat-text); line-height: 1.55; }
+  .chat-pane :global(.markdown-blocks .language), .chat-pane :global(.markdown-blocks blockquote) { color: var(--chat-text-meta); }
+  .history-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2); font-size: var(--text-small); color: var(--chat-text-meta); }
   .transcript { flex: 1; min-height: 0; overflow: auto; padding: var(--space-3); overflow-wrap: anywhere; }
   .message { min-width: 0; padding: var(--space-2) 0 var(--space-4); }
   .user-message { margin: var(--space-2) 0 var(--space-4) auto; width: fit-content; max-width: 85%; padding: var(--space-3); border-radius: var(--radius-shell); background: var(--surface-overlay); }
+  .message[data-sender='queen'] { margin-left: 0; max-width: 100%; border: 1px solid var(--fitted-orchid); border-radius: var(--radius-sm); background: rgba(193,66,196,.10); }
+  .sender-label { display: block; color: var(--chat-text-meta); font-size: var(--text-small); font-weight: 600; margin-bottom: var(--space-1); }
+  .message[data-sender='operator'] { border: 1px solid var(--border-control); background: var(--chat-well); }
+  .message[aria-label='Approval decision'], .message[aria-label='Agent error'] { padding: var(--space-3); border: 1px solid var(--status-warning); border-radius: var(--radius-sm); background: rgba(236,221,165,.10); }
   .message p { margin: 0; white-space: pre-wrap; }
   .message .clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }
-  .truncation, .live-activity { color: var(--text-muted); font-size: var(--text-small); }
+  .truncation, .live-activity, .raw-event > span { color: var(--chat-text-meta); font-size: var(--text-small); }
   .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-small); }
   .chat-composer { flex: 0 0 auto; padding: var(--space-2); }
-  .feed-error { margin: 0; padding: var(--space-2); color: var(--status-error); }
-  .empty-chat { color: var(--text-muted); }
-  @media (forced-colors: active) { .user-message { border: 1px solid CanvasText; } .live-activity { color: CanvasText; } }
+  .feed-error { margin: 0; padding: var(--space-2); border: 1px solid var(--status-warning); border-radius: var(--radius-sm); background: rgba(236,221,165,.10); color: var(--chat-text); }
+  .empty-chat { color: var(--chat-text-meta); }
+  @media (forced-colors: active) { .user-message, .message[data-sender] { border: 1px solid CanvasText; } .chat-pane :global(.markdown-blocks), .live-activity { color: CanvasText; } }
 </style>

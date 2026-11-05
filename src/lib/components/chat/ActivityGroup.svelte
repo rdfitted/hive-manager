@@ -27,11 +27,11 @@
 </details>
 
 <style>
-  .activity-group { margin-bottom: var(--space-3); color: var(--text-muted); }
+  .activity-group { margin-bottom: var(--space-3); color: var(--chat-text-meta); }
   summary { cursor: pointer; font-size: var(--text-small); padding: var(--space-2) 0; }
-  .tool-call { padding: var(--space-2); border-radius: var(--radius-md); background: var(--surface-raised); color: var(--text-primary); }
+  .tool-call { padding: var(--space-2); border-radius: var(--radius-md); background: var(--chat-well); color: var(--chat-text); }
   h4 { margin: 0; font-size: var(--text-small); font-weight: 500; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-small); }
-  .truncation { color: var(--text-muted); font-size: var(--text-small); }
+  .truncation { color: var(--chat-text-meta); font-size: var(--text-small); }
   @media (forced-colors: active) { summary { color: ButtonText; } .tool-call { border: 1px solid CanvasText; } }
 </style>
