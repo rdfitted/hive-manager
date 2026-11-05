@@ -125,44 +125,46 @@ function createCoordinationStore() {
     }));
   });
 
+  function setSessionId(sessionId: string | null) {
+    update((state) => {
+      const changed = sessionId !== state.sessionId;
+      if (changed) {
+        ++logRequestToken;
+        fullLogSessionId = null;
+        loadingLogSessionId = null;
+      }
+      return {
+        ...state,
+        sessionId,
+        loading: changed ? false : state.loading,
+        error: changed ? null : state.error,
+        log: changed ? [] : state.log,
+        workers: changed ? [] : state.workers,
+        fusionState: changed ? {
+          completedVariants: [],
+          judgeReport: null,
+          evaluationReady: false,
+        } : state.fusionState,
+      };
+    });
+  }
+
   return {
     subscribe,
-
-    setSessionId(sessionId: string | null) {
-      update((state) => {
-        const changed = sessionId !== state.sessionId;
-        if (changed) {
-          ++logRequestToken;
-          fullLogSessionId = null;
-          loadingLogSessionId = null;
-        }
-        return {
-          ...state,
-          sessionId,
-          loading: changed ? false : state.loading,
-          error: changed ? null : state.error,
-          log: sessionId === state.sessionId ? state.log : [],
-          workers: sessionId === state.sessionId ? state.workers : [],
-          fusionState: sessionId === state.sessionId ? state.fusionState : {
-            completedVariants: [],
-            judgeReport: null,
-            evaluationReady: false,
-          },
-        };
-      });
-    },
+    setSessionId,
 
     ensureLog(sessionId: string) {
       const state = get({ subscribe });
       if (state.sessionId === sessionId && (fullLogSessionId === sessionId || loadingLogSessionId === sessionId)) return;
-      this.setSessionId(sessionId);
+      setSessionId(sessionId);
       return this.loadLog(sessionId);
     },
 
     async loadLog(sessionId: string, limit?: number) {
+      setSessionId(sessionId);
       const requestToken = ++logRequestToken;
       loadingLogSessionId = sessionId;
-      update((state) => ({ ...state, loading: true, error: null, sessionId }));
+      update((state) => ({ ...state, loading: true, error: null }));
       try {
         const log = await invoke<CoordinationMessage[]>('get_coordination_log', {
           sessionId,

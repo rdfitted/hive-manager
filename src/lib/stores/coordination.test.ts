@@ -1,10 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import type { CoordinationMessage } from './coordination';
-const fixture = vi.hoisted(() => ({ invoke: vi.fn(), onMessage: (_event: { payload: CoordinationMessage }) => {} }));
+const fixture = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  onMessage: (_event: { payload: CoordinationMessage }) => {},
+  onVariant: (_event: { payload: { variant: string } }) => {},
+  onJudge: (_event: { payload: { report: string } }) => {},
+}));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn((name, callback) => {
   if (name === 'coordination-message') fixture.onMessage = callback;
+  if (name === 'fusion-variant-completed') fixture.onVariant = callback;
+  if (name === 'judge-evaluation-ready') fixture.onJudge = callback;
   return Promise.resolve(() => {});
 }) }));
 import { coordination } from './coordination';
@@ -22,6 +29,43 @@ function message(id: string): CoordinationMessage {
 beforeEach(() => { fixture.invoke.mockReset(); coordination.setSessionId(null); coordination.clearLog(); coordination.clearError(); });
 
 describe('coordination log ownership', () => {
+  it('R4-F1 loadLog clears all prior-session state before publishing the new owner', async () => {
+    const prior = message('Alpha directive');
+    const worker = { id: 'alpha-worker-1', role: { role_type: 'Worker', label: 'Worker', default_cli: 'codex', prompt_template: null }, cli: 'codex', status: 'Running', current_task: null, last_update: prior.timestamp };
+    fixture.invoke.mockResolvedValueOnce([prior]).mockResolvedValueOnce([worker]);
+    await coordination.loadLog('alpha');
+    await coordination.loadWorkers('alpha');
+    fixture.onVariant({ payload: { variant: 'alpha-variant' } });
+    fixture.onJudge({ payload: { report: 'Alpha report' } });
+    fixture.invoke.mockRejectedValueOnce(new Error('Alpha error'));
+    await coordination.loadLog('alpha');
+    expect(get(coordination)).toMatchObject({ log: [prior], workers: [worker], error: 'Error: Alpha error', fusionState: { completedVariants: ['alpha-variant'], judgeReport: 'Alpha report', evaluationReady: true } });
+
+    const pending = deferred<CoordinationMessage[]>();
+    fixture.invoke.mockReturnValueOnce(pending.promise);
+    const ownedStates: Parameters<Parameters<typeof coordination.subscribe>[0]>[0][] = [];
+    const unsubscribe = coordination.subscribe(state => { if (state.sessionId === 'beta') ownedStates.push(state); });
+    try {
+      const loading = coordination.loadLog('beta');
+      // Logs loads first; later consumers must preserve that request and cannot repair a leaked owner.
+      coordination.setSessionId('beta');
+      await coordination.ensureLog('beta');
+      expect(get(coordination)).toMatchObject({ sessionId: 'beta', loading: true, error: null });
+      pending.reject(new Error('Beta history unavailable'));
+      await loading;
+      expect(get(coordination)).toMatchObject({ sessionId: 'beta', loading: false, error: 'Error: Beta history unavailable' });
+      expect(ownedStates.length).toBeGreaterThan(0);
+      for (const state of ownedStates) {
+        expect(state).toMatchObject({ log: [], workers: [], fusionState: { completedVariants: [], judgeReport: null, evaluationReady: false } });
+      }
+      fixture.invoke.mockResolvedValueOnce([message('Beta directive')]);
+      await coordination.ensureLog('beta');
+      expect(get(coordination).log).toEqual([message('Beta directive')]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it('R3-F1 foreign or unscoped live messages cannot enter the displayed log, ticker targets, or sender attribution', async () => {
     fixture.invoke.mockResolvedValueOnce([]);
     await coordination.loadLog('session-alpha');
