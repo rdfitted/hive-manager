@@ -36,12 +36,43 @@ describe('ResumeConfirmModal', () => {
     await view.rerender({ open: false, sessionName: null, report: null });
     const report = await waitFor(() => view.getByRole('dialog', { name: 'Resume report' }));
     expect(within(report).getAllByRole('listitem').map((item) => item.textContent)).toEqual(messages);
+    for (const row of within(report).getAllByRole('listitem')) {
+      expect(row.getAttribute('data-agent-id')).toBeNull();
+      expect(row.getAttribute('data-resume-reason')).toBe('legacy');
+    }
     expect(within(report).getByText('Loaded Synthetic session')).toBeTruthy();
     await fireEvent.click(within(report).getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(view.queryByRole('dialog', { name: 'Resume report' })).toBeNull());
     expect(get(sessions).resumeNotice).toBeNull();
     expect(invoke).toHaveBeenCalledOnce();
     expect(invoke).toHaveBeenCalledWith('resume_session', { sessionId: 'fixture-resume-report' });
+  });
+
+  it('lists structured per-agent cwd and terminal-state reasons after a successful load', async () => {
+    const notices = [
+      { agent_id: 'fixture-queen', reason: 'invalid_working_directory',
+        message: 'Synthetic coordinator (fixture-queen): saved working directory no longer exists; Resume is unavailable.' },
+      { agent_id: 'fixture-worker-1', reason: 'manual_resume_required',
+        message: 'Synthetic principal (fixture-worker-1): saved session has ended; use per-agent Resume.' },
+      { agent_id: 'fixture-worker-2', reason: 'resume_failed', message: 'Provider refused Resume.' },
+    ];
+    const view = render(ResumeConfirmModal, { props: { open: false } });
+    vi.mocked(invoke).mockResolvedValueOnce({
+      id: 'fixture-structured-report', name: 'Synthetic closed session', project_path: 'C:/synthetic-report', agents: [],
+      agent_resume_report: notices,
+    } as unknown as Session);
+    await sessions.resumeSession('fixture-structured-report');
+    const dialog = await waitFor(() => view.getByRole('dialog', { name: 'Resume report' }));
+    const rows = within(dialog).getAllByRole('listitem');
+    expect(rows.map((row) => row.textContent)).toEqual([
+      notices[0].message, notices[1].message, 'fixture-worker-2: Provider refused Resume.',
+    ]);
+    for (const [index, row] of rows.entries()) {
+      expect(row.getAttribute('data-agent-id')).toBe(notices[index].agent_id);
+      expect(row.getAttribute('data-resume-reason')).toBe(notices[index].reason);
+    }
+    expect(within(dialog).getByText('Loaded Synthetic closed session')).toBeTruthy();
+    expect(within(dialog).queryByText('These agents have no saved conversation and remain stopped.')).toBeNull();
   });
 
   it.each(['Escape', 'outside click'] as const)(

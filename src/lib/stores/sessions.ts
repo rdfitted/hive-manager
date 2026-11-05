@@ -309,6 +309,13 @@ export function sessionStateToCellStatus(state: SessionState | unknown): CellSta
   }
 }
 
+/** Mirrors the structured load-time notice; legacy text has no agent identity. */
+export interface AgentResumeNotice {
+  agent_id: string | null;
+  reason: string;
+  message: string;
+}
+
 export interface Session {
   id: string;
   name?: string;
@@ -337,7 +344,27 @@ export interface Session {
   worktree_branch?: string | null;
   /** Present on a resumed session (#125): per-step classification for the resume modal. */
   resume_report?: ResumeReport | null;
-  agent_resume_report?: string[];
+  agent_resume_report?: (AgentResumeNotice | string)[];
+}
+
+/**
+ * I3: return a matching agent's Resume blocker message, otherwise null.
+ * Legacy strings never guess an identity. manual_resume_required is an
+ * informational terminal-load notice: explicit per-agent Resume remains available.
+ */
+export function resumeBlockedReason(session: Session | null | undefined, agentId: string): string | null {
+  for (const notice of session?.agent_resume_report ?? []) {
+    if (typeof notice !== 'string' && notice.agent_id === agentId && notice.reason !== 'manual_resume_required') {
+      return notice.message;
+    }
+  }
+  return null;
+}
+
+function normalizeAgentResumeNotice(notice: AgentResumeNotice | string): AgentResumeNotice {
+  return typeof notice === 'string'
+    ? { agent_id: null, reason: 'legacy', message: notice }
+    : { ...notice };
 }
 
 // ---- #125 run journal + side-effect ledger ----
@@ -462,7 +489,7 @@ interface SessionsState {
   activeSessionId: string | null;
   loading: boolean;
   error: string | null;
-  resumeNotice?: { sessionName: string; messages: string[] } | null;
+  resumeNotice?: { sessionName: string; notices: AgentResumeNotice[] } | null;
 }
 
 function createSessionsStore() {
@@ -799,7 +826,7 @@ function createSessionsStore() {
             loading: false,
             resumeNotice: session.agent_resume_report?.length ? {
               sessionName: sessionDisplayName(session),
-              messages: [...session.agent_resume_report],
+              notices: session.agent_resume_report.map(normalizeAgentResumeNotice),
             } : null,
           };
         });
