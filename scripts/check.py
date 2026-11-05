@@ -26,6 +26,28 @@ def run(args, cwd=ROOT):
     return result.stdout
 
 
+
+def snapshot_checkout(temp, sha, base_sha, base_ref, repository):
+    """Copy committed objects/files, never ignored files or source Git config."""
+    snapshot = temp / 'checkout'
+    run(['git', '-c', 'core.hooksPath=', '-c', 'init.templateDir=', 'clone',
+         '--no-local', '--no-checkout', str(ROOT), str(snapshot)])
+    prefix = ['git', '-C', str(snapshot)]
+    run(prefix + ['config', 'core.hooksPath', '.git/no-hooks'])
+    run(prefix + ['remote', 'set-url', 'origin', f'https://github.com/{repository}.git'])
+    # Base may have advanced since the operator last fetched. Fetch only into
+    # the sanitized clone; no workstation auth configuration is copied to it.
+    try:
+        run(prefix + ['cat-file', '-e', base_sha + '^{commit}'])
+    except RuntimeError:
+        run(prefix + ['fetch', 'origin', base_sha])
+    run(prefix + ['update-ref', 'refs/remotes/origin/' + base_ref, base_sha])
+    run(prefix + ['checkout', '--detach', sha])
+    if any(path.is_symlink() for path in snapshot.rglob('*')):
+        raise RuntimeError('Local replay refuses symlinks that could escape its snapshot.')
+    return snapshot
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pr', required=True, type=int)
@@ -68,8 +90,10 @@ def main():
                                      'pull_request': local_pr, 'repository': pr['base']['repo']}), encoding='utf-8')
         empty = temp / 'empty'
         empty.write_text('', encoding='utf-8')
+        snapshot = snapshot_checkout(temp, sha, pr['base']['sha'],
+                                     pr['base']['ref'], config['repository'])
         for job in config['jobs']:
-            workflow = ROOT / job['workflow']
+            workflow = snapshot / job['workflow']
             command = ['act', 'pull_request', '-W', str(workflow), '-j', job['job'],
                        '--eventpath', str(event), '--secret-file', str(empty),
                        '--env-file', str(empty), '--var-file', str(empty),
@@ -80,7 +104,7 @@ def main():
                        '-P', 'ubuntu-latest=ghcr.io/catthehacker/ubuntu:act-latest',
                        '-P', 'ubuntu-24.04=ghcr.io/catthehacker/ubuntu:act-24.04']
             print(f'Replaying {job["workflow"]}: {job["job"]}', flush=True)
-            output = run(command)
+            output = run(command, cwd=snapshot)
             # A zero exit with every job skipped is not evidence of a passing gate.
             if b'Job succeeded' not in output:
                 raise RuntimeError('Replay did not report a successful job; no attestation written.')

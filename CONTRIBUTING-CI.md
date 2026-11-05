@@ -44,3 +44,8 @@ do not receive the host Docker daemon socket. macOS and Windows user act config
 locations are also refused. Verify this boundary with
 `python -m unittest discover -s scripts -p test_check_isolation.py`. These
 controls do not turn arbitrary dependency code into a security sandbox.
+
+Replay runs from a temporary committed Git clone, not the workstation working
+directory. Globally ignored files and local Git auth/configuration are excluded;
+required committed history and the PR base ref are preserved. Symlinks block
+local replay rather than allowing reads outside the snapshot.
