@@ -1,16 +1,25 @@
 name: Content Gate
 
 on:
+  push:
+    branches: [main, staging]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
     branches:
       - main
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   content-gate:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
