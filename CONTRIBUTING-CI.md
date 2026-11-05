@@ -35,3 +35,12 @@ existing integration push checks. Do not cancel deployments or release jobs.
 - .github/workflows/render-check.yml / all: active workflow collision; left untouched
 - .github/workflows/rust-tests.yml / cargo-test: credentials, hosted event policy, original conditional, or OS-specific runner
 - .github/workflows/release.yml / all: release/deploy/manual or unmodified hosted workflow
+
+## Local replay isolation
+
+The launcher explicitly sets an empty GITHUB_TOKEN secret/environment value to
+prevent act from importing the signed-in GitHub CLI credential. Job containers
+do not receive the host Docker daemon socket. macOS and Windows user act config
+locations are also refused. Verify this boundary with
+`python -m unittest discover -s scripts -p test_check_isolation.py`. These
+controls do not turn arbitrary dependency code into a security sandbox.

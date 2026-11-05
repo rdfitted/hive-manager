@@ -3,10 +3,10 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,7 +54,10 @@ def main():
     evidence['act_version'] = run(['act', '--version']).decode().strip()
     # Refuse hidden act configuration: it can inject mounts, credentials, or skipped jobs.
     for path in [ROOT / '.actrc', Path.home() / '.actrc',
-                 Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'act/actrc']:
+                 Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'act/actrc',
+                 Path.home() / 'Library/Application Support/act/actrc',
+                 Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'act/actrc',
+                 Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming'))) / 'act/actrc']:
         if path.exists():
             raise SystemExit(f'Review/remove act configuration before replay: {path}')
     with tempfile.TemporaryDirectory(prefix='local-gate-') as temp:
@@ -70,6 +73,8 @@ def main():
             command = ['act', 'pull_request', '-W', str(workflow), '-j', job['job'],
                        '--eventpath', str(event), '--secret-file', str(empty),
                        '--env-file', str(empty), '--var-file', str(empty),
+                       '--secret', 'GITHUB_TOKEN=', '--env', 'GITHUB_TOKEN=',
+                       '--container-daemon-socket', '-',
                        '--artifact-server-path', str(temp / 'artifacts'),
                        '--container-architecture', 'linux/amd64',
                        '-P', 'ubuntu-latest=ghcr.io/catthehacker/ubuntu:act-latest',
