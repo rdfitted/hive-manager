@@ -638,6 +638,13 @@ mod windows {
         /// This owns future descendants; children born before assignment need
         /// the retained stop-time capture as well.
         pub(crate) fn attach_running(process: std::os::windows::io::RawHandle) -> Result<Self, String> {
+            let job = Self::new()?;
+            job.assign_suspended(process)?;
+            Ok(job)
+        }
+
+        /// Create the lifetime owner before creating the suspended ConPTY root.
+        pub(crate) fn new() -> Result<Self, String> {
             // The handle belongs solely to this guard; Windows propagates job
             // membership to subsequently created descendants, including npm shims.
             let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -655,15 +662,20 @@ mod windows {
                     std::mem::size_of::<ExtendedLimits>() as u32,
                 )
             };
-            let assigned = configured != 0
-                && unsafe { AssignProcessToJobObject(raw, process) } != 0;
-            if !assigned {
+            if configured == 0 {
                 return Err(format!(
                     "Cannot own transport process tree: {}. Select PTY.",
                     std::io::Error::last_os_error()
                 ));
             }
             Ok(job)
+        }
+
+        /// The caller retains the primary thread and resumes only after success.
+        pub(crate) fn assign_suspended(&self, process: std::os::windows::io::RawHandle) -> Result<(), String> {
+            self.include(process).map_err(|error| format!(
+                "Cannot own transport process tree: {error}. Select PTY."
+            ))
         }
 
         fn resume(pid: u32) -> Result<(), String> {

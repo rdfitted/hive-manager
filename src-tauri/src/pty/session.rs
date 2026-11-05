@@ -16,6 +16,15 @@ use super::output_ring::{OutputRing, OutputSnapshot, RECENT_OUTPUT_VIEW_BYTES};
 #[cfg(all(test, windows))]
 pub(super) static WINDOWS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(all(test, windows))]
+static PRE_ASSIGNMENT_HOOK: Mutex<Option<Box<dyn FnOnce(Option<std::os::windows::io::RawHandle>) + Send>>> = Mutex::new(None);
+
+#[cfg(all(test, windows))]
+pub(super) fn run_pre_assignment_hook(thread: Option<std::os::windows::io::RawHandle>) {
+    let hook = PRE_ASSIGNMENT_HOOK.lock().take();
+    if let Some(hook) = hook { hook(thread); }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRole {
     MasterPlanner,  // Initial planning agent that generates plan.md
@@ -550,7 +559,9 @@ impl PtySession {
         replay_capacity: usize,
         cleanup: &mut Option<ConstructionCleanup>,
     ) -> Result<Self, PtyError> {
-        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use portable_pty::{CommandBuilder, PtySize};
+        #[cfg(not(windows))]
+        use portable_pty::{NativePtySystem, PtySystem};
 
         #[cfg(all(test, windows))]
         let fixture_command = if let Some(root) = std::env::var_os("HM_RESUME_PTY_CHILD") {
@@ -570,22 +581,24 @@ impl PtySession {
 
         tracing::info!("Creating PTY session: command={} args={:?} cwd={:?}", command, args, cwd);
 
-        let pty_system = NativePtySystem::default();
-
-        let pty_pair = pty_system
-            .openpty(PtySize {
+        let size = PtySize {
                 rows,
                 cols,
                 pixel_width: 0,
                 pixel_height: 0,
-            })
+            };
+        #[cfg(windows)]
+        let (pty_pair, process_tree) = super::conpty_windows::openpty(size)
+            .map_err(|e| PtyError::CreateError(e.to_string()))?;
+        #[cfg(not(windows))]
+        let pty_pair = NativePtySystem::default().openpty(size)
             .map_err(|e| PtyError::CreateError(e.to_string()))?;
         *cleanup = Some(ConstructionCleanup {
             #[cfg(test)]
             before_release: None,
             pair: Some(pty_pair), reader: None, writer: None, child: None,
             #[cfg(windows)]
-            process_tree: None,
+            process_tree: Some(process_tree),
         });
         let pending = cleanup.as_mut().expect("construction cleanup owns the PTY");
 
@@ -646,16 +659,6 @@ impl PtySession {
         pending.child = Some(child);
         #[cfg(all(test, windows))]
         if fixture_launch { Self::verify_g49_fixture_image(pending.child.as_mut().unwrap())?; }
-        #[cfg(windows)]
-        {
-            // portable-pty returns a running root. Preserve the launcher and
-            // assign immediately; pre-assignment descendants remain a documented
-            // startup boundary, covered by the retained capture where visible.
-            let handle = pending.child.as_ref().unwrap().as_raw_handle()
-                .ok_or_else(|| PtyError::CreateError("PTY root has no process handle".into()))?;
-            pending.process_tree = Some(Arc::new(crate::transport::process::ProcessTree::attach_running(handle)
-                .map_err(PtyError::CreateError)?));
-        }
         #[cfg(unix)]
         let process_tree = crate::transport::process::ProcessTree::for_pty(
             pending.child.as_ref().unwrap().process_id()
@@ -1651,4 +1654,531 @@ mod tests {
         assert_eq!(sanitized.as_ref(), b"helloworld!");
         assert!(!sanitized.as_ref().windows(BRACKETED_PASTE_END.len()).any(|w| w == BRACKETED_PASTE_END));
     }
+}
+
+
+#[cfg(all(test, windows))]
+mod g62_tests {
+    use super::{AgentRole, PtySession, PRE_ASSIGNMENT_HOOK, WINDOWS_TEST_LOCK};
+    use std::{
+        ffi::c_void,
+        fs,
+        mem::size_of,
+        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn TerminateProcess(process: *mut c_void, code: u32) -> i32;
+        fn WaitForSingleObject(handle: *mut c_void, timeout: u32) -> u32;
+        fn QueryFullProcessImageNameW(
+            process: *mut c_void,
+            flags: u32,
+            name: *mut u16,
+            size: *mut u32,
+        ) -> i32;
+        fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> *mut c_void;
+        fn Process32FirstW(snapshot: *mut c_void, entry: *mut Entry) -> i32;
+        fn Process32NextW(snapshot: *mut c_void, entry: *mut Entry) -> i32;
+        fn SuspendThread(thread: *mut c_void) -> u32;
+        fn ResumeThread(thread: *mut c_void) -> u32;
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(
+            callback: unsafe extern "system" fn(*mut c_void, isize) -> i32,
+            data: isize,
+        ) -> i32;
+        fn IsWindowVisible(window: *mut c_void) -> i32;
+        fn GetWindowThreadProcessId(window: *mut c_void, pid: *mut u32) -> u32;
+    }
+    #[repr(C)]
+    struct Entry {
+        size: u32,
+        usage: u32,
+        pid: u32,
+        heap: usize,
+        module: u32,
+        threads: u32,
+        parent: u32,
+        priority: i32,
+        flags: u32,
+        exe: [u16; 260],
+    }
+
+    fn image(handle: &OwnedHandle) -> PathBuf {
+        let mut name = vec![0u16; 32768];
+        let mut size = name.len() as u32;
+        assert_ne!(
+            unsafe {
+                QueryFullProcessImageNameW(handle.as_raw_handle(), 0, name.as_mut_ptr(), &mut size)
+            },
+            0
+        );
+        PathBuf::from(String::from_utf16_lossy(&name[..size as usize]))
+            .canonicalize()
+            .unwrap()
+    }
+    struct Leaf(OwnedHandle);
+    impl Leaf {
+        fn cleanup(&self) -> std::io::Result<()> {
+            unsafe {
+                if WaitForSingleObject(self.0.as_raw_handle(), 0) == 0 {
+                    return Ok(());
+                }
+                let terminated = TerminateProcess(self.0.as_raw_handle(), 1);
+                let error = std::io::Error::last_os_error();
+                if WaitForSingleObject(self.0.as_raw_handle(), 5000) == 0 {
+                    Ok(())
+                } else if terminated == 0 {
+                    Err(error)
+                } else {
+                    Err(std::io::Error::other(
+                        "exact leaf did not exit after termination",
+                    ))
+                }
+            }
+        }
+    }
+    impl Drop for Leaf {
+        fn drop(&mut self) {
+            if let Err(error) = self.cleanup() {
+                eprintln!("G62 exact leaf cleanup failed: {error}");
+            }
+        }
+    }
+    struct ClearHook;
+    impl Drop for ClearHook {
+        fn drop(&mut self) {
+            PRE_ASSIGNMENT_HOOK.lock().take();
+        }
+    }
+    fn literal(path: &Path) -> String {
+        path.to_string_lossy().replace('\'', "''")
+    }
+    fn no_visible_descendants(known: &[u32]) {
+        let raw = unsafe { CreateToolhelp32Snapshot(2, 0) };
+        assert_ne!(raw as isize, -1);
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut entry: Entry = unsafe { std::mem::zeroed() };
+        entry.size = size_of::<Entry>() as u32;
+        let mut links = Vec::new();
+        let mut found = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } != 0;
+        while found {
+            links.push((entry.pid, entry.parent));
+            found = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
+        }
+        let mut state = (vec![std::process::id()], Vec::<u32>::new());
+        state.0.extend_from_slice(known);
+        loop {
+            let n = state.0.len();
+            for &(pid, parent) in &links {
+                if state.0.contains(&parent) && !state.0.contains(&pid) {
+                    state.0.push(pid)
+                }
+            }
+            if n == state.0.len() {
+                break;
+            }
+        }
+        unsafe extern "system" fn visit(hwnd: *mut c_void, data: isize) -> i32 {
+            let state = &mut *(data as *mut (Vec<u32>, Vec<u32>));
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if state.0.contains(&pid) && IsWindowVisible(hwnd) != 0 {
+                state.1.push(pid)
+            }
+            1
+        }
+        assert_ne!(
+            unsafe { EnumWindows(visit, &mut state as *mut _ as isize) },
+            0
+        );
+        assert!(
+            state.1.is_empty(),
+            "visible descendant windows: {:?}",
+            state.1
+        );
+    }
+
+    #[test]
+    fn g62_vanished_intermediate_cannot_escape_pre_execution_job() {
+        let _fixtures = WINDOWS_TEST_LOCK.lock();
+        let _clear = ClearHook;
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let ps = system.join("WindowsPowerShell/v1.0/powershell.exe");
+        let ping = system.join("ping.exe");
+        assert!(ps.is_absolute() && ping.is_absolute());
+        let leaf_pid = root.join("leaf.pid");
+        let ready = root.join("intermediate-exited");
+        let intermediate = root.join("intermediate.ps1");
+        let parent = root.join("parent.ps1");
+        fs::write(&intermediate,format!("$ErrorActionPreference='Stop'\n$p=Start-Process -FilePath '{}' -ArgumentList '-n 120 127.0.0.1' -WindowStyle Hidden -PassThru\n[IO.File]::WriteAllText('{}',[string]$p.Id)\n",literal(&ping),literal(&leaf_pid))).unwrap();
+        fs::write(&parent,format!("$ErrorActionPreference='Stop'\n$p=Start-Process -FilePath '{}' -ArgumentList '-NoProfile -NonInteractive -File \"{}\"' -WindowStyle Hidden -PassThru\n$p.WaitForExit()\n[IO.File]::WriteAllText('{}',[string]$p.Id)\nStart-Sleep -Seconds 120\n",literal(&ps),literal(&intermediate),literal(&ready))).unwrap();
+        let held = Arc::new(parking_lot::Mutex::new(None::<Leaf>));
+        let hook_held = held.clone();
+        let hook_ready = ready.clone();
+        let hook_pid = leaf_pid.clone();
+        let expected_ping = ping.canonicalize().unwrap();
+        let observed = Arc::new(AtomicBool::new(false));
+        let mark = observed.clone();
+        *PRE_ASSIGNMENT_HOOK.lock() = Some(Box::new(move |thread| {
+            // Query and restore the primary thread's suspend count without
+            // allowing a newly created suspended root to execute.
+            let suspended = thread.is_some_and(|thread| unsafe {
+                let previous = SuspendThread(thread);
+                assert_ne!(previous, u32::MAX, "query primary suspend count");
+                assert_eq!(
+                    ResumeThread(thread),
+                    previous + 1,
+                    "restore primary suspend count"
+                );
+                previous > 0
+            });
+            if suspended {
+                assert!(
+                    !hook_ready.exists() && !hook_pid.exists(),
+                    "suspended fixture executed"
+                );
+                return;
+            }
+            // Base and resume-before-assign mutation must establish the real
+            // startup gap. A slow fixture is invalid evidence, never a pass.
+            let deadline = Instant::now() + Duration::from_secs(120);
+            loop {
+                if hook_held.lock().is_none() {
+                    if let Ok(value) = fs::read_to_string(&hook_pid) {
+                        if let Ok(pid) = value.parse::<u32>() {
+                            let raw = unsafe { OpenProcess(0x0010_1001, 0, pid) };
+                            assert!(!raw.is_null());
+                            let leaf = Leaf(unsafe { OwnedHandle::from_raw_handle(raw) });
+                            assert_eq!(image(&leaf.0), expected_ping);
+                            *hook_held.lock() = Some(leaf);
+                        }
+                    }
+                }
+                if hook_ready.exists() && hook_held.lock().is_some() {
+                    assert_eq!(
+                        unsafe {
+                            WaitForSingleObject(
+                                hook_held.lock().as_ref().unwrap().0.as_raw_handle(),
+                                0,
+                            )
+                        },
+                        258,
+                        "running-hook leaf already exited"
+                    );
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "invalid G62 proof: running root never established startup gap"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            mark.store(true, Ordering::SeqCst);
+        }));
+        let session = PtySession::new(
+            "synthetic-g62".into(),
+            AgentRole::Worker {
+                index: 1,
+                parent: None,
+            },
+            ps.to_str().unwrap(),
+            crate::adapters::pty_submit_policy("powershell.exe"),
+            &[],
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-File",
+                parent.to_str().unwrap(),
+            ],
+            Some(root.to_str().unwrap()),
+            80,
+            24,
+            8192,
+        )
+        .unwrap();
+        // Bind the fixture's root image before trusting any PID publication.
+        let root_image = {
+            extern "system" {
+                fn DuplicateHandle(
+                    source_process: *mut c_void,
+                    source: *mut c_void,
+                    target_process: *mut c_void,
+                    target: *mut *mut c_void,
+                    access: u32,
+                    inherit: i32,
+                    options: u32,
+                ) -> i32;
+                fn GetCurrentProcess() -> *mut c_void;
+            }
+            let child = session.child.lock();
+            let raw = child.as_ref().unwrap().as_raw_handle().unwrap();
+            let mut copied = std::ptr::null_mut();
+            let current = unsafe { GetCurrentProcess() };
+            assert_ne!(
+                unsafe { DuplicateHandle(current, raw, current, &mut copied, 0, 0, 2) },
+                0
+            );
+            image(&unsafe { OwnedHandle::from_raw_handle(copied) })
+        };
+        assert_eq!(root_image, system.join("cmd.exe").canonicalize().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let pid = loop {
+            if let Ok(value) = fs::read_to_string(&leaf_pid) {
+                if let Ok(pid) = value.parse::<u32>() {
+                    break pid;
+                }
+            }
+            assert!(
+                session.is_alive(),
+                "fixture root exited before leaf publication"
+            );
+            assert!(Instant::now() < deadline, "leaf PID timeout");
+            thread::sleep(Duration::from_millis(20));
+        };
+        if held.lock().is_none() {
+            let raw = unsafe { OpenProcess(0x0010_1001, 0, pid) };
+            assert!(!raw.is_null());
+            *held.lock() = Some(Leaf(unsafe { OwnedHandle::from_raw_handle(raw) }));
+        }
+        let held_leaf = held.lock();
+        let leaf = held_leaf.as_ref().unwrap();
+        assert_eq!(image(&leaf.0), ping.canonicalize().unwrap());
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "intermediate exit marker timeout"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        let intermediate_pid: u32 = fs::read_to_string(&ready).unwrap().parse().unwrap();
+        let raw = unsafe { OpenProcess(0x0010_0000, 0, intermediate_pid) };
+        if !raw.is_null() {
+            let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+            assert_eq!(
+                unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) },
+                0,
+                "intermediate still running"
+            );
+        }
+        no_visible_descendants(&[session.child_pid.unwrap(), pid, intermediate_pid]);
+        assert_eq!(
+            unsafe { WaitForSingleObject(leaf.0.as_raw_handle(), 0) },
+            258,
+            "fixture leaf exited before stop"
+        );
+        let stopped = session.kill();
+        let surviving = unsafe { WaitForSingleObject(leaf.0.as_raw_handle(), 5000) } != 0;
+        eprintln!(
+            "startup_gap={} stop={stopped:?} surviving_descendant={surviving} visible_windows=0",
+            observed.load(Ordering::SeqCst)
+        );
+        drop(session);
+        leaf.cleanup().expect("exact leaf cleanup");
+        assert!(stopped.is_ok(), "PTY stop failed: {stopped:?}");
+        assert!(!surviving, "surviving_descendant=true");
+    }
+    #[test]
+    fn g62_real_conpty_echo_resize_ctrl_c_exit_and_close_drain() {
+        let _fixtures = WINDOWS_TEST_LOCK.lock();
+        let temp = tempfile::TempDir::new().unwrap();
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let shell = system.join("WindowsPowerShell\\v1.0\\powershell.exe");
+        let pid_file = temp.path().join("synthetic-terminal.pid");
+        let script = temp.path().join("synthetic-terminal.ps1");
+        let body = r#"
+$ErrorActionPreference='Stop'
+[Console]::TreatControlCAsInput=$true
+[IO.File]::WriteAllText('__SYNTHETIC_PID_PATH__',[string]$PID)
+[Console]::WriteLine('SYNTHETIC_READY')
+$line=[Text.StringBuilder]::new()
+while($true){
+ $key=[Console]::ReadKey($true)
+ if(($key.KeyChar -eq [char]3) -or (($key.Key -eq [ConsoleKey]::C) -and (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0))){
+  [Console]::WriteLine('SYNTHETIC_CTRL_C_OK');continue
+ }
+ if($key.Key -ne [ConsoleKey]::Enter){$null=$line.Append($key.KeyChar);continue}
+ $text=$line.ToString();$null=$line.Clear()
+ switch($text){
+  'size' {[Console]::WriteLine(('SYNTHETIC_SIZE_{0}x{1}' -f [Console]::WindowWidth,[Console]::WindowHeight))}
+  'exit' {
+   for($i=0;$i -lt 2000;$i++){[Console]::WriteLine(('synthetic-drain-{0}-abcdefghijklmnopqrstuvwxyz' -f $i))}
+   [Console]::WriteLine('SYNTHETIC_DRAIN_END');exit 37
+  }
+  default {[Console]::WriteLine(('SYNTHETIC_ECHO:{0}' -f $text))}
+ }
+}
+"#;
+        fs::write(
+            &script,
+            body.replace("__SYNTHETIC_PID_PATH__", &literal(&pid_file)),
+        )
+        .unwrap();
+        let mut cleanup = None;
+        let session = Arc::new(
+            PtySession::new_deferred(
+                "synthetic-terminal-contract".into(),
+                AgentRole::Worker {
+                    index: 1,
+                    parent: None,
+                },
+                shell.to_str().unwrap(),
+                crate::adapters::pty_submit_policy("powershell.exe"),
+                &[],
+                &[
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-File",
+                    script.to_str().unwrap(),
+                ],
+                Some(temp.path().to_str().unwrap()),
+                80,
+                24,
+                8192,
+                &mut cleanup,
+            )
+            .expect("real new_deferred constructs the synthetic terminal"),
+        );
+        assert!(
+            cleanup.is_none(),
+            "constructor transfers its cleanup resources"
+        );
+        let reader = session.get_reader();
+        let output = Arc::new(parking_lot::Mutex::new(Vec::<u8>::new()));
+        let received = output.clone();
+        let (ended, eof) = std::sync::mpsc::channel::<Result<(), String>>();
+        let drain = thread::spawn(move || {
+            let mut bytes = [0u8; 4096];
+            loop {
+                match super::read_from_reader(&reader, &mut bytes) {
+                    Ok(0) => {
+                        let _ = ended.send(Ok(()));
+                        break;
+                    }
+                    Ok(n) => received.lock().extend_from_slice(&bytes[..n]),
+                    Err(error) => {
+                        let _ = ended.send(Err(error.to_string()));
+                        break;
+                    }
+                }
+            }
+        });
+        let await_marker = |marker: &str, assertion: &str| {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if String::from_utf8_lossy(&output.lock()).contains(marker) {
+                    break;
+                }
+                assert!(
+                    session.is_alive(),
+                    "{assertion}: child exited; output={:?}",
+                    String::from_utf8_lossy(&output.lock())
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "{assertion}: marker={marker}; output={:?}",
+                    String::from_utf8_lossy(&output.lock())
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        await_marker("SYNTHETIC_READY", "synthetic child is ready for input");
+        let child_pid: u32 = fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        let raw = unsafe { OpenProcess(0x0010_1001, 0, child_pid) };
+        assert!(!raw.is_null(), "synthetic child image handle exists");
+        let child = unsafe { OwnedHandle::from_raw_handle(raw) };
+        assert_eq!(
+            image(&child),
+            shell.canonicalize().unwrap(),
+            "absolute synthetic shell image is selected"
+        );
+        let raw = unsafe { OpenProcess(0x0010_1001, 0, session.child_pid.unwrap()) };
+        assert!(!raw.is_null(), "root image handle exists");
+        let root = unsafe { OwnedHandle::from_raw_handle(raw) };
+        assert_eq!(
+            image(&root),
+            system.join("cmd.exe").canonicalize().unwrap(),
+            "batch launcher image is selected"
+        );
+        session
+            .write(b"hello synthetic\r")
+            .expect("input write succeeds");
+        await_marker(
+            "SYNTHETIC_ECHO:hello synthetic",
+            "written input is echoed through the real reader",
+        );
+        session.resize(103, 31).expect("resize request succeeds");
+        let resize_deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            session.write(b"size\r").unwrap();
+            if String::from_utf8_lossy(&output.lock()).contains("SYNTHETIC_SIZE_103x31") {
+                break;
+            }
+            assert!(
+                Instant::now() < resize_deadline,
+                "resize reaches the synthetic child; output={:?}",
+                String::from_utf8_lossy(&output.lock())
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        no_visible_descendants(&[session.child_pid.unwrap(), child_pid]);
+        session.write(&[3]).expect("Ctrl+C write succeeds");
+        await_marker("SYNTHETIC_CTRL_C_OK", "Ctrl+C reaches the synthetic child");
+        let before_exit = output.lock().len();
+        session.write(b"exit\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while session.is_alive() {
+            assert!(
+                Instant::now() < deadline,
+                "synthetic child exits after command"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            session.unexpected_exit(),
+            Some(37),
+            "synthetic exit code is reported"
+        );
+        assert!(
+            matches!(eof.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "reader waits for master close"
+        );
+        let closing = session.clone();
+        let (closed, close_done) = std::sync::mpsc::channel();
+        let close = thread::spawn(move || {
+            closing.release_master();
+            let _ = closed.send(());
+        });
+        close_done
+            .recv_timeout(Duration::from_secs(10))
+            .expect("master close completes while reader drains");
+        close.join().expect("master close worker joins");
+        eof.recv_timeout(Duration::from_secs(10))
+            .expect("reader reaches EOF after master close")
+            .expect("reader closes without an IO error");
+        drain.join().expect("output drain worker joins");
+        let output = output.lock();
+        assert!(
+            String::from_utf8_lossy(&output).contains("SYNTHETIC_DRAIN_END"),
+            "final child output drains before EOF"
+        );
+        assert!(
+            output.len().saturating_sub(before_exit) > 8192,
+            "final drain exceeds one pipe buffer"
+        );
+        eprintln!("terminal_contract input=true resize=103x31 ctrl_c=true exit_code=37 eof_after_close=true drained_bytes={} visible_windows=0", output.len());
+    }
+
 }
