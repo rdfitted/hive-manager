@@ -826,13 +826,16 @@ fn g53_live_process_cleanup_fails_and_retains_exact_client_until_verified_exit()
 
 #[test]
 fn g63_transport_fixtures_reject_bare_shell_launches() {
-    // Match bare Rust program literals and the first command in a batch shim.
-    let bare = regex::Regex::new(r#"(?i)(?:"|\\r\\n)(?:powershell|cmd)\.exe(?:"|\s)"#).unwrap();
+    // Match Rust literals, batch shims, and PowerShell Start-Process scripts.
+    let bare = regex::Regex::new(r#"(?i)(?:"|\\r\\n|Start-Process\s+(?:-FilePath\s+)?(?:\\?['"])?)(?:powershell|cmd)\.exe(?:\\?['"]|\s)"#).unwrap();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/transport");
-    for name in ["claude", "codex"] {
-        let source = std::fs::read_to_string(root.join(name).join("tests.rs")).unwrap();
+    for name in ["claude/tests.rs", "codex/tests.rs", "process.rs"] {
+        let source = std::fs::read_to_string(root.join(name)).unwrap();
         assert!(!bare.is_match(&source), "{name} fixture contains a bare shell launch");
     }
     assert!(bare.is_match(&format!("\"{}.exe\"", "powershell")));
     assert!(bare.is_match(&format!(r"@echo off\r\n{}.exe /c fixture", "cmd")));
+    assert!(bare.is_match(&format!("Start-Process {}.exe -NoNewWindow", "powershell")));
+    assert!(bare.is_match(&format!("Start-Process -FilePath '{}.exe' -NoNewWindow", "powershell")));
+    assert!(bare.is_match(&format!(r#"Start-Process \"{}.exe\" -NoNewWindow"#, "powershell")));
 }
