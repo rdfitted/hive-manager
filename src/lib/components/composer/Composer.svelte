@@ -139,6 +139,14 @@
     const next = value;
     if (editor && currentText() !== next) editor.textContent = next;
   });
+  let lastSubmissionKey: string | undefined;
+  $effect(() => {
+    const key = submissionKey;
+    if (key !== lastSubmissionKey) {
+      lastSubmissionKey = key;
+      closeMenu();
+    }
+  });
 
   function flattenNode(node: Node): string {
     if (node instanceof HTMLElement && node.dataset.tokenValue) {

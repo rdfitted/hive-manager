@@ -68,6 +68,7 @@ interface CoordinationState {
 }
 
 function createCoordinationStore() {
+  let logRequestToken = 0;
   const { subscribe, set, update } = writable<CoordinationState>({
     log: [],
     workers: [],
@@ -123,33 +124,40 @@ function createCoordinationStore() {
     subscribe,
 
     setSessionId(sessionId: string | null) {
-      update((state) => ({
-        ...state,
-        sessionId,
-        log: sessionId === state.sessionId ? state.log : [],
-        workers: sessionId === state.sessionId ? state.workers : [],
-        fusionState: sessionId === state.sessionId ? state.fusionState : {
-          completedVariants: [],
-          judgeReport: null,
-          evaluationReady: false,
-        },
-      }));
+      update((state) => {
+        const changed = sessionId !== state.sessionId;
+        if (changed) ++logRequestToken;
+        return {
+          ...state,
+          sessionId,
+          loading: changed ? false : state.loading,
+          error: changed ? null : state.error,
+          log: sessionId === state.sessionId ? state.log : [],
+          workers: sessionId === state.sessionId ? state.workers : [],
+          fusionState: sessionId === state.sessionId ? state.fusionState : {
+            completedVariants: [],
+            judgeReport: null,
+            evaluationReady: false,
+          },
+        };
+      });
     },
 
     async loadLog(sessionId: string, limit?: number) {
+      const requestToken = ++logRequestToken;
       update((state) => ({ ...state, loading: true, error: null, sessionId }));
       try {
         const log = await invoke<CoordinationMessage[]>('get_coordination_log', {
           sessionId,
           limit,
         });
-        update((state) => ({
+        update((state) => requestToken !== logRequestToken || state.sessionId !== sessionId ? state : ({
           ...state,
           log,
           loading: false,
         }));
       } catch (err) {
-        update((state) => ({ ...state, loading: false, error: String(err) }));
+        update((state) => requestToken !== logRequestToken || state.sessionId !== sessionId ? state : ({ ...state, loading: false, error: String(err) }));
       }
     },
 

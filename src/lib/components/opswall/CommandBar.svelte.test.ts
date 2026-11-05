@@ -15,6 +15,69 @@ async function type(editor: HTMLElement, text: string) {
   editor.textContent = text; await fireEvent.input(editor); return editor;
 }
 describe('Ops Wall command routing', () => {
+  it('G59 caret menu ownership: target shortcuts close stale autocomplete and leave Tab native', async () => {
+    const rects = Object.getOwnPropertyDescriptor(Range.prototype, 'getClientRects');
+    Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [{ left: 100, bottom: 200 }] });
+    try {
+      const view = render(CommandBarHarness, { sessionId: 's', agents, targetId: 'alpha', initialDrafts: { 's:beta': 'Beta preserved' } });
+      const editor = view.getByRole('textbox'); editor.focus();
+      await fireEvent.click(view.getByRole('button', { name: 'Add mention or command' }));
+      await fireEvent.click(view.getByRole('menuitem', { name: 'Command' }));
+      expect(view.getByRole('listbox', { name: 'Commands' })).toBeTruthy();
+      await fireEvent.keyDown(editor, { key: 'ArrowDown', altKey: true });
+      expect(view.getByRole('button', { name: 'Command target: @Beta' })).toBeTruthy();
+      const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+      editor.dispatchEvent(tab); await tick();
+      expect(tab.defaultPrevented).toBe(false);
+      expect(view.queryByRole('listbox', { name: 'Commands' })).toBeNull();
+      expect(view.getByRole('textbox')).toBe(editor);
+      expect(editor.textContent).toBe('Beta preserved');
+      await fireEvent.keyDown(editor, { key: 'ArrowUp', altKey: true });
+      expect(editor.textContent).toBe('/');
+      expect(fixture.consume).not.toHaveBeenCalled(); expect(fixture.invoke).not.toHaveBeenCalled();
+    } finally {
+      if (rects) Object.defineProperty(Range.prototype, 'getClientRects', rects);
+      else Reflect.deleteProperty(Range.prototype, 'getClientRects');
+    }
+  });
+  it.each([false, true])('G59 keyboard escape: closed-menu Tab is native from editor and picker (shift=%s)', async (shiftKey) => {
+    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'alpha' });
+    for (const control of [view.getByRole('textbox'), view.getByRole('button', { name: 'Command target: @Alpha' })]) {
+      control.focus();
+      const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+      control.dispatchEvent(event); await tick();
+      expect(event.defaultPrevented).toBe(false);
+      expect(view.getByRole('button', { name: 'Command target: @Alpha' })).toBeTruthy();
+    }
+  });
+  it('G59 open target menu owns Tab cycles without submitting or replacing the editor', async () => {
+    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'alpha' });
+    const editor = await type(view.getByRole('textbox'), 'Alpha unsent'); editor.focus();
+    await fireEvent.click(view.getByRole('button', { name: 'Command target: @Alpha' }));
+    expect(await fireEvent.keyDown(editor, { key: 'Tab' })).toBe(false);
+    expect(view.getByRole('button', { name: 'Command target: @Beta' })).toBeTruthy();
+    expect(view.getByRole('listbox', { name: 'Mentions' })).toBeTruthy();
+    expect(await fireEvent.keyDown(editor, { key: 'Tab', shiftKey: true })).toBe(false);
+    expect(view.getByRole('button', { name: 'Command target: @Alpha' })).toBeTruthy();
+    await fireEvent.keyDown(editor, { key: 'Escape' });
+    expect(view.queryByRole('listbox')).toBeNull();
+    expect(view.getByRole('textbox')).toBe(editor);
+    expect(editor.textContent).toBe('Alpha unsent');
+    expect(fixture.consume).not.toHaveBeenCalled(); expect(fixture.invoke).not.toHaveBeenCalled();
+  });
+  it('G59 target shortcuts: editor Alt+Arrow and picker horizontal arrows select stable recipients', async () => {
+    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'alpha' });
+    const editor = view.getByRole('textbox'); editor.focus();
+    await fireEvent.keyDown(editor, { key: 'ArrowDown', altKey: true });
+    expect(view.getByRole('button', { name: 'Command target: @Beta' })).toBeTruthy();
+    await fireEvent.keyDown(editor, { key: 'ArrowUp', altKey: true });
+    const picker = view.getByRole('button', { name: 'Command target: @Alpha' }); picker.focus();
+    await fireEvent.keyDown(picker, { key: 'ArrowRight' });
+    expect(view.getByRole('button', { name: 'Command target: @Beta' })).toBeTruthy();
+    await fireEvent.keyDown(picker, { key: 'ArrowLeft' });
+    expect(view.getByRole('button', { name: 'Command target: @Alpha' })).toBeTruthy();
+    expect(fixture.invoke).not.toHaveBeenCalled();
+  });
   it('G59 consume race: captures recipients and draft ownership before target/session changes', async () => {
     let resolve!: (value: null) => void;
     fixture.consume.mockImplementationOnce(() => new Promise<null>(done => { resolve = done; }));
@@ -22,7 +85,7 @@ describe('Ops Wall command routing', () => {
     const editor = view.getByRole('textbox');
     await fireEvent.keyDown(editor, { key: 'Enter' });
     await waitFor(() => expect(fixture.consume).toHaveBeenCalledWith('s'));
-    await fireEvent.keyDown(editor, { key: 'Tab' });
+    await fireEvent.keyDown(editor, { key: 'ArrowDown', altKey: true });
     expect(editor.textContent).toBe('Beta preserved');
     await view.rerender({ sessionId: 'other', targetId: 'alpha' });
     expect(editor.textContent).toBe('Other preserved');
@@ -45,7 +108,7 @@ describe('Ops Wall command routing', () => {
     expect(document.activeElement).toBe(editor);
     expect(fixture.consume).not.toHaveBeenCalled();
     expect(fixture.invoke).not.toHaveBeenCalled();
-    await fireEvent.keyDown(editor, { key: 'Tab', shiftKey: true });
+    await fireEvent.keyDown(editor, { key: 'ArrowUp', altKey: true });
     expect(editor.textContent).toBe('Alpha unsent');
   });
   it('G59 picker opens above the bottom bar and remains within the viewport', async () => {
@@ -75,24 +138,24 @@ describe('Ops Wall command routing', () => {
     await waitFor(() => expect(delivery).toHaveBeenCalledWith('s', 'beta', 'Sent'));
     expect(delivery).toHaveBeenCalledWith('s', 'alpha', 'Send failed');
   });
-  it('CR-5 Grid: editor identity and per-agent drafts survive target changes and Tab cycles', async () => {
+  it('CR-5 Grid: editor identity and per-agent drafts survive target shortcuts', async () => {
     const drafts = { 's:alpha': 'Alpha saved', 's:beta': 'Beta saved' };
     const view = render(CommandBar, { sessionId: 's', agents, targetId: 'alpha', drafts });
     const editor = view.getByRole('textbox');
     expect(editor.textContent).toBe('Alpha saved');
     await type(view.getByRole('textbox'), 'Alpha draft');
-    await fireEvent.keyDown(editor, { key: 'Tab' }); await tick();
+    await fireEvent.keyDown(editor, { key: 'ArrowDown', altKey: true }); await tick();
     expect(view.getByRole('button', { name: 'Command target: @Beta' })).toBeTruthy();
     expect(view.getByRole('textbox')).toBe(editor);
     expect(editor.textContent).toBe('Beta saved');
     await type(view.getByRole('textbox'), 'Beta draft');
-    await fireEvent.keyDown(editor, { key: 'Tab', shiftKey: true }); await tick();
+    await fireEvent.keyDown(editor, { key: 'ArrowUp', altKey: true }); await tick();
     expect(view.getByRole('textbox')).toBe(editor);
     expect(editor.textContent).toBe('Alpha draft');
     await fireEvent.click(view.getByRole('button', { name: 'Send message' }));
     await waitFor(() => expect(fixture.invoke).toHaveBeenCalledWith('operator_inject', { request: { session_id: 's', target_agent_id: 'alpha', message: 'Alpha draft' } }));
     expect(fixture.invoke).toHaveBeenCalledTimes(1);
-    await fireEvent.keyDown(editor, { key: 'Tab' });
+    await fireEvent.keyDown(editor, { key: 'ArrowDown', altKey: true });
     expect(editor.textContent).toBe('Beta draft');
   });
   it('G59 picker reuses stable IDs and preserves an editor-owned Tab', async () => {

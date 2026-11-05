@@ -336,6 +336,34 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       await probe(`wall-tick-default-${viewport.width}`, defaultTicker, context);
       await prove(`wall-tick-default-${viewport.width}`, defaultTicker, () => styleChange(first, { transform: 'translateY(2000px)' }), context);
       await prove(`wall-tick-label-${viewport.width}`, defaultTicker, () => removeNode(label), context);
+      const bar = page.locator('.terminal-panel:not(.hidden) .command-bar');
+      const editor = bar.locator('[data-composer]'), add = bar.locator('.add-button'), picker = bar.locator('.target-picker');
+      const freeTab = async () => {
+        const target = await picker.textContent();
+        await pressOutsideTerminal(page, editor, 'Tab');
+        const forward = await add.evaluate(node => document.activeElement === node);
+        if (!forward) return { passed: false, details: { forward } };
+        await pressOutsideTerminal(page, add, 'Shift+Tab');
+        const reverse = await editor.evaluate(node => document.activeElement === node);
+        const last = bar.locator('button:enabled').last();
+        await pressOutsideTerminal(page, last, 'Tab');
+        const outsideForward = await bar.evaluate(node => !!document.activeElement && document.activeElement !== document.body && !node.contains(document.activeElement));
+        await pressOutsideTerminal(page, editor, 'Shift+Tab');
+        const pickerReached = await picker.evaluate(node => document.activeElement === node);
+        await pressOutsideTerminal(page, picker, 'Shift+Tab');
+        const outsideReverse = await bar.evaluate(node => !!document.activeElement && document.activeElement !== document.body && !node.contains(document.activeElement));
+        const unchangedTarget = await picker.textContent() === target;
+        return { passed: forward && reverse && pickerReached && outsideForward && outsideReverse && unchangedTarget, details: { forward, reverse, pickerReached, outsideForward, outsideReverse, unchangedTarget } };
+      };
+      await probe(`wall-tab-free-${viewport.width}`, freeTab, context);
+      await prove(`wall-tab-free-${viewport.width}`, freeTab, async () => {
+        const handle = await bar.evaluateHandle(node => {
+          const listener = event => { if (event.key === 'Tab' && event.target instanceof Element && node.contains(event.target) && event.target.matches('[data-composer], .target-picker')) event.preventDefault(); };
+          window.addEventListener('keydown', listener, true);
+          return { dispose: () => window.removeEventListener('keydown', listener, true) };
+        });
+        return async () => { try { await handle.evaluate(guard => guard.dispose()); } finally { await handle.dispose(); } };
+      }, context);
     }
     const panes = page.locator('.terminal-panel:not(.hidden) .terminal-grid .terminal-item');
     const roster = async () => {

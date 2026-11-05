@@ -39,20 +39,37 @@
     activeIndex = Math.max(0, items.findIndex(item => item.id === target));
     menuOpen = !menuOpen;
   }
-  function keydown(event: KeyboardEvent) {
-    if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+  function cycleTarget(delta: number) {
+    const index = items.findIndex(item => item.id === target);
+    activeIndex = (index + delta + items.length) % items.length;
+    targetId = items[activeIndex].id;
+  }
+  function keydown(event: KeyboardEvent): boolean {
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || !(event.target instanceof HTMLElement)) return false;
+    if (event.altKey) {
+      if (agents.length && event.target.matches('[data-composer]') && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+        event.preventDefault(); cycleTarget(event.key === 'ArrowDown' ? 1 : -1); return true;
+      }
+      return false;
+    }
     if (menuOpen) {
-      if (event.key === 'Escape') { event.preventDefault(); menuOpen = false; }
+      if (event.key === 'Tab') {
+        event.preventDefault(); activeIndex = (activeIndex + (event.shiftKey ? -1 : 1) + items.length) % items.length; targetId = items[activeIndex].id;
+      } else if (event.key === 'Escape') { event.preventDefault(); menuOpen = false; }
       else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault(); activeIndex = (activeIndex + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
       } else if (event.key === 'Enter') { event.preventDefault(); choose(items[activeIndex]); }
-      return;
+      return event.defaultPrevented;
     }
-    if (event.key !== 'Tab' || !(event.target instanceof HTMLElement) || !event.target.matches('[data-composer], .target-picker')) return;
-    const targets = [...agents.map(agent => agent.id), '@all'];
-    if (!agents.length) return;
-    event.preventDefault();
-    targetId = targets[(targets.indexOf(target) + (event.shiftKey ? -1 : 1) + targets.length) % targets.length];
+    if (agents.length && event.target.matches('.target-picker') && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+      event.preventDefault(); cycleTarget(event.key === 'ArrowRight' ? 1 : -1); return true;
+    }
+    return false;
+  }
+  function captureKeydown(event: KeyboardEvent) {
+    if (!(event.target instanceof Node) || !bar?.contains(event.target)) return;
+    const editorShortcut = event.altKey && event.target instanceof HTMLElement && event.target.matches('[data-composer]') && (event.key === 'ArrowUp' || event.key === 'ArrowDown');
+    if ((menuOpen || editorShortcut) && keydown(event)) event.stopPropagation();
   }
   function prepareSubmit() {
     const sendingSession = sessionId;
@@ -82,12 +99,12 @@
   }
 </script>
 
-<svelte:window onkeydowncapture={(event) => { if (menuOpen && event.target instanceof Node && bar?.contains(event.target)) { keydown(event); if (event.defaultPrevented) event.stopPropagation(); } }} onkeydown={(event) => { if (!menuOpen && event.target instanceof Node && bar?.contains(event.target)) keydown(event); }} onpointerdown={(event) => { if (event.target instanceof Element && !event.target.closest('.target-picker, .mention-menu')) menuOpen = false; }} />
+<svelte:window onkeydowncapture={captureKeydown} onkeydown={(event) => { if (!menuOpen && event.target instanceof Node && bar?.contains(event.target)) keydown(event); }} onpointerdown={(event) => { if (event.target instanceof Element && !event.target.closest('.target-picker, .mention-menu')) menuOpen = false; }} />
 
 <section bind:this={bar} class="command-bar" aria-label="Shared agent command bar">
   <div class="command-target">
     <button bind:this={picker} type="button" class="target-picker lattice-btn lattice-btn--ghost" aria-label={`Command target: @${label}`} aria-haspopup="listbox" aria-expanded={menuOpen} disabled={!agents.length} onmousedown={(event) => event.preventDefault()} onclick={openPicker}>@{label}</button>
-    <span class="target-hint">Tab cycles targets</span>
+    <span class="target-hint">{menuOpen ? 'Tab cycles targets · Esc closes' : 'Alt+↑/↓ changes target'}</span>
   </div>
   {#if menuOpen}<MentionMenu {items} {activeIndex} {x} {y} onselect={choose} />{/if}
   <Composer {sessionId} agentId={target} submissionKey={draftKey} {prepareSubmit} persistDraft={false} bind:value={() => drafts[draftKey] ?? '', (value) => { drafts = { ...drafts, [draftKey]: value }; }} disabled={sending || !agents.length} onsubmit={send} placeholder={target === '@all' ? 'Message all agents' : facts.placeholder}>

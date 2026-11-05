@@ -8,7 +8,7 @@ reviewProofNames.push('conv-diff-1440', 'conv-diff-800');
 reviewProofNames.push(...[1440, 800].flatMap(width => ['grid', 'focus'].flatMap(mode =>
   ['well', 'body', 'meta', 'font', 'line', 'queen', 'warn', 'operator'].map(part => `chat-${part}-${mode}-${width}`))));
 reviewProofNames.push('grid-no-column-composer', 'wall-pin-fixed', ...[1440, 800].flatMap(width => [
-  `wall-pin-${width}`,
+  `wall-pin-${width}`, `wall-tab-free-${width}`,
   `wall-tick-default-${width}`, `wall-tick-label-${width}`,
   `wall-max-${width}`, `wall-tick-${width}`, `wall-tick-go-${width}`, `wall-tile-${width}`,
   ...['hide', 'edit', 'send', 'pick'].map(part => `wall-bar-${part}-${width}`),
