@@ -1,5 +1,33 @@
 use super::*;
 
+#[cfg(windows)]
+fn fixture_powershell() -> String {
+    let path = std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    assert!(path.is_absolute() && path.is_file(), "fixture shell must be an absolute system executable");
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(windows)]
+fn assert_fixture_image(pid: u32) {
+    use std::{ffi::c_void, os::windows::ffi::OsStringExt};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, id: u32) -> *mut c_void;
+        fn QueryFullProcessImageNameW(handle: *mut c_void, flags: u32, image: *mut u16, size: *mut u32) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    let handle = unsafe { OpenProcess(0x1000, 0, pid) };
+    assert!(!handle.is_null(), "fixture process must be queryable");
+    let mut image = vec![0u16; 32768];
+    let mut size = image.len() as u32;
+    let queried = unsafe { QueryFullProcessImageNameW(handle, 0, image.as_mut_ptr(), &mut size) };
+    unsafe { CloseHandle(handle); }
+    assert_ne!(queried, 0, "fixture image query failed");
+    let actual = std::path::PathBuf::from(std::ffi::OsString::from_wide(&image[..size as usize]));
+    assert_eq!(actual.canonicalize().unwrap(), std::path::Path::new(&fixture_powershell()).canonicalize().unwrap());
+}
+
 #[test]
 fn failed_completion_envelopes_emit_visible_error_and_keep_turn_end() {
     for (failed, details, expected) in [
@@ -422,7 +450,9 @@ fn wait_for_child_pid_with_startup(
             .and_then(|value| value.trim().parse().ok());
         pid.is_some()
     });
-    pid.unwrap()
+    let pid = pid.unwrap();
+    assert_fixture_image(pid);
+    pid
 }
 
 #[cfg(windows)]
@@ -490,7 +520,7 @@ fn fixture(
         include_str!("fake-server.ps1"),
     )
     .unwrap();
-    std::fs::write(temp.path().join("claude.cmd"),"@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0server.ps1\"\r\n").unwrap();
+    std::fs::write(temp.path().join("claude.cmd"),"@echo off\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0server.ps1\"\r\n").unwrap();
     let manager = Arc::new(crate::pty::PtyManager::new());
     let registry = Arc::new(TransportRegistry::new(temp.path().join("feeds"), None));
     manager.attach_transports(registry.clone());
@@ -670,7 +700,7 @@ fn g15_claude_startup_cancel_stop_exit_and_app_shutdown_reap_descendants() {
 fn g15_claude_direct_writer_failure_cleans_owned_tree() {
     let (temp, _, registry, session, agent, transcript) = fixture("closed-stdin");
     let options = ClaudeOptions {
-        command: "powershell.exe".into(),
+        command: fixture_powershell(),
         args: vec![
             "-NoProfile".into(),
             "-NonInteractive".into(),
@@ -775,7 +805,7 @@ fn g53_live_process_cleanup_fails_and_retains_exact_client_until_verified_exit()
     let ready = Arc::new(AtomicBool::new(false));
     let observed = ready.clone();
     let client = client::JsonClient::new();
-    client.spawn("powershell.exe", &[
+    client.spawn(&fixture_powershell(), &[
         "-NoProfile".into(), "-NonInteractive".into(), "-Command".into(),
         r#"Write-Output '{"method":"ready","type":"ready"}'; Start-Sleep -Seconds 600"#.into(),
     ], temp.path(), &[], Arc::new(move |_| { observed.store(true, Ordering::SeqCst); })).unwrap();
@@ -791,4 +821,18 @@ fn g53_live_process_cleanup_fails_and_retains_exact_client_until_verified_exit()
     }).unwrap();
     client.stop_with_cleanup(|_, _| panic!("verified stop must release the child handle")).unwrap();
     client.stop().unwrap();
+}
+
+
+#[test]
+fn g63_transport_fixtures_reject_bare_shell_launches() {
+    // Match bare Rust program literals and the first command in a batch shim.
+    let bare = regex::Regex::new(r#"(?i)(?:"|\\r\\n)(?:powershell|cmd)\.exe(?:"|\s)"#).unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/transport");
+    for name in ["claude", "codex"] {
+        let source = std::fs::read_to_string(root.join(name).join("tests.rs")).unwrap();
+        assert!(!bare.is_match(&source), "{name} fixture contains a bare shell launch");
+    }
+    assert!(bare.is_match(&format!("\"{}.exe\"", "powershell")));
+    assert!(bare.is_match(&format!(r"@echo off\r\n{}.exe /c fixture", "cmd")));
 }
