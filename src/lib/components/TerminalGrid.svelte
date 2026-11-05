@@ -568,9 +568,10 @@
               {@const failed = status === 'Error'}
               {@const stopped = typeof pane.agent.status === 'object' && 'WaitingForInput' in pane.agent.status && pane.agent.status.WaitingForInput === 'stopped_by_operator'}
               {@const blockedResume = resumeBlockedReason(session, pane.id)}
-              {#if blockedResume}
+              {@const resumableStatus = status === 'Completed' || failed || stopped}
+              {#if resumableStatus && blockedResume}
                 <span class="resume-blocked">{blockedResume}</span>
-              {:else if (status === 'Completed' || failed || stopped) && pane.agent.provider_session_id}
+              {:else if resumableStatus && pane.agent.provider_session_id}
                 <button type="button" class="lattice-btn lattice-btn--ghost"
                   aria-label={`Resume ${pane.title}`} disabled={resumingAgents[pane.id]}
                   onmousedown={(event) => event.preventDefault()}

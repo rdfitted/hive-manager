@@ -100,6 +100,17 @@ const session: Session = {
 };
 
 describe('G49 pane resume', () => {
+  it.each(['grid', 'focus'] as const)('G61 live blocked notices are hidden for Running and ordinary waiting agents in %s', async (mode) => {
+    layout.setSessionViewMode(mode);
+    fixture.blockedReasons.claude = 'Live seat must not display a Resume refusal.';
+    const live: Session = { ...session, agents: [{ ...session.agents[0], provider_session_id: 'provider-live' }] };
+    const view = render(TerminalGrid, { session: live, focusedAgentId: 'claude', onSelect: vi.fn() });
+    for (const status of ['Running', { WaitingForInput: 'trust_prompt' }] as const) {
+      await view.rerender({ session: { ...live, agents: [{ ...live.agents[0], status }] } });
+      expect(view.queryByRole('button', { name: 'Resume Claude agent' })).toBeNull();
+      expect(view.queryByText('Live seat must not display a Resume refusal.')).toBeNull();
+    }
+  });
   it.each(['grid', 'focus'] as const)('G61 blocked Resume in %s shows its reason, while an unblocked Completed seat stays resumable', async (mode) => {
     layout.setSessionViewMode(mode);
     fixture.blockedReasons.claude = 'Saved working directory is unavailable.';

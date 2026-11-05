@@ -35,6 +35,7 @@ it('G59 ticker merges session/coordination newest-first and selects the exact so
   expect(items.map(item => item.agentId)).toEqual(['alpha', 'alpha', null]);
   const onselect = vi.fn();
   const view = render(EventTicker, { items, onselect });
+  expect(view.getByText('Latest events')).toBeTruthy();
   expect(view.getAllByRole('button').map(button => button.textContent)).toEqual(['agent launched', 'Task: Inspect fixture']);
   await fireEvent.click(view.getByRole('button', { name: 'Task: Inspect fixture' }));
   expect(onselect).toHaveBeenCalledTimes(1); expect(onselect).toHaveBeenCalledWith('alpha');

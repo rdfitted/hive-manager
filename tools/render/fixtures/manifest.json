@@ -57,6 +57,7 @@
     "literalHtml": "<span data-fixture=\"literal\">synthetic inline HTML</span>"
   },
   "timing": { "oldActivitySeconds": 600, "createdSeconds": 1200, "recentActivitySeconds": 5 },
+  "opswall": { "tickerText": "Synthetic column check", "tickerAgentId": "fixture-orbit-worker-5", "tickerAgentDisplay": "WORKER-5", "minimumColumnWidth": 280, "queenRatio": 1.5 },
   "conversation": {
     "sessionId": "fixture-orbit",
     "agentId": "fixture-orbit-queen",

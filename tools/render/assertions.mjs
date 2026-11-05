@@ -2,7 +2,6 @@ import path from 'node:path';
 import { pngPixels, badgePaint } from './png.mjs';
 import { mutationProver, styleChange, removeNode, textChange, appendNode, offscreenTarget, emptyContents, duplicateIndicators } from './mutations.mjs';
 import { updaterState, classifyUpdater } from './updater.mjs';
-import { classifyFinding } from './findings.mjs';
 import { pressOutsideTerminal, proveTerminalFocus } from './keyboard.mjs';
 import { runSecurityAssertions } from './security.mjs';
 
@@ -12,6 +11,45 @@ const chatSelector = '.chat-pane[aria-label="Agent chat"]';
 // Existing shipped selectors, inventoried read-only; no component test hooks added.
 export function paneFor(page, agent) {
   return page.locator('.terminal-panel:not(.hidden) .terminal-item').filter({ has: page.locator(`button[aria-label=${JSON.stringify(`Focus ${agent.label}`)}]`) });
+}
+export async function scrollColumn(pane) {
+  await pane.scrollIntoViewIfNeeded();
+  await pane.evaluate(node => {
+    if (node.dataset.pinned === 'true') return;
+    const grid = node.closest('.terminal-grid');
+    const outer = grid.getBoundingClientRect();
+    const space = parseFloat(getComputedStyle(grid).getPropertyValue('--pin-space')) || 0;
+    const box = node.getBoundingClientRect();
+    if (box.left < outer.left + space) grid.scrollLeft -= outer.left + space - box.left;
+    const after = node.getBoundingClientRect();
+    if (after.right > outer.right) grid.scrollLeft += after.right - outer.right;
+  });
+}
+export async function pinGeometry(page, selectedId) {
+  return page.locator('.terminal-panel:not(.hidden) .terminal-grid').evaluate((grid, selectedId) => {
+    const outer = grid.getBoundingClientRect();
+    const rows = [...grid.querySelectorAll(':scope > .terminal-item')].map(node => {
+      const box = node.getBoundingClientRect(), css = getComputedStyle(node);
+      const control = node.querySelector('.terminal-pane-focus'), header = control.getBoundingClientRect();
+      const top = document.elementFromPoint(header.x + header.width / 2, header.y + header.height / 2);
+      const clip = parseFloat(css.getPropertyValue('--wall-clip')) || 0;
+      return { id: node.dataset.agentId, pinned: css.position === 'sticky', queen: node.classList.contains('queen-column'), attention: node.classList.contains('attention-column'),
+        box: { left: box.left, right: box.right, width: box.width }, paint: { left: Math.max(outer.left, box.left + clip), right: Math.min(outer.right, box.right) },
+        hit: !!top && (top === control || control.contains(top)) };
+    });
+    const pins = rows.filter(row => row.pinned);
+    const overlaps = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1;
+    const padding = parseFloat(getComputedStyle(grid).paddingLeft) || 0;
+    let next = outer.left + grid.clientLeft + padding + 4;
+    const offsets = pins.every(pin => { const fits = Math.abs(pin.box.left - next) <= 1; next = pin.box.right + 12; return fits; });
+    const noOverlap = pins.every((pin, index) => pins.slice(index + 1).every(other => !overlaps(pin.box, other.box)))
+      && rows.filter(row => !row.pinned && row.paint.right > row.paint.left).every(row => pins.every(pin => !overlaps(row.paint, pin.box)));
+    const reserve = pins.length === 0 || outer.right - next >= 280 - 1;
+    const selected = rows.find(row => row.id === selectedId);
+    const unselected = pins.every(pin => pin.id !== selectedId);
+    return { offsets, noOverlap, reserve, unselected, hits: pins.every(pin => pin.hit) && selected?.hit === true,
+      queen: pins.some(pin => pin.queen), attention: pins.some(pin => pin.attention), width: outer.width, left: outer.left, padding, pins, selected };
+  }, selectedId);
 }
 export async function expandAgents(page, session) {
   const group = page.locator('.session-agents[aria-label="Session agents"]');
@@ -64,6 +102,31 @@ export async function composerGeometry(pane) {
     const box = node.getBoundingClientRect(), outer = parent.getBoundingClientRect();
     const rect = value => ({ x: value.x, y: value.y, width: value.width, height: value.height, right: value.right, bottom: value.bottom });
     return { contained: box.width > 0 && box.height > 0 && box.left >= outer.left - 1 && box.top >= outer.top - 1 && box.right <= outer.right + 1 && box.bottom <= outer.bottom + 1, composer: rect(box), pane: rect(outer) };
+  });
+}
+export async function wallBarGeometry(page) {
+  const bar = page.locator('.terminal-panel:not(.hidden) .command-bar');
+  if (await bar.count() !== 1) return { contained: false, count: await bar.count() };
+  return bar.evaluate(node => {
+    const workspace = node.closest('.terminal-workspace').getBoundingClientRect();
+    const outer = node.getBoundingClientRect();
+    const elements = [node, node.querySelector('[data-composer]'), node.querySelector('.send-button'), node.querySelector('.target-picker')];
+    const boxes = elements.map(element => element?.getBoundingClientRect());
+    const visible = elements.every(element => {
+      if (!element) return false;
+      for (let current = element; current; current = current.parentElement) {
+        const style = getComputedStyle(current);
+        if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0) return false;
+      }
+      return true;
+    });
+    const hit = elements.slice(1).every(element => {
+      if (!element) return false;
+      const box = element.getBoundingClientRect(), top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return !!top && (top === element || element.contains(top));
+    });
+    const inside = box => !!box && box.width > 0 && box.height > 0 && box.left >= Math.max(0, workspace.left, outer.left) - 1 && box.top >= Math.max(0, workspace.top, outer.top) - 1 && box.right <= Math.min(innerWidth, workspace.right, outer.right) + 1 && box.bottom <= Math.min(innerHeight, workspace.bottom, outer.bottom) + 1;
+    return { contained: visible && hit && boxes.every(inside), visible, hit, boxes: boxes.map(box => box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null) };
   });
 }
 export async function badgeGeometry(page) {
@@ -187,6 +250,10 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   };
   const resumeChecks = async (agent, expected, mode, viewport) => {
     const pane = paneFor(page, agent);
+    if (mode === 'Grid') {
+      await page.locator(`.tree-row[data-agent-id=${JSON.stringify(agent.id)}]`).click();
+      await scrollColumn(pane);
+    }
     const button = pane.getByRole('button', { name: `Resume ${agent.label}`, exact: true });
     const name = `resume-${expected ? 'available' : 'unavailable'}-${mode.toLowerCase()}-${viewport.width}`;
     const context = { screen: mode.toLowerCase(), viewport: `${viewport.width}x${viewport.height}`, agentId: agent.id };
@@ -215,14 +282,134 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       tag: 'button', attributes: { 'aria-label': `Resume ${agent.label}` }, text: 'Resume',
     }), context);
   };
+  const revealGridAgent = async agent => {
+    await page.locator(`.tree-row[data-agent-id=${JSON.stringify(agent.id)}]`).click();
+    const pane = paneFor(page, agent);
+    await scrollColumn(pane);
+    return pane;
+  };
   const gridChecks = async (viewport, stage) => {
     const context = { screen: 'grid', viewport: `${viewport.width}x${viewport.height}`, stage };
+    if (stage === 'load') {
+      const region = page.locator('.terminal-panel:not(.hidden) .event-ticker');
+      const first = region.locator('.ticker-item').first();
+      const label = region.locator('.ticker-label');
+      await first.waitFor({ state: 'attached' });
+      const defaultTicker = async () => {
+        const visible = await visibleTargetState(first), heading = await visibleTargetState(label);
+        if (!visible.visible || !heading.visible) return { passed: false, details: { visible, heading, hit: false } };
+        const hit = await first.evaluate(node => { const box = node.getBoundingClientRect(), top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2); return !!top && (top === node || node.contains(top)); });
+        const scroll = await region.evaluate(node => node.scrollLeft);
+        return { passed: !!visible.visibleText.trim() && heading.visibleText === 'Latest events' && hit && scroll === 0, details: { visible, heading, hit, scroll } };
+      };
+      await probe(`wall-tick-default-${viewport.width}`, defaultTicker, context);
+      await prove(`wall-tick-default-${viewport.width}`, defaultTicker, () => styleChange(first, { transform: 'translateY(2000px)' }), context);
+      await prove(`wall-tick-label-${viewport.width}`, defaultTicker, () => removeNode(label), context);
+    }
     const panes = page.locator('.terminal-panel:not(.hidden) .terminal-grid .terminal-item');
-    const visiblePaneCount = async () => (await Promise.all((await panes.all()).map(pane => visibleTargetState(pane)))).filter(item => item.visible).length;
-    const visible = await visiblePaneCount();
-    assert('grid-eight-panes', visible === manifest.screens.grid.paneCount, { visible, expected: manifest.screens.grid.paneCount }, context);
-    await prove('grid-eight-panes', async () => ({ passed: await visiblePaneCount() === manifest.screens.grid.paneCount }), () => styleChange(panes.first(), { display: 'none' }), context);
+    const roster = async () => {
+      const ids = await panes.evaluateAll(nodes => nodes.map(node => node.dataset.agentId));
+      const expected = session.agents.map(agent => agent.id);
+      return { passed: ids.length === manifest.screens.grid.paneCount && new Set(ids).size === expected.length && expected.every(id => ids.includes(id)) && ids[0] === normal.id, details: { ids, expected } };
+    };
+    await probe('grid-eight-panes', roster, context);
+    await prove('grid-eight-panes', roster, () => removeNode(panes.last()), context);
+    await prove(`wall-roster-${viewport.width}`, roster, () => removeNode(panes.last()), context);
+    const columnWidths = async () => {
+      const widths = await panes.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().width));
+      return { passed: widths.length === 8 && widths.slice(1).every(width => width >= manifest.opswall.minimumColumnWidth - 1) && widths.slice(1).every(width => widths[0] >= width * manifest.opswall.queenRatio - 1), details: { widths } };
+    };
+    await probe(`wall-width-${viewport.width}`, columnWidths, context);
+    await prove(`wall-width-${viewport.width}`, columnWidths, () => styleChange(panes.first(), { transform: 'scaleX(0.2)', 'transform-origin': 'left' }), context);
+    const far = session.agents.at(-1);
+    await revealGridAgent(far);
+    const pinMeasure = async () => {
+      const details = await pinGeometry(page, far.id);
+      return { passed: details.offsets && details.noOverlap && details.reserve && details.unselected && details.hits && (viewport.width !== 1440 || (details.queen && details.attention)), details };
+    };
+    await probe(`wall-pin-${viewport.width}`, pinMeasure, context);
+    await prove(`wall-pin-${viewport.width}`, pinMeasure, async () => {
+      const undo = [];
+      for (const pane of await panes.all()) undo.push(await styleChange(pane, { position: 'sticky', left: '4px' }));
+      return async () => { for (const restore of undo.reverse()) await restore(); };
+    }, context);
+    if (viewport.width === 1440) await prove('wall-pin-fixed', pinMeasure, async () => {
+      const undo = [];
+      for (const pane of await panes.filter({ has: page.locator('.attention-chip') }).all()) undo.push(await styleChange(pane, { left: '4px' }));
+      return async () => { for (const restore of undo.reverse()) await restore(); };
+    }, context);
+    for (const [index, agent] of session.agents.entries()) {
+      const pane = paneFor(page, agent);
+      await scrollColumn(pane);
+      const button = pane.getByRole('button', { name: `Focus ${agent.label}`, exact: true });
+      const reachable = async () => {
+        const visible = await visibleTargetState(button);
+        if (!visible.visible) return { passed: false, details: { agentId: agent.id, visible, hit: false } };
+        const hit = await button.evaluate(node => {
+          const r = node.getBoundingClientRect();
+          const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+          return !!top && (top === node || node.contains(top));
+        });
+        return { passed: visible.visible && visible.visibleText.includes(agent.label) && hit, details: { agentId: agent.id, visible, hit } };
+      };
+      const name = `wall-col-${index}-${viewport.width}`;
+      await probe(name, reachable, context);
+      await prove(name, reachable, () => styleChange(button, { visibility: 'hidden' }), context);
+    }
+    const noColumnComposer = async () => ({ passed: await panes.locator('.chat-composer, [data-composer]').count() === 0 });
+    await probe('grid-no-column-composer', noColumnComposer, context);
+    await prove('grid-no-column-composer', noColumnComposer, () => appendNode(panes.first(), { attributes: { class: 'chat-composer' } }), context);
+    await prove(`wall-tail-${viewport.width}`, noColumnComposer, () => appendNode(panes.first(), { attributes: { class: 'chat-composer' } }), context);
+    const farPane = await revealGridAgent(far);
+    await farPane.getByRole('button', { name: `Maximize ${far.label}`, exact: true }).click();
+    const maximized = async () => {
+      const box = await farPane.boundingBox(), outer = await page.locator('.terminal-panel:not(.hidden) .terminal-grid').boundingBox();
+      const count = await panes.count(), hidden = await page.locator('.terminal-panel:not(.hidden) .terminal-grid > .terminal-item.hidden-by-maximize').count();
+      const bar = await wallBarGeometry(page);
+      const contained = !!box && !!outer && box.width > 0 && box.height > 0 && box.x >= Math.max(0, outer.x) - 1 && box.y >= Math.max(0, outer.y) - 1 && box.x + box.width <= Math.min(viewport.width, outer.x + outer.width) + 1 && box.y + box.height <= Math.min(viewport.height, outer.y + outer.height) + 1;
+      return { passed: contained && count === 8 && hidden === 7 && bar.contained, details: { box, outer, count, hidden, bar, contained } };
+    };
+    await probe(`wall-max-${viewport.width}`, maximized, context);
+    await prove(`wall-max-${viewport.width}`, maximized, () => styleChange(farPane, { transform: 'translateX(2000px)' }), context);
+    await farPane.getByRole('button', { name: `Restore ${far.label}`, exact: true }).click();
+    const waitForHeader = async id => page.waitForFunction(id => {
+      const node = document.querySelector(`.terminal-panel:not(.hidden) .terminal-item[data-agent-id="${CSS.escape(id)}"] .terminal-pane-focus`);
+      if (!node) return false;
+      const box = node.getBoundingClientRect(), top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return !!top && (top === node || node.contains(top));
+    }, id, { timeout: 5000 });
+    const ticker = page.locator('.terminal-panel:not(.hidden) .event-ticker').getByRole('button', { name: `Task: ${manifest.opswall.tickerText}`, exact: true });
+    await ticker.scrollIntoViewIfNeeded();
+    const tickerVisible = async () => { const details = await visibleTargetState(ticker); return { passed: details.visible && details.visibleText.includes(manifest.opswall.tickerText), details }; };
+    await probe(`wall-tick-${viewport.width}`, tickerVisible, context);
+    await prove(`wall-tick-${viewport.width}`, tickerVisible, () => styleChange(ticker, { visibility: 'hidden' }), context);
+    await ticker.click();
+    await waitForHeader(manifest.opswall.tickerAgentId);
+    const tickAgent = session.agents.find(agent => agent.id === manifest.opswall.tickerAgentId);
+    const tickTarget = async () => {
+      const target = page.locator('.terminal-panel:not(.hidden) .command-bar .target-picker');
+      const header = paneFor(page, tickAgent).getByRole('button', { name: `Focus ${tickAgent.label}`, exact: true });
+      const visible = await visibleTargetState(header);
+      if (!visible.visible) return { passed: false, details: { visible, hit: false } };
+      const hit = await header.evaluate(node => { const box = node.getBoundingClientRect(), top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2); return !!top && (top === node || node.contains(top)); });
+      return { passed: (await target.textContent()).trim() === `@${tickAgent.label}` && visible.visible && hit, details: { visible, hit } };
+    };
+    await probe(`wall-tick-go-${viewport.width}`, tickTarget, context);
+    await prove(`wall-tick-go-${viewport.width}`, tickTarget, () => styleChange(paneFor(page, tickAgent).locator('.terminal-pane-focus'), { visibility: 'hidden' }), context);
+    const attentionTile = page.locator('.terminal-panel:not(.hidden) .resource-strip').getByRole('button', { name: /^Attention \d+$/ });
+    await attentionTile.click();
+    const firstAttention = session.agents.find(agent => ['stalled', 'exited_during_startup', 'delivery_failed'].includes(agent.state));
+    await waitForHeader(firstAttention.id);
+    const tileMatch = async () => {
+      const expected = Number((await attentionTile.textContent()).replace(/\D/g, ''));
+      const count = await page.locator('.terminal-panel:not(.hidden) .resource-match').count();
+      return { passed: expected > 0 && count === expected && await attentionTile.getAttribute('aria-pressed') === 'true', details: { expected, count } };
+    };
+    await probe(`wall-tile-${viewport.width}`, tileMatch, context);
+    await prove(`wall-tile-${viewport.width}`, tileMatch, () => appendNode(page.locator('.terminal-panel:not(.hidden) .terminal-grid'), { attributes: { class: 'resource-match' } }), context);
+    await attentionTile.click();
     for (const [agent, needs] of [[byState('finished'), false], [stalled, true], [byState('exited_during_startup'), true]]) {
+      await revealGridAgent(agent);
       await probe(`${agent.state}-attention-card`, async () => { const details = await attentionState(page, agent); return { passed: details.paneExists && details.card === needs, details }; }, context);
       await probe(`${agent.state}-needs-you-count`, async () => { const details = await attentionState(page, agent); return { passed: details.rowExists && details.badge === needs, details }; }, context);
       for (const kind of ['attention-card', 'needs-you-count']) {
@@ -237,25 +424,24 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       }
     }
     for (const [agent, hasAttention] of [[normal, false], [stalled, true]]) {
-      const pane = paneFor(page, agent);
+      const pane = await revealGridAgent(agent);
       await showChat(pane);
-      await probe(`grid-composer-${hasAttention ? 'with' : 'without'}-attention`, async () => { const details = await composerGeometry(pane); const card = (await pane.locator(`${attention}:visible`).count()) > 0; return { passed: details.contained && card === hasAttention, details: { ...details, card } }; }, context);
+      const bar = page.locator('.terminal-panel:not(.hidden) .command-bar');
+      const measure = async () => {
+        const details = await wallBarGeometry(page);
+        const card = (await pane.locator(`${attention}:visible`).count()) > 0;
+        return { passed: details.contained && card === hasAttention, details: { ...details, card } };
+      };
       const name = `grid-composer-${hasAttention ? 'with' : 'without'}-attention`;
-      if (!hasAttention) await prove('composer-offscreen-not-known', async () => {
-        const details = { ...await composerGeometry(pane), card: false };
-        const classified = classifyFinding(name, details.contained, details, { [name]: { issue: 414 } });
-        return { passed: classified.accepted, details: { ...details, classified } };
-      }, () => styleChange(pane.locator(`${composer}:visible`).first(), { position: 'fixed', left: '-10000px' }), context);
-      // #414 already overflows. Establish a temporary contained control, prove
-      // the exact geometry predicate rejects overflow, then restore the bug.
-      if (!report.mutations.some(item => item.name === name)) {
-        const box = await pane.boundingBox();
-        const element = pane.locator(`${composer}:visible`).first();
-        const undoControl = await styleChange(element, { position: 'fixed', left: `${box.x + 2}px`, top: `${box.y + 2}px`, width: '40px', height: '40px', 'min-height': '0', 'min-width': '0', margin: '0', transform: 'none' });
-        try {
-          await prove(name, async () => { const details = await composerGeometry(pane); return { passed: details.contained, details }; }, () => styleChange(element, { left: '-1000px' }), { ...context, control: 'Temporary contained DOM box; real #414 geometry restored afterwards' });
-        } finally { await undoControl(); }
+      await probe(name, measure, context);
+      await prove(name, measure, () => styleChange(bar, { transform: 'translateY(2000px)' }), context);
+      await prove(`${hasAttention ? 'wall-warn' : 'wall-calm'}-${viewport.width}`, measure, () => styleChange(bar, { transform: 'translateY(2000px)' }), context);
+      if (!hasAttention) {
+        for (const [part, target] of [['hide', bar], ['edit', bar.locator('[data-composer]')], ['send', bar.locator('.send-button')], ['pick', bar.locator('.target-picker')]]) {
+          await prove(`wall-bar-${part}-${viewport.width}`, measure, () => styleChange(target, { visibility: 'hidden' }), context);
+        }
       }
+      if (!hasAttention) await prove('composer-offscreen-not-known', measure, () => styleChange(bar, { position: 'fixed', left: '-10000px' }), context);
     }
   };
   for (const viewport of [{ width: 1440, height: 900 }, { width: 800, height: 900 }]) {
@@ -313,11 +499,14 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     }
     await gridChecks(viewport, 'after-stall-and-sweep');
     await resumeChecks(resumable, true, 'Grid', viewport);
-    // Full labels remain required in the DOM. Shipped headers truncate them;
-    // visible fixture state text and each pane's viewport check prove content.
-    await capture('grid', viewport, page.locator('.terminal-panel:not(.hidden) .terminal-grid'),
-      text => session.agents.every(agent => text.includes(agent.label)), undefined,
-      text => text.includes('No heartbeat has arrived') && text.includes("This agent's process exited"));
+    // Every column was individually painted/reachable above; preserve captures
+    // of both meaningful attention states without treating offscreen text as painted.
+    for (const [agent, variant, phrase] of [[stalled, undefined, 'No heartbeat has arrived'], [byState('exited_during_startup'), 'dead', "This agent's process exited"]]) {
+      await revealGridAgent(agent);
+      await capture('grid', viewport, page.locator('.terminal-panel:not(.hidden) .terminal-grid'),
+        text => session.agents.every(agent => text.includes(agent.label)), variant,
+        text => text.includes(phrase));
+    }
     await page.getByRole('link', { name: 'Dashboard', exact: true }).click();
     await page.locator('.dashboard .board').waitFor();
     const kanbanSessions = manifest.screens.kanban.sessionIds.map(id => manifest.sessions.find(item => item.id === id));

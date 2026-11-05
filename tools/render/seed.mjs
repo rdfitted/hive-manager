@@ -114,6 +114,9 @@ export async function seed(root, now = new Date()) {
     await json(`${relative}/retirement.json`, { enabled: false, on_call_agent_id: null });
     // The UI polls the typed runtime graph even when no scheduling nodes are needed.
     await json(`${relative}/state/work-graph.json`, { nodes: [], edges: [], omissions: [] });
+    if (session.id === manifest.screens.grid.sessionId) {
+      await write(`${relative}/coordination/coordination.log`, `[${at(1)}] QUEEN → ${manifest.opswall.tickerAgentDisplay}: ${manifest.opswall.tickerText}\n`);
+    }
     const projected = [];
     for (const [index, agent] of session.agents.entries()) {
       const old = ['finished', 'stalled'].includes(agent.state);

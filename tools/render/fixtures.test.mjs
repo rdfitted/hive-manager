@@ -5,6 +5,22 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { seed, manifest, assertSynthetic } from './seed.mjs';
+import { styleChange } from './mutations.mjs';
+
+test('style mutation restores a hidden element through its captured handle', async () => {
+  let style = 'color: blue', disposed = false;
+  const node = {
+    style: { setProperty(key, value) { style = `${key}: ${value}`; } },
+    setAttribute(_name, value) { style = value; }, removeAttribute() { style = null; },
+  };
+  const handle = { getAttribute: async () => style, evaluate: async (fn, value) => fn(node, value), dispose: async () => { disposed = true; } };
+  const locator = { elementHandle: async () => handle, evaluate: async () => { throw new Error('A hidden role locator no longer resolves'); } };
+  const restore = await styleChange(locator, { visibility: 'hidden' });
+  assert.match(style, /hidden/);
+  await restore();
+  assert.equal(style, 'color: blue');
+  assert.equal(disposed, true);
+});
 
 test('fixture source contains only synthetic public data', async () => {
   for (const name of await readdir(new URL('./fixtures/', import.meta.url))) {
@@ -36,6 +52,8 @@ test('seeded schema, feeds, review repo, and relative timestamps cover every man
     assert.equal(result.manifest, manifest);
     assert.equal(manifest.screens.grid.paneCount, 8);
     assert.equal(manifest.sessions[0].agents.length, 8);
+    assert.equal(manifest.opswall.minimumColumnWidth, 280);
+    assert.equal(manifest.opswall.queenRatio, 1.5);
     assert.deepEqual(Object.keys(manifest.screens).sort(), ['dialog', 'focus', 'grid', 'kanban', 'launch', 'review', 'sidebar']);
     const overlayText = await readFile(path.join(root, 'fixture-state.json'), 'utf8');
     assertSynthetic(overlayText, { root, userNames: [process.env.USERNAME, process.env.USER] });
@@ -54,6 +72,13 @@ test('seeded schema, feeds, review repo, and relative timestamps cover every man
       assert.equal(persisted.worktree_path, path.join(root, 'projects', session.project));
       assert.deepEqual(JSON.parse(await readFile(path.join(directory, 'retirement.json'), 'utf8')), { enabled: false, on_call_agent_id: null });
       assert.deepEqual(JSON.parse(await readFile(path.join(directory, 'state/work-graph.json'), 'utf8')), { nodes: [], edges: [], omissions: [] });
+      if (session.id === manifest.screens.grid.sessionId) {
+        const ticker = await readFile(path.join(directory, 'coordination/coordination.log'), 'utf8');
+        assert.ok(ticker.includes(manifest.opswall.tickerAgentDisplay));
+        assert.ok(session.agents.some(agent => agent.id === manifest.opswall.tickerAgentId));
+        assert.ok(ticker.includes(manifest.opswall.tickerText));
+        assert.ok(ticker.includes(new Date(Date.parse(now) - 1000).toISOString()));
+      }
       const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/i.test(key)));
       Object.assign(gitEnv, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(root, 'home/.gitconfig'), GIT_CONFIG_SYSTEM: path.join(root, 'home/.gitconfig-system'), HOME: path.join(root, 'home'), USERPROFILE: path.join(root, 'home') });
       const diff = execFileSync('git', ['diff', '--', 'navigation.txt'], { cwd: persisted.worktree_path, env: gitEnv, encoding: 'utf8', windowsHide: true });
