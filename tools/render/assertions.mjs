@@ -662,13 +662,47 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await viewer.getByRole('tab', { name: 'Queen', exact: true }).click();
     const diffWidget = viewer.locator('.diff-widget').first();
     await diffWidget.waitFor({ state: 'visible' });
+    // Playwright visibility does not wait for the loading crossfade or queued
+    // conversation autoscroll. Settle those states before taking one strict read.
+    const settleConversation = async () => viewer.evaluate(node => new Promise((resolve, reject) => {
+      const started = performance.now();
+      let previous, stable = 0;
+      const rect = element => { const box = element.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height }; };
+      const frame = () => {
+        const widget = node.querySelector('.diff-widget'), messages = node.querySelector('.messages');
+        const skeleton = node.querySelector('.conversation-loading'), content = skeleton?.querySelector('.lattice-skeleton-content');
+        if (widget && messages && skeleton && content) {
+          const snapshot = JSON.stringify({ widget: rect(widget), messages: rect(messages), scrollTop: messages.scrollTop, scrollHeight: messages.scrollHeight, clientHeight: messages.clientHeight });
+          const revealed = skeleton.getAttribute('aria-busy') === 'false' && Number(getComputedStyle(content).opacity) === 1;
+          const animated = content.getAnimations().some(animation => animation.playState !== 'finished' && animation.playState !== 'idle');
+          const ready = revealed && !animated && (!document.fonts || document.fonts.status === 'loaded');
+          stable = ready && snapshot === previous ? stable + 1 : 0;
+          previous = snapshot;
+          if (stable >= 2) return resolve();
+        }
+        if (performance.now() - started > 5000) return reject(new Error(`Conversation reveal/scroll did not settle: ${previous}`));
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    }));
+    await settleConversation();
     await diffWidget.scrollIntoViewIfNeeded();
+    await settleConversation();
     const measureDiff = async () => {
       const widgets = await viewer.locator('.diff-widget').count();
-      const visible = widgets === 1 && (await visibleTargetState(diffWidget)).visible;
+      const painted = widgets === 1 ? await visibleTargetState(diffWidget) : { visible: false };
+      const visible = painted.visible;
       const additions = await viewer.locator('.diff-widget .diff-line.add .line-text').allTextContents();
       const deletions = await viewer.locator('.diff-widget .diff-line.del .line-text').allTextContents();
-      return { passed: visible && additions.includes(conversationFixture.added) && deletions.includes(conversationFixture.removed), details: { widgets, visible, additions, deletions } };
+      const ancestors = widgets === 1 ? await diffWidget.evaluate(node => {
+        const rows = [];
+        for (let parent = node; parent; parent = parent.parentElement) {
+          const box = parent.getBoundingClientRect(), css = getComputedStyle(parent);
+          rows.push({ tag: parent.tagName, className: parent.className, rect: { x: box.x, y: box.y, width: box.width, height: box.height }, display: css.display, visibility: css.visibility, opacity: css.opacity, overflowX: css.overflowX, overflowY: css.overflowY, scrollTop: parent.scrollTop, scrollHeight: parent.scrollHeight, clientHeight: parent.clientHeight });
+        }
+        return rows;
+      }) : [];
+      return { passed: visible && additions.includes(conversationFixture.added) && deletions.includes(conversationFixture.removed), details: { widgets, visible, additions, deletions, painted, ancestors } };
     };
     await probe('conversation-diff-envelope', measureDiff, { screen: 'conversation', viewport: `${viewport.width}x${viewport.height}` });
     await prove(`conv-diff-${viewport.width}`, measureDiff, () => emptyContents(diffWidget), { screen: 'conversation' });
