@@ -8,6 +8,8 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import subprocess
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -114,6 +116,72 @@ class Ignores(unittest.TestCase):
         code, v = run(str(d), "--root", str(d))
         self.assertEqual(code, 2)
         self.assertEqual({f["banned"] for f in v["gating"]}, {"ban-side-tab", "ban-inter"})
+
+
+class EngineLaunchRetry(unittest.TestCase):
+    TIMEOUT = b"Timed out after 30000 ms while waiting for the WS endpoint URL to appear in stdout!"
+
+    def invoke(self, responses):
+        with mock.patch.object(slop_check.subprocess, "run", side_effect=responses) as engine:
+            result = slop_check.run_engine(Path("fake-engine"), "fixture.html", None, False)
+        return result, engine
+
+    def output(self, code, stdout=b"[]", stderr=b""):
+        return subprocess.CompletedProcess([], code, stdout, stderr)
+
+    def test_timeout_then_success(self):
+        result, engine = self.invoke([self.output(1, b"", self.TIMEOUT), self.output(0)])
+        self.assertEqual(result, (0, [], "", 1))
+        self.assertEqual(engine.call_count, 2)
+
+    def test_timeout_twice(self):
+        result, engine = self.invoke([self.output(1, b"", self.TIMEOUT)] * 2)
+        self.assertEqual((result[0], result[3], engine.call_count), (1, 1, 2))
+
+    def test_exit_two_never_retries(self):
+        result, engine = self.invoke([self.output(2, b"[]", self.TIMEOUT)])
+        self.assertEqual((result[0], result[3], engine.call_count), (2, 0, 1))
+
+    def test_exit_zero_never_retries(self):
+        result, engine = self.invoke([self.output(0, b"[]", self.TIMEOUT)])
+        self.assertEqual((result[0], result[3], engine.call_count), (0, 0, 1))
+
+    def test_findings_never_retry(self):
+        result, engine = self.invoke([self.output(1, b'[{"antipattern":"fixture"}]', self.TIMEOUT)])
+        self.assertEqual((result[3], engine.call_count), (0, 1))
+        self.assertEqual(result[1], [{"antipattern": "fixture"}])
+
+    def test_other_errors_never_retry(self):
+        result, engine = self.invoke([self.output(1, b"[]", b"scan failed")])
+        self.assertEqual((result[3], engine.call_count), (0, 1))
+
+    def test_windows_launch_is_hidden(self):
+        with mock.patch.object(slop_check.sys, "platform", "win32"), \
+                mock.patch.object(slop_check.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True):
+            _, engine = self.invoke([self.output(0)])
+        self.assertEqual(engine.call_args.kwargs["creationflags"], 0x08000000)
+
+    def test_retry_launch_exception_keeps_count_in_verdict(self):
+        for failure in (OSError("synthetic retry launch failure"),
+                        subprocess.TimeoutExpired("fake-engine", 300)):
+            with self.subTest(failure=type(failure).__name__), \
+                    mock.patch.object(slop_check, "ensure_engine", return_value=Path("fake-engine")), \
+                    mock.patch.object(slop_check.subprocess, "run", side_effect=[
+                        self.output(1, b"", self.TIMEOUT), failure]) as engine:
+                code, verdict = run(str(FIX / "clean.html"), "--root", str(FIX))
+            self.assertEqual(code, 1)
+            self.assertEqual(engine.call_count, 2)
+            self.assertEqual(verdict["targets"][0]["retry_count"], 1)
+            self.assertIsNone(verdict["targets"][0]["engine_exit"])
+            self.assertEqual(verdict["verdict"], "error")
+
+    def test_retry_invalid_json_keeps_count_in_verdict(self):
+        with mock.patch.object(slop_check, "ensure_engine", return_value=Path("fake-engine")), \
+                mock.patch.object(slop_check.subprocess, "run", side_effect=[
+                    self.output(1, b"", self.TIMEOUT), self.output(1, b"invalid")]) as engine:
+            code, verdict = run(str(FIX / "clean.html"), "--root", str(FIX))
+        self.assertEqual((code, engine.call_count, verdict["targets"][0]["retry_count"]), (1, 2, 1))
+        self.assertIn("engine returned invalid JSON", verdict["errors"][0])
 
 
 if __name__ == "__main__":

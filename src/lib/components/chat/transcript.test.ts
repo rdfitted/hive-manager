@@ -1,9 +1,52 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '$lib/stores/agentEvents';
+import type { CoordinationMessage } from '$lib/stores/coordination';
 import { protocolAttention, transcriptRows } from './transcript';
 
 const event = (kind: AgentEvent['kind'], payload: Record<string, unknown>, source_id = 'held:turn'): AgentEvent => ({
   agent_id: 'fixture-agent', cursor: `${kind}-${source_id}`, ts: '2026-01-01T00:00:00Z', kind, source_id, truncated: false, payload,
+});
+
+describe('I2 coordination sender attribution', () => {
+  const entry = (to: string, content: string, message_type: CoordinationMessage['message_type'] = 'Task', from = 'QUEEN'): CoordinationMessage =>
+    ({ id: content, timestamp: '2026-01-01T00:00:00Z', from, to, content, message_type });
+  it.each([
+    ['synthetic-queen', true, 'QUEEN'], ['synthetic-worker-2', false, 'WORKER-2'],
+    ['synthetic-qa-worker-3', false, 'QA-WORKER-3'], ['synthetic-planner-4-wave', false, 'PLANNER-4'],
+    ['synthetic-evaluator', false, 'EVALUATOR'], ['fixture-agent', false, 'fixture-agent'],
+  ])('attributes addressed wire aliases for %s without using labels', (agentId, isQueen, to) => {
+    const events = ['Directive', 'Operator text', 'Unmatched'].map(text => ({ ...event('user_message', { text }, text), agent_id: agentId }));
+    const log = [entry(to, ' Directive '), entry(to, '[OPERATOR]  Operator text ', 'System', 'SYSTEM')];
+    expect(transcriptRows(events, { agentId, isQueen, log }).map(row => row.sender)).toEqual(['queen', 'operator', undefined]);
+    expect(transcriptRows(events).every(row => !('sender' in row))).toBe(true);
+  });
+  it('requires exact text, target, type and Queen origin, and attributes only user rows', () => {
+    const texts = ['wrong target', 'prefix only', 'wrong source', 'wrong type', 'unmarked system', 'label target', 'valid'];
+    const events = texts.map(text => event('user_message', { text }, text));
+    const log = [entry('WORKER-8', texts[0]), entry('fixture-agent', 'prefix only extra'),
+      entry('fixture-agent', texts[2], 'Task', 'WORKER-1'), entry('fixture-agent', '[OPERATOR] wrong type'),
+      entry('fixture-agent', texts[4], 'System'), entry('Display label', texts[5]), entry('fixture-agent', texts[6])];
+    const context = { agentId: 'fixture-agent', isQueen: false, log };
+    expect(transcriptRows(events, context).map(row => row.sender)).toEqual([undefined, undefined, undefined, undefined, undefined, undefined, 'queen']);
+    expect(transcriptRows([event('assistant_message', { text: 'valid' })], context)[0].sender).toBeUndefined();
+    expect(transcriptRows(events, { ...context, agentId: 'another-agent' }).every(row => row.sender === undefined)).toBe(true);
+  });
+  it('gives an explicit operator match priority and preserves attribution when the log arrives later', () => {
+    const events = [event('user_message', { text: ' Same text ' })];
+    const context = { agentId: 'fixture-agent', isQueen: false, log: [] as CoordinationMessage[] };
+    expect(transcriptRows(events, context)[0].sender).toBeUndefined();
+    context.log = [entry('fixture-agent', 'Same text'), entry('fixture-agent', '[OPERATOR] Same text', 'System', 'SYSTEM')];
+    expect(transcriptRows(events, context)[0].sender).toBe('operator');
+  });
+  it.each(['System', 'Task'] as const)('recovers SYSTEM operator attribution from %s entries but never another sender', message_type => {
+    const events = [event('user_message', { text: 'Recovered input' })];
+    const context = { agentId: 'fixture-agent', isQueen: false, log: [entry('fixture-agent', '[OPERATOR] Recovered input', message_type, 'SYSTEM')] };
+    expect(transcriptRows(events, context)[0].sender).toBe('operator');
+    context.log[0].from = 'WORKER-1';
+    expect(transcriptRows(events, context)[0].sender).toBeUndefined();
+    context.log[0].from = 'SYSTEM'; context.log[0].content = 'Recovered input';
+    expect(transcriptRows(events, context)[0].sender).toBeUndefined();
+  });
 });
 // Normalized D/E envelopes, including the older journal shapes without an explicit error.
 const failures = [

@@ -130,7 +130,7 @@
         },
         {
           "path": "workflow-pack/skills/slop-check/scripts/slop_check.py",
-          "sha256": "eba9a9eb72a2918418fed1d367ad67bae364fbc249e09e8ec000c3bc5b73541f"
+          "sha256": "f3147c40789944c2b4e61a57db47dae678f97f078a4e8cf81148002cc08c520c"
         },
         {
           "path": "workflow-pack/skills/slop-check/SKILL.md",
@@ -142,7 +142,7 @@
         },
         {
           "path": "workflow-pack/skills/slop-check/tests/test_slop_check.py",
-          "sha256": "f98a7490ef1ecb0abbd1fdc183910b54b607dbc8390934ddea28f1cef3eff23f"
+          "sha256": "43abd654699b0277768e40b9470511a641e7c4752018e45d85e9683950dcda77"
         }
       ]
     }

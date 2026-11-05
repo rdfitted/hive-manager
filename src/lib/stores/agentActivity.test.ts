@@ -15,7 +15,7 @@ vi.mock('./events', async () => ({ events: (await import('svelte/store')).writab
 import { activeAgents, activeSession, sessions } from './sessions';
 import { heartbeatStore } from './conversations';
 import { events } from './events';
-import { agentActivity, attentionReason, needsAttention, now } from './agentActivity';
+import { agentActivity, attentionReason, needsAttention, now, staleRunningAgents } from './agentActivity';
 
 const agent = (status: AgentInfo['status']): AgentInfo => ({ id: 'a', role: 'Queen', status, config: { cli: 'codex', flags: [] }, parent_id: null });
 const set = (store: unknown, value: unknown) => (store as { set(value: unknown): void }).set(value);
@@ -67,6 +67,17 @@ describe('G-attention-predicate', () => {
 });
 
 describe('activity derivation', () => {
+  it('G59 stale: Running crosses the boundary at 3m00s, with activity and finished-work exclusions', () => {
+    const running = agent('Running');
+    const at = Date.parse('2030-01-01T12:00:00Z');
+    expect(staleRunningAgents([running], { a: at }, at + 179_000, at).size).toBe(0);
+    expect([...staleRunningAgents([running], { a: at }, at + 180_000, at)]).toEqual(['a']);
+    expect(staleRunningAgents([running], { a: at + 1_000 }, at + 180_000, at).size).toBe(0);
+    expect([...staleRunningAgents([running], {}, at + 180_000, at)]).toEqual(['a']);
+    for (const other of [{ ...running, status: 'Completed' as const }, { ...running, status: { WaitingForInput: 'prompt' } }, { ...running, work_state: 'finished' }, { ...running, work_state: 'retired' }]) {
+      expect(staleRunningAgents([other], {}, at + 180_000, at).size).toBe(0);
+    }
+  });
   it('G31 confirmed follow-up exposes the input time after the awaiting marker is gone', () => {
     const latest_input_at = '2026-11-01T12:00:00Z';
     set(heartbeatStore, { agents: { a: { summary: 'Previous completion',

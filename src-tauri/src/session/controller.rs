@@ -994,7 +994,32 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_report: Option<crate::domain::run_journal::ResumeReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agent_resume_report: Vec<String>,
+    pub agent_resume_report: Vec<AgentResumeNotice>,
+}
+
+/// A load-time Resume notice. Legacy text has no reliable per-agent identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "AgentResumeNoticeWire")]
+pub struct AgentResumeNotice {
+    pub agent_id: Option<String>,
+    pub reason: String,
+    pub message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AgentResumeNoticeWire {
+    Agent { agent_id: Option<String>, reason: String, message: String },
+    Legacy(String),
+}
+
+impl From<AgentResumeNoticeWire> for AgentResumeNotice {
+    fn from(value: AgentResumeNoticeWire) -> Self {
+        match value {
+            AgentResumeNoticeWire::Agent { agent_id, reason, message } => Self { agent_id, reason, message },
+            AgentResumeNoticeWire::Legacy(message) => Self { agent_id: None, reason: "legacy".into(), message },
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -3322,13 +3347,22 @@ impl SessionController {
         storage: Option<&SessionStorage>,
         session: &Session,
     ) {
+        if let Err(error) = Self::try_emit_work_graph_snapshot_for_session_state(storage, session) {
+            let stage = format!("{:?}", session.state.kind());
+            tracing::warn!(session_id = %session.id, stage, "Failed to emit work-graph lifecycle snapshot: {error}");
+        }
+    }
+
+    fn try_emit_work_graph_snapshot_for_session_state(
+        storage: Option<&SessionStorage>,
+        session: &Session,
+    ) -> Result<(), String> {
         if let Some(storage) = storage {
             let manager = StateManager::new(storage.session_dir(&session.id));
             let stage = format!("{:?}", session.state.kind());
-            if let Err(error) = manager.emit_work_graph_snapshot(&stage) {
-                tracing::warn!(session_id = %session.id, stage, "Failed to emit work-graph lifecycle snapshot: {error}");
-            }
+            manager.emit_work_graph_snapshot(&stage).map_err(|error| error.to_string())?;
         }
+        Ok(())
     }
 
     fn persist_then_emit_session_update(
@@ -3359,8 +3393,10 @@ impl SessionController {
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| format!("Session not found: {session_id}"))?;
-        self.set_session_state_with_events(session, new_state);
-        Ok(())
+        // Reuse the production transition without emitting twice, then expose
+        // persistence failures to the test instead of only logging them.
+        Self::set_session_state_with_snapshot(None, session, new_state);
+        Self::try_emit_work_graph_snapshot_for_session_state(self.storage.as_deref(), session)
     }
 
     /// Persist an in-memory test session to storage, so read paths that
@@ -16373,10 +16409,40 @@ The backend composed and persisted the following authoritative skeleton before l
         }
     }
 
-    fn agent_resume_report(session: &Session) -> Vec<String> {
-        session.agents.iter().filter(|agent| agent.provider_session_id.is_none()).map(|agent| {
+    fn agent_resume_report(session: &Session, resumed_agent: Option<&str>) -> Vec<AgentResumeNotice> {
+        session.agents.iter().filter_map(|agent| {
+            if resumed_agent == Some(agent.id.as_str()) { return None; }
             let name = agent.config.label.as_deref().or(agent.config.name.as_deref()).unwrap_or(&agent.id);
-            format!("{name} ({}): no saved conversation ID; Resume is unavailable.", agent.id)
+            if agent.provider_session_id.is_none() {
+                Some(AgentResumeNotice {
+                    agent_id: Some(agent.id.clone()), reason: "missing_conversation_id".into(),
+                    message: format!("{name} ({}): no saved conversation ID; Resume is unavailable.", agent.id),
+                })
+            } else {
+                session.agent_resume_report.iter().find(|notice|
+                    notice.agent_id.as_deref() == Some(agent.id.as_str()) &&
+                    (notice.reason != "manual_resume_required" || session.state.is_terminal())).cloned()
+            }
+        }).collect()
+    }
+
+    /// Inspect saved folders outside roster/runtime identity locks. These notices
+    /// also cover stopped workers and terminal coordinators that do not auto-resume.
+    fn saved_cwd_resume_notices(&self, session: &Session, saved: &crate::storage::PersistedSession) -> Vec<AgentResumeNotice> {
+        let manager = self.pty_manager.read();
+        session.agents.iter().filter(|agent| agent.provider_session_id.is_some()).filter_map(|agent| {
+            let cwd = manager.spawn_cwd(&agent.id).or_else(|| saved.agents.iter()
+                .find(|saved| saved.id == agent.id)?.transcript_cwd.clone());
+            let reason = match cwd {
+                None => "missing_working_directory",
+                Some(cwd) if !Path::new(&cwd).is_absolute() || !Path::new(&cwd).is_dir() => "invalid_working_directory",
+                _ => return None,
+            };
+            let name = agent.config.label.as_deref().or(agent.config.name.as_deref()).unwrap_or(&agent.id);
+            let message = if reason == "missing_working_directory" { "no saved working directory" }
+                else { "saved working directory no longer exists or is not absolute" };
+            Some(AgentResumeNotice { agent_id: Some(agent.id.clone()), reason: reason.into(),
+                message: format!("{name} ({}): {message}; Resume is unavailable.", agent.id) })
         }).collect()
     }
 
@@ -16488,7 +16554,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 if session.state == SessionState::Running && current.state == previous_state {
                     current.state = SessionState::Running;
                 }
-                current.agent_resume_report = Self::agent_resume_report(current);
+                current.agent_resume_report = Self::agent_resume_report(current, Some(agent_id));
                 current.clone()
             }).ok_or_else(|| format!("Agent {agent_id} runtime changed before Resume could finish; try again"))?
         };
@@ -16540,14 +16606,44 @@ The backend composed and persisted the following authoritative skeleton before l
         // Convert persisted session to active session
         let mut session = self.session_from_persisted(&persisted)?;
         self.populate_provider_ids(&mut session);
-        session.agent_resume_report = Self::agent_resume_report(&session);
+        session.agent_resume_report = Self::agent_resume_report(&session, None);
+        let cwd_notices = self.saved_cwd_resume_notices(&session, &persisted);
+        session.agent_resume_report.extend(cwd_notices);
         let coordinator = session.agents.iter().find(|agent| {
             if matches!(session.session_type, SessionType::Solo { .. }) {
                 matches!(agent.role, AgentRole::Worker { index: 1, parent: None }) && agent.parent_id.is_none()
             } else { matches!(agent.role, AgentRole::Queen) }
         }).filter(|agent| agent.provider_session_id.is_some()).map(|agent| agent.id.clone());
-        if let Some(agent_id) = &coordinator {
-            self.respawn_saved_agent(&mut session, agent_id)?;
+        let mut respawned = false;
+        // Loading ended runs is metadata-only. Explicit per-agent Resume still
+        // validates and uses the saved cwd, even when the project root exists.
+        if !session.state.is_terminal() {
+            if let Some(agent_id) = &coordinator {
+                match self.respawn_saved_agent(&mut session, agent_id) {
+                    Ok(_) => respawned = true,
+                    Err(message) => {
+                        if let Some(notice) = session.agent_resume_report.iter_mut()
+                            .find(|notice| notice.agent_id.as_deref() == Some(agent_id.as_str())) {
+                            notice.message = message;
+                        } else {
+                            session.agent_resume_report.push(AgentResumeNotice {
+                                agent_id: Some(agent_id.clone()), reason: "resume_failed".into(), message,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if session.state.is_terminal() {
+            if let Some(agent_id) = &coordinator {
+                if !session.agent_resume_report.iter().any(|notice| notice.agent_id.as_deref() == Some(agent_id.as_str())) {
+                    session.agent_resume_report.push(AgentResumeNotice {
+                        agent_id: Some(agent_id.clone()), reason: "manual_resume_required".into(),
+                        message: format!("{agent_id}: saved session has ended; use per-agent Resume to continue its conversation."),
+                    });
+                }
+            }
         }
 
         // #125: classify the run journal for this resumed session — mark completed
@@ -16565,7 +16661,7 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         self.ensure_task_watcher(&session.id, &session.project_path);
-        if coordinator.is_some() { self.update_session_storage(session_id); }
+        if respawned { self.update_session_storage(session_id); }
         let session = self.project_work_states(session);
 
         // Emit session-update event to frontend

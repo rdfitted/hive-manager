@@ -35,7 +35,7 @@ const executableHash = async () => {
   for await (const chunk of createReadStream(target)) hash.update(chunk);
   return hash.digest('hex');
 };
-export const spawnBuildScript = (script, args, options) => spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], options);
+export const spawnBuildScript = (script, args, options) => spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args], { ...options, windowsHide: true });
 export async function ensureBuild(out, gate, signal) {
   const receiptPath = path.join(out, 'build-state.json');
   const fingerprint = await inputHash();

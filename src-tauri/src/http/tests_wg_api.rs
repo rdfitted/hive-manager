@@ -1485,6 +1485,22 @@ async fn every_session_lifecycle_stage_emits_a_retrievable_graph() {
 }
 
 #[tokio::test]
+async fn lifecycle_snapshot_write_failure_reaches_transition_caller() {
+    const SESSION_ID: &str = "wg-api-snapshot-denied";
+    let app = test_app().await;
+    let session_dir = app.storage().create_session_dir(SESSION_ID).unwrap();
+    StateManager::new(session_dir.clone())
+        .write_work_graph(&TaskGraph::new(vec![], vec![])).unwrap();
+    // A directory cannot be atomically replaced by a file, even after retry.
+    std::fs::create_dir(session_dir.join("state/work-graph-lifecycle.json")).unwrap();
+    let controller = app.state.session_controller.read();
+    controller.insert_test_session(running_session_with_agent(SESSION_ID, "snapshot-queen"));
+    let error = controller.transition_test_session(SESSION_ID, SessionState::PlanReady)
+        .expect_err("snapshot failure must reach the transition caller");
+    assert!(error.contains("IO error"), "{error}");
+}
+
+#[tokio::test]
 async fn completion_persistence_rollback_refreshes_the_graph_artifact() {
     const SESSION_ID: &str = "wg-api-completion-rollback";
     const AGENT_ID: &str = "wg-api-rollback-queen";

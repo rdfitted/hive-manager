@@ -3,7 +3,7 @@
   "files": {
     "codegraph.py": {
       "upstream_sha256": "8b5ae7cd70bd4ac2a5af11d2a05aee9cd608af8e00a545c9b65d52ef53e77a0c",
-      "normalized_sha256": "6d0e6a01955d421bdc2780f986999841bf64b4c571f189abd445fa0a4bd67536"
+      "normalized_sha256": "d2ada98ad2abb06a045f1149eadfbbeeb02a907f59783f0161e7aebcd2576545"
     },
     "codegraph_rs.py": {
       "upstream_sha256": "7d6f6ed1d8171ef382313ae284cef692aa2ae5eb654833173e3a11064b942460",

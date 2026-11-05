@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Dialog } from './ui';
   import { createEventDispatcher } from 'svelte';
-  import type { ResumeReport, RunJournalEntry, LedgerEntry } from '$lib/stores/sessions';
+  import type { AgentResumeNotice, ResumeReport, RunJournalEntry, LedgerEntry } from '$lib/stores/sessions';
   import { sessions } from '$lib/stores/sessions';
 
   /** Whether the modal is visible. */
@@ -40,6 +40,12 @@
   function effectLabel(entry: LedgerEntry): string {
     const ref = entry.effect_ref ? ` (${entry.effect_ref.slice(0, 10)})` : '';
     return `${entry.effect_kind.replace(/_/g, ' ')}${ref}`;
+  }
+
+  function agentNoticeText(notice: AgentResumeNotice): string {
+    return notice.agent_id && !notice.message.includes(notice.agent_id)
+      ? `${notice.agent_id}: ${notice.message}`
+      : notice.message;
   }
 
   function confirm() {
@@ -136,10 +142,10 @@
       <h2>Loaded {$sessions.resumeNotice?.sessionName ?? 'session'}</h2>
     </header>
     <div class="modal-body lattice-scroll-chrome">
-      <p>These agents have no saved conversation and remain stopped.</p>
+      <p>These agents remain stopped. Each notice explains why.</p>
       <ul>
-        {#each $sessions.resumeNotice?.messages ?? [] as message (message)}
-          <li>{message}</li>
+        {#each $sessions.resumeNotice?.notices ?? [] as notice}
+          <li data-agent-id={notice.agent_id ?? undefined} data-resume-reason={notice.reason}>{agentNoticeText(notice)}</li>
         {/each}
       </ul>
     </div>

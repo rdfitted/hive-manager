@@ -78,6 +78,7 @@ vi.mock('$lib/stores/sessions', async () => {
     },
     activeSession,
     activeAgents,
+    resumeBlockedReason: () => null,
     serdeEnumVariantName: (value: unknown) => {
       if (typeof value === 'string') return value;
       if (value && typeof value === 'object') return Object.keys(value)[0];
@@ -139,9 +140,12 @@ vi.mock('$lib/stores/layout', async () => {
   };
 });
 
-vi.mock('$lib/stores/coordination', () => ({
+vi.mock('$lib/stores/coordination', async () => ({
   coordination: {
+    ...(await import('svelte/store')).writable({ sessionId: null, log: [] }),
     setSessionId: testMocks.setSessionId,
+    loadLog: vi.fn().mockResolvedValue(undefined),
+    ensureLog: vi.fn().mockResolvedValue(undefined),
     addWorker: vi.fn(),
   },
 }));

@@ -74,7 +74,7 @@ jobs:
           workspaces: ./src-tauri -> ${{ steps.paths.outputs.cache_target }}
 
       - name: Driver and fixture tests
-        run: node --test tools/render/fixtures.test.mjs tools/render/lifecycle.test.mjs tools/render/findings.test.mjs tools/render/gate-policy.test.mjs
+        run: node --test tools/render/fixtures.test.mjs tools/render/lifecycle.test.mjs tools/render/findings.test.mjs tools/render/gate-policy.test.mjs tools/render/pin-layout.test.mjs tools/render/conversation-layout.test.mjs
 
       # Measured hosted cold run: render step 14.6 minutes, job 15.9 minutes.
       # Leave build variance within the 25-minute job budget.

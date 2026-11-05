@@ -114,6 +114,14 @@ export async function seed(root, now = new Date()) {
     await json(`${relative}/retirement.json`, { enabled: false, on_call_agent_id: null });
     // The UI polls the typed runtime graph even when no scheduling nodes are needed.
     await json(`${relative}/state/work-graph.json`, { nodes: [], edges: [], omissions: [] });
+    if (session.id === manifest.screens.grid.sessionId) {
+      await write(`${relative}/coordination/coordination.log`, `[${at(1)}] QUEEN → ${manifest.opswall.tickerAgentDisplay}: ${manifest.opswall.tickerText}\n`);
+      // Append B's real persisted wire records without replacing A's ticker fixture.
+      const logPath = `${relative}/coordination/coordination.log`;
+      await write(logPath, await readFile(path.join(root, logPath), 'utf8')
+        + `[${at(2)}] QUEEN → WORKER-5: ${manifest.chat.queenDirective}\n`
+        + `[${at(2)}] SYSTEM → WORKER-5: [OPERATOR] ${manifest.chat.operatorMessage}\n`);
+    }
     const projected = [];
     for (const [index, agent] of session.agents.entries()) {
       const old = ['finished', 'stalled'].includes(agent.state);
@@ -130,6 +138,9 @@ export async function seed(root, now = new Date()) {
         ['user_message', 'Please inspect this synthetic navigation report.'],
         ['assistant_message', agent.state === 'markdown' ? chat : `Synthetic report for ${agent.label}. State: ${agent.state}.`],
       ];
+      if (agent.id === manifest.chat.senderAgentId) rows.push(
+        ['error', 'Synthetic attention line.'],
+        ['user_message', manifest.chat.queenDirective], ['user_message', manifest.chat.operatorMessage]);
       let journal = '';
       for (const [rowIndex, [kind, text]] of rows.entries()) {
         const cursor = Buffer.from(JSON.stringify({ generation, byte_offset: Buffer.byteLength(journal) })).toString('base64url');

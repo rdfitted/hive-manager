@@ -467,7 +467,7 @@ impl Action for LogCoordinationMessage {
             .map_err(|e| ActionError::internal(e.to_string()))?;
         if let Some(app_handle) = ctx.state.app_handle.as_ref() {
             app_handle
-                .emit("coordination-message", &coord_message)
+                .emit("coordination-message", &crate::coordination::CoordinationMessageEvent::new(&parsed.session_id, &coord_message))
                 .map_err(|e| ActionError::internal(e.to_string()))?;
         }
         Ok(Value::Null)

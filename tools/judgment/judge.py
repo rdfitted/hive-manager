@@ -104,13 +104,13 @@ def _project_identity_for_cwd(cwd: Path) -> str | None:
     """Resolve each cwd's origin once per process, including denied lookups."""
     try:
         root = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"], cwd=cwd,
+            ["git", "rev-parse", "--show-toplevel"], creationflags=(0x08000000 if sys.platform == "win32" else 0), cwd=cwd,
             capture_output=True, text=True, timeout=30, check=True,
         ).stdout.strip()
         if not root:
             return None
         remote = subprocess.run(
-            ["git", "remote", "get-url", "origin"], cwd=root,
+            ["git", "remote", "get-url", "origin"], creationflags=(0x08000000 if sys.platform == "win32" else 0), cwd=root,
             capture_output=True, text=True, timeout=30, check=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):

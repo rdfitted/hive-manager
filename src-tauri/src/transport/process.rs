@@ -638,6 +638,13 @@ mod windows {
         /// This owns future descendants; children born before assignment need
         /// the retained stop-time capture as well.
         pub(crate) fn attach_running(process: std::os::windows::io::RawHandle) -> Result<Self, String> {
+            let job = Self::new()?;
+            job.assign_suspended(process)?;
+            Ok(job)
+        }
+
+        /// Create the lifetime owner before creating the suspended ConPTY root.
+        pub(crate) fn new() -> Result<Self, String> {
             // The handle belongs solely to this guard; Windows propagates job
             // membership to subsequently created descendants, including npm shims.
             let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -655,15 +662,20 @@ mod windows {
                     std::mem::size_of::<ExtendedLimits>() as u32,
                 )
             };
-            let assigned = configured != 0
-                && unsafe { AssignProcessToJobObject(raw, process) } != 0;
-            if !assigned {
+            if configured == 0 {
                 return Err(format!(
                     "Cannot own transport process tree: {}. Select PTY.",
                     std::io::Error::last_os_error()
                 ));
             }
             Ok(job)
+        }
+
+        /// The caller retains the primary thread and resumes only after success.
+        pub(crate) fn assign_suspended(&self, process: std::os::windows::io::RawHandle) -> Result<(), String> {
+            self.include(process).map_err(|error| format!(
+                "Cannot own transport process tree: {error}. Select PTY."
+            ))
         }
 
         fn resume(pid: u32) -> Result<(), String> {
@@ -736,6 +748,7 @@ mod windows {
     #[cfg(test)]
     mod denied_opener_tests {
         use super::*;
+        use crate::transport::process::tests::{assert_fixture_image, fixture_powershell};
         use crate::transport::process::{stop_child, wait_for_exit, STOP_BUDGET};
         use std::os::windows::process::CommandExt;
         use std::process::{Child, Command, Stdio};
@@ -776,7 +789,8 @@ mod windows {
                     )
                     .unwrap();
                     format!(
-                        "Start-Process powershell.exe -ArgumentList '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"' -PassThru -NoNewWindow",
+                        "Start-Process '{}' -ArgumentList '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"' -PassThru -NoNewWindow",
+                        fixture_powershell().replace('\'', "''"),
                         child_script.display(),
                     )
                 } else {
@@ -787,7 +801,7 @@ mod windows {
                     "$p={child_command}; \
                      [IO.File]::WriteAllText('{}',[string]$p.Id); while(!(Test-Path '{}')){{Start-Sleep -Milliseconds 20}}",
                     ready.display(), release.display());
-                let root = Command::new("powershell.exe")
+                let root = Command::new(fixture_powershell())
                     .args(["-NoProfile", "-NonInteractive", "-Command", &script])
                     .creation_flags(0x0800_0004)
                     .stdin(Stdio::null())
@@ -796,6 +810,7 @@ mod windows {
                     .spawn()
                     .unwrap();
                 let job = ProcessTree::attach(&root).unwrap();
+                assert_fixture_image(root.id());
                 let deadline = Instant::now() + Duration::from_secs(120);
                 let child = loop {
                     if let Ok(text) = std::fs::read_to_string(&ready) {
@@ -809,6 +824,9 @@ mod windows {
                     );
                     std::thread::sleep(Duration::from_millis(20));
                 };
+                if late_orphan {
+                    assert_fixture_image(child);
+                }
                 Self {
                     root,
                     job,
@@ -1247,6 +1265,34 @@ impl ProcessTree {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    pub(super) fn fixture_powershell() -> String {
+        let path = std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+            .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        assert!(path.is_absolute() && path.is_file(), "fixture shell must be an absolute system executable");
+        path.to_string_lossy().into_owned()
+    }
+
+    #[cfg(windows)]
+    pub(super) fn assert_fixture_image(pid: u32) {
+        use std::{ffi::c_void, os::windows::ffi::OsStringExt};
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(access: u32, inherit: i32, id: u32) -> *mut c_void;
+            fn QueryFullProcessImageNameW(handle: *mut c_void, flags: u32, image: *mut u16, size: *mut u32) -> i32;
+            fn CloseHandle(handle: *mut c_void) -> i32;
+        }
+        let handle = unsafe { OpenProcess(0x1000, 0, pid) };
+        assert!(!handle.is_null(), "fixture process must be queryable");
+        let mut image = vec![0u16; 32768];
+        let mut size = image.len() as u32;
+        let queried = unsafe { QueryFullProcessImageNameW(handle, 0, image.as_mut_ptr(), &mut size) };
+        unsafe { CloseHandle(handle); }
+        assert_ne!(queried, 0, "fixture image query failed");
+        let actual = std::path::PathBuf::from(std::ffi::OsString::from_wide(&image[..size as usize]));
+        assert_eq!(actual.canonicalize().unwrap(), std::path::Path::new(&fixture_powershell()).canonicalize().unwrap());
+    }
+
     fn reused_group_stop(signals: &std::sync::atomic::AtomicUsize) -> Result<(), String> {
         terminate_unix_group_with(&mut false,
             || Err("ECHILD: original root was reaped; numeric PGID now names replacement".into()),
@@ -1345,7 +1391,7 @@ mod tests {
              [IO.File]::WriteAllText('{}',[string]$p.Id); \
              while(!(Test-Path '{}')){{Start-Sleep -Milliseconds 20}}",
             ready.display(), release.display());
-        let mut root = Command::new("powershell.exe")
+        let mut root = Command::new(fixture_powershell())
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .creation_flags(0x0800_0004)
             .stdin(Stdio::null())
@@ -1354,6 +1400,7 @@ mod tests {
             .spawn()
             .unwrap();
         let job = ProcessTree::attach(&root).unwrap();
+        assert_fixture_image(root.id());
         let deadline = Instant::now() + Duration::from_secs(120);
         while !ready.exists() {
             assert!(

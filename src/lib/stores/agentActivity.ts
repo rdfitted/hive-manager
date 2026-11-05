@@ -53,6 +53,12 @@ export function needsAttention(agent: AgentInfo, stale: Set<string>, workState =
   return attentionReason(agent, stale, workState) !== 'none';
 }
 
+/** Ops Wall stale means a running seat without activity for three whole minutes. */
+export function staleRunningAgents(agents: AgentInfo[], lastActivity: Record<string, number | null>, at: number, fallback: number): Set<string> {
+  return new Set(agents.filter(agent => agent.status === 'Running' && !isFinished(agent)
+    && at - (lastActivity[agent.id] ?? fallback) >= 180_000).map(agent => agent.id));
+}
+
 /** Svelte starts this once for all subscribers and stops it after the last leaves. */
 export const now: Readable<number> = readable(Date.now(), (set) => {
   set(Date.now());

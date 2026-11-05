@@ -1,11 +1,13 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
 import type { AgentEvent } from '$lib/stores/agentEvents';
 import { CHAT_WINDOW_SIZE, passiveToolResult, protocolAttention, transcriptRows } from './transcript';
 
 const fixture = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue(undefined), loadOlder: vi.fn(), setAgents: (_agents: import('$lib/stores/sessions').AgentInfo[]) => {}, setSource: (_source: import('$lib/stores/agentEvents').AgentFeed['capabilities']['event_source']) => {} }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock('$lib/stores/agentEvents', async () => {
   const { writable } = await import('svelte/store');
   const state = writable({ sessionId: 's', histories: {}, feeds: {} });
@@ -20,13 +22,88 @@ vi.mock('$lib/stores/sessions', async () => {
 });
 import ChatPane from './ChatPane.svelte';
 import PaneToggle from './PaneToggle.svelte';
+import { coordination } from '$lib/stores/coordination';
 
 export const event = (cursor: string, kind: AgentEvent['kind'] = 'assistant_message', payload: Record<string, unknown> = { text: cursor }, source_id: string | null = cursor): AgentEvent => ({
   agent_id: 'a', cursor, kind, payload, source_id, ts: '2026-01-01T00:00:00Z', truncated: false,
 });
-afterEach(() => { cleanup(); fixture.setSource('none'); fixture.setAgents([]); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); coordination.clearLog(); fixture.setSource('none'); fixture.setAgents([]); vi.clearAllMocks(); });
+beforeEach(() => {
+  fixture.invoke.mockReset().mockImplementation((command: string) => Promise.resolve(command === 'get_coordination_log' ? [] : undefined));
+  coordination.setSessionId(null);
+});
 
 describe('agent chat', () => {
+  it('R3-F2 retained hidden Focus panes leave the visible log alone and load only when shown', async () => {
+    const current = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [], composer: false } });
+    await tick(); await tick();
+    const hidden = render(ChatPane, { props: { sessionId: 'other', agentId: 'b', events: [], composer: false, visible: false } });
+    await tick();
+    expect(get(coordination).sessionId).toBe('s');
+    expect(fixture.invoke.mock.calls).toEqual([['get_coordination_log', { sessionId: 's', limit: undefined }]]);
+    await current.rerender({ visible: false });
+    await hidden.rerender({ visible: true });
+    await tick();
+    expect(get(coordination).sessionId).toBe('other');
+    expect(fixture.invoke.mock.calls).toEqual([
+      ['get_coordination_log', { sessionId: 's', limit: undefined }],
+      ['get_coordination_log', { sessionId: 'other', limit: undefined }],
+    ]);
+  });
+  it('R3-F2 Focus-only mount loads historical Queen and operator attribution without Grid or Logs', async () => {
+    let resolve!: (value: unknown) => void;
+    fixture.invoke.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    const events = ['Historical directive', 'Historical operator'].map(text => event(text, 'user_message', { text }));
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events, composer: false, variant: 'focus' } });
+    expect(view.container.querySelectorAll('[data-sender]')).toHaveLength(0);
+    await tick();
+    expect(fixture.invoke).toHaveBeenCalledWith('get_coordination_log', { sessionId: 's', limit: undefined });
+    resolve([
+      { id: 'queen-history', timestamp: events[0].ts, from: 'QUEEN', to: 'a', content: 'Historical directive', message_type: 'Task' },
+      { id: 'operator-history', timestamp: events[0].ts, from: 'SYSTEM', to: 'a', content: '[OPERATOR] Historical operator', message_type: 'System' },
+    ]);
+    await waitFor(() => expect(view.container.querySelector('[data-sender="queen"]')?.textContent).toContain('Historical directive'));
+    expect(view.container.querySelector('[data-sender="operator"]')?.textContent).toContain('Historical operator');
+    expect(fixture.invoke).toHaveBeenCalledTimes(1);
+  });
+  it('I2: leaves user rows unattributed while coordination history is unavailable', async () => {
+    fixture.invoke.mockResolvedValueOnce(undefined);
+    await coordination.loadLog('s');
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [event('unattributed', 'user_message', { text: 'Continue' })] } });
+    expect(view.getByRole('article', { name: 'User message' }).textContent).toContain('Continue');
+    expect(view.container.querySelectorAll('[data-sender]')).toHaveLength(0);
+  });
+  it.each(['focus', 'column'] as const)('I2: renders Queen, operator and unmatched user senders in %s and reacts to the session log', async variant => {
+    const events = ['Directive', 'Operator text', 'Unmatched'].map(text => event(text, 'user_message', { text }));
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events, variant } });
+    expect(view.container.querySelectorAll('[data-sender]')).toHaveLength(0);
+    fixture.invoke.mockResolvedValueOnce([
+      { id: 'q', timestamp: events[0].ts, from: 'QUEEN', to: 'a', content: 'Directive', message_type: 'Task' },
+      { id: 'o', timestamp: events[0].ts, from: 'SYSTEM', to: 'a', content: '[OPERATOR] Operator text', message_type: 'System' },
+    ]);
+    await coordination.loadLog('s');
+    await tick();
+    expect(view.container.querySelector('[data-sender="queen"]')?.textContent).toContain('Directive');
+    expect(view.container.querySelector('[data-sender="queen"] .sender-label')?.textContent).toBe('Queen');
+    expect(view.container.querySelector('[data-sender="operator"]')?.textContent).toContain('Operator text');
+    expect(view.getAllByRole('article', { name: 'User message' })[2].hasAttribute('data-sender')).toBe(false);
+    // A log belonging to another session must never label this session's rows.
+    fixture.invoke.mockResolvedValueOnce([
+      { id: 'wrong-session', timestamp: events[0].ts, from: 'QUEEN', to: 'a', content: 'Unmatched', message_type: 'Task' },
+    ]);
+    await coordination.loadLog('other-session');
+    await tick();
+    expect(view.container.querySelectorAll('[data-sender]')).toHaveLength(0);
+  });
+  it('I1: column variant omits its composer and optional paging without changing bounded transcript rendering', () => {
+    const events = Array.from({ length: 500 }, (_, index) => event(`column-${index}`));
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events, composer: false, paging: false, variant: 'column' } });
+    expect(view.container.querySelector('.chat-pane')?.getAttribute('data-variant')).toBe('column');
+    expect(view.container.querySelectorAll('.chat-composer')).toHaveLength(0);
+    expect(view.queryByRole('textbox')).toBeNull();
+    expect(view.queryByRole('navigation', { name: 'Transcript history' })).toBeNull();
+    expect(view.getAllByRole('article')).toHaveLength(CHAT_WINDOW_SIZE);
+  });
   it('G30 source guard: prohibits raw HTML in every chat component and shared Markdown renderer', () => {
     const sources = import.meta.glob<string>([
       './**/*.svelte', '../ui/MarkdownBlocks.svelte', '../ui/HtmlPreview.svelte', '../knowledge/MarkdownInline.svelte',
@@ -54,6 +131,25 @@ describe('agent chat', () => {
     expect(frame.getAttribute('sandbox')).toBe('');
     expect(frame.srcdoc).not.toContain('<script>');
     expect(view.getByRole('article', { name: 'User message' }).querySelector('iframe, button')).toBeNull();
+  });
+
+  it.each(['roster', 'coordination'] as const)('keeps the same HTML preview open through unrelated %s refreshes', async refresh => {
+    fixture.setAgents([runningAgent()]);
+    const text = '```html\n<h1>Stable synthetic preview</h1>\n```';
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [event('stable-preview', 'assistant_message', { text })] } });
+    await fireEvent.click(view.getByRole('button', { name: 'Preview HTML' }));
+    const frame = view.getByTitle('HTML preview');
+    if (refresh === 'roster') fixture.setAgents([{ ...runningAgent(), status: 'Completed' }]);
+    else {
+      fixture.invoke.mockResolvedValueOnce([{ id: 'unrelated-log', timestamp: '2026-01-01T00:00:00Z', from: 'QUEEN', to: 'other-agent', content: 'Unrelated directive', message_type: 'Task' }]);
+      await coordination.loadLog('s');
+    }
+    await tick();
+    expect(view.queryByTitle('HTML preview'), 'unchanged assistant text must retain the open iframe').toBe(frame);
+    expect(view.getByRole('button', { name: 'Close HTML preview' }).getAttribute('aria-expanded')).toBe('true');
+    await view.rerender({ sessionId: 's', agentId: 'a', events: [event('stable-preview', 'assistant_message', { text: text.replace('Stable', 'Updated') })] });
+    expect(view.queryByTitle('HTML preview'), 'a real source change must still close the old preview').toBeNull();
+    expect(view.container.querySelector('pre code')?.textContent).toContain('Updated synthetic preview');
   });
 
   it('G30: keeps script, image handlers, iframe HTML and executable links inert and visible', () => {
@@ -177,7 +273,7 @@ describe('agent chat', () => {
     await waitFor(() => expect(fixture.invoke).toHaveBeenCalledWith('operator_inject', {
       request: { session_id: 's', target_agent_id: 'a', message: 'Continue with fixture' },
     }));
-    expect(fixture.invoke).toHaveBeenCalledTimes(1);
+    expect(fixture.invoke.mock.calls.filter(([command]) => command === 'operator_inject')).toHaveLength(1);
   });
 
   it('holds the current reading window when new live records arrive after scrolling up', async () => {

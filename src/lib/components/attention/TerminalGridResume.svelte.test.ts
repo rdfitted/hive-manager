@@ -8,6 +8,7 @@ const fixture = vi.hoisted(() => ({
   terminals: [] as { buffer: string; disposed: boolean; textarea: HTMLTextAreaElement; keyHandler: (event: KeyboardEvent) => boolean }[],
   webglCreated: 0, webglDisposed: 0, terminalsDisposed: 0, focuses: 0,
   setAgentEvents: null as ((value: AgentEventsState) => void) | null,
+  blockedReasons: {} as Record<string, string>,
   invoke: vi.fn(async (command: string, args: { id: string }) => command === 'get_pty_snapshot'
     ? { id: args.id, offset_start: 0, offset_end: 17, data: btoa('fixture scrollback') } : undefined),
 }));
@@ -45,6 +46,7 @@ vi.mock('$lib/stores/sessions', async () => {
   const { writable } = await import('svelte/store');
   return {
     activeAgents: writable([]), activeSession: writable(null), sessions: { ...writable({ sessions: [] }), resumeAgent: (sessionId: string, agentId: string) => fixture.invoke('resume_agent', { sessionId, agentId } as never) },
+    resumeBlockedReason: (_session: Session, id: string) => fixture.blockedReasons[id] ?? null,
     serdeEnumVariantName: (value: unknown) => typeof value === 'string' ? value : value && typeof value === 'object' ? Object.keys(value)[0] : undefined,
   };
 });
@@ -75,6 +77,7 @@ import { layout } from '$lib/stores/layout';
 const { readFileSync } = await vi.importActual<{ readFileSync(path: string, encoding: 'utf8'): string }>('node:fs');
 
 beforeEach(() => {
+  fixture.blockedReasons = {};
   fixture.terminals.length = 0; fixture.webglCreated = 0; fixture.webglDisposed = 0; fixture.terminalsDisposed = 0; fixture.focuses = 0;
   localStorage.clear(); layout.setMaximizedTerminalId(null);
   publishFeed();
@@ -97,6 +100,28 @@ const session: Session = {
 };
 
 describe('G49 pane resume', () => {
+  it.each(['grid', 'focus'] as const)('G61 live blocked notices are hidden for Running and ordinary waiting agents in %s', async (mode) => {
+    layout.setSessionViewMode(mode);
+    fixture.blockedReasons.claude = 'Live seat must not display a Resume refusal.';
+    const live: Session = { ...session, agents: [{ ...session.agents[0], provider_session_id: 'provider-live' }] };
+    const view = render(TerminalGrid, { session: live, focusedAgentId: 'claude', onSelect: vi.fn() });
+    for (const status of ['Running', { WaitingForInput: 'trust_prompt' }] as const) {
+      await view.rerender({ session: { ...live, agents: [{ ...live.agents[0], status }] } });
+      expect(view.queryByRole('button', { name: 'Resume Claude agent' })).toBeNull();
+      expect(view.queryByText('Live seat must not display a Resume refusal.')).toBeNull();
+    }
+  });
+  it.each(['grid', 'focus'] as const)('G61 blocked Resume in %s shows its reason, while an unblocked Completed seat stays resumable', async (mode) => {
+    layout.setSessionViewMode(mode);
+    fixture.blockedReasons.claude = 'Saved working directory is unavailable.';
+    const saved: Session = { ...session, agents: session.agents.map(agent => ({ ...agent, status: 'Completed' as const, provider_session_id: `provider-${agent.id}` })) };
+    const view = render(TerminalGrid, { session: saved, focusedAgentId: 'claude', onSelect: vi.fn() });
+    expect(view.queryByRole('button', { name: 'Resume Claude agent' })).toBeNull();
+    expect(view.getByText('Saved working directory is unavailable.')).toBeTruthy();
+    await view.rerender({ focusedAgentId: 'codex' });
+    expect(view.getByRole('button', { name: 'Resume Codex PTY' })).toBeTruthy();
+    expect(view.container.querySelector('button[aria-label="Resume Claude agent"]')).toBeNull();
+  });
   it('shows an ellipsis while Resume is pending and restores the idle label', async () => {
     layout.setSessionViewMode('focus');
     let finishResume!: () => void;

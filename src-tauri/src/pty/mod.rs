@@ -1,4 +1,6 @@
 mod manager;
+#[cfg(windows)]
+mod conpty_windows;
 pub mod output_ring;
 #[cfg(not(test))]
 mod session;

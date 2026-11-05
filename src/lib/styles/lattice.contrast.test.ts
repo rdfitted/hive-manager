@@ -47,6 +47,46 @@ function contrast(foreground: string, background: string): number {
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 }
 
+function rgbLuminance(channels: number[]): number {
+  const linear = channels.map(value => {
+    const channel = value / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+}
+
+function tintContrast(foreground: string, tint: number[]): number {
+  const well = resolveToken('--chat-well');
+  const composite = tint.map((channel, index) =>
+    channel * 0.10 + parseInt(well.slice(1 + index * 2, 3 + index * 2), 16) * 0.90);
+  const a = luminance(foreground), b = rgbLuminance(composite);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+describe('G60 chat text contrast', () => {
+  it.each(['--chat-well', '--chat-text', '--chat-text-meta'])('defines %s as six-digit hex', token => {
+    expect(tokens[token]).toMatch(/^#[\da-f]{6}$/i);
+  });
+  it('keeps chat body readable on the well', () => {
+    expect(contrast('--chat-text', '--chat-well')).toBeGreaterThanOrEqual(4.5);
+  });
+  it('keeps chat metadata readable on the well', () => {
+    expect(contrast('--chat-text-meta', '--chat-well')).toBeGreaterThanOrEqual(4.5);
+  });
+  it('keeps chat body readable on the composited Queen tint', () => {
+    expect(tintContrast('--chat-text', [193, 66, 196])).toBeGreaterThanOrEqual(4.5);
+  });
+  it('keeps chat metadata readable on the composited Queen tint', () => {
+    expect(tintContrast('--chat-text-meta', [193, 66, 196])).toBeGreaterThanOrEqual(4.5);
+  });
+  it('keeps chat body readable on the composited warning tint', () => {
+    expect(tintContrast('--chat-text', [236, 221, 165])).toBeGreaterThanOrEqual(4.5);
+  });
+  it('keeps chat metadata readable on the composited warning tint', () => {
+    expect(tintContrast('--chat-text-meta', [236, 221, 165])).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
 // These are the actual UI surfaces, including field, track and compatibility roles.
 const surfaces = [
   '--canvas', '--chrome', '--toolbar', '--toolbar-control', '--surface',

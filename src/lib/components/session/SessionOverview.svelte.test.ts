@@ -15,6 +15,7 @@ const fixture = vi.hoisted(() => ({
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock('phosphor-svelte', () => ({
   ArrowUp: () => {}, ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {},
   Hourglass: () => {}, Plus: () => {}, X: () => {}, Minus: () => {}, Square: () => {},
@@ -31,6 +32,7 @@ vi.mock('$lib/stores/sessions', async () => {
   return {
     sessions: { subscribe: state.subscribe }, activeSession,
     activeAgents: derived(activeSession, (session) => session?.agents ?? []),
+    resumeBlockedReason: () => null,
     serdeEnumVariantName: (value: unknown) => typeof value === 'string' ? value
       : value && typeof value === 'object' ? Object.keys(value)[0] : undefined,
   };
@@ -168,10 +170,15 @@ describe('Focus/Grid session terminals', () => {
     layout.setSessionViewMode(mode); chatFeed(undefined, hasTerminal);
     const view = render(SessionOverview); await tick();
     const pane = view.container.querySelector<HTMLElement>('.terminal-item')!;
-    const editor = within(pane).getByRole('textbox', { name: 'Message Agent 0' }); editor.focus();
+    const editor = (mode === 'grid' ? view : within(pane)).getByRole('textbox', { name: 'Message Agent 0' }); editor.focus();
     chatFeed([{ agent_id: 'session-a-agent-0', cursor: 'approval', kind: 'status', ts: '2026-01-01T00:00:00Z', source_id: 'approval', truncated: false, payload: { status, message: 'Fixture prompt' } }], hasTerminal);
     await tick();
     const attention = within(pane).getByRole('region', { name: 'Agent needs attention' });
+    if (mode === 'grid') {
+      const tile = view.getByRole('button', { name: 'Attention 1' });
+      await fireEvent.click(tile);
+      expect(pane.classList.contains('resource-match')).toBe(true);
+    }
     expect(attention.textContent).toContain(status === 'needs_approval' ? 'Approval required.' : 'Agent needs input.');
     const pointer = within(attention).getByRole('button', { name: hasTerminal ? 'Open terminal' : 'Open raw event log' });
     expect(document.activeElement).toBe(editor);
@@ -189,7 +196,7 @@ describe('Focus/Grid session terminals', () => {
     layout.setSessionViewMode(mode); chatFeed();
     const view = render(SessionOverview); await tick();
     const pane = view.container.querySelector<HTMLElement>('.terminal-item')!;
-    const editor = within(pane).getByRole('textbox', { name: 'Message Agent 0' }); editor.focus();
+    const editor = (mode === 'grid' ? view : within(pane)).getByRole('textbox', { name: 'Message Agent 0' }); editor.focus();
     const active = session(); active.agents[0].status = { WaitingForInput: 'trust_prompt' }; publish(active); await tick();
     expect(within(pane).getByText('Agent needs input. A prompt may only be visible in the terminal.')).toBeTruthy();
     expect(document.activeElement).toBe(editor);

@@ -250,7 +250,7 @@ def tracked_files(root: Path):
     """
     try:
         import subprocess
-        r = subprocess.run(["git", "-C", str(root), "ls-files"],
+        r = subprocess.run(["git", "-C", str(root), "ls-files"], creationflags=(0x08000000 if sys.platform == "win32" else 0),
                            capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             return None

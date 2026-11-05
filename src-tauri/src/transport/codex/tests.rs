@@ -1,5 +1,33 @@
 use super::*;
 
+#[cfg(windows)]
+fn fixture_powershell() -> String {
+    let path = std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    assert!(path.is_absolute() && path.is_file(), "fixture shell must be an absolute system executable");
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(windows)]
+fn assert_fixture_image(pid: u32) {
+    use std::{ffi::c_void, os::windows::ffi::OsStringExt};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, id: u32) -> *mut c_void;
+        fn QueryFullProcessImageNameW(handle: *mut c_void, flags: u32, image: *mut u16, size: *mut u32) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    let handle = unsafe { OpenProcess(0x1000, 0, pid) };
+    assert!(!handle.is_null(), "fixture process must be queryable");
+    let mut image = vec![0u16; 32768];
+    let mut size = image.len() as u32;
+    let queried = unsafe { QueryFullProcessImageNameW(handle, 0, image.as_mut_ptr(), &mut size) };
+    unsafe { CloseHandle(handle); }
+    assert_ne!(queried, 0, "fixture image query failed");
+    let actual = std::path::PathBuf::from(std::ffi::OsString::from_wide(&image[..size as usize]));
+    assert_eq!(actual.canonicalize().unwrap(), std::path::Path::new(&fixture_powershell()).canonicalize().unwrap());
+}
+
 #[test]
 fn failed_completion_envelopes_emit_visible_error_and_keep_turn_end() {
     for (status, error, expected) in [
@@ -311,7 +339,7 @@ fn fake_server(
         .unwrap();
     let script = r#"
 $ErrorActionPreference='Stop'
-$child=Start-Process -FilePath "$PSHOME\powershell.exe" -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 300' -WindowStyle Hidden -PassThru
+$child=Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 300' -WindowStyle Hidden -PassThru
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'child.pid.pending'),[string]$child.Id)
 [IO.File]::Move((Join-Path $PSScriptRoot 'child.pid.pending'), (Join-Path $PSScriptRoot 'child.pid'))
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'environment.json'),(@{billing_present=[bool]($env:OPENAI_API_KEY -or $env:CODEX_API_KEY);parent_marker_present=[bool]$env:CLAUDECODE;agent=$env:HIVE_AGENT_ID;token_present=[bool]$env:HIVE_AGENT_TOKEN}|ConvertTo-Json -Compress))
@@ -332,7 +360,7 @@ while($null -ne ($line=[Console]::ReadLine())) {
 }
 "#;
     std::fs::write(temp.path().join("server.ps1"), script).unwrap();
-    std::fs::write(temp.path().join("codex.cmd"),"@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0server.ps1\"\r\n").unwrap();
+    std::fs::write(temp.path().join("codex.cmd"),"@echo off\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0server.ps1\"\r\n").unwrap();
     if hang {
         std::fs::write(temp.path().join("hang"), "").unwrap();
     }
@@ -413,7 +441,9 @@ fn wait_for_child_pid_with_startup(
             .and_then(|value| value.trim().parse().ok());
         pid.is_some()
     });
-    pid.unwrap()
+    let pid = pid.unwrap();
+    assert_fixture_image(pid);
+    pid
 }
 
 #[cfg(windows)]
@@ -531,7 +561,7 @@ fn g15_startup_cancel_and_shim_tree_stop_and_natural_exit() {
             // A cmd shim retains its own stdin read handle. Use a direct fake
             // server here so closing stdin genuinely breaks the writer pipe.
             let options = CodexOptions {
-                command: "powershell.exe".into(),
+                command: fixture_powershell(),
                 server_args: vec![
                     "-NoProfile".into(),
                     "-NonInteractive".into(),
@@ -753,7 +783,7 @@ fn g53_live_process_cleanup_fails_and_retains_exact_client_until_verified_exit()
     let ready = Arc::new(AtomicBool::new(false));
     let observed = ready.clone();
     let client = client::RpcClient::new();
-    client.spawn("powershell.exe", &[
+    client.spawn(&fixture_powershell(), &[
         "-NoProfile".into(), "-NonInteractive".into(), "-Command".into(),
         r#"Write-Output '{"method":"ready","type":"ready"}'; Start-Sleep -Seconds 600"#.into(),
     ], temp.path(), &[], Arc::new(move |_| { observed.store(true, Ordering::SeqCst); })).unwrap();

@@ -38,28 +38,25 @@ fn g49_isolated_resume_refuses_coordinator_and_per_agent_spawns() {
             "agents":[{"id":queen,"role":"Queen","parent_id":null,"config":{"cli":"claude","flags":[]},
                 "provider_session_id":provider,"transcript_session_id":provider,"transcript_cwd":cwd}]
         })).unwrap();
-        storage.save_session(&saved).unwrap();
-        let error = controller.resume_session(sid).unwrap_err();
-        assert!(error.contains("Isolated instance"), "G40 coordinator Resume must be refused: {error}");
-        assert!(controller.list_sessions().is_empty());
-        assert!(manager.read().instance_id(queen).is_none());
-        assert!(!manager.read().is_alive(queen));
-
-        // The existing fixture loader may still restore metadata when the
-        // coordinator has no ID; a ready worker must never start automatically.
+        // Ended runs load metadata, including agents with saved conversations.
+        // Isolation still refuses every explicit per-agent process start.
         let mut worker_info = saved.agents[0].clone();
         worker_info.id = worker.into();
         worker_info.role = "Worker(1)".into();
         worker_info.parent_id = Some(queen.into());
-        saved.agents[0].provider_session_id = None;
-        saved.agents[0].transcript_session_id = None;
         saved.agents.push(worker_info);
         storage.save_session(&saved).unwrap();
         let session = controller.resume_session(sid).unwrap();
+        assert_eq!(controller.list_sessions().len(), 1);
+        assert_eq!(session.state, crate::session::SessionState::Completed);
+        let notice = session.agent_resume_report.iter()
+            .find(|notice| notice.agent_id.as_deref() == Some(queen)).unwrap();
+        assert_eq!(notice.reason, "manual_resume_required");
+        assert!(notice.message.contains("saved session has ended"));
         assert!(session.agents[1].provider_session_id.is_some());
-        let error = controller.resume_agent(sid, worker).unwrap_err();
-        assert!(error.contains("Isolated instance"), "G40 per-agent Resume must be refused: {error}");
         for id in [queen, worker] {
+            let error = controller.resume_agent(sid, id).unwrap_err();
+            assert!(error.contains("Isolated instance"), "G40 per-agent Resume must be refused: {error}");
             assert!(manager.read().instance_id(id).is_none());
             assert!(!manager.read().is_alive(id));
         }
@@ -67,11 +64,18 @@ fn g49_isolated_resume_refuses_coordinator_and_per_agent_spawns() {
     }
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join(".hive-instance"), "fixture").unwrap();
-    let output = Command::new(std::env::current_exe().unwrap())
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--exact", "instance_fixture_tests::g49_isolated_resume_refuses_coordinator_and_per_agent_spawns", "--nocapture"])
         .env("HM_RESUME_ISOLATION_CHILD", "1")
         .env(instance::DIR, temp.path()).env(instance::PORT, "18897")
-        .env_remove(instance::CDP_PORT).output().unwrap();
+        .env_remove(instance::CDP_PORT);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output().unwrap();
     assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed; 0 failed;"));
     assert!(!instance::is_isolated(), "G40 the parent stays on its normal profile");
@@ -150,7 +154,11 @@ fn seeded_output_loads_through_real_storage_and_isolated_controller() {
                 }
                 assert!(feeds.is_protocol(id, agent_id).unwrap());
                 let history = feeds.history(id, agent_id, None, None, 100).unwrap();
-                assert_eq!(history.events.len(), 2, "durable journal is not empty");
+                assert_eq!(
+                    history.events.len(),
+                    expected["eventCount"].as_u64().expect("manifest agent eventCount") as usize,
+                    "durable journal matches manifest eventCount for {agent_id}"
+                );
                 if expected["state"] == "markdown" {
                     let text = history.events[1].payload["text"].as_str().unwrap();
                     for key in ["tableText", "codeText", "link", "literalHtml"] {
@@ -237,22 +245,33 @@ fn seeded_output_loads_through_real_storage_and_isolated_controller() {
     }
     let temp = tempfile::tempdir().unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/render/seed.mjs");
-    let output = Command::new("node")
+    let mut command = Command::new("node");
+    command
         .arg(script)
-        .arg(temp.path())
-        .output()
-        .unwrap();
+        .arg(temp.path());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output().unwrap();
     assert!(
         output.status.success(),
         "seeder failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let output = Command::new(std::env::current_exe().unwrap())
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--ignored", "--exact", "instance_fixture_tests::seeded_output_loads_through_real_storage_and_isolated_controller", "--nocapture"])
         .env("HM_SEEDED_FIXTURE_CHILD", "1")
         .env(instance::DIR, temp.path()).env(instance::PORT, "18897")
-        .env_remove(instance::CDP_PORT)
-        .output().unwrap();
+        .env_remove(instance::CDP_PORT);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output().unwrap();
     assert!(
         output.status.success(),
         "{}\n{}",

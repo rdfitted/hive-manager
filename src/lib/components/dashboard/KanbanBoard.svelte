@@ -4,21 +4,23 @@
   import KanbanColumn from './KanbanColumn.svelte';
 
   const PRIMARY_COLUMNS: { status: CellStatus; label: string; accent: string }[] = [
-    { status: 'queued', label: 'Queued', accent: 'var(--state-queued)' },
     { status: 'preparing', label: 'Preparing', accent: 'var(--accent-chrome)' },
-    { status: 'launching', label: 'Launching', accent: 'var(--accent)' },
     { status: 'running', label: 'Running', accent: 'var(--status-running)' },
     { status: 'waiting_input', label: 'Waiting Input', accent: 'var(--status-warning)' },
-    { status: 'summarizing', label: 'Summarizing', accent: 'var(--accent-chrome)' },
     { status: 'completed', label: 'Completed', accent: 'var(--status-success)' },
     { status: 'failed', label: 'Failed', accent: 'var(--status-error)' },
-    { status: 'killed', label: 'Killed', accent: 'var(--status-blocked)' },
   ];
 
+  function boardStatus(status: CellStatus): CellStatus | 'other' {
+    if (status === 'launching') return 'running';
+    if (status === 'summarizing') return 'completed';
+    return PRIMARY_COLUMNS.some((column) => column.status === status) ? status : 'other';
+  }
+
   let groups = $derived.by(() => {
-    const map = new Map<CellStatus, Session[]>();
+    const map = new Map<CellStatus | 'other', Session[]>();
     for (const s of $sessionsStore.sessions) {
-      const k = sessionStateToCellStatus(s.state);
+      const k = boardStatus(sessionStateToCellStatus(s.state));
       const arr = map.get(k) ?? [];
       arr.push(s);
       map.set(k, arr);
@@ -37,6 +39,14 @@
         sessions={groups.get(col.status) ?? []}
       />
     {/each}
+    {#if (groups.get('other')?.length ?? 0) > 0}
+      <KanbanColumn
+        label="Other"
+        status="queued"
+        accent="var(--text-muted)"
+        sessions={groups.get('other') ?? []}
+      />
+    {/if}
   </div>
 </div>
 

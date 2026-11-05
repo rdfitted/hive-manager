@@ -162,9 +162,30 @@ impl StateManager {
         let mut temp = NamedTempFile::new_in(parent)?;
         use std::io::Write;
         temp.write_all(content.as_bytes())?;
-        temp.persist(target)
-            .map_err(|err| StateError::Io(err.error))?;
+        Self::persist_with_retry(temp, &target, |file, path| file.persist(path))?;
         Ok(())
+    }
+
+    // Antivirus/indexers can briefly hold a Windows replacement target open.
+    // PersistError returns ownership of the same temp file, so retries preserve
+    // atomic replacement and never rewrite or truncate the destination.
+    fn persist_with_retry(
+        mut temp: NamedTempFile,
+        target: &std::path::Path,
+        mut persist: impl FnMut(NamedTempFile, &std::path::Path) -> Result<fs::File, tempfile::PersistError>,
+    ) -> Result<(), StateError> {
+        const ATTEMPTS: usize = 3;
+        for attempt in 0..ATTEMPTS {
+            match persist(temp, target) {
+                Ok(_) => return Ok(()),
+                Err(error) if error.error.kind() == std::io::ErrorKind::PermissionDenied && attempt + 1 < ATTEMPTS => {
+                    temp = error.file;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => return Err(StateError::Io(error.error)),
+            }
+        }
+        unreachable!("bounded persist loop always returns")
     }
 
     fn write_peer_record(
@@ -941,5 +962,61 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, StateError::ContractLocked(state) if state == "QaInProgress"));
+    }
+}
+
+
+#[cfg(test)]
+mod atomic_retry_tests {
+    use super::*;
+    use std::io::{Error, ErrorKind, Write};
+
+    fn fixture() -> (tempfile::TempDir, NamedTempFile, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("snapshot.json");
+        fs::write(&target, "previous").unwrap();
+        let mut file = NamedTempFile::new_in(root.path()).unwrap();
+        file.write_all(b"latest").unwrap();
+        (root, file, target)
+    }
+
+    #[test]
+    fn permission_denied_once_retries_same_atomic_file() {
+        let (_root, file, target) = fixture();
+        let mut attempts = 0;
+        StateManager::persist_with_retry(file, &target, |file, path| {
+            attempts += 1;
+            if attempts == 1 {
+                assert_eq!(fs::read_to_string(path).unwrap(), "previous");
+                Err(tempfile::PersistError { error: Error::from(ErrorKind::PermissionDenied), file })
+            } else { file.persist(path) }
+        }).unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(fs::read_to_string(target).unwrap(), "latest");
+    }
+
+    #[test]
+    fn persistent_permission_denied_is_bounded_and_preserves_destination() {
+        let (_root, file, target) = fixture();
+        let mut attempts = 0;
+        let error = StateManager::persist_with_retry(file, &target, |file, _| {
+            attempts += 1;
+            Err(tempfile::PersistError { error: Error::from(ErrorKind::PermissionDenied), file })
+        }).unwrap_err();
+        assert!(matches!(error, StateError::Io(error) if error.kind() == ErrorKind::PermissionDenied));
+        assert_eq!(attempts, 3);
+        assert_eq!(fs::read_to_string(target).unwrap(), "previous");
+    }
+
+    #[test]
+    fn other_persist_errors_do_not_retry() {
+        let (_root, file, target) = fixture();
+        let mut attempts = 0;
+        let error = StateManager::persist_with_retry(file, &target, |file, _| {
+            attempts += 1;
+            Err(tempfile::PersistError { error: Error::from(ErrorKind::NotFound), file })
+        }).unwrap_err();
+        assert!(matches!(error, StateError::Io(error) if error.kind() == ErrorKind::NotFound));
+        assert_eq!(attempts, 1);
     }
 }

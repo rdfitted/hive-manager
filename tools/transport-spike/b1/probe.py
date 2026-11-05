@@ -27,14 +27,14 @@ def main():
     store = root / 'sqlite'
     store.mkdir()
     try:
-        subprocess.run(['git', 'init', '--quiet', str(project)], check=True,
+        subprocess.run(['git', 'init', '--quiet', str(project)], creationflags=(0x08000000 if os.name == "nt" else 0), check=True,
                        capture_output=True, timeout=60)
     except subprocess.TimeoutExpired:
         raise SystemExit('Git initialization timed out (details withheld)') from None
     # This is a throwaway git init, never a branch/worktree of the application.
     schema = root / 'schema'
     try:
-        subprocess.run([args.codex, 'app-server', 'generate-json-schema', '--out', str(schema)],
+        subprocess.run([args.codex, 'app-server', 'generate-json-schema', '--out', str(schema)], creationflags=(0x08000000 if os.name == "nt" else 0),
                        check=True, capture_output=True, timeout=args.timeout)
     except subprocess.TimeoutExpired:
         raise SystemExit('Schema generation timed out (details withheld)') from None
@@ -44,7 +44,7 @@ def main():
         digest.update(path.relative_to(schema).as_posix().encode())
         digest.update(path.read_bytes())
     try:
-        version = subprocess.check_output([args.codex, '--version'], text=True, timeout=60).strip()
+        version = subprocess.check_output([args.codex, '--version'], creationflags=(0x08000000 if os.name == "nt" else 0), text=True, timeout=60).strip()
     except subprocess.TimeoutExpired:
         raise SystemExit('Version lookup timed out (details withheld)') from None
     child_env = os.environ.copy()
@@ -55,7 +55,7 @@ def main():
         for key in ('OPENAI_API_KEY', 'CODEX_API_KEY'):
             child_env.pop(key, None)
     proc = subprocess.Popen([args.codex, '-c', 'sqlite_home=' + json.dumps(str(store)),
-                             'app-server', '--listen', 'stdio://'], cwd=project,
+                             'app-server', '--listen', 'stdio://'], creationflags=(0x08000000 if os.name == "nt" else 0), cwd=project,
                             env=child_env,
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, encoding='utf-8')

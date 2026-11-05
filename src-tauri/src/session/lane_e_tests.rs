@@ -1,4 +1,5 @@
 use super::*;
+use super::super::AgentResumeNotice;
 use crate::pty::PtyManager;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -283,7 +284,7 @@ fn resume_fixture(
     let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
     controller.set_storage(storage.clone());
     let mut source = waiting_worker_session(&Uuid::new_v4().to_string(), temp.path(), 1);
-    source.state = SessionState::Completed;
+    source.state = SessionState::Running;
     source.agents[0].transcript_session_id = Some(Uuid::new_v4().to_string());
     source.agents[0].transcript_spawned_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
     if solo {
@@ -348,7 +349,7 @@ fn g49_load_resumes_only_queen_then_explicitly_resumes_one_worker_in_saved_cwd()
         .instance_id(&missing)
         .is_none());
     assert_eq!(resumed.agent_resume_report.len(), 1);
-    assert!(resumed.agent_resume_report[0].contains(&missing));
+    assert!(resumed.agent_resume_report[0].agent_id.as_deref() == Some(missing.as_str()));
     assert!(matches!(resumed.agents[1].status, AgentStatus::Completed));
     let resumed = controller.resume_agent(&source.id, &worker).unwrap();
     assert_eq!(
@@ -448,7 +449,7 @@ fn g51_resume_preserves_concurrent_roster_status_activity_and_target_metadata() 
         assert_eq!(target.provider_session_id, source.agents[1].transcript_session_id);
         assert_eq!(target.transcript_spawned_at, controller.pty_manager.read().spawned_at(&worker));
         assert_ne!(target.transcript_spawned_at, before.agents[1].transcript_spawned_at);
-        assert!(snapshot.agent_resume_report.iter().any(|line| line.contains(&added_id)));
+        assert!(snapshot.agent_resume_report.iter().any(|notice| notice.agent_id.as_deref() == Some(added_id.as_str())));
     }
     let saved = storage.load_session(&session_id).unwrap();
     assert!(saved.agents.iter().any(|agent| agent.id == added_id));
@@ -708,16 +709,17 @@ fn g49_missing_worktree_or_saved_cwd_refuses_without_project_root_fallback() {
                 .into_owned()
         });
         storage.save_session(&saved).unwrap();
-        let error = controller.resume_session(&source.id).unwrap_err();
-        assert!(
-            error.contains("working directory"),
-            "G49 clear refusal: {error}"
-        );
+        let resumed = controller.resume_session(&source.id).expect("G61 load succeeds despite coordinator refusal");
+        let notice = resumed.agent_resume_report.iter()
+            .find(|notice| notice.agent_id.as_deref() == Some(source.agents[0].id.as_str()))
+            .expect("G61 report identifies the refusing coordinator");
+        assert_eq!(notice.reason, if missing_path { "invalid_working_directory" } else { "missing_working_directory" });
+        assert!(notice.message.contains("working directory"), "G49 clear refusal: {}", notice.message);
         assert!(
             temp.path().is_dir(),
             "the project root is available but must never be used instead"
         );
-        assert!(controller.sessions.read().is_empty());
+        assert!(controller.sessions.read().contains_key(&source.id), "G61 refused coordinator does not prevent loading the session");
         for agent in &source.agents {
             assert!(controller
                 .pty_manager
@@ -726,6 +728,87 @@ fn g49_missing_worktree_or_saved_cwd_refuses_without_project_root_fallback() {
                 .is_none());
         }
     }
+}
+
+#[test]
+fn g61_terminal_hive_and_solo_load_without_spawning_and_allow_explicit_resume() {
+    for solo in [false, true] {
+        for state in [SessionState::Completed, SessionState::Closed] {
+            let (_temp, controller, storage, source) = resume_fixture(solo);
+            let mut saved = storage.load_session(&source.id).unwrap();
+            saved.state = format!("{state:?}");
+            saved.agents[1].transcript_cwd = None;
+            storage.save_session(&saved).unwrap();
+            let path = storage.session_dir(&source.id).join("session.json");
+            let before = std::fs::read(&path).unwrap();
+            let resumed = controller.resume_session(&source.id).unwrap();
+            assert_eq!(resumed.state, state, "G61 terminal load preserves saved state");
+            let notice = resumed.agent_resume_report.iter()
+                .find(|notice| notice.agent_id.as_deref() == Some(source.agents[0].id.as_str())).unwrap();
+            assert_eq!(notice.reason, "manual_resume_required");
+            for agent in &source.agents {
+                assert!(controller.pty_manager.read().instance_id(&agent.id).is_none(), "G61 terminal load starts nothing");
+                assert!(!controller.pty_manager.read().is_alive(&agent.id));
+            }
+            assert_eq!(std::fs::read(path).unwrap(), before, "G61 metadata-only load never rewrites storage");
+            let resumed = controller.resume_agent(&source.id, &source.agents[0].id).unwrap();
+            assert_eq!(resumed.state, SessionState::Running);
+            assert!(!resumed.agent_resume_report.iter().any(|notice| notice.agent_id.as_deref() == Some(source.agents[0].id.as_str())));
+            assert!(resumed.agent_resume_report.iter().any(|notice|
+                notice.agent_id.as_deref() == Some(source.agents[1].id.as_str()) && notice.reason == "missing_working_directory"),
+                "G61 resuming one agent preserves another agent's cwd blocker");
+            controller.pty_manager.read().kill(&source.agents[0].id).unwrap();
+        }
+    }
+}
+
+#[test]
+fn g61_solo_missing_or_relative_cwd_loads_with_blocker_and_never_uses_project_root() {
+    for cwd in [None, Some("gone worktree"), Some("relative-worktree")] {
+        let (temp, controller, storage, source) = resume_fixture(true);
+        let mut saved = storage.load_session(&source.id).unwrap();
+        saved.agents[0].transcript_cwd = cwd.map(|cwd| if cwd == "gone worktree" {
+            temp.path().join(cwd).to_string_lossy().into_owned()
+        } else { cwd.to_string() });
+        storage.save_session(&saved).unwrap();
+        let resumed = controller.resume_session(&source.id).unwrap();
+        assert!(controller.sessions.read().contains_key(&source.id));
+        assert!(temp.path().is_dir(), "G61 project root exists but is never a fallback");
+        let notice = resumed.agent_resume_report.iter()
+            .find(|notice| notice.agent_id.as_deref() == Some(source.agents[0].id.as_str())).unwrap();
+        assert_eq!(notice.reason, if cwd.is_none() { "missing_working_directory" } else { "invalid_working_directory" });
+        assert!(notice.message.contains("working directory"));
+        assert!(controller.resume_agent(&source.id, &source.agents[0].id).unwrap_err().contains("working directory"));
+        for agent in &source.agents {
+            assert!(controller.pty_manager.read().instance_id(&agent.id).is_none());
+            assert_ne!(controller.pty_manager.read().spawn_cwd(&agent.id).as_deref(), temp.path().to_str(),
+                "G61 no saved cwd may be replaced by the project root");
+        }
+    }
+}
+
+#[test]
+fn g61_legacy_string_resume_reports_deserialize_and_session_json_loads() {
+    let (_temp, controller, storage, source) = resume_fixture(true);
+    let mut value = serde_json::to_value(storage.load_session(&source.id).unwrap()).unwrap();
+    value["state"] = serde_json::json!("Completed");
+    value["agent_resume_report"] = serde_json::json!([
+        "Synthetic agent: no saved conversation ID",
+        {"agent_id": source.agents[0].id, "reason": "missing_working_directory", "message": "Synthetic agent: no saved working directory"}
+    ]);
+    let notices: Vec<AgentResumeNotice> = serde_json::from_value(value["agent_resume_report"].clone()).unwrap();
+    assert_eq!(notices[0].agent_id, None, "legacy text never guesses an agent identity");
+    assert_eq!(notices[0].reason, "legacy");
+    assert_eq!(notices[0].message, "Synthetic agent: no saved conversation ID");
+    assert_eq!(notices[1].agent_id.as_deref(), Some(source.agents[0].id.as_str()));
+    assert_eq!(serde_json::to_value(&notices[1]).unwrap()["reason"], "missing_working_directory");
+    let path = storage.session_dir(&source.id).join("session.json");
+    let bytes = serde_json::to_vec(&value).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let resumed = controller.resume_session(&source.id).unwrap();
+    assert_eq!(resumed.state, SessionState::Completed);
+    assert!(controller.pty_manager.read().instance_id(&source.agents[0].id).is_none());
+    assert_eq!(std::fs::read(path).unwrap(), bytes, "legacy saved reports load without migration");
 }
 
 #[test]
@@ -746,7 +829,7 @@ fn g49_load_without_coordinator_id_names_it_and_keeps_all_agents_stopped() {
     assert!(resumed
         .agent_resume_report
         .iter()
-        .any(|line| line.contains(&source.agents[0].id)));
+        .any(|notice| notice.agent_id.as_deref() == Some(source.agents[0].id.as_str())));
     for agent in &source.agents {
         assert!(controller
             .pty_manager
@@ -946,8 +1029,11 @@ fn g49_run_real_pty_resume_fixture(test: &str, reject_non_fixture: bool) {
                 let mut saved = storage.load_session(&source.id).unwrap();
                 saved.agents[0].config.flags.push("--real-pty-fixture".into());
                 storage.save_session(&saved).unwrap();
-                let error = controller.resume_session(&source.id).unwrap_err();
-                assert!(error.contains("G49 launch guard refused non-fixture executable before OS launch"), "{error}");
+                let resumed = controller.resume_session(&source.id).unwrap();
+                let notice = resumed.agent_resume_report.iter()
+                    .find(|notice| notice.agent_id.as_deref() == Some(source.agents[0].id.as_str())).unwrap();
+                assert_eq!(notice.reason, "resume_failed");
+                assert!(notice.message.contains("G49 launch guard refused non-fixture executable before OS launch"), "{}", notice.message);
                 assert!(controller.pty_manager.read().instance_id(&source.agents[0].id).is_none());
                 assert!(!root.join("claude-result.json").exists());
             }
@@ -997,7 +1083,7 @@ fn g49_run_real_pty_resume_fixture(test: &str, reject_non_fixture: bool) {
                 .pty_manager
                 .read()
                 .spawn_args_for_test(agent_id)
-                .unwrap();
+                .expect("G49 synthetic shim must publish a resumed runtime");
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
             let result = loop {
                 if let Ok(bytes) = std::fs::read(root.join(format!("{cli}-result.json"))) {
