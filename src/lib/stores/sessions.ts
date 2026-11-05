@@ -349,12 +349,13 @@ export interface Session {
 
 /**
  * I3: return a matching agent's Resume blocker message, otherwise null.
- * Legacy strings never guess an identity. manual_resume_required is an
- * informational terminal-load notice: explicit per-agent Resume remains available.
+ * Only known backend prerequisite refusals hide Resume. Legacy, informational,
+ * transient and unknown notices leave explicit per-agent retry available.
  */
 export function resumeBlockedReason(session: Session | null | undefined, agentId: string): string | null {
+  const blockingReasons = ['missing_conversation_id', 'missing_working_directory', 'invalid_working_directory'];
   for (const notice of session?.agent_resume_report ?? []) {
-    if (typeof notice !== 'string' && notice.agent_id === agentId && notice.reason !== 'manual_resume_required') {
+    if (typeof notice !== 'string' && notice.agent_id === agentId && blockingReasons.includes(notice.reason)) {
       return notice.message;
     }
   }

@@ -20,6 +20,31 @@ function savedSession(id: string): Session {
 beforeEach(() => vi.clearAllMocks());
 
 describe('G49 per-agent resume store', () => {
+  it.each(['missing_conversation_id', 'missing_working_directory', 'invalid_working_directory'])
+    ('blocks Resume for the backend prerequisite refusal %s', reason => {
+      const saved = savedSession('resume-store-prerequisite');
+      saved.agent_resume_report = [{ agent_id: saved.agents[0].id, reason, message: `Synthetic refusal: ${reason}` }];
+      expect(resumeBlockedReason(saved, saved.agents[0].id)).toBe(`Synthetic refusal: ${reason}`);
+      expect(resumeBlockedReason(saved, saved.agents[1].id)).toBeNull();
+    });
+
+  it.each(['resume_failed', 'manual_resume_required', 'future_notice'])
+    ('keeps Resume available for %s notices', reason => {
+      const saved = savedSession('resume-store-retryable');
+      saved.agent_resume_report = [{ agent_id: saved.agents[0].id, reason, message: 'Synthetic retry notice' }];
+      expect(resumeBlockedReason(saved, saved.agents[0].id)).toBeNull();
+    });
+
+  it('skips retryable notices and other agents before finding a permanent refusal', () => {
+    const saved = savedSession('resume-store-mixed-notices');
+    saved.agent_resume_report = [
+      { agent_id: saved.agents[0].id, reason: 'resume_failed', message: 'Synthetic transient failure' },
+      { agent_id: saved.agents[1].id, reason: 'missing_conversation_id', message: 'Other principal has no conversation' },
+      { agent_id: saved.agents[0].id, reason: 'invalid_working_directory', message: 'Synthetic working directory unavailable' },
+    ];
+    expect(resumeBlockedReason(saved, saved.agents[0].id)).toBe('Synthetic working directory unavailable');
+  });
+
   it('retains the returned unavailable-agent report until dismissed, then clears it for the next load', async () => {
     const saved = { ...savedSession('resume-store-report'), name: 'Synthetic report',
       agent_resume_report: ['Synthetic principal: no saved conversation ID'] };
