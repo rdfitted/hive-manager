@@ -1,17 +1,26 @@
 name: macOS Tests
 
 on:
+  push:
+    branches: [main, staging]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
     branches:
       - main
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   macos-test:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     name: Svelte and Rust tests
     runs-on: macos-latest
+    timeout-minutes: 37
 
     steps:
       - name: Checkout

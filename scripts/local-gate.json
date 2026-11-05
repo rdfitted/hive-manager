@@ -1,0 +1,34 @@
+{
+  "repository": "rdfitted/hive-manager",
+  "jobs": [
+    {
+      "workflow": ".github/workflows/content-gate.yml",
+      "job": "content-gate"
+    }
+  ],
+  "hosted_only": [
+    {
+      "workflow": ".github/workflows/frontend.yml",
+      "job": "frontend-test",
+      "reason": "credentials, hosted event policy, original conditional, or OS-specific runner"
+    },
+    {
+      "workflow": ".github/workflows/macos.yml",
+      "job": "macos-test",
+      "reason": "credentials, hosted event policy, original conditional, or OS-specific runner"
+    },
+    {
+      "workflow": ".github/workflows/render-check.yml",
+      "reason": "active workflow collision; left untouched"
+    },
+    {
+      "workflow": ".github/workflows/rust-tests.yml",
+      "job": "cargo-test",
+      "reason": "credentials, hosted event policy, original conditional, or OS-specific runner"
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
+      "reason": "release/deploy/manual or unmodified hosted workflow"
+    }
+  ]
+}

@@ -2,19 +2,25 @@ name: Rust Tests
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
     branches:
       - main
   push:
-    branches:
-      - "feat/**"
+    branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   cargo-test:
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     name: Cargo test
     runs-on: windows-latest
+    timeout-minutes: 36
 
     defaults:
       run:
