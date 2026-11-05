@@ -10,6 +10,20 @@ use crate::tauri_shim::{AppHandle, Emitter};
 
 use super::{CoordinationMessage, StateManager, WorkerStateInfo};
 
+/// Session ownership belongs to the live event envelope, not the persisted log.
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct CoordinationMessageEvent<'a> {
+    session_id: &'a str,
+    #[serde(flatten)]
+    message: &'a CoordinationMessage,
+}
+
+impl<'a> CoordinationMessageEvent<'a> {
+    pub(crate) fn new(session_id: &'a str, message: &'a CoordinationMessage) -> Self {
+        Self { session_id, message }
+    }
+}
+
 /// Sender-side facts captured around a successful PTY injection.
 ///
 /// `payload_bytes_written` and `submit_bytes_written` are measured from the actual PTY
@@ -134,7 +148,7 @@ impl InjectionManager {
 
         // Emit event for UI
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("coordination-message", &coord_message);
+            let _ = app_handle.emit("coordination-message", &CoordinationMessageEvent::new(session_id, &coord_message));
         }
 
         Ok(receipt)
@@ -199,7 +213,7 @@ impl InjectionManager {
         }
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("coordination-message", &coord_message);
+            let _ = app_handle.emit("coordination-message", &CoordinationMessageEvent::new(session_id, &coord_message));
         }
 
         Ok(receipt)
@@ -371,7 +385,7 @@ impl InjectionManager {
 
         // Emit event for UI
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("coordination-message", &coord_message);
+            let _ = app_handle.emit("coordination-message", &CoordinationMessageEvent::new(session_id, &coord_message));
         }
 
         Ok(receipt)
@@ -403,7 +417,7 @@ impl InjectionManager {
 
         // Emit event for UI
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("coordination-message", &coord_message);
+            let _ = app_handle.emit("coordination-message", &CoordinationMessageEvent::new(session_id, &coord_message));
         }
 
         Ok(())
@@ -432,7 +446,7 @@ impl InjectionManager {
 
         // Emit event for UI
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("coordination-message", &coord_message);
+            let _ = app_handle.emit("coordination-message", &CoordinationMessageEvent::new(session_id, &coord_message));
         }
 
         Ok(())
@@ -452,7 +466,7 @@ impl InjectionManager {
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("coordination-message", &coord_message);
+            let _ = app_handle.emit("coordination-message", &CoordinationMessageEvent::new(session_id, &coord_message));
         }
 
         Ok(())
@@ -473,7 +487,7 @@ impl InjectionManager {
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("coordination-message", &coord_message);
+            let _ = app_handle.emit("coordination-message", &CoordinationMessageEvent::new(session_id, &coord_message));
         }
 
         Ok(())
@@ -571,6 +585,20 @@ fn format_agent_display(agent_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r3_live_coordination_event_adds_session_without_changing_log_message() {
+        let message = CoordinationMessage::task("QUEEN", "WORKER-1", "Synthetic directive");
+        let original = serde_json::to_value(&message).unwrap();
+        assert!(original.get("session_id").is_none());
+        for session_id in ["session-alpha", "session-beta"] {
+            let event = CoordinationMessageEvent::new(session_id, &message);
+            let mut expected = original.clone();
+            expected["session_id"] = serde_json::json!(session_id);
+            assert_eq!(serde_json::to_value(event).unwrap(), expected);
+        }
+        assert_eq!(serde_json::to_value(&message).unwrap(), original);
+    }
 
     #[cfg(windows)]
     #[test]
