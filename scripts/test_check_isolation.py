@@ -66,7 +66,7 @@ class ReplayIsolationTests(unittest.TestCase):
             ignore = temp / "global-ignore"
             ignore.write_text(".private-token\n", encoding="utf-8")
             gate.run(prefix + ["config", "core.excludesFile", str(ignore)])
-            (source / "tracked.txt").write_text("committed", encoding="utf-8")
+            (source / "tracked.txt").write_bytes(b"committed\n")
             gate.run(prefix + ["add", "tracked.txt"])
             gate.run(prefix + ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=",
                                "commit", "-m", "fixture"])
@@ -76,7 +76,7 @@ class ReplayIsolationTests(unittest.TestCase):
             with patch.object(gate, "ROOT", source):
                 snapshot = gate.snapshot_checkout(temp, sha, sha, "main", "owner/repo")
             self.assertFalse((snapshot / ".private-token").exists())
-            self.assertEqual((snapshot / "tracked.txt").read_text(), "committed")
+            self.assertEqual((snapshot / "tracked.txt").read_bytes(), b"committed\n")
             config = (snapshot / ".git/config").read_text()
             self.assertNotIn("excludesfile", config.lower())
             self.assertNotIn(str(ignore), config)

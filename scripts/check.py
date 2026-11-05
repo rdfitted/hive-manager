@@ -34,6 +34,7 @@ def snapshot_checkout(temp, sha, base_sha, base_ref, repository):
          '--no-local', '--no-checkout', str(ROOT), str(snapshot)])
     prefix = ['git', '-C', str(snapshot)]
     run(prefix + ['config', 'core.hooksPath', '.git/no-hooks'])
+    run(prefix + ['config', 'core.autocrlf', 'false'])
     run(prefix + ['remote', 'set-url', 'origin', f'https://github.com/{repository}.git'])
     # Base may have advanced since the operator last fetched. Fetch only into
     # the sanitized clone; no workstation auth configuration is copied to it.
