@@ -92,6 +92,12 @@ def is_url(t: str) -> bool:
     return bool(re.match(r"^(https?|file)://", t, re.I))
 
 
+class EngineRunError(ValueError):
+    def __init__(self, message: str, retry_count: int):
+        super().__init__(message)
+        self.retry_count = retry_count
+
+
 def run_engine(engine: Path, target: str, viewport: str | None, allow_network: bool) -> tuple[int, list[dict], str, int]:
     cmd = [str(engine), "detect", target, "--json", "--no-config", "--no-inline-ignores"]
     if viewport:
@@ -108,8 +114,11 @@ def run_engine(engine: Path, target: str, viewport: str | None, allow_network: b
         r"Timed out after \d+ ms while waiting for the WS endpoint URL to appear in stdout!?"
     )
     for retry_count in range(2):
-        p = subprocess.run(cmd, capture_output=True, env=env, timeout=300,
-                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+        try:
+            p = subprocess.run(cmd, capture_output=True, env=env, timeout=300,
+                               creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise EngineRunError(str(exc), retry_count) from exc
         out = p.stdout.decode("utf-8", "replace").strip()
         err = p.stderr.decode("utf-8", "replace")
         timed_out = p.returncode not in (0, 2) and bool(launch_timeout.search(out + "\n" + err))
@@ -117,10 +126,10 @@ def run_engine(engine: Path, target: str, viewport: str | None, allow_network: b
             findings = json.loads(out)
         except json.JSONDecodeError as exc:
             if not timed_out:
-                raise ValueError("engine returned invalid JSON") from exc
+                raise EngineRunError("engine returned invalid JSON", retry_count) from exc
             findings = []
         if not isinstance(findings, list) or any(not isinstance(f, dict) for f in findings):
-            raise ValueError("engine findings must be a list of objects")
+            raise EngineRunError("engine findings must be a list of objects", retry_count)
         if retry_count == 0 and timed_out and not findings:
             continue
         return p.returncode, findings, err[-2000:], retry_count
@@ -492,6 +501,10 @@ def main(argv: list[str] | None = None) -> int:
                     for bucket in part:
                         verdict[bucket].extend(part[bucket])
             except Exception as exc:
+                if isinstance(exc, EngineRunError):
+                    verdict['targets'].append({'target': target, 'viewport': viewport,
+                                               'engine_exit': None, 'raw': 0,
+                                               'retry_count': exc.retry_count})
                 verdict['errors'].append(f'{target}: {exc}')
         if a.baseline and not verdict['errors']:
             try:

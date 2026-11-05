@@ -161,6 +161,28 @@ class EngineLaunchRetry(unittest.TestCase):
             _, engine = self.invoke([self.output(0)])
         self.assertEqual(engine.call_args.kwargs["creationflags"], 0x08000000)
 
+    def test_retry_launch_exception_keeps_count_in_verdict(self):
+        for failure in (OSError("synthetic retry launch failure"),
+                        subprocess.TimeoutExpired("fake-engine", 300)):
+            with self.subTest(failure=type(failure).__name__), \
+                    mock.patch.object(slop_check, "ensure_engine", return_value=Path("fake-engine")), \
+                    mock.patch.object(slop_check.subprocess, "run", side_effect=[
+                        self.output(1, b"", self.TIMEOUT), failure]) as engine:
+                code, verdict = run(str(FIX / "clean.html"), "--root", str(FIX))
+            self.assertEqual(code, 1)
+            self.assertEqual(engine.call_count, 2)
+            self.assertEqual(verdict["targets"][0]["retry_count"], 1)
+            self.assertIsNone(verdict["targets"][0]["engine_exit"])
+            self.assertEqual(verdict["verdict"], "error")
+
+    def test_retry_invalid_json_keeps_count_in_verdict(self):
+        with mock.patch.object(slop_check, "ensure_engine", return_value=Path("fake-engine")), \
+                mock.patch.object(slop_check.subprocess, "run", side_effect=[
+                    self.output(1, b"", self.TIMEOUT), self.output(1, b"invalid")]) as engine:
+            code, verdict = run(str(FIX / "clean.html"), "--root", str(FIX))
+        self.assertEqual((code, engine.call_count, verdict["targets"][0]["retry_count"]), (1, 2, 1))
+        self.assertIn("engine returned invalid JSON", verdict["errors"][0])
+
 
 if __name__ == "__main__":
     unittest.main()
