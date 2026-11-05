@@ -154,7 +154,11 @@ fn seeded_output_loads_through_real_storage_and_isolated_controller() {
                 }
                 assert!(feeds.is_protocol(id, agent_id).unwrap());
                 let history = feeds.history(id, agent_id, None, None, 100).unwrap();
-                assert_eq!(history.events.len(), 2, "durable journal is not empty");
+                assert_eq!(
+                    history.events.len(),
+                    expected["eventCount"].as_u64().expect("manifest agent eventCount") as usize,
+                    "durable journal matches manifest eventCount for {agent_id}"
+                );
                 if expected["state"] == "markdown" {
                     let text = history.events[1].payload["text"].as_str().unwrap();
                     for key in ["tableText", "codeText", "link", "literalHtml"] {
@@ -241,22 +245,33 @@ fn seeded_output_loads_through_real_storage_and_isolated_controller() {
     }
     let temp = tempfile::tempdir().unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/render/seed.mjs");
-    let output = Command::new("node")
+    let mut command = Command::new("node");
+    command
         .arg(script)
-        .arg(temp.path())
-        .output()
-        .unwrap();
+        .arg(temp.path());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output().unwrap();
     assert!(
         output.status.success(),
         "seeder failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let output = Command::new(std::env::current_exe().unwrap())
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--ignored", "--exact", "instance_fixture_tests::seeded_output_loads_through_real_storage_and_isolated_controller", "--nocapture"])
         .env("HM_SEEDED_FIXTURE_CHILD", "1")
         .env(instance::DIR, temp.path()).env(instance::PORT, "18897")
-        .env_remove(instance::CDP_PORT)
-        .output().unwrap();
+        .env_remove(instance::CDP_PORT);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output().unwrap();
     assert!(
         output.status.success(),
         "{}\n{}",
