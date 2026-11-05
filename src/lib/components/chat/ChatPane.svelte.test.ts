@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
 import type { AgentEvent } from '$lib/stores/agentEvents';
 import { CHAT_WINDOW_SIZE, passiveToolResult, protocolAttention, transcriptRows } from './transcript';
 
@@ -27,8 +28,44 @@ export const event = (cursor: string, kind: AgentEvent['kind'] = 'assistant_mess
   agent_id: 'a', cursor, kind, payload, source_id, ts: '2026-01-01T00:00:00Z', truncated: false,
 });
 afterEach(() => { cleanup(); coordination.clearLog(); fixture.setSource('none'); fixture.setAgents([]); vi.clearAllMocks(); });
+beforeEach(() => {
+  fixture.invoke.mockReset().mockImplementation((command: string) => Promise.resolve(command === 'get_coordination_log' ? [] : undefined));
+  coordination.setSessionId(null);
+});
 
 describe('agent chat', () => {
+  it('R3-F2 retained hidden Focus panes leave the visible log alone and load only when shown', async () => {
+    const current = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [], composer: false } });
+    await tick(); await tick();
+    const hidden = render(ChatPane, { props: { sessionId: 'other', agentId: 'b', events: [], composer: false, visible: false } });
+    await tick();
+    expect(get(coordination).sessionId).toBe('s');
+    expect(fixture.invoke.mock.calls).toEqual([['get_coordination_log', { sessionId: 's', limit: undefined }]]);
+    await current.rerender({ visible: false });
+    await hidden.rerender({ visible: true });
+    await tick();
+    expect(get(coordination).sessionId).toBe('other');
+    expect(fixture.invoke.mock.calls).toEqual([
+      ['get_coordination_log', { sessionId: 's', limit: undefined }],
+      ['get_coordination_log', { sessionId: 'other', limit: undefined }],
+    ]);
+  });
+  it('R3-F2 Focus-only mount loads historical Queen and operator attribution without Grid or Logs', async () => {
+    let resolve!: (value: unknown) => void;
+    fixture.invoke.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    const events = ['Historical directive', 'Historical operator'].map(text => event(text, 'user_message', { text }));
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events, composer: false, variant: 'focus' } });
+    expect(view.container.querySelectorAll('[data-sender]')).toHaveLength(0);
+    await tick();
+    expect(fixture.invoke).toHaveBeenCalledWith('get_coordination_log', { sessionId: 's', limit: undefined });
+    resolve([
+      { id: 'queen-history', timestamp: events[0].ts, from: 'QUEEN', to: 'a', content: 'Historical directive', message_type: 'Task' },
+      { id: 'operator-history', timestamp: events[0].ts, from: 'SYSTEM', to: 'a', content: '[OPERATOR] Historical operator', message_type: 'System' },
+    ]);
+    await waitFor(() => expect(view.container.querySelector('[data-sender="queen"]')?.textContent).toContain('Historical directive'));
+    expect(view.container.querySelector('[data-sender="operator"]')?.textContent).toContain('Historical operator');
+    expect(fixture.invoke).toHaveBeenCalledTimes(1);
+  });
   it('I2: leaves user rows unattributed while coordination history is unavailable', async () => {
     fixture.invoke.mockResolvedValueOnce(undefined);
     await coordination.loadLog('s');
@@ -236,7 +273,7 @@ describe('agent chat', () => {
     await waitFor(() => expect(fixture.invoke).toHaveBeenCalledWith('operator_inject', {
       request: { session_id: 's', target_agent_id: 'a', message: 'Continue with fixture' },
     }));
-    expect(fixture.invoke).toHaveBeenCalledTimes(1);
+    expect(fixture.invoke.mock.calls.filter(([command]) => command === 'operator_inject')).toHaveLength(1);
   });
 
   it('holds the current reading window when new live records arrive after scrolling up', async () => {

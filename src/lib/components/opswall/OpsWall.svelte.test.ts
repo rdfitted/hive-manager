@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, render } from '@testing-library/svelte';
+import { cleanup, fireEvent, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { get, writable } from 'svelte/store';
 import type { Session } from '$lib/stores/sessions';
 import type { CoordinationMessage } from '$lib/stores/coordination';
 
-const fixture = vi.hoisted(() => ({ invoke: vi.fn() }));
+const fixture = vi.hoisted(() => ({ invoke: vi.fn(), onMessage: (_event: { payload: CoordinationMessage }) => {} }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn((name, callback) => {
+  if (name === 'coordination-message') fixture.onMessage = callback;
+  return Promise.resolve(() => {});
+}) }));
 vi.mock('$lib/stores/events', () => ({ events: writable({ events: [] }) }));
 import { coordination } from '$lib/stores/coordination';
 import OpsWall from './OpsWall.svelte';
@@ -24,6 +27,26 @@ beforeEach(() => {
   coordination.setSessionId(null);
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+it('R3-F1 foreign live messages cannot appear in the ticker or select this session worker', async () => {
+  fixture.invoke.mockResolvedValueOnce([]);
+  await coordination.loadLog(session.id);
+  const onselect = vi.fn();
+  const agents = [{ id: `${session.id}-worker-1`, role: { Worker: { index: 1, parent: null } }, parent_id: null, status: 'Running', config: { cli: 'codex', flags: [] } }] satisfies import('$lib/stores/sessions').AgentInfo[];
+  const view = render(OpsWall, { ...props(), session: { ...session, agents }, onselect });
+  const message: CoordinationMessage = { ...log[0], id: 'foreign', session_id: 'other-session', to: 'WORKER-1', content: 'Foreign directive' };
+  fixture.onMessage({ payload: message });
+  fixture.onMessage({ payload: { ...message, id: 'unscoped', session_id: undefined } });
+  await tick();
+  expect(view.queryByText('Task: Foreign directive')).toBeNull();
+  expect(get(coordination).log).toEqual([]);
+  expect(onselect).not.toHaveBeenCalled();
+  fixture.onMessage({ payload: { ...message, id: 'local', session_id: session.id, content: 'Local directive' } });
+  await tick();
+  await fireEvent.click(view.getByRole('button', { name: 'Task: Local directive' }));
+  expect(onselect).toHaveBeenCalledTimes(1);
+  expect(onselect).toHaveBeenCalledWith(agents[0].id);
+});
 
 it('R2-F2 mounting with a full shared log preserves it and only the ticker takes the newest 30', async () => {
   fixture.invoke.mockResolvedValueOnce(log);

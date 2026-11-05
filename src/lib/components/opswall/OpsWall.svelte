@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
   import type { Session } from '$lib/stores/sessions';
   import { serdeEnumVariantName } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
@@ -15,12 +14,8 @@
   const items = $derived(tickerItems(session.id, session.agents, $coordination.sessionId === session.id ? $coordination.log ?? [] : [], $events.events));
   $effect(() => {
     const id = session.id;
-    // Log updates must not rerun the mount/session load, including empty results.
-    untrack(() => {
-      const needsLog = $coordination.sessionId !== id || (!$coordination.log?.length && !$coordination.loading);
-      coordination.setSessionId(id);
-      if (needsLog) void coordination.loadLog(id);
-    });
+    coordination.setSessionId(id);
+    void coordination.ensureLog(id);
   });
 </script>
 

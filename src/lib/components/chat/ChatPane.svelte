@@ -17,6 +17,7 @@
   } = $props();
   const history = $derived($agentEvents.sessionId === sessionId ? $agentEvents.histories[agentId] : undefined);
   const rows = $derived(transcriptRows(events, { agentId, isQueen: $activeAgents.some(candidate => candidate.id === agentId && candidate.role === 'Queen'), log: $coordination.sessionId === sessionId ? ($coordination.log ?? []) : [] }));
+  $effect(() => { if (visible) void coordination.ensureLog(sessionId); });
   const agent = $derived($activeAgents.find((candidate) => candidate.id === agentId));
   const facts = $derived(toolbarFacts(agent, $agentEvents.sessionId === sessionId ? $agentEvents.feeds?.[agentId]?.capabilities.event_source : undefined));
   let now = $state(Date.now());

@@ -1,10 +1,12 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 export type MessageType = 'Task' | 'Progress' | 'Completion' | 'Error' | 'System' | 'Judge' | 'PeerFeedback' | 'MilestoneReady' | 'QaVerdict';
 
 export interface CoordinationMessage {
+  /** Present on live events; saved coordination history keeps its legacy shape. */
+  session_id?: string;
   id: string;
   timestamp: string;
   from: string;
@@ -69,6 +71,8 @@ interface CoordinationState {
 
 function createCoordinationStore() {
   let logRequestToken = 0;
+  let fullLogSessionId: string | null = null;
+  let loadingLogSessionId: string | null = null;
   const { subscribe, set, update } = writable<CoordinationState>({
     log: [],
     workers: [],
@@ -85,6 +89,7 @@ function createCoordinationStore() {
   // Listen for coordination messages from backend
   listen<CoordinationMessage>('coordination-message', (event) => {
     update((state) => {
+      if (!event.payload.session_id || event.payload.session_id !== state.sessionId) return state;
       // Add new message to log
       const exists = state.log.some((m) => m.id === event.payload.id);
       if (!exists) {
@@ -126,7 +131,11 @@ function createCoordinationStore() {
     setSessionId(sessionId: string | null) {
       update((state) => {
         const changed = sessionId !== state.sessionId;
-        if (changed) ++logRequestToken;
+        if (changed) {
+          ++logRequestToken;
+          fullLogSessionId = null;
+          loadingLogSessionId = null;
+        }
         return {
           ...state,
           sessionId,
@@ -143,21 +152,31 @@ function createCoordinationStore() {
       });
     },
 
+    ensureLog(sessionId: string) {
+      const state = get({ subscribe });
+      if (state.sessionId === sessionId && (fullLogSessionId === sessionId || loadingLogSessionId === sessionId)) return;
+      this.setSessionId(sessionId);
+      return this.loadLog(sessionId);
+    },
+
     async loadLog(sessionId: string, limit?: number) {
       const requestToken = ++logRequestToken;
+      loadingLogSessionId = sessionId;
       update((state) => ({ ...state, loading: true, error: null, sessionId }));
       try {
         const log = await invoke<CoordinationMessage[]>('get_coordination_log', {
           sessionId,
           limit,
         });
-        update((state) => requestToken !== logRequestToken || state.sessionId !== sessionId ? state : ({
-          ...state,
-          log,
-          loading: false,
-        }));
+        update((state) => {
+          if (requestToken !== logRequestToken || state.sessionId !== sessionId) return state;
+          fullLogSessionId = limit === undefined ? sessionId : null;
+          return { ...state, log, loading: false };
+        });
       } catch (err) {
         update((state) => requestToken !== logRequestToken || state.sessionId !== sessionId ? state : ({ ...state, loading: false, error: String(err) }));
+      } finally {
+        if (requestToken === logRequestToken) loadingLogSessionId = null;
       }
     },
 
@@ -237,6 +256,7 @@ function createCoordinationStore() {
     },
 
     clearLog() {
+      fullLogSessionId = null;
       update((state) => ({ ...state, log: [] }));
     },
 

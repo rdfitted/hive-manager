@@ -33,7 +33,7 @@ vi.mock('$lib/stores/sessions', async () => {
     serdeEnumVariantName: (value: unknown) => typeof value === 'string' ? value : value && typeof value === 'object' ? Object.keys(value)[0] : undefined,
   };
 });
-vi.mock('$lib/stores/coordination', async () => ({ coordination: { ...(await import('svelte/store')).writable({ sessionId: null, log: [] }), setSessionId: vi.fn(), loadLog: vi.fn().mockResolvedValue(undefined) } }));
+vi.mock('$lib/stores/coordination', async () => ({ coordination: { ...(await import('svelte/store')).writable({ sessionId: null, log: [] }), setSessionId: vi.fn(), loadLog: vi.fn().mockResolvedValue(undefined), ensureLog: vi.fn().mockResolvedValue(undefined) } }));
 vi.mock('$lib/stores/conversations', async () => ({ heartbeatStore: { ...(await import('svelte/store')).writable({ agents: {}, staleAgents: new Set(), stalledAgents: new Set() }), loadHeartbeats: vi.fn().mockResolvedValue(undefined) }, conversationStore: { pollMessages: vi.fn().mockResolvedValue(undefined) } }));
 vi.mock('$lib/stores/cells', async () => ({ cells: { ...(await import('svelte/store')).writable({ cells: {}, sessionNotFound: false }), fetchCells: vi.fn().mockResolvedValue(undefined), setExternalRefreshHandler: vi.fn() } }));
 vi.mock('$lib/stores/agents', () => ({ agents: { fetchAgents: vi.fn().mockResolvedValue(undefined) } }));

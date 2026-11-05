@@ -145,6 +145,7 @@ vi.mock('$lib/stores/coordination', async () => ({
     ...(await import('svelte/store')).writable({ sessionId: null, log: [] }),
     setSessionId: testMocks.setSessionId,
     loadLog: vi.fn().mockResolvedValue(undefined),
+    ensureLog: vi.fn().mockResolvedValue(undefined),
     addWorker: vi.fn(),
   },
 }));
