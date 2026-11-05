@@ -92,7 +92,7 @@ def is_url(t: str) -> bool:
     return bool(re.match(r"^(https?|file)://", t, re.I))
 
 
-def run_engine(engine: Path, target: str, viewport: str | None, allow_network: bool) -> tuple[int, list[dict], str]:
+def run_engine(engine: Path, target: str, viewport: str | None, allow_network: bool) -> tuple[int, list[dict], str, int]:
     cmd = [str(engine), "detect", target, "--json", "--no-config", "--no-inline-ignores"]
     if viewport:
         cmd += ["--viewport", viewport]
@@ -102,15 +102,30 @@ def run_engine(engine: Path, target: str, viewport: str | None, allow_network: b
         # The engine's own HTTP client goes nowhere; local pages still render.
         env.update(HTTPS_PROXY="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9",
                    NO_PROXY="localhost,127.0.0.1,::1")
-    p = subprocess.run(cmd, capture_output=True, env=env, timeout=300)
-    out = p.stdout.decode("utf-8", "replace").strip()
-    try:
-        findings = json.loads(out)
-    except json.JSONDecodeError as exc:
-        raise ValueError("engine returned invalid JSON") from exc
-    if not isinstance(findings, list) or any(not isinstance(f, dict) for f in findings):
-        raise ValueError("engine findings must be a list of objects")
-    return p.returncode, findings, p.stderr.decode("utf-8", "replace")[-2000:]
+    # Puppeteer's launch failure is transient; scan findings and all other errors
+    # retain their original exit behavior. At most two launches per target.
+    launch_timeout = re.compile(
+        r"Timed out after \d+ ms while waiting for the WS endpoint URL to appear in stdout!?"
+    )
+    for retry_count in range(2):
+        p = subprocess.run(cmd, capture_output=True, env=env, timeout=300,
+                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+        out = p.stdout.decode("utf-8", "replace").strip()
+        err = p.stderr.decode("utf-8", "replace")
+        timed_out = p.returncode not in (0, 2) and bool(launch_timeout.search(out + "\n" + err))
+        try:
+            findings = json.loads(out)
+        except json.JSONDecodeError as exc:
+            if not timed_out:
+                raise ValueError("engine returned invalid JSON") from exc
+            findings = []
+        if not isinstance(findings, list) or any(not isinstance(f, dict) for f in findings):
+            raise ValueError("engine findings must be a list of objects")
+        if retry_count == 0 and timed_out and not findings:
+            continue
+        return p.returncode, findings, err[-2000:], retry_count
+    raise AssertionError("unreachable engine retry state")
+
 
 
 def source_line(f: dict) -> str:
@@ -467,9 +482,9 @@ def main(argv: list[str] | None = None) -> int:
                 ignores, problems = load_ignores(root)
                 verdict['errors'].extend(problems)
                 for viewport in (a.viewports.split(',') if rendered else [None]):
-                    code, findings, err = run_engine(engine, target, viewport, a.allow_network)
+                    code, findings, err, retry_count = run_engine(engine, target, viewport, a.allow_network)
                     verdict['targets'].append({'target': target, 'viewport': viewport,
-                                               'engine_exit': code, 'raw': len(findings)})
+                                               'engine_exit': code, 'raw': len(findings), 'retry_count': retry_count})
                     if code not in (0, 2):
                         verdict['errors'].append(f'{target}: engine exit {code}: {err.strip()[-300:]}')
                         continue
