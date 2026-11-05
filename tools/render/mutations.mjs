@@ -5,6 +5,8 @@
 export const consoleProofMessage = runId => `render-mutation-console: ${runId}`;
 export const reviewProofNames = ['resume-clip-focus-1440', 'resume-clip-grid-1440', 'resume-clip-focus-800', 'resume-clip-grid-800', 'resume-available-focus-1440', 'resume-available-grid-1440', 'resume-unavailable-focus-1440', 'resume-unavailable-grid-1440', 'resume-available-focus-800', 'resume-available-grid-800', 'resume-unavailable-focus-800', 'resume-unavailable-grid-800', 'screen-target-offscreen', 'grid-target-offscreen', 'sidebar-target-offscreen', 'sidebar-all-recent-sessions', 'sidebar-inactive-stale-only', 'sidebar-session-attention-compact', 'sidebar-session-name-single-line', 'sidebar-session-names-painted', 'composer-offscreen-not-known', 'finished-duplicate-attention-card', 'finished-duplicate-needs-you-count', 'chat-empty-table', 'chat-empty-code', 'updater-network-rejection', 'badge-painted-line-1440', 'badge-painted-line-800', 'badge-painted-band-1440', 'badge-painted-band-800'];
 reviewProofNames.push('conv-diff-1440', 'conv-diff-800');
+reviewProofNames.push(...[1440, 800].flatMap(width => ['grid', 'focus'].flatMap(mode =>
+  ['well', 'body', 'meta', 'font', 'line', 'queen', 'warn', 'operator'].map(part => `chat-${part}-${mode}-${width}`))));
 reviewProofNames.push('grid-no-column-composer', 'wall-pin-fixed', ...[1440, 800].flatMap(width => [
   `wall-pin-${width}`,
   `wall-tick-default-${width}`, `wall-tick-label-${width}`,

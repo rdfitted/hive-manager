@@ -7,6 +7,22 @@ import { execFileSync } from 'node:child_process';
 import { seed, manifest, assertSynthetic } from './seed.mjs';
 import { styleChange } from './mutations.mjs';
 
+test('Lane B seeds matching Queen and SYSTEM operator wire records without changing eight-pane coverage', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'hm-chat-fixture-'));
+  try {
+    const result = await seed(root, '2030-06-15T12:00:00.000Z');
+    const folder = path.join(result.dataDir, 'sessions', manifest.chat.sessionId);
+    const log = await readFile(path.join(folder, 'coordination/coordination.log'), 'utf8');
+    assert.ok(log.includes(`QUEEN → WORKER-5: ${manifest.chat.queenDirective}`));
+    assert.ok(log.includes(`SYSTEM → WORKER-5: [OPERATOR] ${manifest.chat.operatorMessage}`));
+    assert.ok(log.includes(manifest.opswall.tickerText));
+    const feed = (await readFile(path.join(folder, 'agent-feeds', `${manifest.chat.senderAgentId}.jsonl`), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(feed.filter(event => event.kind === 'user_message').map(event => event.payload.text),
+      ['Please inspect this synthetic navigation report.', manifest.chat.queenDirective, manifest.chat.operatorMessage]);
+    assert.equal(manifest.screens.grid.paneCount, 8);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('style mutation restores a hidden element through its captured handle', async () => {
   let style = 'color: blue', disposed = false;
   const node = {

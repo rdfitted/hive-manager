@@ -46,6 +46,9 @@
     "dialog": { "action": "open Keyboard Shortcuts with Ctrl+/ without changing settings" }
   },
   "chat": {
+    "senderAgentId": "fixture-orbit-worker-5",
+    "queenDirective": "Inspect the synthetic amber navigation.",
+    "operatorMessage": "Report the synthetic violet checkpoint.",
     "sessionId": "fixture-orbit",
     "agentId": "fixture-orbit-queen",
     "file": "chat.md",

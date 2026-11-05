@@ -743,6 +743,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       text => text.includes(unavailable.label) && text.includes('Completed'), 'resume-unavailable', text => text.includes('Completed'));
     await selectSession(page, session, report);
   }
+  await runChatContrastAssertions({ page, session, manifest, report, assert, prove, out });
   const updater = await updaterState(page);
   assert('updater-invoke-rejected', updater.rejected, updater);
   let injectedOutcome;
@@ -765,4 +766,57 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     report.screenshots = original.filter(item => item.screen !== target.screen || item.viewport.width !== target.viewport.width);
     return async () => { report.screenshots = original; };
   });
+}
+
+// Lane B appends measurements after the complete Lane A screen/guard sequence.
+export async function runChatContrastAssertions({ page, session, manifest, report, assert, prove, out }) {
+  const agent = session.agents.find(item => item.id === manifest.chat.senderAgentId);
+  await selectSession(page, session, report);
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 800, height: 900 }]) {
+    await page.setViewportSize(viewport);
+    for (const mode of ['Grid', 'Focus']) {
+      await viewMode(page, mode);
+      await page.locator(`.tree-row[data-agent-id=${JSON.stringify(agent.id)}]`).click();
+      const pane = paneFor(page, agent);
+      if (mode === 'Grid') await scrollColumn(pane);
+      await showChat(pane);
+      const chat = pane.locator(`${chatSelector}:visible`).first();
+      const queen = chat.locator('[data-sender="queen"]');
+      const operator = chat.locator('[data-sender="operator"]');
+      await queen.waitFor(); await operator.waitFor();
+      const body = chat.locator('.message p').first();
+      const meta = queen.locator('.sender-label');
+      await body.scrollIntoViewIfNeeded();
+      const sample = locator => locator.evaluate(node => {
+        const css = getComputedStyle(node);
+        return { color: css.color, background: css.backgroundColor, font: css.fontSize, line: css.lineHeight,
+          border: css.borderLeftColor, borderWidth: css.borderLeftWidth, radius: css.borderTopLeftRadius,
+          outline: ['Top', 'Right', 'Bottom', 'Left'].every(side => css[`border${side}Width`] === '1px' && css[`border${side}Style`] === 'solid' && css[`border${side}Color`] === css.borderLeftColor),
+          text: node.textContent, label: node.querySelector('.sender-label, strong')?.textContent };
+      });
+      const cases = [
+        ['well', chat, css => css.background === 'rgb(7, 22, 40)', { 'background-color': 'rgb(244,247,251)' }],
+        ['body', body, css => css.color === 'rgb(244, 247, 251)', { color: 'rgb(7,22,40)' }],
+        ['meta', meta, css => css.color === 'rgb(201, 213, 228)', { color: 'rgb(7,22,40)' }],
+        ['font', body, css => css.font === '13.5px' && Math.abs(parseFloat(css.line) - 20.925) < .01, { 'font-size': '12px' }],
+        ['line', body, css => Math.abs(parseFloat(css.line) - 20.925) < .01, { 'line-height': '1' }],
+        ['queen', queen, css => css.text.includes(manifest.chat.queenDirective) && css.background === 'rgba(193, 66, 196, 0.1)' && css.border === 'rgb(193, 66, 196)' && css.outline && css.label === 'Queen', { 'border-top-width': '0px' }],
+        ['warn', chat.locator('.message[aria-label="Agent error"]'), css => css.background === 'rgba(236, 221, 165, 0.1)' && css.border === 'rgb(236, 221, 165)' && css.outline && css.label === 'Error', { 'border-top-width': '0px' }],
+        ['operator', operator, css => css.text.includes(manifest.chat.operatorMessage) && css.background === 'rgb(7, 22, 40)' && css.borderWidth === '1px' && parseFloat(css.radius) > 0, { 'border-left-width': '0px' }],
+      ];
+      for (const [part, locator, accepts, mutation] of cases) {
+        await locator.scrollIntoViewIfNeeded();
+        const measure = async () => {
+          const details = await sample(locator);
+          return { passed: await locator.isVisible() && accepts(details), details };
+        };
+        const name = `chat-${part}-${mode.toLowerCase()}-${viewport.width}`;
+        const result = await measure();
+        assert(name, result.passed, result.details, { screen: mode.toLowerCase(), viewport: `${viewport.width}x${viewport.height}` });
+        await prove(name, measure, () => styleChange(locator, mutation));
+      }
+      await queen.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(out, `chat-${mode.toLowerCase()}-${viewport.width}.png`) });
+    }
+  }
 }
