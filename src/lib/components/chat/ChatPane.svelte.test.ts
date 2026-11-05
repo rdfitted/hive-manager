@@ -96,6 +96,25 @@ describe('agent chat', () => {
     expect(view.getByRole('article', { name: 'User message' }).querySelector('iframe, button')).toBeNull();
   });
 
+  it.each(['roster', 'coordination'] as const)('keeps the same HTML preview open through unrelated %s refreshes', async refresh => {
+    fixture.setAgents([runningAgent()]);
+    const text = '```html\n<h1>Stable synthetic preview</h1>\n```';
+    const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [event('stable-preview', 'assistant_message', { text })] } });
+    await fireEvent.click(view.getByRole('button', { name: 'Preview HTML' }));
+    const frame = view.getByTitle('HTML preview');
+    if (refresh === 'roster') fixture.setAgents([{ ...runningAgent(), status: 'Completed' }]);
+    else {
+      fixture.invoke.mockResolvedValueOnce([{ id: 'unrelated-log', timestamp: '2026-01-01T00:00:00Z', from: 'QUEEN', to: 'other-agent', content: 'Unrelated directive', message_type: 'Task' }]);
+      await coordination.loadLog('s');
+    }
+    await tick();
+    expect(view.queryByTitle('HTML preview'), 'unchanged assistant text must retain the open iframe').toBe(frame);
+    expect(view.getByRole('button', { name: 'Close HTML preview' }).getAttribute('aria-expanded')).toBe('true');
+    await view.rerender({ sessionId: 's', agentId: 'a', events: [event('stable-preview', 'assistant_message', { text: text.replace('Stable', 'Updated') })] });
+    expect(view.queryByTitle('HTML preview'), 'a real source change must still close the old preview').toBeNull();
+    expect(view.container.querySelector('pre code')?.textContent).toContain('Updated synthetic preview');
+  });
+
   it('G30: keeps script, image handlers, iframe HTML and executable links inert and visible', () => {
     const source = '<script>window.agentPayload = true</script> <img src=x onerror=alert(1)> <iframe srcdoc="unsafe"></iframe> [script](javascript:alert(1)) [data](data:text/html,unsafe)';
     const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [event('unsafe', 'assistant_message', { text: source })] } });

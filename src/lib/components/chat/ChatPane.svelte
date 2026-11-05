@@ -107,12 +107,13 @@
         {#if row.type === 'activity'}
           <ActivityGroup group={row} expanded={expandedTools[row.id] ?? false} onchange={(open) => { expandedTools[row.id] = open; }} />
         {:else}
+          {@const messageText = row.text}
           {@const longMessage = row.text.split('\n').length > 6 || row.text.length > 480}
           <article class="message" class:user-message={row.type === 'user'} data-sender={row.type === 'user' ? row.sender : undefined} aria-label={row.type === 'user' ? 'User message' : row.type === 'assistant' ? 'Assistant message' : row.type === 'decision' ? 'Approval decision' : 'Agent error'} title={new Date(row.ts).toLocaleString()}>
             {#if row.sender === 'queen'}<span class="sender-label">Queen</span>{/if}
             {#if row.type === 'decision' || row.type === 'error'}<strong>{row.type === 'decision' ? 'Approval' : 'Error'}</strong>{/if}
             {#if row.type === 'assistant'}
-              <MarkdownBlocks source={row.text} allowHtmlPreview />
+              <MarkdownBlocks source={messageText} allowHtmlPreview />
             {:else}
               <p use:measureOverflow={row.type === 'user' ? row.id : undefined} class:clamped={row.type === 'user' && !expandedMessages[row.id] && (canMeasure || longMessage)}>{row.text}</p>
             {/if}
