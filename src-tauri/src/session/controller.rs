@@ -19837,9 +19837,13 @@ mod tests {
         use crate::session::slop_gate::{render_command, SlopGateMode};
         let docs = include_str!("../../../docs/wiki-starter/engineering/quality-gates.md");
         let commands: Vec<&str> = docs.lines().filter(|line| line.starts_with("python -I ")).collect();
-        let expected: Vec<String> = [SlopGateMode::Report, SlopGateMode::Block].into_iter()
+        let mut expected: Vec<String> = [SlopGateMode::Report, SlopGateMode::Block].into_iter()
             .map(|mode| render_command(mode, "<script>", "<workspace>", "<session-root>", "<session>", "<task>"))
             .collect();
+        // The maintainability gate documents one command, in report mode.
+        expected.push(crate::session::maintain_gate::render_command(
+            crate::session::maintain_gate::MaintainGateMode::Report,
+            "<script>", "<workspace>", "<session-root>", "<session>", "<task>"));
         assert_eq!(commands, expected.iter().map(String::as_str).collect::<Vec<_>>());
     }
 
