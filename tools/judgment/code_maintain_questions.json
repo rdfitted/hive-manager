@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "surface": "code.maintain",
+  "mode": "probe",
+  "model": "jev-1.14.0",
+  "note": "Higher levels are better on every Score. Level text describes a situation and stands alone; the model never sees a level's number.",
+  "questions": {
+    "single_job": {
+      "type": "score",
+      "instructions": "How many distinct jobs does the function in `function` perform?",
+      "criteria": [
+        "The function performs several unrelated jobs, such as checking input, changing stored state, starting other work and notifying other parts of the system",
+        "The function performs two or three separable jobs that could each be a function of its own",
+        "The function performs one job, with a few supporting steps that belong to that job",
+        "The function performs exactly one small, clearly bounded job"
+      ]
+    },
+    "naming": {
+      "type": "score",
+      "instructions": "How well do the names in `function` (the function itself, its parameters and its local variables) tell a reader what each thing is?",
+      "criteria": [
+        "A name is misleading: the function or a variable does something its name does not say",
+        "Names are vague placeholders such as data, tmp, x, flag, handle or process that do not say what the thing is",
+        "Most names are descriptive and a few are generic",
+        "Every name states what the thing is or does"
+      ]
+    },
+    "local_reasoning": {
+      "type": "score",
+      "instructions": "How much does a reader need to know outside `function` to change it safely?",
+      "criteria": [
+        "The function reads or changes shared state that is not passed in, and what it does depends on what other code did earlier",
+        "The function changes its arguments or stored state in a way a caller would not expect from its name and signature",
+        "The function has side effects, and they are the ones its name and signature state",
+        "The function depends only on its arguments and returns a value"
+      ]
+    },
+    "more_than_one_job": {
+      "type": "noul",
+      "instructions": "Does the function in `function` perform more than one separable job?",
+      "criteria": {
+        "true": "At least two parts of the function could each stand alone as a function with its own purpose.",
+        "false": "Every step in the function serves the same single purpose."
+      }
+    },
+    "name_covers_behavior": {
+      "type": "noul",
+      "instructions": "Does the name of the function in `function` describe everything the function does?",
+      "criteria": {
+        "true": "Nothing the function does would surprise a caller who read only its name.",
+        "false": "The function does something a caller who read only its name would not expect."
+      }
+    }
+  }
+}
