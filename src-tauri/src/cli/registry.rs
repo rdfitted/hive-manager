@@ -398,6 +398,7 @@ mod tests {
             knowledge_wiki_folders: None,
             pty_replay_buffer_bytes: None,
             slop_check_mode: None,
+            maintain_check_mode: None,
         }
     }
 

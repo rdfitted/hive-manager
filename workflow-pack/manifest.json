@@ -145,6 +145,36 @@
           "sha256": "6a88face1b3cabbfe2e334622e6107540609ae3b53d0f686b178828585a35964"
         }
       ]
+    },
+    {
+      "name": "maintain-check",
+      "tier": "advanced",
+      "harnesses": [
+        "claude",
+        "codex"
+      ],
+      "files": [
+        {
+          "path": "workflow-pack/skills/maintain-check/SKILL.md",
+          "sha256": "fd6055b7b7f785ca8d2953eb1133c2bbced5b71c8be8c8a4ff4d60a5a0179490"
+        },
+        {
+          "path": "workflow-pack/skills/maintain-check/fixtures/shapes.rs",
+          "sha256": "9f4d501506d8c92b6c6ff168091da2d550e62d51a5c6c4e7b61b0995e9f0972b"
+        },
+        {
+          "path": "workflow-pack/skills/maintain-check/fixtures/shapes.ts",
+          "sha256": "9e0d2fcbdedeebe1b632d4cb66b792febb832862310202defbd93102b8ba8846"
+        },
+        {
+          "path": "workflow-pack/skills/maintain-check/scripts/maintain_check.py",
+          "sha256": "7036e41b8a926eeecbde6f990730db57983ff1077d3087fd5f837551090a204b"
+        },
+        {
+          "path": "workflow-pack/skills/maintain-check/tests/test_maintain_check.py",
+          "sha256": "02fc592cbf1ea2c8935210475e2da3e845ccdd8febe0c1e1150b015fad3ca3d1"
+        }
+      ]
     }
   ],
   "roster": {

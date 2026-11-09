@@ -36,6 +36,9 @@ jobs:
       - name: Slop-check skill tests
         run: python -I -m unittest discover -s workflow-pack/skills/slop-check/tests
 
+      - name: Maintain-check skill tests
+        run: python -I -m unittest discover -s workflow-pack/skills/maintain-check/tests
+
       # Advisory: codegraph does not parse .svelte; baseline is 65 .svelte vs 69 .ts,
       # and all 3/3 uncapped `certain` findings are false positives.
       # Policy and promotion criteria: docs/reachability-gate.md

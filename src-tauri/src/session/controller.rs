@@ -8056,9 +8056,10 @@ When the objective and every configured gate are complete, send this `completed`
         project_path: &Path,
         workspace_path: &Path,
         execution_policy: &HiveExecutionPolicy,
-        slop_check_mode: crate::session::slop_gate::SlopGateMode,
+        gate_modes: impl Into<crate::session::maintain_gate::GateModes>,
         plan_task_id: Option<&str>,
     ) -> BuiltWorkerPrompt {
+        let gate_modes = gate_modes.into();
         let role_name = config
             .role
             .as_ref()
@@ -8169,7 +8170,7 @@ When the objective and every configured gate are complete, send this `completed`
             String::new()
         } else {
             crate::session::slop_gate::render(
-                slop_check_mode, &session_root, Path::new(&workspace_path),
+                gate_modes.slop, &session_root, Path::new(&workspace_path),
                 session_id, plan_task_id, role_type.starts_with("reviewer"),
             )
         };
@@ -8348,6 +8349,9 @@ When the objective and every configured gate are complete, send this `completed`
             completion_protocol.push_str("\n");
             completion_protocol.push_str(&slop_gate_contract);
         }
+        completion_protocol.push_str(&crate::session::maintain_gate::section(
+            gate_modes.maintain_unless(is_research), &session_root, Path::new(&workspace_path),
+            session_id, plan_task_id, role_type.starts_with("reviewer")));
 
         // The pending-learning fallback is workspace-local to respect the worker write boundary.
         let learnings_section = if is_research {
@@ -10547,7 +10551,7 @@ Last updated: {timestamp}
                 &project_path,
                 Path::new(&worker_cwd),
                 &config.execution_policy,
-                crate::session::slop_gate::configured_mode(self.storage.as_deref()),
+                crate::session::maintain_gate::configured_modes(self.storage.as_deref()),
                 None,
             );
             let filename = format!("worker-{}-prompt.md", index);
@@ -13299,7 +13303,7 @@ The backend composed and persisted the following authoritative skeleton before l
             &session.project_path,
             Path::new(&worker_cwd),
             &session.execution_policy,
-            crate::session::slop_gate::configured_mode(self.storage.as_deref()),
+            crate::session::maintain_gate::configured_modes(self.storage.as_deref()),
             None,
         );
         let prompt_file = Self::write_worker_prompt_file(
@@ -17797,7 +17801,7 @@ The backend composed and persisted the following authoritative skeleton before l
             &session.project_path,
             Path::new(&worker_cwd),
             &session.execution_policy,
-            crate::session::slop_gate::configured_mode(self.storage.as_deref()),
+            crate::session::maintain_gate::configured_modes(self.storage.as_deref()),
             plan_task_id,
         );
         let filename = format!("worker-{}-prompt.md", worker_index);
@@ -19733,6 +19737,31 @@ mod tests {
             "slop-session-queen", "slop-session", project, &project.join("worktree"),
             &tiered_meta_harness_policy(), mode, task,
         ).prompt
+    }
+
+    #[test]
+    fn maintain_gate_reaches_coding_principals_and_not_researchers() {
+        use crate::session::maintain_gate::{GateModes, MaintainGateMode};
+        use crate::session::slop_gate::SlopGateMode;
+        let temp = tempfile::tempdir().unwrap();
+        let prompt = |role: &str, maintain| {
+            let mut principal = codex_principal();
+            principal.role = Some(WorkerRole::new(role, role, "codex"));
+            let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(temp.path(), None, role);
+            SessionController::build_worker_prompt_artifact_with_tier(
+                2, &principal, &resolved, &SpawnContext::default(), false, &[], None,
+                "gate-session-queen", "gate-session", temp.path(), &temp.path().join("worktree"),
+                &tiered_meta_harness_policy(), GateModes { slop: SlopGateMode::Off, maintain }, Some("T7"),
+            ).prompt
+        };
+        for role in ["backend", "frontend", "reviewer"] {
+            let report = prompt(role, MaintainGateMode::Report);
+            assert!(report.contains("## Maintainability gate") && report.contains("--mode report"), "{role}");
+            assert!(!report.contains("## UI slop-check gate"), "{role}");
+            assert!(prompt(role, MaintainGateMode::Block).contains("--mode block"), "{role}");
+            assert!(!prompt(role, MaintainGateMode::Off).contains("## Maintainability gate"), "{role}");
+        }
+        assert!(!prompt("researcher", MaintainGateMode::Report).contains("## Maintainability gate"));
     }
 
     #[test]

@@ -1039,6 +1039,7 @@ impl SessionStorage {
             knowledge_wiki_folders: None,
             pty_replay_buffer_bytes: None,
             slop_check_mode: None,
+            maintain_check_mode: None,
         }
     }
 
@@ -1929,6 +1930,9 @@ pub struct AppConfig {
     /// UI gate mode for newly spawned principals. Missing means report.
     #[serde(default)]
     pub slop_check_mode: Option<crate::session::slop_gate::SlopGateMode>,
+    /// Maintainability gate mode for newly spawned principals. Missing means report.
+    #[serde(default)]
+    pub maintain_check_mode: Option<crate::session::maintain_gate::MaintainGateMode>,
 }
 
 /// Default location of the global LLM wiki used by Research mode.
