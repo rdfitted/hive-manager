@@ -85,6 +85,21 @@ class Fixtures(unittest.TestCase):
         self.assertEqual(v["suppressed"], [])  # rendered contrast is trusted, nothing to filter
 
 
+class FileUrlRoot(unittest.TestCase):
+    """A file:// scan with no --root resolves its root from the page, not from the caller's cwd."""
+
+    def test_file_url_outside_cwd_scans_without_explicit_root(self):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        shutil.copy(FIX / "side_tab.html", d / "side_tab.html")
+        (d / slop_check.IGNORE_FILE).write_text(json.dumps({"ignores": []}), encoding="utf-8")
+        self.assertNotIn(Path.cwd().resolve(), [d.resolve(), *d.resolve().parents])
+        code, v = run((d / "side_tab.html").as_uri())
+        self.assertEqual((code, v["errors"]), (2, []), json.dumps(v, indent=2))
+        self.assertEqual({f["relpath"] for f in v["gating"]}, {"side_tab.html"})
+        self.assertIn(("side-tab", "ban-side-tab"), rules(v, "gating"))
+
+
 class Ignores(unittest.TestCase):
     def repo(self, files: list[str], ignore: dict | None) -> Path:
         d = Path(tempfile.mkdtemp())
