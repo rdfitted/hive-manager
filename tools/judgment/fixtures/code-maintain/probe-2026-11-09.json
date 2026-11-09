@@ -1,0 +1,96 @@
+{
+ "date": "2026-11-09",
+ "runs_per_function": 3,
+ "fixtures": 26,
+ "labels": "agent-assigned before any model answer was seen; not operator-verified",
+ "models_answering": [
+  "jev-1.14.0"
+ ],
+ "questions": {
+  "single_job": {
+   "judged_against": "single_job",
+   "labelled_good": 16,
+   "labelled_poor": 10,
+   "mean_good": 0.744,
+   "mean_poor": 0.169,
+   "auc": 1.0,
+   "max_run_spread": 0.04,
+   "decision_flips": 1,
+   "mean_by_group": {
+    "real-long-many-jobs": 0.138,
+    "real-long-one-job": 0.576,
+    "real-short-clean": 0.77,
+    "synthetic-short-clean": 0.908,
+    "synthetic-short-poor": 0.358
+   }
+  },
+  "more_than_one_job": {
+   "judged_against": "single_job",
+   "labelled_good": 16,
+   "labelled_poor": 10,
+   "mean_good": 0.398,
+   "mean_poor": 0.086,
+   "auc": 0.981,
+   "max_run_spread": 0.06,
+   "decision_flips": 2,
+   "mean_by_group": {
+    "real-long-many-jobs": 0.087,
+    "real-long-one-job": 0.133,
+    "real-short-clean": 0.43,
+    "synthetic-short-clean": 0.612,
+    "synthetic-short-poor": 0.172
+   }
+  },
+  "naming": {
+   "judged_against": "naming",
+   "labelled_good": 11,
+   "labelled_poor": 5,
+   "mean_good": 0.893,
+   "mean_poor": 0.431,
+   "auc": 0.982,
+   "max_run_spread": 0.117,
+   "decision_flips": 1,
+   "mean_by_group": {
+    "real-long-many-jobs": 0.781,
+    "real-long-one-job": 0.868,
+    "real-short-clean": 0.863,
+    "synthetic-short-clean": 0.972,
+    "synthetic-short-poor": 0.459
+   }
+  },
+  "name_covers_behavior": {
+   "judged_against": "naming",
+   "labelled_good": 11,
+   "labelled_poor": 5,
+   "mean_good": 0.648,
+   "mean_poor": 0.129,
+   "auc": 1.0,
+   "max_run_spread": 0.05,
+   "decision_flips": 2,
+   "mean_by_group": {
+    "real-long-many-jobs": 0.292,
+    "real-long-one-job": 0.583,
+    "real-short-clean": 0.578,
+    "synthetic-short-clean": 0.833,
+    "synthetic-short-poor": 0.141
+   }
+  },
+  "local_reasoning": {
+   "judged_against": "local_reasoning",
+   "labelled_good": 11,
+   "labelled_poor": 10,
+   "mean_good": 0.896,
+   "mean_poor": 0.181,
+   "auc": 1.0,
+   "max_run_spread": 0.067,
+   "decision_flips": 0,
+   "mean_by_group": {
+    "real-long-many-jobs": 0.11,
+    "real-long-one-job": 0.82,
+    "real-short-clean": 0.858,
+    "synthetic-short-clean": 0.997,
+    "synthetic-short-poor": 0.438
+   }
+  }
+ }
+}
