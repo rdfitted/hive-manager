@@ -4,6 +4,7 @@ pub mod agent_events;
 pub mod application_state;
 pub mod artifacts;
 pub mod cells;
+pub mod completion_gate;
 pub mod conversations;
 pub mod evaluator;
 pub mod events;
