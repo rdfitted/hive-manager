@@ -3,6 +3,7 @@
     python -I -m unittest discover -s workflow-pack/skills/slop-check/tests
 """
 import json
+import os
 import re
 import shutil
 import sys
@@ -93,7 +94,11 @@ class FileUrlRoot(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         shutil.copy(FIX / "side_tab.html", d / "side_tab.html")
         (d / slop_check.IGNORE_FILE).write_text(json.dumps({"ignores": []}), encoding="utf-8")
-        self.assertNotIn(Path.cwd().resolve(), [d.resolve(), *d.resolve().parents])
+        # Run from a directory that does not contain the page, wherever the suite was started.
+        elsewhere = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(elsewhere)
         code, v = run((d / "side_tab.html").as_uri())
         self.assertEqual((code, v["errors"]), (2, []), json.dumps(v, indent=2))
         self.assertEqual({f["relpath"] for f in v["gating"]}, {"side_tab.html"})
