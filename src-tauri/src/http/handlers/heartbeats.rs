@@ -383,6 +383,9 @@ pub async fn post_heartbeat(
         return Err(ApiError::new(StatusCode::FORBIDDEN,
             "X-Hive-Agent-Token does not own the resolved agent"));
     }
+    if req.status == "completed" {
+        super::completion_gate::check(&state, &session_id, &agent_id, req.mark_agent_id.is_some()).await?;
+    }
 
     // Validate the whole declared set before the queue or controller is mutated. Exact ids are
     // deliberate: aliases and labels are not node identity, and a mixed valid/invalid request
@@ -2946,4 +2949,128 @@ test "$with_header" = 200 && test "$without_header" = 200 && test "$wrong_token"
         assert!(!security_events(&fixture).iter().any(|event| event["payload"]["kind"] == "node_reassignment_failed"));
     }
 
+    /// The error from a heartbeat that must have been refused.
+    fn refusal(result: Result<(StatusCode, Json<PostHeartbeatResponse>), ApiError>, why: &str) -> ApiError {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("{why}"),
+        }
+    }
+
+    /// #441: the app runs the maintainability checker itself at completion. Uses the real
+    /// checker from the workflow pack; skipped where `python` or `git` is not on PATH.
+    #[tokio::test]
+    async fn g441_block_mode_refuses_a_completion_the_checker_blocks() {
+        use std::process::{Command, Stdio};
+        let tool = |name: &str| Command::new(name).arg("--version").stdin(Stdio::null())
+            .stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success());
+        if !tool("python") || !tool("git") {
+            eprintln!("skipping: python or git is not available");
+            return;
+        }
+        let fixture = fixture();
+        // An isolated cell: a repository of its own, distinct from the session's project path.
+        let cell = fixture._temp.path().join("cell");
+        let installed = cell.join(".claude/skills/maintain-check/scripts");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../workflow-pack/skills/maintain-check/scripts/maintain_check.py"),
+            installed.join("maintain_check.py")).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args).current_dir(&cell).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                .status().unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(cell.join("small.py"), "value = 1\n").unwrap();
+        git(&["add", "small.py"]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        fixture.state.pty_manager.read().seed_spawn_cwd(WORKER_ID, &cell.to_string_lossy());
+        let set_mode = |mode| {
+            let mut config = fixture.state.storage.load_config().unwrap();
+            config.maintain_check_mode = Some(mode);
+            fixture.state.storage.save_config(&config).unwrap();
+        };
+        let oversized: String = (0..900).map(|i| format!("x_{i} = {i}\n")).collect();
+        std::fs::write(cell.join("big.py"), oversized).unwrap();
+
+        set_mode(crate::session::maintain_gate::MaintainGateMode::Block);
+        let refused = refusal(heartbeat(fixture.state.clone(), WORKER_ID, "completed", None).await, "a completion whose change blocks the gate must be refused");
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert!(refused.message.contains("Maintainability gate blocked completion"), "{}", refused.message);
+        let details = refused.details.expect("structured details for the agent");
+        assert_eq!(details["gate"], "maintain-check");
+        assert!(details["findings"][0].as_str().unwrap().starts_with("big.py:1 [file-growth]"), "{details:?}");
+        assert!(std::path::Path::new(details["verdict_path"].as_str().unwrap()).is_file());
+        let recorded = fixture.state.session_controller.read().get_session(SESSION_ID).unwrap()
+            .agents.iter().find(|agent| agent.id == WORKER_ID).unwrap().status.clone();
+        assert_ne!(recorded, AgentStatus::Completed, "a refused completion must not be recorded");
+
+        // The Queen cannot mark around a real block either.
+        let queen_mark = post_heartbeat(State(fixture.state.clone()), Path(SESSION_ID.to_string()),
+            authenticated_headers(&fixture.state, QUEEN_ID),
+            Json(PostHeartbeatRequest {
+                agent_id: QUEEN_ID.to_string(), mark_agent_id: Some(WORKER_ID.to_string()),
+                reassign_nodes: Vec::new(), status: "completed".to_string(), summary: None,
+                assignment_id: None, completed_nodes: Vec::new(), knowledge_ack: None,
+            })).await;
+        assert_eq!(refusal(queen_mark, "a Queen mark must not bypass a block").status, StatusCode::CONFLICT);
+
+        // Report mode never refuses, whatever the checker would say.
+        set_mode(crate::session::maintain_gate::MaintainGateMode::Report);
+        let (working, _) = heartbeat(fixture.state.clone(), WORKER_ID, "working", None).await
+            .unwrap_or_else(|error| panic!("report mode never refuses: {}", error.message));
+        assert_eq!(working, StatusCode::OK);
+
+        // Cleaned up: the same completion is accepted in block mode.
+        std::fs::remove_file(cell.join("big.py")).unwrap();
+        set_mode(crate::session::maintain_gate::MaintainGateMode::Block);
+        let (status, _) = heartbeat(fixture.state.clone(), WORKER_ID, "completed", None).await
+            .unwrap_or_else(|error| panic!("a clean completion must be accepted: {}", error.message));
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn g441_block_mode_refuses_unavailable_but_lets_the_queen_escalate() {
+        let fixture = fixture();
+        // A cell with no repository and no checker installed in it: the check cannot be made.
+        let cell = fixture._temp.path().join("cell-without-repo");
+        std::fs::create_dir_all(&cell).unwrap();
+        fixture.state.pty_manager.read().seed_spawn_cwd(WORKER_ID, &cell.to_string_lossy());
+        let mut config = fixture.state.storage.load_config().unwrap();
+        config.maintain_check_mode = Some(crate::session::maintain_gate::MaintainGateMode::Block);
+        fixture.state.storage.save_config(&config).unwrap();
+
+        let refused = refusal(heartbeat(fixture.state.clone(), WORKER_ID, "completed", None).await, "unavailable is never a pass");
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert!(refused.message.contains("could not run") && refused.message.contains("never a pass"), "{}", refused.message);
+
+        let (status, _) = post_heartbeat(State(fixture.state.clone()), Path(SESSION_ID.to_string()),
+            authenticated_headers(&fixture.state, QUEEN_ID),
+            Json(PostHeartbeatRequest {
+                agent_id: QUEEN_ID.to_string(), mark_agent_id: Some(WORKER_ID.to_string()),
+                reassign_nodes: Vec::new(), status: "completed".to_string(), summary: None,
+                assignment_id: None, completed_nodes: Vec::new(), knowledge_ack: None,
+            })).await.unwrap_or_else(|error| panic!("the Queen is the escalation path: {}", error.message));
+        assert_eq!(status, StatusCode::OK);
+
+    }
+
+    #[tokio::test]
+    async fn g441_shared_workspaces_and_the_queen_are_not_gated() {
+        let fixture = fixture();
+        // The worker runs in the project directory itself, which it shares with other agents.
+        fixture.state.pty_manager.read().seed_spawn_cwd(WORKER_ID, &fixture._temp.path().to_string_lossy());
+        let mut config = fixture.state.storage.load_config().unwrap();
+        config.maintain_check_mode = Some(crate::session::maintain_gate::MaintainGateMode::Block);
+        fixture.state.storage.save_config(&config).unwrap();
+        let (worker, _) = heartbeat(fixture.state.clone(), WORKER_ID, "completed", None).await
+            .unwrap_or_else(|error| panic!("a shared workspace is not gated: {}", error.message));
+        let (queen, _) = heartbeat(fixture.state.clone(), QUEEN_ID, "completed", None).await
+            .unwrap_or_else(|error| panic!("the Queen is not gated: {}", error.message));
+        assert_eq!((worker, queen), (StatusCode::OK, StatusCode::OK));
+    }
 }

@@ -62,6 +62,11 @@ fn search_roots(workspace: &Path) -> Vec<PathBuf> {
     roots
 }
 
+/// The first compatible checker for a workspace, in the documented search order.
+pub(crate) fn resolve_checker(workspace: &Path) -> Option<PathBuf> {
+    script_in(&search_roots(workspace))
+}
+
 fn script_in(roots: &[PathBuf]) -> Option<PathBuf> {
     roots.iter().map(|root| root.join(SCRIPT_RELATIVE)).find(|path| {
         std::fs::read_to_string(path).is_ok_and(|text| text.contains(CONTRACT_MARKER))
@@ -139,7 +144,7 @@ fn render_with_roots(
     };
     let mode_rule = match mode {
         MaintainGateMode::Report => "Report mode: a block verdict is logged and reported, and the task may complete. Error or unavailable is recorded and noted by the reviewer, and the task may complete.",
-        MaintainGateMode::Block => "Block mode: a block verdict means clean up, re-run, and continue until the verdict is pass. Move new code into a new module or split the function. Do not ship around the gate and do not ask permission to fix findings in files you own. Error or unavailable requires escalation to the Queen.",
+        MaintainGateMode::Block => "Block mode: a block verdict means clean up, re-run, and continue until the verdict is pass. Move new code into a new module or split the function. Do not ship around the gate and do not ask permission to fix findings in files you own. Error or unavailable requires escalation to the Queen. The app runs this checker itself on your workspace when you send the completed heartbeat. If that heartbeat is refused with HTTP 409, read <session-root>/evidence/maintain-check/<your-agent-id>-app.json, clean up, and send it again.",
         MaintainGateMode::Off => unreachable!(),
     };
     let review_rule = if reviewer {

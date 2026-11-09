@@ -4,6 +4,7 @@ mod fusion_judgment;
 mod polling_intervals;
 mod prompt_contract;
 pub mod retirement;
+pub mod maintain_enforce;
 pub mod maintain_gate;
 pub mod slop_gate;
 pub mod transitions;
