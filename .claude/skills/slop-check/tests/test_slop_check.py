@@ -3,6 +3,7 @@
     python -I -m unittest discover -s workflow-pack/skills/slop-check/tests
 """
 import json
+import os
 import re
 import shutil
 import sys
@@ -83,6 +84,25 @@ class Fixtures(unittest.TestCase):
         self.assertEqual(code, 0, json.dumps(v, indent=2))
         self.assertEqual(sorted(t["viewport"] for t in v["targets"]), ["1280x800", "390x844"])
         self.assertEqual(v["suppressed"], [])  # rendered contrast is trusted, nothing to filter
+
+
+class FileUrlRoot(unittest.TestCase):
+    """A file:// scan with no --root resolves its root from the page, not from the caller's cwd."""
+
+    def test_file_url_outside_cwd_scans_without_explicit_root(self):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        shutil.copy(FIX / "side_tab.html", d / "side_tab.html")
+        (d / slop_check.IGNORE_FILE).write_text(json.dumps({"ignores": []}), encoding="utf-8")
+        # Run from a directory that does not contain the page, wherever the suite was started.
+        elsewhere = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, elsewhere, ignore_errors=True)
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(elsewhere)
+        code, v = run((d / "side_tab.html").as_uri())
+        self.assertEqual((code, v["errors"]), (2, []), json.dumps(v, indent=2))
+        self.assertEqual({f["relpath"] for f in v["gating"]}, {"side_tab.html"})
+        self.assertIn(("side-tab", "ban-side-tab"), rules(v, "gating"))
 
 
 class Ignores(unittest.TestCase):

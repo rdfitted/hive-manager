@@ -225,11 +225,24 @@ def classify(findings: list[dict], rendered: bool, viewport: str | None, ignores
     return res
 
 
+def local_path(url: str) -> str | None:
+    """Filesystem path behind a file:// URL; None for any other URL."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() != 'file':
+        return None
+    raw = urllib.request.url2pathname(parsed.path)
+    return '//' + parsed.netloc + raw if parsed.netloc else raw
+
+
 def find_root(target: str, explicit: str | None) -> Path | None:
     if explicit:
         return Path(explicit)
     if is_url(target):
-        return Path.cwd()
+        # A file:// page belongs to the tree that holds it, not to the caller's cwd.
+        local = local_path(target)
+        if local is None:
+            return Path.cwd()
+        target = local
     p = Path(target).resolve()
     for d in [p, *p.parents]:
         if (d / IGNORE_FILE).is_file() or (d / ".git").exists():
@@ -251,14 +264,11 @@ def finding_metadata(f: dict, rendered: bool, root: Path | None) -> dict:
     if not raw:
         raise ValueError('finding has no source file')
     if is_url(raw):
-        parsed = urllib.parse.urlparse(raw)
-        if parsed.scheme.lower() == 'file':
-            raw = urllib.request.url2pathname(parsed.path)
-            if parsed.netloc:
-                raw = '//' + parsed.netloc + raw
-        else:
+        local = local_path(raw)
+        if local is None:
             return {'relpath': raw, 'context': str(f.get('snippet', ''))[:300],
                     'finding_key': finding_key({**f, 'relpath': raw})}
+        raw = local
     source = Path(raw).resolve()
     try:
         relpath = source.relative_to((root or Path.cwd()).resolve()).as_posix()
