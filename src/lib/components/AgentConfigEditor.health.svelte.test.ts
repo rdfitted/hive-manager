@@ -202,8 +202,8 @@ describe('fetchPresetCatalogue', () => {
         presets: [{
           provider: 'codex',
           id: 'codex-gpt-6-1-sol',
-          label: 'GPT-6.1 Sol',
-          model: 'gpt-6.1-sol',
+          label: 'GPT-6.2 Sol',
+          model: 'gpt-6.2-sol',
           flags: [],
         }],
       }));

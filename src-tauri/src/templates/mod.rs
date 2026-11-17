@@ -220,14 +220,14 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-6.1-sol".to_string()),
+                    model: Some("gpt-6.2-sol".to_string()),
                     prompt_template: "roles/backend".to_string(),
                     ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "frontend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-6.1-sol".to_string()),
+                    model: Some("gpt-6.2-sol".to_string()),
                     prompt_template: "roles/frontend".to_string(),
                     ..CellTemplate::default()
                 },
@@ -262,21 +262,21 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-6.1-sol".to_string()),
+                    model: Some("gpt-6.2-sol".to_string()),
                     prompt_template: "roles/backend".to_string(),
                     ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "frontend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-6.1-sol".to_string()),
+                    model: Some("gpt-6.2-sol".to_string()),
                     prompt_template: "roles/frontend".to_string(),
                     ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "coherence".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-6.1-sol".to_string()),
+                    model: Some("gpt-6.2-sol".to_string()),
                     prompt_template: "roles/coherence".to_string(),
                     ..CellTemplate::default()
                 },
@@ -296,7 +296,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "candidate-a".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-6.1-sol".to_string()),
+                    model: Some("gpt-6.2-sol".to_string()),
                     prompt_template: "fusion-worker".to_string(),
                     ..CellTemplate::default()
                 },
@@ -343,7 +343,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "backend".to_string(),
                 cli: "codex".to_string(),
-                model: Some("gpt-6.1-sol".to_string()),
+                model: Some("gpt-6.2-sol".to_string()),
                 prompt_template: "roles/backend".to_string(),
                 ..CellTemplate::default()
             }],
@@ -354,7 +354,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "coherence".to_string(),
                 cli: "codex".to_string(),
-                model: Some("gpt-6.1-sol".to_string()),
+                model: Some("gpt-6.2-sol".to_string()),
                 prompt_template: "roles/coherence".to_string(),
                 ..CellTemplate::default()
             }],
@@ -2503,7 +2503,7 @@ mod tests {
                 assert_eq!(principal.cli, "codex", "{role} CLI drifted");
                 assert_eq!(
                     principal.model.as_deref(),
-                    Some("gpt-6.1-sol"),
+                    Some("gpt-6.2-sol"),
                     "{role} model drifted"
                 );
             }
@@ -2515,7 +2515,7 @@ mod tests {
             .expect("implementer role pack must remain available");
         assert_eq!(implementer.name, "Coding Principal");
         assert_eq!(implementer.roles[0].cli, "codex");
-        assert_eq!(implementer.roles[0].model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(implementer.roles[0].model.as_deref(), Some("gpt-6.2-sol"));
     }
 
     #[test]

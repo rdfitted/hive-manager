@@ -21,7 +21,7 @@ beforeEach(() => {
   selectedTemplate.set(null);
   vi.stubGlobal('fetch', vi.fn(async (url: string) => new Response(JSON.stringify(
     url.includes('/api/templates') ? { templates: builtinFixtures, role_packs: [] }
-      : url.includes('/api/preset-catalogue') ? { presets: [{ provider: 'codex', id: 'high', label: 'High', model: 'gpt-6.1-sol', flags: ['-c', 'model_reasoning_effort="xhigh"'] }] }
+      : url.includes('/api/preset-catalogue') ? { presets: [{ provider: 'codex', id: 'high', label: 'High', model: 'gpt-6.2-sol', flags: ['-c', 'model_reasoning_effort="xhigh"'] }] }
       : url.includes('/api/tier-ladder') ? { cells: [], omissions: [] } : { clis: [] },
   ), { status: 200 })));
 });
@@ -114,7 +114,7 @@ describe('G-launch-parity: emitted composer and retained legacy-form payloads', 
 
   it.each(builtinFixtures)('$id preserves the complete canonical template payload', async (template) => {
     if (template.id === 'feature-build-hive') {
-      expect(template.cells.find((cell) => cell.role === 'coherence')).toMatchObject({ cli: 'codex', model: 'gpt-6.1-sol' });
+      expect(template.cells.find((cell) => cell.role === 'coherence')).toMatchObject({ cli: 'codex', model: 'gpt-6.2-sol' });
     }
     const mode = template.mode as Mode;
     const oldForm = await capture(mode, true, template);
@@ -223,7 +223,7 @@ describe('G-launch-parity: emitted composer and retained legacy-form payloads', 
     await fireEvent.change(view.container.querySelector(`#${prefix}-preset`)!, { target: { value: 'high' } });
     await fireEvent.click(view.getByRole('button', { name: 'Launch' }));
     const oldForm = structuredClone(view.launch.mock.calls[0][0].detail);
-    expect(roster ? oldForm[roster][0] : oldForm).toMatchObject({ cli: 'codex', model: 'gpt-6.1-sol', flags: ['-c', 'model_reasoning_effort="xhigh"'] });
+    expect(roster ? oldForm[roster][0] : oldForm).toMatchObject({ cli: 'codex', model: 'gpt-6.2-sol', flags: ['-c', 'model_reasoning_effort="xhigh"'] });
     await fireEvent.click(view.getByRole('button', { name: 'Back to composer' }));
     await fireEvent.click(view.getByRole('button', { name: 'Launch' }));
     expect(view.launch.mock.calls[1][0].detail).toStrictEqual(oldForm);

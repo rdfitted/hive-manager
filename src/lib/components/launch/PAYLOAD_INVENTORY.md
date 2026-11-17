@@ -4,7 +4,7 @@ Reference: base `14ffe2daa79f94c250ddef7f20b47e4fa774d981`, read-only payload sc
 
 ## Shared defaults
 
-`sessionName`, `sessionColor`, `projectPath`, `prompt`, `soloTask` start empty. A nonblank project is required. Name is trimmed and becomes `undefined` when empty; color is `undefined` when empty; project keeps the selected path. Queen = `{cli:'claude',model:'opus',flags:[],label:'Queen'}`. Evaluator = `{cli:'claude',model:'opus',flags:[],label:'Evaluator'}`. QA defaults to UI, API, A11Y workers, each `{specialization,cli:'codex',model:'gpt-6.1-sol',flags:[]}`. Hive/Solo QA are enabled. Planning starts true. Smoke is false unless the Smoke Test action is used. Role/model defaults come from `config/clis.ts:defaultRoles`; no display-model alias is materialized by merely opening a control. Model & Effort defaults to Custom when the exact model/flags do not match a catalogue preset.
+`sessionName`, `sessionColor`, `projectPath`, `prompt`, `soloTask` start empty. A nonblank project is required. Name is trimmed and becomes `undefined` when empty; color is `undefined` when empty; project keeps the selected path. Queen = `{cli:'claude',model:'opus',flags:[],label:'Queen'}`. Evaluator = `{cli:'claude',model:'opus',flags:[],label:'Evaluator'}`. QA defaults to UI, API, A11Y workers, each `{specialization,cli:'codex',model:'gpt-6.2-sol',flags:[]}`. Hive/Solo QA are enabled. Planning starts true. Smoke is false unless the Smoke Test action is used. Role/model defaults come from `config/clis.ts:defaultRoles`; no display-model alias is materialized by merely opening a control. Model & Effort defaults to Custom when the exact model/flags do not match a catalogue preset.
 
 ## Mode → builder and every emitted field
 
@@ -19,11 +19,11 @@ Reference: base `14ffe2daa79f94c250ddef7f20b47e4fa774d981`, read-only payload sc
 
 ### Hive nested fields
 
-`workers` maps every coding principal to `{cli,model,flags,label,role}`; default principal = `{cli:'codex',model:'gpt-6.1-sol',flags:[],label:'Coding Principal 1'}`. `role` = `{role_type:'principal',label:'Coding Principal',default_cli:principal.cli,prompt_template:null}` initially. Other roles use predefined labels/prompts; a custom role preserves its ID, title-cases its label and uses a null prompt unless overridden. Form-only `selectedRole`/`promptTemplateOverride` are not emitted as agent fields.
+`workers` maps every coding principal to `{cli,model,flags,label,role}`; default principal = `{cli:'codex',model:'gpt-6.2-sol',flags:[],label:'Coding Principal 1'}`. `role` = `{role_type:'principal',label:'Coding Principal',default_cli:principal.cli,prompt_template:null}` initially. Other roles use predefined labels/prompts; a custom role preserves its ID, title-cases its label and uses a null prompt unless overridden. Form-only `selectedRole`/`promptTemplateOverride` are not emitted as agent fields.
 
 `execution_policy` = `{launch_kind:'hive',workspace_strategy:'shared_cell',queen_delegation:{mode:'auto',max_children:3,max_depth:1},principal_delegation:{mode:'encouraged',max_children:2,max_depth:1},tier_policy:{enabled:false,ceiling_percent:34,review_floor:'high',ladder:{}}}`. Disabled delegation emits only `{mode:'disabled'}`. Enabled limits clamp to at least 1 in the builder; the dialog validates whole-number ranges first. Tier-policy preview cells never enter the payload; ladder is always `{}`. A selected work-graph archetype is trimmed, forces planning true, and allows only trimmed nonempty parameter keys/values. No archetype discards stale overrides.
 
-Research workers map to `{cli:'codex',model:'gpt-6.1-sol',flags:[],label:'Researcher N',role:{role_type:'researcher',label:'Researcher',default_cli:worker.cli,prompt_template:null}}`; explicit labels and prompt overrides survive.
+Research workers map to `{cli:'codex',model:'gpt-6.2-sol',flags:[],label:'Researcher N',role:{role_type:'researcher',label:'Researcher',default_cli:worker.cli,prompt_template:null}}`; explicit labels and prompt overrides survive.
 
 ## Every built-in session template fixture
 
@@ -31,9 +31,9 @@ Source: `src-tauri/src/templates/mod.rs:builtin_session_templates` (read-only); 
 
 | ID / name | Concrete builder | Overrides relative to defaults |
 | --- | --- | --- |
-| `bug-fix-hive` / Bug-fix Hive | Hive builder | Name = template name; Queen claude/opus; workers backend and frontend, both codex/gpt-6.1-sol, flags `[]`, labels Backend/Frontend, roles with `prompt_template:'roles/backend'` and `'roles/frontend'`; workspace shared_cell; no graph/parameters. |
-| `feature-build-hive` / Feature-build Hive | Hive builder | As Bug-fix plus a coherence worker codex/gpt-6.1-sol, label Coherence, `prompt_template:'roles/coherence'`; workspace shared_cell; no graph/parameters. |
-| `fusion-compare` / Fusion Compare | Fusion inline builder | Name = template name; candidates A codex/gpt-6.1-sol and B codex/gpt-6-luna, flags `[]`; resolver becomes `{cli:'claude',model:'opus',flags:[],label:'Fusion Resolver'}` judge and never a candidate. Template workspace isolated_cell is stored in form state but is **not** a Fusion payload field. |
+| `bug-fix-hive` / Bug-fix Hive | Hive builder | Name = template name; Queen claude/opus; workers backend and frontend, both codex/gpt-6.2-sol, flags `[]`, labels Backend/Frontend, roles with `prompt_template:'roles/backend'` and `'roles/frontend'`; workspace shared_cell; no graph/parameters. |
+| `feature-build-hive` / Feature-build Hive | Hive builder | As Bug-fix plus a coherence worker codex/gpt-6.2-sol, label Coherence, `prompt_template:'roles/coherence'`; workspace shared_cell; no graph/parameters. |
+| `fusion-compare` / Fusion Compare | Fusion inline builder | Name = template name; candidates A codex/gpt-6.2-sol and B codex/gpt-6-luna, flags `[]`; resolver becomes `{cli:'claude',model:'opus',flags:[],label:'Fusion Resolver'}` judge and never a candidate. Template workspace isolated_cell is stored in form state but is **not** a Fusion payload field. |
 
 `applyTemplate` treats the first case-insensitive Queen role as Queen, all remaining Hive cells as principals; no principals falls back to one default. Fusion uses `templates/templateLaunch.ts:routeFusionTemplateCells`: resolver/judge aliases route to judge, all other cells to variants; no judge preserves the existing judge; no candidates produces an error. Debate templates map all cells to Debater A/B/… with Stance A/B/… and preserve CLI/model. Template routing tests also cover candidates without a resolver and explicit `fusion_judge` aliases. These are routing fixtures, not additional built-in session templates.
 
