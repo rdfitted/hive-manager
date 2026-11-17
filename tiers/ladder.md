@@ -2,16 +2,16 @@
 {
   "tier_ladder": {
     "claude": {
-      "low": "claude-haiku-4-5",
-      "medium": "claude-sonnet-4-6",
+      "low": "claude-haiku-5-5",
+      "medium": "claude-sonnet-5-5",
       "high": "opus-high",
       "critical": "fable-high"
     },
     "codex": {
       "low": "codex-gpt-6-luna-medium",
-      "medium": "codex-gpt-6-1-sol-medium",
-      "high": "codex-gpt-6-1-sol-xhigh",
-      "critical": "codex-gpt-6-astra-max"
+      "medium": "codex-gpt-6-2-sol-medium",
+      "high": "codex-gpt-6-2-sol-xhigh",
+      "critical": "codex-gpt-6-2-astra-max"
     }
   }
 }

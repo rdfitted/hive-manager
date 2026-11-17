@@ -59,16 +59,16 @@ A single-window application that:
 | Worker | CLI | Model | Role |
 |--------|-----|-------|------|
 | Worker 1X (Backend) | `agent` via WSL | Cursor/Opus | Backend implementation |
-| Worker 2X (Frontend) | `codex` | GPT-6.1 Sol | Frontend implementation |
-| Worker 3X (Coherence) | `codex` | GPT-6.1 Sol | Cross-cutting coherence |
+| Worker 2X (Frontend) | `codex` | GPT-6.2 Sol | Frontend implementation |
+| Worker 3X (Coherence) | `codex` | GPT-6.2 Sol | Cross-cutting coherence |
 | Worker 4X (Simplify) | `codex` | GPT-5.3 | Simplification pass |
 
 ### Support Agents
 | Agent | CLI | Model | Role |
 |-------|-----|-------|------|
-| Reviewer | `codex` | GPT-6.1 Sol | Code review |
+| Reviewer | `codex` | GPT-6.2 Sol | Code review |
 | Tester | `codex` | GPT-5.3 | Test execution |
-| Integration Reviewer | `codex` | GPT-6.1 Sol | Cross-domain review |
+| Integration Reviewer | `codex` | GPT-6.2 Sol | Cross-domain review |
 | Integration Tester | `codex` | GPT-5.3 | Integration tests |
 
 ### CLI Reference

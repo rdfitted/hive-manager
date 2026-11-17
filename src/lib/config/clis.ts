@@ -21,7 +21,7 @@ export interface CliOption {
  */
 export const cliOptions: CliOption[] = [
   { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude', defaultModel: 'opus' },
-  { value: 'codex', label: 'Codex', description: 'OpenAI GPT-6.1 Sol, GPT-6 (Astra / Sol / Luna)', defaultModel: 'gpt-6.1-sol' },
+  { value: 'codex', label: 'Codex', description: 'OpenAI GPT-6.2 (Sol / Astra), GPT-6.1 Sol, GPT-6 (Astra / Sol / Luna)', defaultModel: 'gpt-6.2-sol' },
   { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Composer 2.5, Gemini 4 Argon)', defaultModel: 'composer-2.5' },
 ];
 
@@ -36,23 +36,23 @@ export interface RoleDefaults {
 
 export const defaultRoles: Record<string, RoleDefaults> = {
   queen: { cli: 'claude', model: 'opus' },
-  principal: { cli: 'codex', model: 'gpt-6.1-sol' },
-  backend: { cli: 'codex', model: 'gpt-6.1-sol' },
+  principal: { cli: 'codex', model: 'gpt-6.2-sol' },
+  backend: { cli: 'codex', model: 'gpt-6.2-sol' },
   // Coding roles intentionally share the Codex default.
-  frontend: { cli: 'codex', model: 'gpt-6.1-sol' },
-  coherence: { cli: 'codex', model: 'gpt-6.1-sol' },
-  simplify: { cli: 'codex', model: 'gpt-6.1-sol' },
+  frontend: { cli: 'codex', model: 'gpt-6.2-sol' },
+  coherence: { cli: 'codex', model: 'gpt-6.2-sol' },
+  simplify: { cli: 'codex', model: 'gpt-6.2-sol' },
   // Review & QA roles
-  reviewer: { cli: 'codex', model: 'gpt-6.1-sol' },
-  'reviewer-quick': { cli: 'codex', model: 'gpt-6.1-sol' },
-  resolver: { cli: 'codex', model: 'gpt-6.1-sol' },
-  tester: { cli: 'codex', model: 'gpt-6.1-sol' },
-  'code-quality': { cli: 'codex', model: 'gpt-6.1-sol' },
+  reviewer: { cli: 'codex', model: 'gpt-6.2-sol' },
+  'reviewer-quick': { cli: 'codex', model: 'gpt-6.2-sol' },
+  resolver: { cli: 'codex', model: 'gpt-6.2-sol' },
+  tester: { cli: 'codex', model: 'gpt-6.2-sol' },
+  'code-quality': { cli: 'codex', model: 'gpt-6.2-sol' },
   // Evaluator & QA roles - match backend storage/mod.rs default_roles
   evaluator: { cli: 'claude', model: 'opus' },
-  'qa-worker': { cli: 'codex', model: 'gpt-6.1-sol' },
+  'qa-worker': { cli: 'codex', model: 'gpt-6.2-sol' },
   // General purpose
-  general: { cli: 'codex', model: 'gpt-6.1-sol' },
+  general: { cli: 'codex', model: 'gpt-6.2-sol' },
 };
 
 /** Normalize model aliases that are not accepted by a CLI authentication path. */
