@@ -190,6 +190,31 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
     preset!("claude", "fable", "Fable 5", "fable", 3),
     preset!(
         "claude",
+        "claude-fable-5-2-high",
+        "Fable 5.2 (High effort)",
+        "claude-fable-5-2",
+        3,
+        "--settings",
+        "{\"effortLevel\":\"high\"}"
+    ),
+    preset!(
+        "claude",
+        "claude-fable-5-2-max",
+        "Fable 5.2 (Max effort)",
+        "claude-fable-5-2",
+        3,
+        "--settings",
+        "{\"effortLevel\":\"max\"}"
+    ),
+    preset!(
+        "claude",
+        "claude-fable-5-2",
+        "Fable 5.2",
+        "claude-fable-5-2",
+        3
+    ),
+    preset!(
+        "claude",
         "opus-high",
         "Opus (High effort)",
         "opus",
@@ -1455,11 +1480,11 @@ mod tests {
             assert_eq!(expansion.resolved.flags, preset.flags.to_vec());
         }
 
-        assert_eq!(preset_catalogue().len(), 89);
+        assert_eq!(preset_catalogue().len(), 92);
         assert_eq!(
             provider_counts,
             std::collections::BTreeMap::from([
-                ("claude", 16),
+                ("claude", 19),
                 ("codex", 68),
                 ("cursor", 5),
             ])
@@ -1467,6 +1492,7 @@ mod tests {
         assert!(ids.contains("codex-gpt-5-5-xhigh"));
         assert!(ids.contains("codex-gpt-5-4-xhigh"));
         assert!(ids.contains("codex-gpt-5-3-xhigh"));
+        assert!(ids.contains("claude-fable-5-2-max"));
         assert!(!ids.contains("codex-gpt-6-luna-ultra"));
         assert!(!ids.contains("codex-gpt-6-terra"));
         let codex_ids: Vec<_> = preset_catalogue()
