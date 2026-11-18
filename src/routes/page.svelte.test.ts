@@ -61,9 +61,9 @@ vi.mock('$lib/stores/sessions', async () => {
     project_path: 'D:/project',
     worktree_path: 'D:/project',
     default_cli: 'codex',
-    default_model: 'gpt-6.1-sol',
+    default_model: 'gpt-6.2-sol',
     default_principal_cli: 'codex',
-    default_principal_model: 'gpt-6.1-sol',
+    default_principal_model: 'gpt-6.2-sol',
     default_principal_flags: [],
   });
   const activeAgents = writable<AgentInfo[]>([]);

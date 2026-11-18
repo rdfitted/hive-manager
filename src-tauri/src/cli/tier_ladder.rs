@@ -209,6 +209,24 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
     preset!("claude", "opus", "Opus", "opus", 2),
     preset!(
         "claude",
+        "claude-opus-5-5-high",
+        "Opus 5.5 (High effort)",
+        "claude-opus-5-5",
+        2,
+        "--settings",
+        "{\"effortLevel\":\"high\"}"
+    ),
+    preset!(
+        "claude",
+        "claude-opus-5-5-low",
+        "Opus 5.5 (Low effort)",
+        "claude-opus-5-5",
+        2,
+        "--settings",
+        "{\"effortLevel\":\"low\"}"
+    ),
+    preset!(
+        "claude",
         "claude-opus-4-6-high",
         "Opus 4.6 (High effort)",
         "claude-opus-4-6",
@@ -234,6 +252,13 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
     ),
     preset!(
         "claude",
+        "claude-sonnet-5-5",
+        "Sonnet 5.5",
+        "claude-sonnet-5-5",
+        1
+    ),
+    preset!(
+        "claude",
         "claude-sonnet-4-6",
         "Sonnet 4.6",
         "claude-sonnet-4-6",
@@ -248,10 +273,139 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
     ),
     preset!(
         "claude",
+        "claude-haiku-5-5",
+        "Haiku 5.5",
+        "claude-haiku-5-5",
+        0
+    ),
+    preset!(
+        "claude",
         "claude-haiku-4-5",
         "Haiku 4.5",
         "claude-haiku-4-5",
         0
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-sol",
+        "GPT-6.2 Sol",
+        "gpt-6.2-sol",
+        1
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-sol-low",
+        "GPT-6.2 Sol (Low effort)",
+        "gpt-6.2-sol",
+        1,
+        "-c",
+        "model_reasoning_effort=\"low\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-sol-medium",
+        "GPT-6.2 Sol (Medium effort)",
+        "gpt-6.2-sol",
+        1,
+        "-c",
+        "model_reasoning_effort=\"medium\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-sol-high",
+        "GPT-6.2 Sol (High effort)",
+        "gpt-6.2-sol",
+        2,
+        "-c",
+        "model_reasoning_effort=\"high\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-sol-xhigh",
+        "GPT-6.2 Sol (Extra high effort)",
+        "gpt-6.2-sol",
+        2,
+        "-c",
+        "model_reasoning_effort=\"xhigh\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-sol-max",
+        "GPT-6.2 Sol (Max effort)",
+        "gpt-6.2-sol",
+        3,
+        "-c",
+        "model_reasoning_effort=\"max\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-sol-ultra",
+        "GPT-6.2 Sol (Ultra effort)",
+        "gpt-6.2-sol",
+        3,
+        "-c",
+        "model_reasoning_effort=\"ultra\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-astra",
+        "GPT-6.2 Astra",
+        "gpt-6.2-astra",
+        3
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-astra-low",
+        "GPT-6.2 Astra (Low effort)",
+        "gpt-6.2-astra",
+        3,
+        "-c",
+        "model_reasoning_effort=\"low\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-astra-medium",
+        "GPT-6.2 Astra (Medium effort)",
+        "gpt-6.2-astra",
+        3,
+        "-c",
+        "model_reasoning_effort=\"medium\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-astra-high",
+        "GPT-6.2 Astra (High effort)",
+        "gpt-6.2-astra",
+        3,
+        "-c",
+        "model_reasoning_effort=\"high\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-astra-xhigh",
+        "GPT-6.2 Astra (Extra high effort)",
+        "gpt-6.2-astra",
+        3,
+        "-c",
+        "model_reasoning_effort=\"xhigh\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-astra-max",
+        "GPT-6.2 Astra (Max effort)",
+        "gpt-6.2-astra",
+        3,
+        "-c",
+        "model_reasoning_effort=\"max\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-6-2-astra-ultra",
+        "GPT-6.2 Astra (Ultra effort)",
+        "gpt-6.2-astra",
+        3,
+        "-c",
+        "model_reasoning_effort=\"ultra\""
     ),
     preset!(
         "codex",
@@ -1143,10 +1297,10 @@ mod tests {
             (
                 "claude",
                 TaskTier::Low,
-                "claude-haiku-4-5",
+                "claude-haiku-5-5",
                 Vec::<&str>::new(),
             ),
-            ("claude", TaskTier::Medium, "claude-sonnet-4-6", vec![]),
+            ("claude", TaskTier::Medium, "claude-sonnet-5-5", vec![]),
             (
                 "claude",
                 TaskTier::High,
@@ -1168,19 +1322,19 @@ mod tests {
             (
                 "codex",
                 TaskTier::Medium,
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 vec!["-c", "model_reasoning_effort=\"medium\""],
             ),
             (
                 "codex",
                 TaskTier::High,
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 vec!["-c", "model_reasoning_effort=\"xhigh\""],
             ),
             (
                 "codex",
                 TaskTier::Critical,
-                "gpt-6-astra",
+                "gpt-6.2-astra",
                 vec!["-c", "model_reasoning_effort=\"max\""],
             ),
         ];
@@ -1301,12 +1455,12 @@ mod tests {
             assert_eq!(expansion.resolved.flags, preset.flags.to_vec());
         }
 
-        assert_eq!(preset_catalogue().len(), 71);
+        assert_eq!(preset_catalogue().len(), 89);
         assert_eq!(
             provider_counts,
             std::collections::BTreeMap::from([
-                ("claude", 12),
-                ("codex", 54),
+                ("claude", 16),
+                ("codex", 68),
                 ("cursor", 5),
             ])
         );
@@ -1320,12 +1474,12 @@ mod tests {
             .filter(|preset| preset.provider == "codex")
             .map(|preset| preset.id)
             .collect();
-        assert_eq!(codex_ids.first(), Some(&"codex-gpt-6-1-sol"));
+        assert_eq!(codex_ids.first(), Some(&"codex-gpt-6-2-sol"));
         let first_legacy = codex_ids
             .iter()
             .position(|id| id.starts_with("codex-gpt-5-6-"))
             .unwrap();
-        assert_eq!(first_legacy, 27, "GPT-6.x presets must precede legacy 5.6");
+        assert_eq!(first_legacy, 41, "GPT-6.x presets must precede legacy 5.6");
         assert_eq!(
             expand_preset("codex", "codex-gpt-5-6-sol-medium")
                 .unwrap()
@@ -1388,15 +1542,20 @@ mod tests {
                 );
             }
         }
-        let model = "gpt-6.1-sol";
-        assert_eq!(expand_preset("codex", "codex-gpt-6-1-sol").unwrap().resolved.model, model);
-        for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
-            let expansion = expand_preset("codex", &format!("codex-gpt-6-1-sol-{effort}")).unwrap();
-            assert_eq!(expansion.resolved.model, model);
-            assert_eq!(
-                expansion.resolved.flags,
-                vec!["-c".to_string(), format!("model_reasoning_effort=\"{effort}\"")]
-            );
+        for (base_id, model) in [
+            ("codex-gpt-6-2-sol", "gpt-6.2-sol"),
+            ("codex-gpt-6-2-astra", "gpt-6.2-astra"),
+            ("codex-gpt-6-1-sol", "gpt-6.1-sol"),
+        ] {
+            assert_eq!(expand_preset("codex", base_id).unwrap().resolved.model, model);
+            for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+                let expansion = expand_preset("codex", &format!("{base_id}-{effort}")).unwrap();
+                assert_eq!(expansion.resolved.model, model);
+                assert_eq!(
+                    expansion.resolved.flags,
+                    vec!["-c".to_string(), format!("model_reasoning_effort=\"{effort}\"")]
+                );
+            }
         }
         assert!(expand_preset("codex", "codex-gpt-6-luna-ultra").is_none());
         assert!(expand_preset("codex", "codex-gpt-6-terra").is_none());

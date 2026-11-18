@@ -441,7 +441,7 @@ mod tests {
         assert!(section.contains("`low`: model `gpt-6-luna`"));
         assert!(section.contains(r#"model_reasoning_effort="medium""#));
         assert!(section
-            .contains(r#"`high`: model `gpt-6.1-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
+            .contains(r#"`high`: model `gpt-6.2-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
         assert!(section.contains("you may spawn `low`, `medium`, or `high` work"));
     }
 
@@ -460,10 +460,10 @@ mod tests {
         .expect("enabled tier section");
 
         assert!(section.contains("routing via the Agent tool"));
-        assert!(section.contains("`low`: model `claude-haiku-4-5`; no tier-specific flags"));
+        assert!(section.contains("`low`: model `claude-haiku-5-5`; no tier-specific flags"));
         assert!(section.contains("you may spawn `low` work only"));
         assert!(section.contains("may not delegate above your own tier"));
-        assert!(!section.contains("claude-haiku-4-5`; flags `--model"));
+        assert!(!section.contains("claude-haiku-5-5`; flags `--model"));
 
         let high_section = render_tier_section(
             &config,
