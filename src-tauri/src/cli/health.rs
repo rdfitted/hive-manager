@@ -148,6 +148,10 @@ impl CliHealthRegistry {
 
         let (logged_in, detail) = match cli {
             "codex" => probe_login(&bin_path, &["login", "status"], "Codex").await,
+            "antigravity" => (
+                LoginStatus::Unknown,
+                "agy is available; Antigravity authentication is managed out of band".to_string(),
+            ),
             _ => (
                 LoginStatus::Unknown,
                 format!(
@@ -288,6 +292,7 @@ pub(crate) fn configured_institutional_wiki_root(config: &AppConfig) -> Option<P
 fn executable_for_cli(cli: &str) -> &str {
     match cli {
         "cursor" => "wsl",
+        "antigravity" => "agy",
         _ => cli,
     }
 }

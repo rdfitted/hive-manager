@@ -70,6 +70,7 @@ pub const FIRST_HEARTBEAT_LATENCY_MS_BY_CLI: &[(&str, Option<i64>)] = &[
     ("claude", None),
     ("codex", None),
     ("cursor", None),
+    ("antigravity", None),
 ];
 
 /// `STUCK_CUTOFF_MS` in whole seconds, for prompt prose.

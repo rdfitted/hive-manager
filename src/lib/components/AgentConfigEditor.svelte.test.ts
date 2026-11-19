@@ -17,6 +17,8 @@ const presets = [
   { provider: 'codex', id: 'codex-gpt-5-6-sol-ultra', label: 'GPT-5.6 Sol (Ultra effort)', model: 'gpt-5.6-sol', flags: ['-c', 'model_reasoning_effort="ultra"'] },
   { provider: 'cursor', id: 'composer-2.5', label: 'Composer 2.5 (latest)', model: 'composer-2.5', flags: [] },
   { provider: 'cursor', id: 'gemini-4-argon-high', label: 'Gemini 4 Argon (High)', model: 'gemini-4-argon-high', flags: [] },
+  { provider: 'antigravity', id: 'agy-gemini-4-neon-high', label: 'Gemini 4 Neon (High)', model: 'gemini-4-neon-high', flags: [] },
+  { provider: 'antigravity', id: 'agy-gemini-4-hydrogen-xhigh', label: 'Gemini 4 Hydrogen (XHigh)', model: 'gemini-4-hydrogen-xhigh', flags: [] },
 ];
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -209,6 +211,15 @@ describe('AgentConfigEditor', () => {
     });
   });
 
+  it('round-trips an Antigravity preset from the server catalogue', async () => {
+    await expectServerPresetRoundTrip({
+      cli: 'antigravity',
+      presetId: 'agy-gemini-4-hydrogen-xhigh',
+      model: 'gemini-4-hydrogen-xhigh',
+      flags: [],
+    });
+  });
+
 
 
 
@@ -217,7 +228,7 @@ describe('AgentConfigEditor', () => {
       props: { idPrefix: 'stale', config: { cli: 'droid', model: 'glm-5.1', flags: [] } },
     });
     const picker = getByLabelText('CLI') as HTMLSelectElement;
-    expect(Array.from(picker.options, (option) => option.value)).toEqual(['claude', 'codex', 'cursor']);
+    expect(Array.from(picker.options, (option) => option.value)).toEqual(['claude', 'codex', 'cursor', 'antigravity']);
   });
 
   it('keeps the custom selection as an early return', async () => {

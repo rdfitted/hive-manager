@@ -4018,10 +4018,10 @@ async fn test_add_worker_explicit_cli_overrides_session_default() {
 }
 
 #[tokio::test]
-async fn test_add_worker_rejects_removed_gemini_and_antigravity_clis() {
-    // gemini and antigravity were removed as spawnable CLIs (workflows now
-    // run GPT-5.6 tiers through codex). Both names must fail VALID_CLIS
+async fn test_add_worker_rejects_removed_clis() {
+    // The legacy gemini CLI and the retired providers must fail VALID_CLIS
     // validation in handlers/mod.rs — the lockstep partner of adapters/mod.rs.
+    // `agy` is the Antigravity binary name, not a CLI id, so it is rejected too.
     let (app, controller) = setup_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-removed-clis");
@@ -4032,7 +4032,7 @@ async fn test_add_worker_rejects_removed_gemini_and_antigravity_clis() {
         temp_dir.to_str().unwrap(),
     ));
 
-    for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+    for cli in ["gemini", "agy", "droid", "opencode", "qwen"] {
         let body = serde_json::json!({
             "role_type": "frontend",
             "cli": cli
@@ -4069,7 +4069,7 @@ async fn test_add_worker_rejects_removed_gemini_and_antigravity_clis() {
 async fn test_add_worker_rejects_removed_inherited_principal_cli() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp = TempDir::new().unwrap();
-    for cli in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+    for cli in ["droid", "opencode", "qwen", "agy", "gemini"] {
         let mut session = make_test_session("stale-principal", temp.path().to_str().unwrap());
         session.default_principal_cli = Some(cli.to_string());
         controller.read().insert_test_session(session);
@@ -4087,7 +4087,7 @@ async fn test_add_worker_rejects_removed_inherited_principal_cli() {
 async fn test_launch_rejects_removed_clis_with_supported_names() {
     let app = setup_test_app().await;
     let temp = TempDir::new().unwrap();
-    for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+    for removed in ["droid", "opencode", "qwen", "agy", "gemini"] {
         let body = serde_json::json!({
             "project_path": temp.path().to_str().unwrap(), "mode": "hive",
             "objective": "Check validation", "default_cli": removed,

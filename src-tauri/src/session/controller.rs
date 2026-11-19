@@ -4248,6 +4248,15 @@ impl SessionController {
                     args.push(model.to_string());
                 }
             }
+            "antigravity" => {
+                // Antigravity CLI (agy): --dangerously-skip-permissions auto-approves,
+                // --model takes catalogue IDs such as gemini-4-neon-high.
+                args.push("--dangerously-skip-permissions".to_string());
+                if let Some(ref model) = effective_model {
+                    args.push("--model".to_string());
+                    args.push(model.to_string());
+                }
+            }
             _ => {
                 // For other CLIs, just add model flag if specified
                 if let Some(ref model) = effective_model {
@@ -4262,8 +4271,9 @@ impl SessionController {
 
         // Determine the actual command to run
         let command = match config.cli.as_str() {
-            "cursor" => "wsl".to_string(), // Cursor runs via WSL
-            _ => config.cli.clone(),       // Others use CLI name as command
+            "cursor" => "wsl".to_string(),      // Cursor runs via WSL
+            "antigravity" => "agy".to_string(), // Antigravity CLI binary is `agy`
+            _ => config.cli.clone(),            // Others use CLI name as command
         };
 
         (command, args)
@@ -4299,6 +4309,13 @@ impl SessionController {
                 // Claude, Codex, Cursor accept prompt as positional argument
                 args.push(prompt_arg);
             }
+            "antigravity" | "agy" => {
+                // agy takes the initial interactive prompt through -i. The "agy"
+                // arm matters: call sites pass the executable from build_command,
+                // which maps "antigravity" to "agy".
+                args.push("-i".to_string());
+                args.push(prompt_arg);
+            }
             _ => {
                 // Default: try positional argument
                 args.push(prompt_arg);
@@ -4320,6 +4337,11 @@ impl SessionController {
                 args.push(task.to_string());
             }
             "cursor" => {
+                args.push(task.to_string());
+            }
+            "antigravity" | "agy" => {
+                // agy -p (alias for --print) runs a single prompt non-interactively.
+                args.push("-p".to_string());
                 args.push(task.to_string());
             }
             _ => {
@@ -4378,6 +4400,13 @@ impl SessionController {
                 }
                 return ("wsl".to_string(), args);
             }
+            "antigravity" => {
+                args.push("--dangerously-skip-permissions".to_string());
+                if let Some(ref model) = effective_model {
+                    args.push("--model".to_string());
+                    args.push(model.to_string());
+                }
+            }
             _ => {
                 if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
@@ -4395,6 +4424,7 @@ impl SessionController {
 
         let command = match config.cli.as_str() {
             "cursor" => "wsl".to_string(),
+            "antigravity" => "agy".to_string(),
             _ => config.cli.clone(),
         };
         (command, args)
@@ -9065,7 +9095,7 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality, researcher |
-| cli | string | No | CLI override: claude, codex, or cursor. Omit to inherit the session principal CLI (`{default_cli}`). |
+| cli | string | No | CLI override: claude, codex, cursor, or antigravity. Omit to inherit the session principal CLI (`{default_cli}`). |
 | model | string | No | Model override (for example gpt-6.2-sol for Codex or fable/opus for Claude). Omit to inherit the principal model. |
 | flags | string[] | No | CLI flag override. Omit to inherit principal flags; send `[]` to clear them. |
 | name | string | No | Stable worker name; defaults to `Worker N (Role)` |
@@ -9194,7 +9224,7 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | specialization | string | Yes | QA specialization: `ui`, `api`, or `a11y` |
-| cli | string | No | CLI to use: {default_cli} (default), claude, codex, cursor |
+| cli | string | No | CLI to use: {default_cli} (default), claude, codex, cursor, antigravity |
 | model | string | No | Optional model override |
 | label | string | No | Custom label for the QA worker |
 | initial_task | string | No | Initial QA assignment |
@@ -9576,8 +9606,8 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
-| cli | string | No | CLI to use: {default_cli} (default), claude, codex, cursor |
-| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-6.2-sol`, `gpt-6-luna`, `composer-2.5`) |
+| cli | string | No | CLI to use: {default_cli} (default), claude, codex, cursor, antigravity |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-6.2-sol`, `gpt-6-luna`, `composer-2.5`, `gemini-4-neon-high`) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -20587,7 +20617,7 @@ mod tests {
     }
 
     fn assert_removed_continuation_rejected(kind: &str, pointer: &str) {
-        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini"] {
             for state in [SessionState::Planning, SessionState::PlanReady] {
                 let temp = tempfile::tempdir().unwrap();
                 let controller = test_controller();
@@ -20710,7 +20740,7 @@ mod tests {
     fn removed_cli_stored_sessions_still_list_load_and_resume_without_spawning() {
         let temp = tempfile::tempdir().unwrap();
         let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
-        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini"] {
             let id = format!("stored-{removed}");
             let mut original = waiting_worker_session(&id, temp.path(), 1);
             original.default_cli = removed.to_string();
@@ -21742,6 +21772,35 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         SessionController::add_prompt_to_args("wsl", &mut args, prompt_path);
         assert_eq!(args, vec![expected_cursor_prompt], "cli wsl");
 
+        // Call sites pass build_command's executable, so "agy" must match too.
+        for cli in ["antigravity", "agy"] {
+            let mut args = Vec::new();
+            SessionController::add_prompt_to_args(cli, &mut args, prompt_path);
+            assert_eq!(args, vec!["-i".to_string(), expected_prompt.clone()], "cli {cli}");
+        }
+    }
+
+    #[test]
+    fn antigravity_commands_launch_agy_with_model_and_prompt_modes() {
+        let config = AgentConfig {
+            cli: "antigravity".to_string(),
+            model: Some("gemini-4-hydrogen-xhigh".to_string()),
+            ..AgentConfig::default()
+        };
+        let (command, args) = SessionController::build_command(&config);
+        assert_eq!(command, "agy");
+        assert_eq!(args[0], "--dangerously-skip-permissions");
+        assert!(args.windows(2).any(|pair| pair == ["--model", "gemini-4-hydrogen-xhigh"]));
+
+        let default_model = AgentConfig { cli: "antigravity".to_string(), ..AgentConfig::default() };
+        let (_, args) = SessionController::build_command(&default_model);
+        assert!(args.windows(2).any(|pair| pair == ["--model", "gemini-4-neon-high"]));
+
+        let (command, args) = SessionController::build_solo_command(&config, Some("Fix the bug"));
+        assert_eq!(command, "agy");
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "gemini-4-hydrogen-xhigh"]));
+        assert!(args.windows(2).any(|pair| pair == ["-p", "Fix the bug"]));
     }
 
     #[test]

@@ -30,7 +30,7 @@ use crate::http::error::ApiError;
 use std::collections::HashSet;
 
 // Must stay in lockstep with adapters/mod.rs::VALID_CLIS.
-pub(crate) const VALID_CLIS: &[&str] = &["claude", "codex", "cursor"];
+pub(crate) const VALID_CLIS: &[&str] = &["claude", "codex", "cursor", "antigravity"];
 
 /// Validate session_id for path traversal attacks
 pub fn validate_session_id(session_id: &str) -> Result<(), ApiError> {

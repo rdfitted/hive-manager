@@ -23,6 +23,7 @@ export const cliOptions: CliOption[] = [
   { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude', defaultModel: 'opus' },
   { value: 'codex', label: 'Codex', description: 'OpenAI GPT-6.2 (Sol / Astra), GPT-6.1 Sol, GPT-6 (Astra / Sol / Luna)', defaultModel: 'gpt-6.2-sol' },
   { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Composer 2.5, Gemini 4 Argon)', defaultModel: 'composer-2.5' },
+  { value: 'antigravity', label: 'Antigravity', description: 'Google Antigravity CLI (agy): Gemini 4 Neon / Hydrogen / Carbon / Argon, Gemini 3.8 Flash', defaultModel: 'gemini-4-neon-high' },
 ];
 
 /**

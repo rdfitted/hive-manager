@@ -172,6 +172,7 @@ impl CliRegistry {
             "claude" => Some("opus"),
             "codex" => Some("gpt-6.2-sol"),
             "cursor" => Some("composer-2.5"),
+            "antigravity" => Some("gemini-4-neon-high"),
             _ => None,
         }
     }
@@ -306,6 +307,9 @@ impl CliRegistry {
             // they need a durable activation loop.
             "codex" => CliBehavior::ExplicitPolling,
             "cursor" => CliBehavior::Interactive,
+            // Gemini via agy acts on its own initiative like Claude does, so it
+            // gets the same role hardening.
+            "antigravity" => CliBehavior::ActionProne,
             _ => CliBehavior::ActionProne, // Default to most constrained
         }
     }
@@ -567,9 +571,12 @@ mod tests {
         assert_eq!(CliRegistry::default_model("codex"), Some("gpt-6.2-sol"));
         assert_eq!(CliRegistry::default_model("cursor"), Some("composer-2.5"));
         assert_eq!(CliRegistry::default_model("unknown"), None);
-        // Removed CLIs must no longer resolve a default model.
+        assert_eq!(
+            CliRegistry::default_model("antigravity"),
+            Some("gemini-4-neon-high")
+        );
+        // The removed legacy Gemini CLI must not resolve a default model.
         assert_eq!(CliRegistry::default_model("gemini"), None);
-        assert_eq!(CliRegistry::default_model("antigravity"), None);
     }
 
     #[test]
@@ -760,15 +767,15 @@ mod tests {
     #[test]
     fn test_build_command_rejects_removed_clis() {
         let mut stale = test_config();
-        for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+        for cli in ["gemini", "agy", "droid", "opencode", "qwen"] {
             stale.clis.insert(cli.to_string(), stale.clis["claude"].clone());
             stale.default_roles.insert(cli.to_string(), crate::storage::RoleDefaults {
                 cli: cli.to_string(), model: "stale-model".to_string(),
             });
         }
         let registry = CliRegistry::new(stale);
-        assert_eq!(registry.list_clis().len(), 3);
-        for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+        assert_eq!(registry.list_clis().len(), 3, "test_config has no antigravity entry");
+        for cli in ["gemini", "agy", "droid", "opencode", "qwen"] {
             assert!(registry.get_cli(cli).is_none());
             assert!(registry.get_role_defaults(cli).is_none());
             assert!(CliRegistry::default_model(cli).is_none());

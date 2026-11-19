@@ -877,7 +877,8 @@ impl SessionStorage {
         }
 
         let json = fs::read_to_string(config_path)?;
-        let config: AppConfig = serde_json::from_str(&json)?;
+        let mut config: AppConfig = serde_json::from_str(&json)?;
+        Self::upgrade_antigravity_cli_config(&mut config);
         Ok(config)
     }
 
@@ -886,6 +887,31 @@ impl SessionStorage {
         let json = serde_json::to_string_pretty(config)?;
         fs::write(self.config_path(), json)?;
         Ok(())
+    }
+
+    fn default_antigravity_cli_config() -> CliConfig {
+        CliConfig {
+            command: "agy".to_string(),
+            auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
+            model_flag: Some("--model".to_string()),
+            default_model: "gemini-4-neon-high".to_string(),
+            env: None,
+        }
+    }
+
+    /// Bring a persisted config up to the current Antigravity entry. Configs
+    /// written while agy was removed have no entry, and configs from before the
+    /// removal carry the old shape with no model flag (agy then had none).
+    fn upgrade_antigravity_cli_config(config: &mut AppConfig) {
+        let stale = config
+            .clis
+            .get("antigravity")
+            .map_or(true, |entry| entry.model_flag.is_none());
+        if stale {
+            config
+                .clis
+                .insert("antigravity".to_string(), Self::default_antigravity_cli_config());
+        }
     }
 
     /// Get default config with CLI registry
@@ -925,6 +951,8 @@ impl SessionStorage {
                 env: None,
             },
         );
+
+        clis.insert("antigravity".to_string(), Self::default_antigravity_cli_config());
 
 
 
@@ -2277,8 +2305,8 @@ mod tests {
 
     #[test]
     fn test_default_config_excludes_removed_clis() {
-        // gemini and antigravity were removed as spawnable CLIs; GPT-6 work
-        // (astra/sol/luna) now routes through the codex entry.
+        // The legacy gemini CLI and the retired providers stay out; Google
+        // models run through the antigravity (agy) entry.
         let config = SessionStorage::default_config();
 
         assert_eq!(crate::adapters::VALID_CLIS, crate::http::handlers::VALID_CLIS);
@@ -2286,13 +2314,50 @@ mod tests {
         for cli in crate::adapters::VALID_CLIS {
             assert!(config.clis.contains_key(*cli));
         }
-        for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+        for cli in ["gemini", "agy", "droid", "opencode", "qwen"] {
             assert!(!config.clis.contains_key(cli));
         }
 
         let codex = config.clis.get("codex").expect("codex entry present");
         assert_eq!(codex.command, "codex");
         assert_eq!(codex.default_model, "gpt-6.2-sol");
+    }
+
+    #[test]
+    fn load_config_upgrades_missing_and_pre_removal_antigravity_entries() {
+        let (storage, _temp) = create_test_storage();
+        let default_entry = SessionStorage::default_antigravity_cli_config();
+
+        // Written while agy was removed: no entry at all.
+        let mut config = storage.load_config().unwrap();
+        config.clis.remove("antigravity");
+        storage.save_config(&config).unwrap();
+        let loaded = storage.load_config().unwrap();
+        assert_eq!(loaded.clis["antigravity"].command, default_entry.command);
+        assert_eq!(loaded.clis["antigravity"].model_flag.as_deref(), Some("--model"));
+
+        // Written before the removal: agy had no model flag then.
+        config.clis.insert(
+            "antigravity".to_string(),
+            CliConfig {
+                command: "agy".to_string(),
+                auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
+                model_flag: None,
+                default_model: String::new(),
+                env: None,
+            },
+        );
+        storage.save_config(&config).unwrap();
+        let loaded = storage.load_config().unwrap();
+        assert_eq!(loaded.clis["antigravity"].model_flag.as_deref(), Some("--model"));
+        assert_eq!(loaded.clis["antigravity"].default_model, "gemini-4-neon-high");
+
+        // An operator's current-shape override is kept.
+        config.clis.get_mut("antigravity").unwrap().model_flag = Some("--model".to_string());
+        config.clis.get_mut("antigravity").unwrap().default_model = "gemini-4-hydrogen-high".to_string();
+        storage.save_config(&config).unwrap();
+        let loaded = storage.load_config().unwrap();
+        assert_eq!(loaded.clis["antigravity"].default_model, "gemini-4-hydrogen-high");
     }
 
     #[test]
@@ -2314,7 +2379,7 @@ mod tests {
     fn removed_cli_config_loads_but_registry_ignores_retired_entries() {
         let (storage, _temp) = create_test_storage();
         let mut config = storage.load_config().unwrap();
-        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini"] {
             config.clis.insert(removed.to_string(), config.clis["claude"].clone());
             config.default_roles.insert(removed.to_string(), RoleDefaults { cli: removed.to_string(), model: "old-model".to_string() });
         }
@@ -2322,8 +2387,8 @@ mod tests {
         let loaded = storage.load_config().unwrap();
         assert_eq!(loaded.clis.len(), 9, "stale config remains readable without migration");
         let registry = crate::cli::CliRegistry::new(loaded);
-        assert_eq!(registry.list_clis().len(), 3);
-        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+        assert_eq!(registry.list_clis().len(), 4);
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini"] {
             assert!(registry.get_cli(removed).is_none());
             assert!(registry.get_role_defaults(removed).is_none());
             assert!(registry.build_command(&crate::pty::AgentConfig { cli: removed.to_string(), ..Default::default() }).is_err());
