@@ -5,7 +5,7 @@ import type { Session } from '$lib/stores/sessions';
 import type { AgentEventsState } from '$lib/stores/agentEvents';
 
 const fixture = vi.hoisted(() => ({
-  terminals: [] as { buffer: string; disposed: boolean; textarea: HTMLTextAreaElement; keyHandler: (event: KeyboardEvent) => boolean }[],
+  terminals: [] as { scrollback: string; disposed: boolean; textarea: HTMLTextAreaElement; keyHandler: (event: KeyboardEvent) => boolean }[],
   webglCreated: 0, webglDisposed: 0, terminalsDisposed: 0, focuses: 0,
   setAgentEvents: null as ((value: AgentEventsState) => void) | null,
   invoke: vi.fn(async (command: string, args: { id: string }) => command === 'get_pty_snapshot'
@@ -13,7 +13,7 @@ const fixture = vi.hoisted(() => ({
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('phosphor-svelte', () => ({
-  Bell: () => {}, ChatCircle: () => {}, ListBullets: () => {}, SquareSplitVertical: () => {}, TerminalWindow: () => {}, Timer: () => {},
+  ArrowUpRight: () => {}, Bell: () => {}, ChatCircle: () => {}, ListBullets: () => {}, SquareSplitVertical: () => {}, TerminalWindow: () => {}, Timer: () => {},
   ArrowDown: () => {}, ArrowUp: () => {}, Broom: () => {}, CaretDown: () => {}, CaretUp: () => {}, CheckSquare: () => {},
   ClipboardText: () => {}, FileText: () => {}, MagnifyingGlass: () => {}, X: () => {},
   ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {}, Hourglass: () => {}, Plus: () => {},
@@ -22,11 +22,15 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() =
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ onDragDropEvent: vi.fn().mockResolvedValue(() => {}) }) }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: vi.fn(), readText: vi.fn() }));
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
-  buffer = ''; disposed = false; textarea = document.createElement('textarea');
+  scrollback = ''; disposed = false; textarea = document.createElement('textarea');
   keyHandler = (_event: KeyboardEvent) => true;
   constructor(public options: Record<string, unknown>) { fixture.terminals.push(this); }
   open(node: HTMLElement) { this.textarea.className = 'xterm-helper-textarea'; node.append(this.textarea); }
-  write(text: string) { this.buffer += text; }
+  get buffer() {
+    const lines = this.scrollback.split('\n');
+    return { active: { baseY: 0, cursorY: lines.length - 1, getLine: (row: number) => ({ translateToString: () => lines[row].trimEnd() }) } };
+  }
+  write(text: string, afterWrite?: () => void) { this.scrollback += text; afterWrite?.(); }
   focus() { fixture.focuses++; this.textarea.focus(); }
   loadAddon() {}
   onData() { return { dispose() {} }; }
@@ -98,7 +102,104 @@ const session: Session = {
   agents: ['claude', 'codex'].map((id) => ({ id, role: 'Queen', parent_id: null, status: 'Running', config: { cli: id, flags: [], label: id === 'claude' ? 'Claude agent' : 'Codex PTY' } })),
 };
 
+const stageRoster: Session = {
+  ...session,
+  agents: [session.agents[0], { ...session.agents[1], role: { Worker: { index: 1, parent: null } } }],
+};
+
+function publishModeFeed(hasTerminal: boolean) {
+  const feeds: AgentEventsState['feeds'] = {};
+  const histories: AgentEventsState['histories'] = {};
+  for (const { id } of stageRoster.agents) {
+    feeds[id] = {
+      agent_id: id,
+      capabilities: { has_terminal: hasTerminal, can_interrupt: true, supports_approvals: !hasTerminal, event_source: hasTerminal ? 'transcript' : 'protocol' },
+    };
+    histories[id] = {
+      events: [{ agent_id: id, cursor: 'mode-test', source_id: 'mode-test', kind: 'assistant_message',
+        ts: '2026-01-01T00:00:00Z', truncated: false, payload: { text: `Transcript for ${id}` } }],
+      before: null, hasMore: false, loading: false, error: null,
+    };
+  }
+  fixture.setAgentEvents!({ sessionId: session.id, feeds, histories, connected: true, error: null });
+}
+
 describe('attention across pane modes (real Terminal, renderer doubles)', () => {
+  it('shows Chat, Split and Terminal for the Queen and worker and keeps the parsed line when the worker collapses', async () => {
+    layout.setSessionViewMode('grid');
+    publishModeFeed(true);
+    const view = render(TerminalGrid, { session: stageRoster, focusedAgentId: 'claude', onSelect: vi.fn() });
+    await waitFor(() => expect(fixture.terminals.map(term => term.scrollback)).toEqual(['fixture scrollback', 'fixture scrollback']));
+
+    for (const { id } of stageRoster.agents) {
+      const pane = view.container.querySelector<HTMLElement>(`[data-agent-id="${id}"]`)!;
+      const body = pane.querySelector<HTMLElement>('.agent-pane-body')!;
+      const chat = body.querySelector<HTMLElement>('.chat-layer')!;
+      const terminal = body.querySelector<HTMLElement>('.terminal-layer')!;
+      const buttons = within(pane).getByRole('group', { name: 'Agent pane' });
+      const select = async (label: string) => {
+        const button = within(buttons).getByRole('button', { name: label });
+        button.focus();
+        await fireEvent.click(button);
+        expect(document.activeElement).toBe(button);
+        expect(button.getAttribute('aria-pressed')).toBe('true');
+      };
+
+      expect(body.dataset.mode).toBe('chat');
+      expect([chat.inert, terminal.inert]).toEqual([false, true]);
+      await select('Split');
+      expect(body.dataset.mode).toBe('split');
+      expect([chat.inert, terminal.inert]).toEqual([false, false]);
+      await select('Terminal');
+      expect(body.dataset.mode).toBe('terminal');
+      expect([chat.inert, terminal.inert]).toEqual([true, false]);
+      await select('Chat');
+      expect(body.dataset.mode).toBe('chat');
+      expect([chat.inert, terminal.inert]).toEqual([false, true]);
+    }
+
+    const original = [...fixture.terminals];
+    const worker = view.container.querySelector<HTMLElement>('[data-agent-id="codex"]')!;
+    await fireEvent.click(within(worker).getByRole('button', { name: 'Collapse Codex PTY' }));
+    expect(worker.querySelector('.terminal-status-line.compact')?.textContent).toContain('fixture scrollback');
+    expect(worker.querySelector('.terminal-container')?.hasAttribute('hidden')).toBe(true);
+    expect(worker.querySelectorAll('.xterm-helper-textarea')).toHaveLength(1);
+    expect(fixture.terminals).toEqual(original);
+    expect(fixture.terminalsDisposed).toBe(0);
+  });
+
+  it('opens Split from the parsed terminal line above the Focus Chat composer', async () => {
+    layout.setSessionViewMode('focus');
+    publishModeFeed(true);
+    const view = render(TerminalGrid, { session: stageRoster, focusedAgentId: 'claude', onSelect: vi.fn() });
+    const pane = view.container.querySelector<HTMLElement>('[data-agent-id="claude"]')!;
+    const status = pane.querySelector<HTMLElement>('.chat-composer .terminal-status-line')!;
+    await waitFor(() => expect(status.textContent).toContain('fixture scrollback'));
+    const button = within(status).getByRole('button', { name: 'Open Split' });
+    button.focus();
+    await fireEvent.click(button);
+    expect(pane.querySelector<HTMLElement>('.agent-pane-body')!.dataset.mode).toBe('split');
+    expect(document.activeElement).toBe(within(pane).getByRole('button', { name: 'Split' }));
+    expect(fixture.focuses).toBe(0);
+  });
+
+  it('opens Raw for the Queen and worker when their protocol feeds have no terminal', async () => {
+    layout.setSessionViewMode('grid');
+    publishModeFeed(false);
+    const view = render(TerminalGrid, { session: stageRoster, focusedAgentId: 'claude', onSelect: vi.fn() });
+
+    for (const { id } of stageRoster.agents) {
+      const pane = view.container.querySelector<HTMLElement>(`[data-agent-id="${id}"]`)!;
+      const ui = within(pane);
+      expect(ui.queryByRole('button', { name: 'Terminal' })).toBeNull();
+      expect(ui.queryByRole('button', { name: 'Split' })).toBeNull();
+      await fireEvent.click(ui.getByRole('button', { name: 'Raw event log' }));
+      expect(ui.getByRole('region', { name: 'Raw agent event log' }).textContent).toContain(`Transcript for ${id}`);
+      expect(pane.querySelector<HTMLElement>('.agent-pane-body')!.dataset.mode).toBe('raw');
+    }
+    expect(fixture.terminals).toHaveLength(0);
+  });
+
   it('G59 scroll: restore returns to the worker stack position with the same terminal instances', async () => {
     layout.setSessionViewMode('grid');
     const roster = { ...session, agents: [session.agents[0], { ...session.agents[1], role: { Worker: { index: 1, parent: null } } }] };
@@ -190,7 +291,7 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     expect(fixture.focuses).toBe(0);
   });
 
-  it('G59: Queen leads the full roster, column clicks set the shared target and resource tiles highlight without unmounting', async () => {
+  it('G59: Queen leads the full roster, column clicks set the shared target and the resource filter highlights without unmounting', async () => {
     layout.setSessionViewMode('grid');
     const reordered = { ...session, state: 'QaInProgress' as const, agents: [...session.agents].reverse().map(agent => ({ ...agent, role: agent.id === 'claude' ? 'Queen' as const : { Worker: { index: 1, parent: null } }, status: agent.id === 'codex' ? { WaitingForInput: 'fixture' } : 'Running' as const })) };
     const view = render(TerminalGrid, { session: reordered, focusedAgentId: 'claude', onSelect: vi.fn() });
@@ -200,11 +301,11 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     expect(view.container.querySelector('.terminal-item')?.classList.contains('queen-column')).toBe(true);
     await fireEvent.click(view.getByRole('button', { name: 'Focus Codex PTY' }));
     expect(view.getByRole('button', { name: 'Command target: @Codex PTY' })).toBeTruthy();
-    expect(view.getByText('QaInProgress')).toBeTruthy();
-    await fireEvent.click(view.getByRole('button', { name: 'Waiting 1' }));
+    expect(view.queryByRole('navigation', { name: 'Agent resources' })).toBeNull();
+    await view.rerender({ resourceFilter: 'waiting' });
     expect(view.container.querySelectorAll('.resource-match')).toHaveLength(1);
     expect(view.container.querySelector('.resource-match')?.getAttribute('data-agent-id')).toBe('codex');
-    await fireEvent.click(view.getByRole('button', { name: 'Waiting 1' }));
+    await view.rerender({ resourceFilter: null });
     expect(view.container.querySelectorAll('.resource-match')).toHaveLength(0);
     expect(fixture.terminals).toEqual(original);
     expect(fixture.terminalsDisposed).toBe(0);
@@ -222,12 +323,11 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     const matchedIds = () => [...view.container.querySelectorAll('.resource-match')]
       .map(node => node.getAttribute('data-agent-id'));
 
-    await fireEvent.click(view.getByRole('button', { name: 'Waiting 1' }));
-    expect(matchedIds()).toEqual(['codex']);
-    await view.rerender({ resourceFilter: null });
     expect(matchedIds()).toEqual([]);
     await view.rerender({ resourceFilter: 'waiting' });
     expect(matchedIds()).toEqual(['codex']);
+    await view.rerender({ resourceFilter: null });
+    expect(matchedIds()).toEqual([]);
     expect(view.container.querySelectorAll('.terminal-item')).toHaveLength(2);
   });
 
@@ -361,7 +461,7 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     original.forEach((term, index) => {
       expect(fixture.terminals[index]).toBe(term);
       expect(term.textarea).toBe(textareas[index]);
-      expect(term.buffer).toContain('fixture scrollback');
+      expect(term.scrollback).toContain('fixture scrollback');
     });
     expect(fixture.focuses).toBe(focusesAfterLayout);
   });

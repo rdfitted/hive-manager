@@ -18,7 +18,7 @@ describe('terminal frame styles', () => {
     expect(notice).toMatch(/grid-area:\s*1\s*\/\s*1\s*;/);
     expect(notice).toMatch(/max-height:\s*none\s*;/);
     expect(notice).toMatch(/align-self:\s*stretch\s*;/);
-    const terminal = styles.match(/\.non-chat-attention\s*>\s*\.terminal-layer\s*\{([^{}]*)\}/)?.[1] ?? '';
+    const terminal = styles.match(/\.non-chat-attention\s*>\s*:global\(\.agent-pane-body\)\s*\{([^{}]*)\}/)?.[1] ?? '';
     expect(terminal, 'CR-9: the notice must not paint in the live terminal cell').toMatch(/grid-area:\s*2\s*\/\s*1\s*;/);
   });
 
@@ -26,7 +26,7 @@ describe('terminal frame styles', () => {
     const source = readFileSync('src/lib/components/TerminalGrid.svelte', 'utf8');
     const styles = source.split('<style>')[1].split('</style>')[0];
     const containerStart = source.indexOf('<div class="terminal-container"');
-    const beforeTerminal = source.slice(containerStart, source.indexOf('{#if hasTerminal}', containerStart));
+    const beforeTerminal = source.slice(containerStart, source.indexOf('<AgentPaneBody', containerStart));
     expect(source).toContain('const gridAttention = !focusMode && visible && showAttention');
     expect(beforeTerminal).toContain('{#if gridAttention');
     expect(beforeTerminal).toContain('<div class="agent-info">');
@@ -37,7 +37,7 @@ describe('terminal frame styles', () => {
     expect(card).toMatch(/min-height:\s*0\s*;/);
     expect(card).toMatch(/max-height:\s*min\(7rem,\s*35%\)\s*;/);
     expect(card).toMatch(/overflow:\s*hidden\s+auto\s*;/);
-    expect(styles).toMatch(/\.terminal-layer,\s*\.chat-layer\s*\{\s*grid-area:\s*1\s*\/\s*1/);
+    expect(styles).toMatch(/\.terminal-container\s*>\s*:global\(\.agent-pane-body\)\s*\{\s*grid-area:\s*1\s*\/\s*1/);
     expect(styles).toMatch(/\.terminal-container\s*\{[^{}]*grid-template:\s*minmax\(0,\s*1fr\)\s*\/\s*minmax\(0,\s*1fr\)/);
   });
   it('terminal_panel_does_not_inherit_shared_panel_padding', () => {

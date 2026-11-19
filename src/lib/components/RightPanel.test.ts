@@ -28,6 +28,7 @@ vi.mock('$lib/stores/sessions', async (importOriginal) => {
 import RightPanel from './RightPanel.svelte';
 import TitleBar from './shell/TitleBar.svelte';
 import { layout } from '$lib/stores/layout';
+import { accent } from '$lib/stores/accent';
 
 beforeEach(() => {
   layout.setRightTab('overview');
@@ -76,13 +77,13 @@ describe('RightPanel header tabs and title-bar toggle', () => {
     terminal.remove();
   });
 
-  it('exposes exactly three header tabs and preserves activate-to-collapse behavior', async () => {
+  it('exposes every inspector view in one header group and preserves activate-to-collapse behavior', async () => {
     const view = render(RightPanel);
     const toolbar = render(TitleBar);
-    const header = view.container.querySelector('.panel-header')!;
+    const tabs = view.getByRole('group', { name: 'Panel views' });
     expect(view.container.querySelector('.rail')).toBeNull();
-    expect([...header.querySelectorAll('button[aria-pressed]')].map((button) => button.getAttribute('aria-label')))
-      .toEqual(['Overview', 'Activity', 'Changes']);
+    expect(within(tabs).getAllByRole('button').map((button) => button.getAttribute('aria-label')))
+      .toEqual(['Overview', 'Activity', 'Changes', 'Plan', 'Graph', 'Logs', 'Timeline', 'Files', 'Artifacts']);
     const activity = view.getByRole('button', { name: 'Activity' });
     await fireEvent.click(activity);
     expect(get(layout)).toMatchObject({ rightTab: 'activity', rightCollapsed: false });
@@ -96,6 +97,31 @@ describe('RightPanel header tabs and title-bar toggle', () => {
     await fireEvent.click(view.getByRole('button', { name: 'Changes' }));
     expect(get(layout)).toMatchObject({ rightTab: 'changes', rightCollapsed: false });
     expect(view.getByRole('heading', { name: 'Changes' })).toBeTruthy();
+    expect(view.queryByRole('group', { name: /sections/i })).toBeNull();
+  });
+
+  it('closes on Escape from the inspector and restores focus to its title-bar toggle', async () => {
+    const panel = render(RightPanel);
+    const toolbar = render(TitleBar);
+    const tab = panel.getByRole('button', { name: 'Overview' });
+    tab.focus();
+    await fireEvent.keyDown(tab, { key: 'Escape' });
+    expect(get(layout).rightCollapsed).toBe(true);
+    expect(document.activeElement).toBe(within(toolbar.container).getByRole('button', { name: /Expand panel/ }));
+  });
+
+  it('switches the accent from the inspector using the shared store', async () => {
+    const initial = get(accent);
+    try {
+      accent.set('honey');
+      const panel = render(RightPanel);
+      await fireEvent.click(panel.getByRole('button', { name: 'Switch accent (current: Honey)' }));
+      expect(get(accent)).toBe('sky');
+      expect(document.documentElement.dataset.accent).toBe('sky');
+      expect(panel.getByRole('button', { name: 'Switch accent (current: Sky)' })).toBeTruthy();
+    } finally {
+      accent.set(initial);
+    }
   });
 
   it('has a visible button that collapses and expands the panel', async () => {

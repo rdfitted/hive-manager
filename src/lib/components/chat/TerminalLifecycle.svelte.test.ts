@@ -14,7 +14,9 @@ const fixture = vi.hoisted(() => ({
     ? { id: args.id, offset_start: 0, offset_end: 17, data: btoa('fixture scrollback') } : undefined),
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
-vi.mock('phosphor-svelte', () => ({
+vi.mock('phosphor-svelte', async (importOriginal) => ({
+  ...await importOriginal<typeof import('phosphor-svelte')>(),
+  ArrowUpRight: () => {},
   ArrowDown: () => {}, ArrowUp: () => {}, Broom: () => {}, CaretDown: () => {}, CaretUp: () => {}, CheckSquare: () => {},
   ClipboardText: () => {}, FileText: () => {}, MagnifyingGlass: () => {}, X: () => {},
   ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {}, Hourglass: () => {}, Plus: () => {},
@@ -250,8 +252,9 @@ describe('real Terminal component behind chat (renderer doubles)', () => {
     // This pins sizing/hit-test policy; jsdom does not measure desktop geometry.
     const source = readFileSync('src/lib/components/TerminalGrid.svelte', 'utf8');
     expect(source).toContain('grid-template: minmax(0, 1fr) / minmax(0, 1fr)');
-    expect(source).toContain('transform: translateX(-200vw)');
-    expect(source).not.toMatch(/\.terminal-layer\.chat-hidden\s*\{[^}]*display:\s*none/);
+    const body = readFileSync('src/lib/components/chat/AgentPaneBody.svelte', 'utf8');
+    expect(body).toMatch(/\.chat-hidden\s*\{[^}]*transform:\s*translateX\(-200vw\)/);
+    expect(body).not.toMatch(/\.chat-hidden\s*\{[^}]*display:\s*none/);
   });
 
   it('enables document-targeted paste only after an explicit focus inside the revealed terminal', async () => {

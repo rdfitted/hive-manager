@@ -30,11 +30,13 @@
   import { startupExitCode, workStateFor, agentActivity, now, staleRunningAgents } from '$lib/stores/agentActivity';
   import { heartbeatStore } from '$lib/stores/conversations';
   import Terminal from './Terminal.svelte';
+  import AgentPaneBody from './chat/AgentPaneBody.svelte';
   import ChatPane from './chat/ChatPane.svelte';
   import PaneToggle from './chat/PaneToggle.svelte';
+  import TerminalStatusLine from './chat/TerminalStatusLine.svelte';
+  import type { PaneMode } from './chat/paneMode';
   import { protocolAttention } from './chat/transcript';
   import CommandBar from './opswall/CommandBar.svelte';
-  import OpsWall from './opswall/OpsWall.svelte';
 
   interface Props {
     session: Session;
@@ -68,7 +70,7 @@
   const terminalReadyWaiters = new Map<string, TerminalReadyWaiter>();
   const flushState = createFlushState();
 
-  let { session, visible = true, focusedAgentId, onSelect, resourceFilter, revealRequest, onSeats }: Props = $props();
+  let { session, visible = true, focusedAgentId, onSelect, resourceFilter = null, revealRequest, onSeats }: Props = $props();
 
   let agents = $derived(session.agents);
 
@@ -77,15 +79,14 @@
   let openingScratchId = $state<string | null>(null);
   let scratchError = $state<string | null>(null);
   let previousFocusedAgentId = $state<string | null>(null);
-  let paneModes = $state<Record<string, 'chat' | 'terminal' | 'raw'>>({});
+  let paneModes = $state<Record<string, PaneMode>>({});
+  let lastLines = $state<Partial<Record<string, string>>>({});
   let terminalFocusId = $state<string | null>(null);
   let resumingAgents = $state<Record<string, boolean>>({});
   let resumeErrors = $state<Record<string, string>>({});
   let commandTargetId = $state<string | null>(null);
   let drafts = $state<Record<string, string>>({});
   let delivery = $state<Record<string, string>>({});
-  let localResourceFilter = $state<string | null>(null);
-  const activeResourceFilter = $derived(resourceFilter === undefined ? localResourceFilter : resourceFilter);
   let handledRevealNonce: number | undefined;
   let workspace: HTMLDivElement;
   let workerViewport: HTMLDivElement;
@@ -138,12 +139,6 @@
       workerViewport?.querySelector<HTMLElement>(`[data-agent-id=${JSON.stringify(id)}] .terminal-pane-focus`)
         ?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
     });
-  }
-  function filterResources(filter: string | null) {
-    localResourceFilter = filter;
-    const id = filter === 'attention' ? [...attentionSeats][0] : filter === 'stale' ? [...staleSeats][0]
-      : filter === 'waiting' ? session.agents.find(agent => serdeEnumVariantName(agent.status) === 'WaitingForInput')?.id : undefined;
-    if (id) revealAgent(id);
   }
 
   function deliveryLabel(agent: AgentInfo): string | null {
@@ -276,6 +271,17 @@
     const heartbeat = $heartbeatStore.agents[agent.id];
     return status === 'Idle' || status === 'Completed' || heartbeat?.status === 'idle'
       || ['finished', 'retired', 'idle'].includes(workStateFor(agent, heartbeat) ?? '');
+  }
+
+  function changePaneMode(id: string, mode: PaneMode) {
+    paneModes[id] = mode;
+    if (terminalFocusId === id) terminalFocusId = null;
+  }
+
+  function openSplit(id: string) {
+    changePaneMode(id, 'split');
+    // The composer shortcut is hidden in Split, so retain focus on its header control.
+    workspace?.querySelector<HTMLButtonElement>(`[data-agent-id=${JSON.stringify(id)}] .pane-toggle [aria-label="Split"]`)?.focus();
   }
 
   function focusPane(pane: TerminalPane) {
@@ -481,10 +487,6 @@
     <div class="scratch-error status-badge status-error" role="alert">Could not update scratch terminal: {scratchError}</div>
   {/if}
 
-  {#if !focusMode && visible}
-    <OpsWall {session} attention={attentionSeats} stale={staleSeats} filter={activeResourceFilter} onfilter={filterResources} onselect={revealAgent} />
-  {/if}
-
   <div
     class="terminal-grid"
     class:queen-only={fullStage ? queenFullStage : workerPanes.length === 0}
@@ -514,10 +516,6 @@
   {/if}
 </div>
 
-{#snippet workerStatusLine(agentId: string)}
-  <AgentActivityLine {agentId} compact />
-{/snippet}
-
 {#snippet paneCard(pane: TerminalPane)}
       {@const focused = isPaneFocused(pane)}
       {@const feed = pane.kind === 'agent' && $agentEvents.sessionId === session.id ? $agentEvents.feeds[pane.id] : undefined}
@@ -525,8 +523,10 @@
       {@const hasTerminal = feed?.capabilities.has_terminal !== false}
       {@const history = $agentEvents.sessionId === session.id ? $agentEvents.histories[pane.id]?.events ?? [] : []}
       {@const defaultMode = hasTerminal && feed?.capabilities.event_source === 'transcript' && history.length === 0 ? 'terminal' : 'chat'}
-      {@const mode = chatEligible ? (paneModes[pane.id] ?? defaultMode) : 'terminal'}
-      {@const chatShowing = chatEligible && (mode !== 'terminal' || !hasTerminal)}
+      {@const requestedMode = paneModes[pane.id] ?? defaultMode}
+      {@const mode = !chatEligible ? 'terminal' : !hasTerminal && (requestedMode === 'terminal' || requestedMode === 'split') ? 'chat' : requestedMode}
+      {@const chatShowing = chatEligible && mode !== 'terminal'}
+      {@const terminalInputEnabled = hasTerminal && (mode === 'split' || mode === 'terminal')}
       {@const eventAttention = protocolAttention(history)}
       {@const feedError = chatEligible ? $agentEvents.error ?? $agentEvents.histories[pane.id]?.error : null}
       {@const queen = isQueen(pane)}
@@ -549,7 +549,7 @@
         class:attention-column={!focusMode && showAttention}
         class:quiet-column={!focusMode && quiet}
         class:collapsed
-        class:resource-match={!focusMode && activeResourceFilter !== null && pane.kind === 'agent' && (activeResourceFilter === 'attention' ? attentionSeats.has(pane.id) : activeResourceFilter === 'stale' ? staleSeats.has(pane.id) : serdeEnumVariantName(pane.agent.status) === 'WaitingForInput')}
+        class:resource-match={!focusMode && resourceFilter !== null && pane.kind === 'agent' && (resourceFilter === 'attention' ? attentionSeats.has(pane.id) : resourceFilter === 'stale' ? staleSeats.has(pane.id) : serdeEnumVariantName(pane.agent.status) === 'WaitingForInput')}
         data-agent-id={pane.kind === 'agent' ? pane.id : undefined}
         inert={eclipsed}
         onclick={() => focusPane(pane)}
@@ -571,7 +571,11 @@
           </button>
           {#if !focusMode && visible && pane.kind === 'agent'}
             <span class="pane-activity">
-              {#if queen}<AgentActivityLine agentId={pane.id} compact />{:else}{@render workerStatusLine(pane.id)}{/if}
+              {#if queen}
+                <AgentActivityLine agentId={pane.id} compact />
+              {:else}
+                <TerminalStatusLine sessionId={session.id} agentId={pane.id} line={lastLines[pane.id]} compact />
+              {/if}
             </span>
             {#if showAttention}<span class="attention-chip">Needs attention</span>{/if}
             {#if deliveryLabel(pane.agent)}<span class="delivery-chip" role="status">{deliveryLabel(pane.agent)}</span>{/if}
@@ -595,7 +599,7 @@
                 </button>
               {/if}
               {#if resumeErrors[pane.id]}<span role="alert">{resumeErrors[pane.id]}</span>{/if}
-              {#if chatEligible && !collapsed}<PaneToggle {hasTerminal} mode={chatShowing ? mode === 'raw' ? 'raw' : 'chat' : 'terminal'} onchange={(next) => { if (next === 'chat' || next === 'terminal' || next === 'raw') paneModes[pane.id] = next; }} />{/if}
+              {#if chatEligible && !collapsed}<PaneToggle {hasTerminal} {mode} onchange={(next) => changePaneMode(pane.id, next)} />{/if}
               <span class="cli-badge">{pane.agent.config?.cli || 'unknown'}</span>
               <span class="pane-status-text">{status ?? 'Unknown'}</span>
               <span
@@ -663,7 +667,7 @@
             <AgentActivityLine agentId={pane.id} />
             <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} {flushState} chatAvailable={chatEligible}
               {eventAttention} {feedError}
-              onOpen={chatEligible ? () => { paneModes[pane.id] = hasTerminal ? 'terminal' : 'raw'; } : undefined} />
+              onOpen={chatEligible ? () => changePaneMode(pane.id, hasTerminal ? 'terminal' : 'raw') : undefined} />
           </div>
         {/if}
         <div class="terminal-container" id={`pane-body-${pane.id}`} hidden={collapsed} inert={collapsed}
@@ -673,29 +677,39 @@
             <div class="agent-info">
               <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} {flushState} chatAvailable={chatEligible}
                 {eventAttention} {feedError}
-                onOpen={chatEligible ? () => { paneModes[pane.id] = hasTerminal ? 'terminal' : 'raw'; } : undefined} />
+                onOpen={chatEligible ? () => changePaneMode(pane.id, hasTerminal ? 'terminal' : 'raw') : undefined} />
             </div>
           {/if}
-          {#if hasTerminal}
-            <div class="terminal-layer" class:chat-hidden={chatShowing} inert={chatShowing} aria-hidden={chatShowing}
-              onfocusin={() => { terminalFocusId = pane.id; }}
-              onfocusout={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) { if (terminalFocusId === pane.id) terminalFocusId = null; } }}>
-              <Terminal
-                agentId={pane.id}
-                isAgent={pane.kind === 'agent'}
-                isFocused={paneVisible && focused && (!chatEligible || (!chatShowing && terminalFocusId === pane.id))}
-                isVisible={paneVisible}
-                layoutRevision={localMaximizedId}
-                onReady={pane.kind === 'scratch' ? () => markTerminalReady(pane.id) : undefined}
-                onStatusChange={pane.kind === 'scratch' ? (status) => handlePaneStatus(pane, status) : undefined}
-              />
-            </div>
-          {/if}
-          {#if chatEligible}
-            <div class="chat-layer" class:pane-hidden={!chatShowing} inert={!chatShowing} aria-hidden={!chatShowing}>
-              <ChatPane sessionId={session.id} agentId={pane.id} events={history} composer={focusMode} variant={focusMode ? 'focus' : 'column'} bind:draft={() => drafts[`${session.id}:${pane.id}`] ?? '', (value) => { drafts = { ...drafts, [`${session.id}:${pane.id}`]: value }; }} raw={mode === 'raw'} visible={paneVisible && chatShowing} />
-            </div>
-          {/if}
+          <AgentPaneBody {mode}>
+            {#snippet terminal()}
+              {#if hasTerminal}
+                <div class="terminal-input"
+                  onfocusin={() => { terminalFocusId = pane.id; }}
+                  onfocusout={(event) => {
+                    if (terminalFocusId === pane.id && (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget))) terminalFocusId = null;
+                  }}>
+                  <Terminal
+                    agentId={pane.id}
+                    isAgent={pane.kind === 'agent'}
+                    isFocused={paneVisible && focused && terminalInputEnabled && (!chatEligible || terminalFocusId === pane.id)}
+                    isVisible={paneVisible}
+                    layoutRevision={localMaximizedId}
+                    onLastLine={pane.kind === 'agent' ? (line) => { lastLines[pane.id] = line; } : undefined}
+                    onReady={pane.kind === 'scratch' ? () => markTerminalReady(pane.id) : undefined}
+                    onStatusChange={pane.kind === 'scratch' ? (status) => handlePaneStatus(pane, status) : undefined}
+                  />
+                </div>
+              {/if}
+            {/snippet}
+            {#snippet chat()}
+              {#if chatEligible}
+                <ChatPane sessionId={session.id} agentId={pane.id} events={history} composer={focusMode} variant={focusMode ? 'focus' : 'column'} bind:draft={() => drafts[`${session.id}:${pane.id}`] ?? '', (value) => { drafts = { ...drafts, [`${session.id}:${pane.id}`]: value }; }} raw={mode === 'raw'} visible={paneVisible && chatShowing} />
+              {/if}
+            {/snippet}
+            {#snippet statusLine()}
+              <TerminalStatusLine sessionId={session.id} agentId={pane.id} line={lastLines[pane.id]} onOpenSplit={hasTerminal ? () => openSplit(pane.id) : undefined} />
+            {/snippet}
+          </AgentPaneBody>
         </div>
       </div>
 {/snippet}
@@ -941,7 +955,8 @@
   }
   .terminal-container[hidden] { display: none; }
 
-  .terminal-layer, .chat-layer { grid-area: 1 / 1; min-width: 0; min-height: 0; }
+  .terminal-container > :global(.agent-pane-body) { grid-area: 1 / 1; }
+  .terminal-input { height: 100%; min-height: 0; }
   /* Non-chat PTYs have no composer: reserve notice height above their live output. */
   .terminal-container.non-chat-attention {
     grid-template-rows: minmax(0, min(7rem, 35%)) minmax(0, 1fr);
@@ -951,15 +966,12 @@
     align-self: stretch;
     max-height: none;
   }
-  .non-chat-attention > .terminal-layer { grid-area: 2 / 1; }
+  .non-chat-attention > :global(.agent-pane-body) { grid-area: 2 / 1; }
   .terminal-container.worker-chat-attention {
     grid-template-rows: minmax(0, min(7rem, 35%)) minmax(0, 1fr);
   }
   .worker-chat-attention > .agent-info { align-self: stretch; max-height: none; }
-  .worker-chat-attention > .terminal-layer, .worker-chat-attention > .chat-layer { grid-area: 2 / 1; }
-  /* Keep xterm's initial fit measurable and move its native drop rectangle offscreen. */
-  .terminal-layer.chat-hidden { visibility: hidden; pointer-events: none; transform: translateX(-200vw); }
-  .chat-layer.pane-hidden { visibility: hidden; pointer-events: none; }
+  .worker-chat-attention > :global(.agent-pane-body) { grid-area: 2 / 1; }
   .pane-status-text { font-size: var(--text-small); color: var(--text-muted); }
 
   .empty-state {

@@ -304,8 +304,9 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   };
   const gridChecks = async (viewport, stage) => {
     const context = { screen: 'grid', viewport: `${viewport.width}x${viewport.height}`, stage };
+    const band = page.locator('.session-ops-band');
+    const region = band.getByRole('region', { name: 'Session event ticker', exact: true });
     if (stage === 'load') {
-      const region = page.locator('.terminal-panel:not(.hidden) .event-ticker');
       const first = region.locator('.ticker-item').first();
       const label = region.locator('.ticker-label');
       await first.waitFor({ state: 'attached' });
@@ -424,7 +425,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       const box = node.getBoundingClientRect(), top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
       return !!top && (top === node || node.contains(top));
     }, id, { timeout: 5000 });
-    const ticker = page.locator('.terminal-panel:not(.hidden) .event-ticker').getByRole('button', { name: `Task: ${manifest.opswall.tickerText}`, exact: true });
+    const ticker = region.getByRole('button', { name: `Task: ${manifest.opswall.tickerText}`, exact: true });
     await ticker.scrollIntoViewIfNeeded();
     const tickerVisible = async () => { const details = await visibleTargetState(ticker); return { passed: details.visible && details.visibleText.includes(manifest.opswall.tickerText), details }; };
     await probe(`wall-tick-${viewport.width}`, tickerVisible, context);
@@ -442,7 +443,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     };
     await probe(`wall-tick-go-${viewport.width}`, tickTarget, context);
     await prove(`wall-tick-go-${viewport.width}`, tickTarget, () => styleChange(paneFor(page, tickAgent).locator('.terminal-pane-focus'), { visibility: 'hidden' }), context);
-    const attentionTile = page.locator('.terminal-panel:not(.hidden) .resource-strip').getByRole('button', { name: /^Attention \d+$/ });
+    const attentionTile = band.getByRole('navigation', { name: 'Agent resources', exact: true }).getByRole('button', { name: /^Attention \d+$/ });
     await attentionTile.click();
     const firstAttention = session.agents.find(agent => ['stalled', 'exited_during_startup', 'delivery_failed'].includes(agent.state));
     await waitForHeader(firstAttention.id);

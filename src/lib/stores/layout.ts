@@ -1,18 +1,25 @@
 import { writable } from 'svelte/store';
 
-export type RightPanelTab = 'overview' | 'activity' | 'changes';
+export type OverviewTab = 'overview' | 'plan' | 'graph';
+export type ActivityTab = 'activity' | 'logs' | 'timeline';
+export type ChangesTab = 'changes' | 'files' | 'artifacts';
+export type RightPanelTab = OverviewTab | ActivityTab | ChangesTab;
 
 export function migrateRightTab(raw: unknown): RightPanelTab {
   switch (raw) {
     case 'activity':
-    case 'logs':
     case 'chat':
-    case 'timeline':
       return 'activity';
     case 'changes':
     case 'review':
-    case 'files':
       return 'changes';
+    case 'plan':
+    case 'graph':
+    case 'logs':
+    case 'timeline':
+    case 'files':
+    case 'artifacts':
+      return raw;
     default:
       return 'overview';
   }
@@ -38,6 +45,7 @@ export const LEFT_WIDTH_MAX = 420;
 export const RIGHT_WIDTH_MIN = 260;
 export const RIGHT_WIDTH_MAX = 560;
 export const COLLAPSED_PANEL_WIDTH = 0;
+export const SESSION_RAIL_WIDTH = 56;
 
 const defaultLayout: LayoutState = {
   leftCollapsed: false,

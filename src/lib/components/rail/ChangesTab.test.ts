@@ -65,9 +65,9 @@ describe('Changes rail composition', () => {
     const view = render(ChangesTab);
     await view.findByText('new');
     expect((view.getByLabelText('Principal') as HTMLSelectElement).value).toBe('worker-a');
-    await fireEvent.click(view.getByRole('button', { name: 'Files' }));
+    await view.rerender({ tab: 'files' });
     expect(mounts.files).toHaveBeenCalled();
-    await fireEvent.click(view.getByRole('button', { name: 'Artifacts' }));
+    await view.rerender({ tab: 'artifacts' });
     expect(mounts.artifacts).toHaveBeenCalled();
   });
 });

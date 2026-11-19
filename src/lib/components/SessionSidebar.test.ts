@@ -33,7 +33,7 @@ vi.mock('./ResumeConfirmModal.svelte', () => ({ default: () => {} }));
 
 import SessionSidebar from './SessionSidebar.svelte';
 import TitleBar from './shell/TitleBar.svelte';
-import { layout } from '$lib/stores/layout';
+import { layout, SESSION_RAIL_WIDTH } from '$lib/stores/layout';
 import { sessions, activeSession, activeAgents } from '$lib/stores/sessions';
 import { ui } from '$lib/stores/ui';
 import { launch } from '$lib/stores/launch';
@@ -338,9 +338,9 @@ describe('sidebar project grouping and header navigation', () => {
     expect(view.queryByText('Old')).toBeNull();
   });
 
-  it('keeps all three destinations in the sidebar header and removes the rail', async () => {
+  it('keeps the expanded destinations and shows session tiles when collapsed', async () => {
     const active = session('A', 'D:/one');
-    load([active]); (activeSession as Writable<Session | null>).set(active);
+    load([active, session('B', 'D:/two')]); (activeSession as Writable<Session | null>).set(active);
     const view = render(SessionSidebar);
     const header = view.container.querySelector('aside header')!;
     const nav = within(header as HTMLElement);
@@ -350,9 +350,16 @@ describe('sidebar project grouping and header navigation', () => {
     expect(view.container.querySelector('.sidebar-rail')).toBeNull();
     await fireEvent.click(nav.getByRole('button', { name: /Collapse sidebar/ }));
     expect(get(layout).leftCollapsed).toBe(true);
-    expect(view.container.querySelector('aside')?.style.width).toBe('0px');
+    expect(view.container.querySelector('aside')?.style.width).toBe(`${SESSION_RAIL_WIDTH}px`);
     expect(view.container.querySelector('.sidebar-drawer')?.getAttribute('aria-hidden')).toBe('true');
     expect((view.container.querySelector('.sidebar-drawer') as HTMLElement).inert).toBe(true);
+    const rail = within(view.getByRole('navigation', { name: 'Session rail' }));
+    expect(rail.getByRole('button', { name: 'A' }).getAttribute('aria-current')).toBe('true');
+    await fireEvent.click(rail.getByRole('button', { name: 'B' }));
+    expect(sessions.setActiveSession).toHaveBeenCalledWith('B');
+    expect(get(layout).leftCollapsed).toBe(true);
+    await fireEvent.click(rail.getByRole('button', { name: 'New Session' }));
+    expect(get(launch).landingOpen).toBe(true);
   });
 
   it.each([
