@@ -1,0 +1,33 @@
+:root[data-accent="honey"] {
+  --fitted-navy: #0c0b0a;
+  --bg-chrome: #100e0c;
+  --bg-panel: #13110f;
+  --bg-raised: #1d1a16;
+  --bg-elevated: #24201b;
+  --border-structural: #3e3830;
+  --fitted-sky: #e5b97c;
+  --accent-bg: rgba(229, 185, 124, .14);
+  --accent-ink: #21170b;
+  --glass: rgba(24, 21, 18, .6);
+  --glass-strong: rgba(36, 32, 27, .72);
+  --line: rgba(255, 236, 210, .1);
+  --line-strong: rgba(255, 236, 210, .2);
+  --ink-muted: #b0a698;
+}
+
+:root[data-accent="sky"] {
+  --fitted-navy: #090a0c;
+  --bg-chrome: #0b0d10;
+  --bg-panel: #0e1014;
+  --bg-raised: #171b21;
+  --bg-elevated: #1c2129;
+  --border-structural: #343a45;
+  --fitted-sky: #5cc1ff;
+  --accent-bg: rgba(92, 193, 255, .14);
+  --accent-ink: #03121d;
+  --glass: rgba(17, 20, 25, .6);
+  --glass-strong: rgba(28, 33, 41, .72);
+  --line: rgba(214, 230, 255, .1);
+  --line-strong: rgba(214, 230, 255, .2);
+  --ink-muted: #a5aebb;
+}

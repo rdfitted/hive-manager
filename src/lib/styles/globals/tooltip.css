@@ -4,11 +4,35 @@
 
 .lattice-tooltip {
   background-color: var(--surface-overlay);
-  border: 0;
+  border: 1px solid var(--line-strong);
   box-shadow: var(--depth-2);
   border-radius: var(--radius-md);
   font-family: var(--font-body);
   font-size: var(--text-small);
   color: var(--text-primary);
   padding: var(--space-1) var(--space-2);
+  position: relative;
+  z-index: 150;
+}
+
+.lattice-tooltip kbd {
+  margin-inline-start: var(--space-1);
+  font: inherit;
+  color: var(--ink-muted);
+}
+
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+  .lattice-tooltip {
+    background-color: var(--glass-strong);
+    -webkit-backdrop-filter: blur(18px) saturate(1.2);
+    backdrop-filter: blur(18px) saturate(1.2);
+  }
+}
+
+@media (forced-colors: active) {
+  .lattice-tooltip {
+    background-color: Canvas;
+    border-color: CanvasText;
+    color: CanvasText;
+  }
 }

@@ -228,6 +228,62 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     expect(fixture.terminalsDisposed).toBe(0);
   });
 
+  it('uses the supplied resource filter, including an explicit clear', async () => {
+    layout.setSessionViewMode('grid');
+    const waiting: Session = {
+      ...session,
+      agents: session.agents.map(agent => agent.id === 'codex'
+        ? { ...agent, status: { WaitingForInput: 'awaiting_injected_turn' } }
+        : agent),
+    };
+    const view = render(TerminalGrid, { session: waiting, focusedAgentId: 'claude', onSelect: vi.fn() });
+    const matchedIds = () => [...view.container.querySelectorAll('.resource-match')]
+      .map(node => node.getAttribute('data-agent-id'));
+
+    await fireEvent.click(view.getByRole('button', { name: 'Waiting 1' }));
+    expect(matchedIds()).toEqual(['codex']);
+    await view.rerender({ resourceFilter: null });
+    expect(matchedIds()).toEqual([]);
+    await view.rerender({ resourceFilter: 'waiting' });
+    expect(matchedIds()).toEqual(['codex']);
+    expect(view.container.querySelectorAll('.terminal-item')).toHaveLength(2);
+  });
+
+  it('focuses and scrolls on each new reveal nonce, even for the same agent', async () => {
+    layout.setSessionViewMode('grid');
+    const onSelect = vi.fn();
+    const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect });
+    const pane = view.container.querySelector<HTMLElement>('[data-agent-id="codex"]')!;
+    const scrollIntoView = vi.fn();
+    pane.scrollIntoView = scrollIntoView;
+
+    await view.rerender({ revealRequest: { agentId: 'codex', nonce: 1 } });
+    expect(onSelect.mock.calls).toEqual([['codex']]);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+
+    await view.rerender({ revealRequest: { agentId: 'claude', nonce: 1 } });
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    await view.rerender({ revealRequest: { agentId: 'codex', nonce: 2 } });
+    expect(onSelect.mock.calls).toEqual([['codex'], ['codex']]);
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+  });
+
+  it('publishes attention and stale seats when they change', async () => {
+    const onSeats = vi.fn();
+    const changed: Session = {
+      ...session,
+      agents: session.agents.map(agent => agent.id === 'claude'
+        ? { ...agent, status: { Error: 'fixture error' } }
+        : agent),
+    };
+    const view = render(TerminalGrid, { session: changed, focusedAgentId: 'claude', onSelect: vi.fn(), onSeats });
+    await tick();
+    expect(onSeats).toHaveBeenLastCalledWith({ attention: new Set(['claude']), stale: new Set(['codex']) });
+
+    await view.rerender({ session: { ...changed, agents: changed.agents.map(agent => ({ ...agent, status: 'Completed' })) } });
+    expect(onSeats).toHaveBeenLastCalledWith({ attention: new Set(), stale: new Set() });
+  });
+
   it('G59 quiet seats dim in place with no terminal disposal or finished attention', async () => {
     layout.setSessionViewMode('grid');
     const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });

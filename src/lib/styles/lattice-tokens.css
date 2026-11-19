@@ -5,25 +5,25 @@
   --bg-void: #060606;
 
   /* ── Surface ladder (#198) — tonal steps, not hairlines ───────── */
-  --bg-chrome: #0E2748;   /* app chrome: rails, toolbars, headers, tab strips */
-  --bg-panel:  #122D52;   /* panels, cards, modals */
-  --bg-raised: #16345D;   /* hover / raised card state */
+  --bg-chrome: #100e0c;   /* app chrome: rails, toolbars, headers, tab strips */
+  --bg-panel:  #13110f;   /* panels, cards, modals */
+  --bg-raised: #1d1a16;   /* hover / raised card state */
 
   /* D3: --bg-surface stays a value-preserving chrome alias. The large lit
      .main-content card deliberately consumes --bg-panel in shell.css. */
   --bg-surface: var(--bg-chrome);
-  --bg-elevated: #1A3B67;
+  --bg-elevated: #24201b;
   --bg-sunken: var(--fitted-navy);
 
-  --border-structural: #24466D;
+  --border-structural: #3e3830;
   /* Meaningful control boundaries need 3:1 against the neutral surface ladder. */
   --border-control: #8A9FBD;
 
   /* UI palette is independent of the terminal's literal inputs. */
-  --fitted-navy: #0B213E;
+  --fitted-navy: #0c0b0a;
   --fitted-main: #0074FF;
   --fitted-stroke: #0064E1;
-  --fitted-sky: #00B3FF;
+  --fitted-sky: #e5b97c;
   --fitted-dodger: #2699FF;
   --fitted-orchid: #C142C4;
   --fitted-whitesmoke: #F5F5F5;
@@ -66,7 +66,7 @@
   --rgb-blocked: 237, 166, 140;
 
   /* ── Typography ────────────────────────────────────────────────── */
-  --font-display: 'IBM Plex Sans', sans-serif;
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
   --font-body: 'IBM Plex Sans', sans-serif;
   --font-mono: 'IBM Plex Mono', monospace;
 
@@ -109,11 +109,18 @@
   --surface-raised: var(--bg-raised);
   --surface-overlay: var(--bg-elevated);
   --text-muted: #A9B8CC;
+  --ink-muted: #b0a698;
   --border: var(--border-structural);
   --input: var(--fitted-navy);
   --focus: var(--fitted-sky);
   --accent: var(--fitted-sky);
   --on-accent: var(--fitted-navy);
+  --accent-bg: rgba(229, 185, 124, .14);
+  --accent-ink: #21170b;
+  --glass: rgba(24, 21, 18, .6);
+  --glass-strong: rgba(36, 32, 27, .72);
+  --line: rgba(255, 236, 210, .1);
+  --line-strong: rgba(255, 236, 210, .2);
   --accent-tint: color-mix(in srgb, var(--accent) 10%, var(--surface));
   --accent-shape: var(--fitted-main);
   --orchid-shape: var(--fitted-orchid);

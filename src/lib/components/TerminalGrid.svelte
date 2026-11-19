@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import {
     ArrowsIn,
     ArrowsOut,
@@ -41,6 +41,9 @@
     visible?: boolean;
     focusedAgentId: string | null;
     onSelect: (id: string) => void;
+    resourceFilter?: 'attention' | 'waiting' | 'stale' | null;
+    revealRequest?: { agentId: string; nonce: number } | null;
+    onSeats?: (s: { attention: ReadonlySet<string>; stale: ReadonlySet<string> }) => void;
   }
 
   interface AgentTerminalPane {
@@ -64,7 +67,7 @@
   const terminalReadyWaiters = new Map<string, TerminalReadyWaiter>();
   const flushState = createFlushState();
 
-  let { session, visible = true, focusedAgentId, onSelect }: Props = $props();
+  let { session, visible = true, focusedAgentId, onSelect, resourceFilter, revealRequest, onSeats }: Props = $props();
 
   let agents = $derived(session.agents);
 
@@ -80,7 +83,9 @@
   let commandTargetId = $state<string | null>(null);
   let drafts = $state<Record<string, string>>({});
   let delivery = $state<Record<string, string>>({});
-  let resourceFilter = $state<string | null>(null);
+  let localResourceFilter = $state<string | null>(null);
+  const activeResourceFilter = $derived(resourceFilter === undefined ? localResourceFilter : resourceFilter);
+  let handledRevealNonce: number | undefined;
   let wall: HTMLDivElement;
   let pins = $state<Record<string, number>>({});
   let pinSpace = $state(0);
@@ -155,13 +160,27 @@
   }
   const attentionSeats = $derived(new Set(session.agents.filter(hasAgentAttention).map(agent => agent.id)));
 
+  $effect(() => {
+    const report = onSeats;
+    if (!report) return;
+    const seats = { attention: attentionSeats, stale: staleSeats };
+    untrack(() => report(seats));
+  });
+
+  $effect(() => {
+    const request = revealRequest;
+    if (!request || request.nonce === handledRevealNonce) return;
+    handledRevealNonce = request.nonce;
+    untrack(() => revealAgent(request.agentId));
+  });
+
   function revealAgent(id: string) {
     const pane = panes.find(candidate => candidate.id === id);
     if (pane) focusPane(pane);
     wall?.querySelector<HTMLElement>(`[data-agent-id=${JSON.stringify(id)}]`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
   }
   function filterResources(filter: string | null) {
-    resourceFilter = filter;
+    localResourceFilter = filter;
     const id = filter === 'attention' ? [...attentionSeats][0] : filter === 'stale' ? [...staleSeats][0]
       : filter === 'waiting' ? session.agents.find(agent => serdeEnumVariantName(agent.status) === 'WaitingForInput')?.id : undefined;
     if (id) revealAgent(id);
@@ -500,7 +519,7 @@
   {/if}
 
   {#if !focusMode && visible}
-    <OpsWall {session} attention={attentionSeats} stale={staleSeats} filter={resourceFilter} onfilter={filterResources} onselect={revealAgent} />
+    <OpsWall {session} attention={attentionSeats} stale={staleSeats} filter={activeResourceFilter} onfilter={filterResources} onselect={revealAgent} />
   {/if}
 
   <div
@@ -542,7 +561,7 @@
         style:--pin-left={`${pins[pane.id] ?? 0}px`}
         data-pinned={!focusMode && localMaximizedId === null && pins[pane.id] !== undefined ? 'true' : undefined}
         class:quiet-column={!focusMode && pane.kind === 'agent' && !showAttention && (serdeEnumVariantName(pane.agent.status) === 'Idle' || pane.agent.status === 'Completed' || $heartbeatStore.agents[pane.id]?.status === 'idle' || ['finished', 'retired', 'idle'].includes(workStateFor(pane.agent, $heartbeatStore.agents[pane.id]) ?? ''))}
-        class:resource-match={!focusMode && resourceFilter !== null && pane.kind === 'agent' && (resourceFilter === 'attention' ? attentionSeats.has(pane.id) : resourceFilter === 'stale' ? staleSeats.has(pane.id) : serdeEnumVariantName(pane.agent.status) === 'WaitingForInput')}
+        class:resource-match={!focusMode && activeResourceFilter !== null && pane.kind === 'agent' && (activeResourceFilter === 'attention' ? attentionSeats.has(pane.id) : activeResourceFilter === 'stale' ? staleSeats.has(pane.id) : serdeEnumVariantName(pane.agent.status) === 'WaitingForInput')}
         data-agent-id={pane.kind === 'agent' ? pane.id : undefined}
         onclick={() => focusPane(pane)}
       >
