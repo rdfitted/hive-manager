@@ -2,17 +2,42 @@ import { describe, expect, it } from 'vitest';
 import {
   automaticAdversarialLaneCount,
   buildHiveLaunchConfig,
+  createDefaultCodingPrincipal,
   createDefaultHiveFormState,
   createSessionPrincipalConfig,
   nextCodingPrincipalIndex,
 } from './hiveLaunch';
 
 describe('default Hive launch contract', () => {
-  it('uses Opus Queen, GPT-6.2 Sol principal, shared workspace, and split delegation defaults', () => {
+  it('omits planner_config for callers without one and falls back to Sol past the lineup', () => {
     const defaults = createDefaultHiveFormState();
     const config = buildHiveLaunchConfig({
       projectPath: 'C:/code/project',
       queenConfig: defaults.queenConfig,
+      principals: [createDefaultCodingPrincipal(4)],
+      workspaceStrategy: defaults.workspaceStrategy,
+      queenDelegationMode: defaults.queenDelegationMode,
+      principalDelegationMode: defaults.principalDelegationMode,
+      queenMaxChildren: defaults.queenMaxChildren,
+      queenMaxDepth: defaults.queenMaxDepth,
+      principalMaxChildren: defaults.principalMaxChildren,
+      principalMaxDepth: defaults.principalMaxDepth,
+      workGraphArchetype: defaults.workGraphArchetype,
+      workGraphParameters: defaults.workGraphParameters,
+      withPlanning: false,
+      smokeTest: false,
+      withEvaluator: false,
+    });
+    expect('planner_config' in config).toBe(false);
+    expect(config.workers[0]).toMatchObject({ cli: 'codex', model: 'gpt-6.2-sol' });
+  });
+
+  it('uses the default lineup, shared workspace, and split delegation defaults', () => {
+    const defaults = createDefaultHiveFormState();
+    const config = buildHiveLaunchConfig({
+      projectPath: 'C:/code/project',
+      queenConfig: defaults.queenConfig,
+      plannerConfig: defaults.plannerConfig,
       principals: defaults.codingPrincipals,
       workspaceStrategy: defaults.workspaceStrategy,
       queenDelegationMode: defaults.queenDelegationMode,
@@ -28,13 +53,18 @@ describe('default Hive launch contract', () => {
       withEvaluator: true,
     });
 
-    expect(config.queen_config).toMatchObject({ cli: 'claude', model: 'opus' });
-    expect(config.workers).toHaveLength(1);
-    expect(config.workers[0]).toMatchObject({
-      cli: 'codex',
-      model: 'gpt-6.2-sol',
-      label: 'Coding Principal 1',
+    expect(config.queen_config).toEqual({
+      cli: 'claude', model: 'opus', flags: ['--settings', '{"effortLevel":"medium"}'], label: 'Queen',
     });
+    expect(config.planner_config).toEqual({
+      cli: 'claude', model: 'fable', flags: ['--settings', '{"effortLevel":"low"}'], label: 'Master Planner',
+    });
+    expect(config.workers.map((worker) => [worker.label, worker.cli, worker.model])).toEqual([
+      ['Coding Principal 1', 'antigravity', 'gemini-4-carbon-high'],
+      ['Coding Principal 2', 'codex', 'gpt-6.2-sol'],
+      ['Coding Principal 3', 'antigravity', 'gemini-4-neon-high'],
+      ['Coding Principal 4', 'codex', 'gpt-6.2-sol'],
+    ]);
     expect(config.execution_policy).toEqual({
       launch_kind: 'hive',
       workspace_strategy: 'shared_cell',

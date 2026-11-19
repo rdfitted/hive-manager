@@ -296,7 +296,7 @@
   $: selectedCliHealth = cliHealth[config.cli];
 
   $: presetDescription = config.cli === 'claude'
-    ? 'Claude effort presets add --settings {"effortLevel":"low|high|max"}'
+    ? 'Claude effort presets add --settings {"effortLevel":"low|medium|high|max"}'
     : config.cli === 'codex'
       ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh|max|ultra"'
       : config.cli === 'cursor'

@@ -20,8 +20,28 @@ export type CodingPrincipalFormConfig = AgentConfig & {
   promptTemplateOverride?: string | null;
 };
 
+/** Most coding principals the launch form offers. */
+export const MAX_CODING_PRINCIPALS = 4;
+
+function claudeEffortFlags(effort: 'low' | 'medium' | 'high' | 'max'): string[] {
+  return ['--settings', JSON.stringify({ effortLevel: effort })];
+}
+
+/**
+ * Default worker lineup by slot. Two families of Google model bracket the
+ * GPT Sol slots; slots past the lineup fall back to the Codex principal
+ * default, where token headroom is largest.
+ */
+const DEFAULT_PRINCIPAL_LINEUP: ReadonlyArray<Pick<AgentConfig, 'cli' | 'model'>> = [
+  { cli: 'antigravity', model: 'gemini-4-carbon-high' },
+  { cli: defaultRoles.principal.cli, model: defaultRoles.principal.model },
+  { cli: 'antigravity', model: 'gemini-4-neon-high' },
+  { cli: defaultRoles.principal.cli, model: defaultRoles.principal.model },
+];
+
 export interface DefaultHiveFormState {
   queenConfig: AgentConfig;
+  plannerConfig: AgentConfig;
   codingPrincipals: CodingPrincipalFormConfig[];
   workspaceStrategy: HiveLaunchConfig['execution_policy']['workspace_strategy'];
   queenDelegationMode: DelegationMode;
@@ -36,9 +56,10 @@ export interface DefaultHiveFormState {
 }
 
 export function createDefaultCodingPrincipal(index: number): CodingPrincipalFormConfig {
+  const slot = DEFAULT_PRINCIPAL_LINEUP[index] ?? defaultRoles.principal;
   return {
-    cli: defaultRoles.principal.cli,
-    model: defaultRoles.principal.model,
+    cli: slot.cli,
+    model: slot.model,
     flags: [],
     label: `Coding Principal ${index + 1}`,
     selectedRole: 'principal',
@@ -109,10 +130,16 @@ export function createDefaultHiveFormState(): DefaultHiveFormState {
     queenConfig: {
       cli: defaultRoles.queen.cli,
       model: defaultRoles.queen.model,
-      flags: [],
+      flags: claudeEffortFlags('medium'),
       label: 'Queen',
     },
-    codingPrincipals: [createDefaultCodingPrincipal(0)],
+    plannerConfig: {
+      cli: 'claude',
+      model: 'fable',
+      flags: claudeEffortFlags('low'),
+      label: 'Master Planner',
+    },
+    codingPrincipals: DEFAULT_PRINCIPAL_LINEUP.map((_, index) => createDefaultCodingPrincipal(index)),
     workspaceStrategy: 'shared_cell',
     queenDelegationMode: 'auto',
     principalDelegationMode: 'encouraged',
@@ -153,6 +180,8 @@ export interface BuildHiveLaunchConfigInput<
   color?: string;
   projectPath: string;
   queenConfig: AgentConfig;
+  /** Master Planner config; omitted, the planner launches from the Queen's. */
+  plannerConfig?: AgentConfig;
   principals: AgentConfig[];
   workspaceStrategy: HiveLaunchConfig['execution_policy']['workspace_strategy'];
   queenDelegationMode: DelegationMode;
@@ -194,6 +223,7 @@ export function buildHiveLaunchConfig<
     ...(input.agentTransports?.length ? { agent_transports: [...input.agentTransports] } : {}),
     project_path: input.projectPath,
     queen_config: input.queenConfig,
+    ...(input.plannerConfig ? { planner_config: input.plannerConfig } : {}),
     workers: input.principals,
     execution_policy: {
       launch_kind: 'hive',

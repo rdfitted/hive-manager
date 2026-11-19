@@ -14,6 +14,7 @@
     buildHiveLaunchConfig,
     createDefaultCodingPrincipal,
     createDefaultHiveFormState,
+    MAX_CODING_PRINCIPALS,
     nextCodingPrincipalIndex,
     type CodingPrincipalFormConfig,
     type TierRoutingPolicy,
@@ -124,7 +125,7 @@
     : mode === 'research' ? researchWorkers.length
     : mode === 'fusion' ? variantCount
     : mode === 'debate' ? debaterCount : 1;
-  $: composerMaxWorkers = mode === 'hive' ? Math.max(3, codingPrincipals.length)
+  $: composerMaxWorkers = mode === 'hive' ? Math.max(MAX_CODING_PRINCIPALS, codingPrincipals.length)
     : mode === 'research' ? Math.max(6, researchWorkers.length)
     : mode === 'solo' || mode === 'templates' ? 1
     : Math.max(4, composerWorkerCount);
@@ -189,6 +190,7 @@
 
   const defaultHiveForm = createDefaultHiveFormState();
   let queenConfig: AgentConfig = defaultHiveForm.queenConfig;
+  let plannerConfig: AgentConfig = defaultHiveForm.plannerConfig;
   let tierPolicy: TierRoutingPolicy = {
     ...defaultHiveForm.tierPolicy,
     ladder: {},
@@ -326,6 +328,8 @@
           flags: [],
           label: 'Queen',
         };
+        // Templates predate a separate planner: it follows the template's Queen.
+        plannerConfig = { ...queenConfig, label: 'Master Planner' };
       }
 
       const principalCells = template.cells.filter((cell) => cell !== queenCell);
@@ -426,7 +430,7 @@
   }
 
   function addCodingPrincipal() {
-    if (codingPrincipals.length < 3) {
+    if (codingPrincipals.length < MAX_CODING_PRINCIPALS) {
       codingPrincipals = [
         ...codingPrincipals,
         createDefaultCodingPrincipal(nextCodingPrincipalIndex(codingPrincipals)),
@@ -576,6 +580,7 @@
           color: sessionColor || undefined,
           projectPath,
           queenConfig,
+          plannerConfig: withPlanning ? plannerConfig : undefined,
           principals: principalsWithRoles,
           workspaceStrategy,
           queenDelegationMode,
@@ -724,7 +729,7 @@
   bind:error {launchError} bind:showPreview
   bind:showAdvanced bind:showHiveAdvanced {launching}
   bind:withPlanning bind:withEvaluator bind:withSoloEvaluator
-  {tierLadderLoading} {presentation} bind:queenConfig
+  {tierLadderLoading} {presentation} bind:queenConfig bind:plannerConfig
   bind:soloConfig bind:evaluatorConfig {judgeAgentConfig}
   {debateJudgeAgentConfig} bind:codingPrincipals bind:researchWorkers
   bind:qaWorkers bind:workspaceStrategy bind:queenDelegationMode

@@ -281,7 +281,7 @@ describe('StatusPanel CLI health', () => {
         'pending',
       );
     });
-    expect(container.querySelectorAll('.cli-health-item')).toHaveLength(3);
+    expect(container.querySelectorAll('.cli-health-item')).toHaveLength(4);
     expect(container.textContent).not.toMatch(/Droid|OpenCode|Qwen/);
 
     await fireEvent.click(disclosure);

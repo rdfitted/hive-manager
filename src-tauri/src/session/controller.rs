@@ -707,6 +707,10 @@ pub struct HiveLaunchConfig {
     #[serde(default)]
     pub color: Option<String>,
     pub queen_config: AgentConfig,
+    /// Master Planner config. Missing keeps the legacy behavior of launching
+    /// the planner from the Queen's config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_config: Option<AgentConfig>,
     pub workers: Vec<AgentConfig>,
     pub prompt: Option<String>,
     #[serde(default)]
@@ -4031,6 +4035,32 @@ impl SessionController {
         let mut config = queen_config.clone();
         config.label = Some("Master Planner".to_string());
         config
+    }
+
+    fn claude_effort_flags(effort: &str) -> Vec<String> {
+        vec!["--settings".to_string(), format!("{{\"effortLevel\":\"{effort}\"}}")]
+    }
+
+    /// Default Hive Queen: Opus at medium effort.
+    pub(crate) fn default_hive_queen_config() -> AgentConfig {
+        AgentConfig {
+            cli: "claude".to_string(),
+            model: Some("opus".to_string()),
+            flags: Self::claude_effort_flags("medium"),
+            label: Some("Queen".to_string()),
+            ..AgentConfig::default()
+        }
+    }
+
+    /// Default Master Planner: Fable at low effort.
+    pub(crate) fn default_master_planner_config() -> AgentConfig {
+        AgentConfig {
+            cli: "claude".to_string(),
+            model: Some("fable".to_string()),
+            flags: Self::claude_effort_flags("low"),
+            label: Some("Master Planner".to_string()),
+            ..AgentConfig::default()
+        }
     }
 
     fn truncate_agent_label(value: String, max_chars: usize) -> String {
@@ -10807,6 +10837,7 @@ Last updated: {timestamp}
             .collect();
 
         let hive_config = HiveLaunchConfig {
+            planner_config: None,
             retirement_settings: None,
             project_path: config.project_path,
             name: config.name,
@@ -12147,7 +12178,10 @@ The backend composed and persisted the following authoritative skeleton before l
 
             // Create Master Planner agent
             let planner_id = format!("{}-master-planner", session_id);
-            let (cmd, mut args) = Self::build_command(&config.queen_config); // Use queen config for planner
+            // An explicit planner config wins; older callers launch the
+            // planner from the Queen's config.
+            let planner_base = config.planner_config.as_ref().unwrap_or(&config.queen_config);
+            let (cmd, mut args) = Self::build_command(planner_base);
 
             // Write Master Planner prompt to file
             let prompt_file = match Self::write_prompt_file(
@@ -12205,7 +12239,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
-                config: Self::master_planner_agent_config(&config.queen_config),
+                config: Self::master_planner_agent_config(planner_base),
                 parent_id: None,
                 role_definition_id: None,
                 role_definition_version: None,
@@ -15626,6 +15660,9 @@ The backend composed and persisted the following authoritative skeleton before l
 
     fn validate_hive_continuation_clis(config: &HiveLaunchConfig) -> Result<(), String> {
         Self::validate_launch_cli(&config.queen_config.cli)?;
+        if let Some(planner) = config.planner_config.as_ref() {
+            Self::validate_launch_cli(&planner.cli)?;
+        }
         for worker in &config.workers {
             Self::validate_launch_cli(&worker.cli)?;
         }
@@ -21778,6 +21815,46 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             SessionController::add_prompt_to_args(cli, &mut args, prompt_path);
             assert_eq!(args, vec!["-i".to_string(), expected_prompt.clone()], "cli {cli}");
         }
+    }
+
+    #[test]
+    fn default_lineup_launches_fable_low_planner_and_opus_medium_queen() {
+        let planner = SessionController::default_master_planner_config();
+        let (command, args) = SessionController::build_command(&planner);
+        assert_eq!(command, "claude");
+        assert!(args.windows(2).any(|pair| pair == ["--model", "fable"]));
+        assert!(args.windows(2).any(|pair| pair == ["--settings", r#"{"effortLevel":"low"}"#]));
+        assert_eq!(planner.label.as_deref(), Some("Master Planner"));
+
+        let queen = SessionController::default_hive_queen_config();
+        let (_, args) = SessionController::build_command(&queen);
+        assert!(args.windows(2).any(|pair| pair == ["--model", "opus"]));
+        assert!(args.windows(2).any(|pair| pair == ["--settings", r#"{"effortLevel":"medium"}"#]));
+
+        // Both defaults match a catalogue preset, so the editor shows them by name.
+        for (id, config) in [("fable-low", &planner), ("opus-medium", &queen)] {
+            let preset = crate::cli::tier_ladder::expand_preset("claude", id).unwrap().resolved;
+            assert_eq!(Some(preset.model), config.model);
+            assert_eq!(preset.flags, config.flags);
+        }
+    }
+
+    #[test]
+    fn hive_continuation_rejects_an_unsupported_planner_cli() {
+        let mut config: HiveLaunchConfig = serde_json::from_value(serde_json::json!({
+            "project_path": "D:/tmp/project",
+            "queen_config": {"cli": "claude"},
+            "workers": [{"cli": "codex"}],
+            "prompt": null,
+        }))
+        .unwrap();
+        assert!(config.planner_config.is_none(), "older payloads carry no planner");
+        assert!(SessionController::validate_hive_continuation_clis(&config).is_ok());
+        assert!(!serde_json::to_string(&config).unwrap().contains("planner_config"));
+
+        config.planner_config = Some(AgentConfig { cli: "gemini".to_string(), ..AgentConfig::default() });
+        let error = SessionController::validate_hive_continuation_clis(&config).unwrap_err();
+        assert!(error.contains("gemini"), "{error}");
     }
 
     #[test]

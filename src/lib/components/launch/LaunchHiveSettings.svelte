@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { DelegationMode } from '$lib/stores/sessions';
-  import type { CodingPrincipalFormConfig, TierRoutingPolicy } from '../hiveLaunch';
+  import { MAX_CODING_PRINCIPALS, type CodingPrincipalFormConfig, type TierRoutingPolicy } from '../hiveLaunch';
   import type { CliHealthMap } from '../AgentConfigEditor.svelte';
   import { WORK_GRAPH_ARCHETYPES, TASK_TIERS, predefinedRoles, providerLabel, type SessionMode, type WorkGraphParameterRow, type TierLadderPreviewCell, type TierLadderOmission } from './launchForm';
   import AgentConfigEditor from '../AgentConfigEditor.svelte';
@@ -236,7 +236,7 @@
                 <h4 data-launch-owned>Coding Principals ({codingPrincipals.length})</h4>
                 <p data-launch-owned class="section-description">Each principal owns a coherent lane and may delegate according to policy.</p>
               </div>
-              <button data-launch-owned type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--dashed" on:click={addCodingPrincipal} disabled={codingPrincipals.length >= 3}>
+              <button data-launch-owned type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--dashed" on:click={addCodingPrincipal} disabled={codingPrincipals.length >= MAX_CODING_PRINCIPALS}>
                 + Add principal
               </button>
             </div>

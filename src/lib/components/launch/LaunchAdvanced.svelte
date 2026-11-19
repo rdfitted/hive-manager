@@ -36,6 +36,7 @@
   export let tierLadderLoading: boolean;
   export let presentation: 'modal' | 'inline';
   export let queenConfig: AgentConfig;
+  export let plannerConfig: AgentConfig;
   export let soloConfig: AgentConfig;
   export let evaluatorConfig: AgentConfig;
   export let judgeAgentConfig: AgentConfig;
@@ -237,6 +238,23 @@
               bind:config={queenConfig}
               showLabel={true}
               idPrefix="launch-queen"
+              {cliHealth}
+              {cliHealthLoading}
+              {cliHealthError}
+            />
+          </div>
+        {/if}
+
+        {#if mode === 'hive' && withPlanning}
+          <div data-launch-owned class="form-section queen-section lattice-forced-colors-boundary">
+            <div data-launch-owned class="section-heading-copy">
+              <h3 data-launch-owned>Master Planner</h3>
+              <p data-launch-owned>Writes the plan the Queen executes, then retires.</p>
+            </div>
+            <AgentConfigEditor
+              bind:config={plannerConfig}
+              showLabel={false}
+              idPrefix="launch-planner"
               {cliHealth}
               {cliHealthLoading}
               {cliHealthError}

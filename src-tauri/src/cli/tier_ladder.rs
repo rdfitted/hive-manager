@@ -190,6 +190,15 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
     preset!("claude", "fable", "Fable 5", "fable", 3),
     preset!(
         "claude",
+        "fable-low",
+        "Fable 5 (Low effort)",
+        "fable",
+        3,
+        "--settings",
+        "{\"effortLevel\":\"low\"}"
+    ),
+    preset!(
+        "claude",
         "claude-fable-5-2-high",
         "Fable 5.2 (High effort)",
         "claude-fable-5-2",
@@ -232,6 +241,15 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
         "{\"effortLevel\":\"low\"}"
     ),
     preset!("claude", "opus", "Opus", "opus", 2),
+    preset!(
+        "claude",
+        "opus-medium",
+        "Opus (Medium effort)",
+        "opus",
+        2,
+        "--settings",
+        "{\"effortLevel\":\"medium\"}"
+    ),
     preset!(
         "claude",
         "claude-opus-5-5-high",
@@ -1599,12 +1617,12 @@ mod tests {
             assert_eq!(expansion.resolved.flags, preset.flags.to_vec());
         }
 
-        assert_eq!(preset_catalogue().len(), 109);
+        assert_eq!(preset_catalogue().len(), 111);
         assert_eq!(
             provider_counts,
             std::collections::BTreeMap::from([
                 ("antigravity", 17),
-                ("claude", 19),
+                ("claude", 21),
                 ("codex", 68),
                 ("cursor", 5),
             ])
