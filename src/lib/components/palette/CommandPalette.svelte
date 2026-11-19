@@ -5,6 +5,7 @@
   import { sessions, activeSession } from '$lib/stores/sessions';
   import { ui } from '$lib/stores/ui';
   import { layout, type RightPanelTab } from '$lib/stores/layout';
+  import { accent } from '$lib/stores/accent';
   import { shell } from '$lib/stores/shell';
   import { flushEnter } from '../attention/flush';
   import FlushReceipt from '../attention/FlushReceipt.svelte';
@@ -28,6 +29,7 @@
       ...($activeSession ? [{ id: 'add-worker', label: 'Add worker', run: () => shell.openAddWorker() }] : []),
       { id: 'view-mode', label: 'Toggle Focus / Grid', run: () => layout.toggleSessionViewMode() },
       { id: 'toggle-rail', label: 'Toggle right panel', run: () => layout.toggleRight() },
+      { id: 'accent', label: 'Switch accent', run: accent.toggle },
       ...tabs.map((tab) => ({ id: `tab-${tab}`, label: `Open ${tab[0].toUpperCase()}${tab.slice(1)}`, run: () => layout.setRightTab(tab) })),
       { id: 'nav-sessions', label: 'Go to Sessions', run: () => goto('/') },
       { id: 'nav-dashboard', label: 'Go to Dashboard', run: () => goto('/dashboard') },

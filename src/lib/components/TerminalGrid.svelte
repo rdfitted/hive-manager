@@ -4,6 +4,7 @@
   import {
     ArrowsIn,
     ArrowsOut,
+    ArrowUp,
     Check,
     Circle,
     Hourglass,
@@ -21,6 +22,7 @@
   } from '$lib/stores/scratchTerminals';
   import { sessions, serdeEnumVariantName, resumeBlockedReason, type AgentInfo, type Session } from '$lib/stores/sessions';
   import { TERMINAL_SESSION_STATES } from '$lib/stores/terminalPool';
+  import IconButton from './ui/IconButton.svelte';
   import AgentActivityLine from './agent/AgentActivityLine.svelte';
   import AttentionCard from './attention/AttentionCard.svelte';
   import { createFlushState, flushKey } from './attention/flushState';
@@ -33,7 +35,6 @@
   import { protocolAttention } from './chat/transcript';
   import CommandBar from './opswall/CommandBar.svelte';
   import OpsWall from './opswall/OpsWall.svelte';
-  import { columnPins } from './opswall/pinning';
 
   interface Props {
     session: Session;
@@ -86,60 +87,10 @@
   let localResourceFilter = $state<string | null>(null);
   const activeResourceFilter = $derived(resourceFilter === undefined ? localResourceFilter : resourceFilter);
   let handledRevealNonce: number | undefined;
-  let wall: HTMLDivElement;
-  let pins = $state<Record<string, number>>({});
-  let pinSpace = $state(0);
-  const columnNodes = new Map<string, HTMLElement>();
-  let pinObserver: ResizeObserver | undefined;
-  let pinMeasureQueued = false;
-  let destroyed = false;
-  let savedGridScrollLeft = 0;
-
-  function schedulePinMeasure() {
-    if (pinMeasureQueued || destroyed) return;
-    pinMeasureQueued = true;
-    void tick().then(() => {
-      pinMeasureQueued = false;
-      if (destroyed || !wall || focusMode || localMaximizedId) return;
-      const candidates = session.agents.map(agent => ({ id: agent.id,
-        width: columnNodes.get(agent.id)?.getBoundingClientRect().width ?? 0,
-        queen: serdeEnumVariantName(agent.role) === 'Queen', attention: attentionSeats.has(agent.id),
-      }));
-      const next = columnPins(wall.clientWidth, candidates);
-      if (JSON.stringify(next) !== JSON.stringify(pins)) pins = next;
-      pinSpace = Math.max(0, ...candidates.filter(column => next[column.id] !== undefined).map(column => next[column.id] + column.width + 12));
-      void tick().then(updateColumnClips);
-    });
-  }
-  function measureWall(node: HTMLDivElement) {
-    if (typeof ResizeObserver !== 'undefined') {
-      pinObserver = new ResizeObserver(schedulePinMeasure);
-      pinObserver.observe(node);
-      for (const column of columnNodes.values()) pinObserver.observe(column);
-    }
-    schedulePinMeasure();
-    return { destroy() { pinObserver?.disconnect(); } };
-  }
-  function measureColumn(node: HTMLDivElement, id: string) {
-    columnNodes.set(id, node); pinObserver?.observe(node); schedulePinMeasure();
-    return { destroy() { pinObserver?.unobserve?.(node); columnNodes.delete(id); } };
-  }
-  function updateColumnClips() {
-    if (!wall || destroyed) return;
-    const start = wall.getBoundingClientRect().left + pinSpace;
-    const updates = [...columnNodes].map(([id, node]) => {
-      const box = node.getBoundingClientRect();
-      return { node, clip: focusMode || localMaximizedId || pins[id] !== undefined ? 0 : Math.min(box.width, Math.max(0, start - box.left)) };
-    });
-    for (const { node, clip } of updates) node.style.setProperty('--wall-clip', `${clip}px`);
-  }
-  function setWallScrollLeft(left: number) {
-    if (!wall) return;
-    wall.scrollLeft = left;
-    updateColumnClips();
-  }
-  $effect(() => { void attentionSeats; void focusMode; void localMaximizedId; schedulePinMeasure(); });
-  $effect(() => { if ((focusMode || localMaximizedId !== null) && wall) setWallScrollLeft(0); });
+  let workspace: HTMLDivElement;
+  let workerViewport: HTMLDivElement;
+  let collapseOverrides = $state<Partial<Record<string, boolean>>>({});
+  let savedWorkerScrollTop: number | undefined;
   const staleSeats = $derived.by(() => {
     const last = Object.fromEntries(session.agents.map(agent => {
       const history = $agentEvents.sessionId === session.id ? $agentEvents.histories[agent.id]?.events ?? [] : [];
@@ -176,8 +127,17 @@
 
   function revealAgent(id: string) {
     const pane = panes.find(candidate => candidate.id === id);
-    if (pane) focusPane(pane);
-    wall?.querySelector<HTMLElement>(`[data-agent-id=${JSON.stringify(id)}]`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+    if (!pane) return;
+    if (!focusMode && gridMaximizedId && gridMaximizedId !== id) {
+      savedWorkerScrollTop = undefined;
+      layout.setMaximizedTerminalId(null);
+    }
+    if (pane.kind === 'agent' && !isQueen(pane)) collapseOverrides[id] = false;
+    focusPane(pane);
+    void tick().then(() => {
+      workerViewport?.querySelector<HTMLElement>(`[data-agent-id=${JSON.stringify(id)}] .terminal-pane-focus`)
+        ?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+    });
   }
   function filterResources(filter: string | null) {
     localResourceFilter = filter;
@@ -213,21 +173,22 @@
   let scratchSessionAvailable = $derived(!TERMINAL_SESSION_STATES.has(sessionState ?? ''));
   let scratchPanes = $derived(sessionId ? ($scratchTerminals.panesBySession[sessionId] ?? []) : []);
   let focusedScratchId = $derived(sessionId ? ($scratchTerminals.focusedBySession[sessionId] ?? null) : null);
-  let panes = $derived.by<TerminalPane[]>(() => [
-    ...[...agents].sort((a, b) => focusMode ? 0 : Number(serdeEnumVariantName(b.role) === 'Queen') - Number(serdeEnumVariantName(a.role) === 'Queen') || Number(pins[b.id] !== undefined) - Number(pins[a.id] !== undefined)).map((agent): AgentTerminalPane => ({
+  const agentPanes = $derived(agents.map((agent): AgentTerminalPane => ({
       kind: 'agent',
       id: agent.id,
       title: getRoleLabel(agent),
       agent,
-    })),
-    ...scratchPanes,
-  ]);
+  })));
+  // Each id stays in its role's keyed block for its entire lifetime.
+  const queenPanes = $derived(agentPanes.filter(isQueen));
+  const workerPanes = $derived([...agentPanes.filter(pane => !isQueen(pane)), ...scratchPanes]);
+  const panes = $derived([...queenPanes, ...workerPanes]);
   let maximizedTerminalId = $derived($layout.maximizedTerminalId);
   let focusMode = $derived($layout.sessionViewMode === 'focus');
   let focusedPaneId = $derived(
     scratchPanes.some((pane) => pane.id === focusedScratchId) ? focusedScratchId
       : agents.some((agent) => agent.id === focusedAgentId) ? focusedAgentId
-      : panes[0]?.id ?? null
+      : agentPanes[0]?.id ?? scratchPanes[0]?.id ?? null
   );
   // The maximize id is global; only honour it when it names one of this grid's panes,
   // so a pooled grid never collapses because another session maximized something.
@@ -239,23 +200,20 @@
   // Focus reuses the maximize geometry, never the global maximize state or a filtered
   // pane list. Hidden panes retain their Terminal instances and live scrollback.
   let localMaximizedId = $derived(focusMode ? focusedPaneId : gridMaximizedId);
+  const fullStage = $derived(localMaximizedId !== null);
+  const queenFullStage = $derived(queenPanes.some(pane => pane.id === localMaximizedId));
 
-  let cols = $derived(
-    panes.length <= 1 ? 1 :
-    panes.length <= 2 ? 2 :
-    panes.length <= 4 ? 2 :
-    panes.length <= 6 ? 3 :
-    panes.length <= 9 ? 3 :
-    4
-  );
-
-  let rows = $derived(
-    panes.length <= 2 ? 1 :
-    panes.length <= 4 ? 2 :
-    panes.length <= 6 ? 2 :
-    panes.length <= 9 ? 3 :
-    Math.ceil(panes.length / 4)
-  );
+  $effect.pre(() => {
+    if (fullStage) {
+      savedWorkerScrollTop ??= workerViewport?.scrollTop ?? 0;
+    } else if (savedWorkerScrollTop !== undefined) {
+      const top = savedWorkerScrollTop;
+      savedWorkerScrollTop = undefined;
+      void tick().then(() => {
+        if (workerViewport && !fullStage) workerViewport.scrollTop = top;
+      });
+    }
+  });
 
   $effect(() => {
     if (!visible) return;
@@ -309,6 +267,17 @@
     return 'Agent';
   }
 
+  function isQueen(pane: TerminalPane) {
+    return pane.kind === 'agent' && serdeEnumVariantName(pane.agent.role) === 'Queen';
+  }
+
+  function isQuiet(agent: AgentInfo) {
+    const status = serdeEnumVariantName(agent.status);
+    const heartbeat = $heartbeatStore.agents[agent.id];
+    return status === 'Idle' || status === 'Completed' || heartbeat?.status === 'idle'
+      || ['finished', 'retired', 'idle'].includes(workStateFor(agent, heartbeat) ?? '');
+  }
+
   function focusPane(pane: TerminalPane) {
     if (pane.kind === 'scratch') {
       scratchTerminals.focus(pane.sessionId, pane.id);
@@ -329,11 +298,8 @@
 
   function toggleMaximized(event: MouseEvent, pane: TerminalPane) {
     event.stopPropagation();
-    const restoring = gridMaximizedId === pane.id;
-    if (!restoring && wall) { savedGridScrollLeft = wall.scrollLeft; setWallScrollLeft(0); }
     focusPane(pane);
     layout.toggleMaximizedTerminal(pane.id);
-    if (restoring) void tick().then(() => { if (wall) { wall.scrollLeft = savedGridScrollLeft; updateColumnClips(); } });
   }
 
   function handleWindowKeydown(event: KeyboardEvent) {
@@ -348,7 +314,6 @@
 
     event.preventDefault();
     layout.setMaximizedTerminalId(null);
-    void tick().then(() => { if (wall) { wall.scrollLeft = savedGridScrollLeft; updateColumnClips(); } });
   }
 
   function markTerminalReady(id: string) {
@@ -456,8 +421,6 @@
   }
 
   onDestroy(() => {
-    destroyed = true;
-    pinObserver?.disconnect();
     for (const [id, waiter] of terminalReadyWaiters) {
       clearTimeout(waiter.timeout);
       waiter.reject(new Error(`Terminal ${id} was destroyed before it became ready`));
@@ -469,7 +432,7 @@
 
 <svelte:window onkeydowncapture={handleWindowKeydown} />
 
-<div class="terminal-workspace">
+<div class="terminal-workspace" bind:this={workspace}>
   <div class="terminal-toolbar">
     {#if focusMode && panes.length > 0}
       <label class="pane-picker">
@@ -523,17 +486,39 @@
   {/if}
 
   <div
-    bind:this={wall}
-    use:measureWall
-    onscroll={updateColumnClips}
-    class="terminal-grid lattice-scroll-content"
-    style="--cols: {cols}; --rows: {rows}; --pin-space: {pinSpace}px; --wall-tracks: {panes.map((pane) => pane.kind === 'agent' && serdeEnumVariantName(pane.agent.role) === 'Queen' ? 'minmax(420px, 1.5fr)' : 'minmax(280px, 1fr)').join(' ')}"
-    class:ops-wall={!focusMode}
-    class:scrollable={panes.length > 9}
-    class:has-maximized={localMaximizedId !== null}
+    class="terminal-grid"
+    class:queen-only={fullStage ? queenFullStage : workerPanes.length === 0}
+    class:workers-only={fullStage ? !queenFullStage : queenPanes.length === 0}
+    class:has-maximized={fullStage}
     class:empty={panes.length === 0}
   >
-    {#each panes as pane (pane.id)}
+    <div class="queen-area" hidden={queenPanes.length === 0 || (fullStage && !queenFullStage)}>
+      {#each queenPanes as pane (pane.id)}
+        {@render paneCard(pane)}
+      {/each}
+    </div>
+    <div class="worker-viewport lattice-scroll-content" bind:this={workerViewport} hidden={workerPanes.length === 0 || queenFullStage}>
+      {#each workerPanes as pane (pane.id)}
+        {@render paneCard(pane)}
+      {/each}
+    </div>
+    {#if panes.length === 0}
+      <div class="empty-state">
+        <span>No terminals are running.</span>
+        <span>Open a scratch terminal to work in this session.</span>
+      </div>
+    {/if}
+  </div>
+  {#if !focusMode && visible}
+    <CommandBar sessionId={session.id} agents={panes.filter((pane): pane is AgentTerminalPane => pane.kind === 'agent').map(pane => pane.agent)} bind:targetId={commandTargetId} bind:drafts ondelivery={(sid, id, state) => { delivery[`${sid}:${id}`] = state; }} />
+  {/if}
+</div>
+
+{#snippet workerStatusLine(agentId: string)}
+  <AgentActivityLine {agentId} compact />
+{/snippet}
+
+{#snippet paneCard(pane: TerminalPane)}
       {@const focused = isPaneFocused(pane)}
       {@const feed = pane.kind === 'agent' && $agentEvents.sessionId === session.id ? $agentEvents.feeds[pane.id] : undefined}
       {@const chatEligible = !!feed && feed.capabilities.event_source !== 'none'}
@@ -544,25 +529,29 @@
       {@const chatShowing = chatEligible && (mode !== 'terminal' || !hasTerminal)}
       {@const eventAttention = protocolAttention(history)}
       {@const feedError = chatEligible ? $agentEvents.error ?? $agentEvents.histories[pane.id]?.error : null}
+      {@const queen = isQueen(pane)}
       {@const showAttention = pane.kind === 'agent' && attentionSeats.has(pane.id)}
+      {@const quiet = pane.kind === 'agent' && !showAttention && isQuiet(pane.agent)}
+      {@const collapsible = pane.kind === 'agent' && !queen && !fullStage && !showAttention}
+      {@const collapsed = collapsible && (collapseOverrides[pane.id] ?? quiet)}
+      {@const eclipsed = fullStage && pane.id !== localMaximizedId}
+      {@const paneVisible = visible && !eclipsed && !collapsed}
       {@const gridAttention = !focusMode && visible && showAttention && pane.kind === 'agent'
-        && (chatEligible || startupExitCode(pane.agent) !== null || !!$flushState[flushKey(session.id, pane.id)])}
+        && (!queen || chatEligible || startupExitCode(pane.agent) !== null || !!$flushState[flushKey(session.id, pane.id)])}
       <!-- Container click is a convenience; the dedicated header button carries
            accessible focus semantics without wrapping the terminal or other controls. -->
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
       <div
-        use:measureColumn={pane.id}
         class={`terminal-item lattice-panel${focused ? ' lattice-panel--active' : ''}`}
         class:maximized={pane.id === localMaximizedId}
-        class:hidden-by-maximize={localMaximizedId !== null && pane.id !== localMaximizedId}
-        class:queen-column={!focusMode && pane.kind === 'agent' && serdeEnumVariantName(pane.agent.role) === 'Queen'}
+        class:hidden-by-maximize={eclipsed}
+        class:queen-column={queen}
         class:attention-column={!focusMode && showAttention}
-        class:pinned-column={!focusMode && localMaximizedId === null && pins[pane.id] !== undefined}
-        style:--pin-left={`${pins[pane.id] ?? 0}px`}
-        data-pinned={!focusMode && localMaximizedId === null && pins[pane.id] !== undefined ? 'true' : undefined}
-        class:quiet-column={!focusMode && pane.kind === 'agent' && !showAttention && (serdeEnumVariantName(pane.agent.status) === 'Idle' || pane.agent.status === 'Completed' || $heartbeatStore.agents[pane.id]?.status === 'idle' || ['finished', 'retired', 'idle'].includes(workStateFor(pane.agent, $heartbeatStore.agents[pane.id]) ?? ''))}
+        class:quiet-column={!focusMode && quiet}
+        class:collapsed
         class:resource-match={!focusMode && activeResourceFilter !== null && pane.kind === 'agent' && (activeResourceFilter === 'attention' ? attentionSeats.has(pane.id) : activeResourceFilter === 'stale' ? staleSeats.has(pane.id) : serdeEnumVariantName(pane.agent.status) === 'WaitingForInput')}
         data-agent-id={pane.kind === 'agent' ? pane.id : undefined}
+        inert={eclipsed}
         onclick={() => focusPane(pane)}
       >
         <div
@@ -581,7 +570,9 @@
             <span class="role-label" title={pane.title}>{pane.title}</span>
           </button>
           {#if !focusMode && visible && pane.kind === 'agent'}
-            <span class="pane-activity"><AgentActivityLine agentId={pane.id} compact /></span>
+            <span class="pane-activity">
+              {#if queen}<AgentActivityLine agentId={pane.id} compact />{:else}{@render workerStatusLine(pane.id)}{/if}
+            </span>
             {#if showAttention}<span class="attention-chip">Needs attention</span>{/if}
             {#if deliveryLabel(pane.agent)}<span class="delivery-chip" role="status">{deliveryLabel(pane.agent)}</span>{/if}
           {/if}
@@ -604,7 +595,7 @@
                 </button>
               {/if}
               {#if resumeErrors[pane.id]}<span role="alert">{resumeErrors[pane.id]}</span>{/if}
-              {#if chatEligible}<PaneToggle {hasTerminal} mode={chatShowing ? mode === 'raw' ? 'raw' : 'chat' : 'terminal'} onchange={(next) => { paneModes[pane.id] = next; }} />{/if}
+              {#if chatEligible && !collapsed}<PaneToggle {hasTerminal} mode={chatShowing ? mode === 'raw' ? 'raw' : 'chat' : 'terminal'} onchange={(next) => { if (next === 'chat' || next === 'terminal' || next === 'raw') paneModes[pane.id] = next; }} />{/if}
               <span class="cli-badge">{pane.agent.config?.cli || 'unknown'}</span>
               <span class="pane-status-text">{status ?? 'Unknown'}</span>
               <span
@@ -637,6 +628,20 @@
               </button>
             {/if}
             {#if !focusMode}
+              {#if pane.kind === 'agent' && !queen}
+                <IconButton label={`Message ${pane.title}`} tooltip="Message worker" icon={ArrowUp} size="sm"
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    focusPane(pane);
+                    void tick().then(() => workspace?.querySelector<HTMLElement>('.command-bar [data-composer]')?.focus());
+                  }} />
+              {/if}
+              {#if collapsible}
+                <IconButton label={`${collapsed ? 'Expand' : 'Collapse'} ${pane.title}`}
+                  tooltip={collapsed ? 'Expand worker' : 'Collapse worker'} icon={collapsed ? ArrowsOut : ArrowsIn}
+                  size="sm" aria-expanded={!collapsed} aria-controls={`pane-body-${pane.id}`}
+                  onclick={(event) => { event.stopPropagation(); collapseOverrides[pane.id] = !collapsed; }} />
+              {/if}
               <button
                 type="button"
                 class="pane-control lattice-btn lattice-btn--ghost lattice-btn--icon"
@@ -661,7 +666,9 @@
               onOpen={chatEligible ? () => { paneModes[pane.id] = hasTerminal ? 'terminal' : 'raw'; } : undefined} />
           </div>
         {/if}
-        <div class="terminal-container" class:non-chat-attention={gridAttention && !chatEligible && hasTerminal}>
+        <div class="terminal-container" id={`pane-body-${pane.id}`} hidden={collapsed} inert={collapsed}
+          class:non-chat-attention={gridAttention && !chatEligible && hasTerminal}
+          class:worker-chat-attention={gridAttention && !queen && chatEligible}>
           {#if gridAttention && pane.kind === 'agent'}
             <div class="agent-info">
               <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} {flushState} chatAvailable={chatEligible}
@@ -676,8 +683,8 @@
               <Terminal
                 agentId={pane.id}
                 isAgent={pane.kind === 'agent'}
-                isFocused={visible && focused && (!chatEligible || (!chatShowing && terminalFocusId === pane.id))}
-                isVisible={visible && (localMaximizedId === null || pane.id === localMaximizedId)}
+                isFocused={paneVisible && focused && (!chatEligible || (!chatShowing && terminalFocusId === pane.id))}
+                isVisible={paneVisible}
                 layoutRevision={localMaximizedId}
                 onReady={pane.kind === 'scratch' ? () => markTerminalReady(pane.id) : undefined}
                 onStatusChange={pane.kind === 'scratch' ? (status) => handlePaneStatus(pane, status) : undefined}
@@ -686,24 +693,12 @@
           {/if}
           {#if chatEligible}
             <div class="chat-layer" class:pane-hidden={!chatShowing} inert={!chatShowing} aria-hidden={!chatShowing}>
-              <ChatPane sessionId={session.id} agentId={pane.id} events={history} composer={focusMode} variant={focusMode ? 'focus' : 'column'} bind:draft={() => drafts[`${session.id}:${pane.id}`] ?? '', (value) => { drafts = { ...drafts, [`${session.id}:${pane.id}`]: value }; }} raw={mode === 'raw'} visible={visible && chatShowing && (localMaximizedId === null || pane.id === localMaximizedId)} />
+              <ChatPane sessionId={session.id} agentId={pane.id} events={history} composer={focusMode} variant={focusMode ? 'focus' : 'column'} bind:draft={() => drafts[`${session.id}:${pane.id}`] ?? '', (value) => { drafts = { ...drafts, [`${session.id}:${pane.id}`]: value }; }} raw={mode === 'raw'} visible={paneVisible && chatShowing} />
             </div>
           {/if}
         </div>
       </div>
-    {/each}
-
-    {#if panes.length === 0}
-      <div class="empty-state">
-        <span>No terminals are running.</span>
-        <span>Open a scratch terminal to work in this session.</span>
-      </div>
-    {/if}
-  </div>
-  {#if !focusMode && visible}
-    <CommandBar sessionId={session.id} agents={panes.filter((pane): pane is AgentTerminalPane => pane.kind === 'agent').map(pane => pane.agent)} bind:targetId={commandTargetId} bind:drafts ondelivery={(sid, id, state) => { delivery[`${sid}:${id}`] = state; }} />
-  {/if}
-</div>
+{/snippet}
 
 <style>
   .terminal-workspace {
@@ -764,7 +759,8 @@
     min-width: 0;
     min-height: 0;
     max-height: min(7rem, 35%);
-    overflow: auto;
+    overflow: hidden auto;
+    overflow-wrap: anywhere;
     padding: var(--space-1) var(--space-2);
     background: var(--surface);
   }
@@ -783,46 +779,54 @@
   .terminal-grid {
     display: grid;
     flex: 1;
-    grid-template-columns: repeat(var(--cols), 1fr);
-    grid-template-rows: repeat(var(--rows), 1fr);
+    grid-template-columns: minmax(0, 1.42fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "queen workers";
     gap: 12px;
     width: 100%;
+    min-width: 0;
     min-height: 0;
     padding: 4px;
-    overflow: hidden;
+    overflow: clip;
   }
 
-  .terminal-grid.scrollable {
-    grid-template-rows: repeat(var(--rows), 300px);
-    overflow-y: auto;
+  .terminal-grid.queen-only {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "queen";
   }
-
-  .terminal-grid.ops-wall {
-    grid-template-columns: var(--wall-tracks);
-    grid-template-rows: minmax(0, 1fr);
-    overflow-x: auto;
-    overflow-y: hidden;
-    isolation: isolate;
-    scroll-padding-left: var(--pin-space);
+  .terminal-grid.workers-only {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "workers";
   }
-  .ops-wall > .pinned-column { position: sticky; left: var(--pin-left); z-index: 6; }
-  .ops-wall:not(.has-maximized) > .terminal-item:not(.pinned-column) { clip-path: inset(0 0 0 var(--wall-clip, 0px)); }
-  .ops-wall > .terminal-item.lattice-panel--active { z-index: 5; }
-  .ops-wall > .pinned-column.lattice-panel--active { z-index: 7; }
-  .ops-wall > .quiet-column .terminal-header { opacity: 0.65; }
-  .ops-wall > .resource-match { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .queen-area,
+  .worker-viewport {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+  .queen-area { grid-area: queen; }
+  .worker-viewport {
+    grid-area: workers;
+    gap: var(--space-2);
+    overflow: hidden auto;
+    overscroll-behavior-y: contain;
+  }
+  .queen-area[hidden], .worker-viewport[hidden] { display: none; }
+  .queen-area > .terminal-item { flex: 1; }
+  .worker-viewport > .terminal-item { flex: 0 0 clamp(10rem, 55%, 22rem); }
+  .worker-viewport > .collapsed { flex-basis: auto; }
+  .worker-viewport > .attention-column { order: -1; }
+  .has-maximized > .worker-viewport { overflow: clip; }
+  .has-maximized .terminal-item.maximized { flex: 1; }
+  .terminal-item.hidden-by-maximize { display: none; }
+  .terminal-item.resource-match { outline: 2px solid var(--accent); outline-offset: -2px; }
+  @media (forced-colors: active) {
+    .terminal-item.resource-match { outline-color: Highlight; }
+  }
   .delivery-chip { color: var(--text-muted); font-size: var(--text-micro); }
   .resume-blocked { max-width: 18rem; color: var(--status-warning); font-size: var(--text-micro); overflow-wrap: anywhere; }
   .attention-chip { color: var(--status-warning); font-size: var(--text-micro); }
-  .ops-wall .terminal-header { flex-wrap: wrap; min-width: 0; }
-  .ops-wall .terminal-meta { flex-wrap: wrap; }
-  .ops-wall .terminal-pane-focus { flex-basis: 45%; }
-  .ops-wall .pane-activity { flex-basis: 40%; }
-
-  .terminal-grid.has-maximized {
-    position: relative;
-    overflow: hidden;
-  }
 
   .terminal-grid.empty {
     display: flex;
@@ -839,26 +843,16 @@
     border-radius: var(--radius-lg);
     box-shadow: var(--depth-1);
     transition: box-shadow var(--motion-ui);
+    min-width: 0;
     min-height: 0;
-  }
-
-  .terminal-item.maximized {
-    position: absolute;
-    inset: 4px;
-    z-index: 2;
-  }
-
-  .terminal-item.hidden-by-maximize {
-    position: absolute;
-    inset: 4px;
-    visibility: hidden;
-    pointer-events: none;
   }
 
   .terminal-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    min-width: 0;
     gap: 8px;
     padding: 6px 10px;
     background: var(--toolbar);
@@ -880,18 +874,20 @@
   .terminal-meta {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    min-width: 0;
     gap: 6px;
   }
 
   .pane-activity {
-    flex: 1;
+    flex: 1 1 40%;
     min-width: 0;
     overflow: hidden;
   }
 
   .terminal-pane-focus {
     display: flex;
-    flex: 1;
+    flex: 1 1 45%;
     min-width: 0;
     padding: 0;
     color: inherit;
@@ -943,6 +939,7 @@
     grid-template: minmax(0, 1fr) / minmax(0, 1fr);
     overflow: hidden;
   }
+  .terminal-container[hidden] { display: none; }
 
   .terminal-layer, .chat-layer { grid-area: 1 / 1; min-width: 0; min-height: 0; }
   /* Non-chat PTYs have no composer: reserve notice height above their live output. */
@@ -955,6 +952,11 @@
     max-height: none;
   }
   .non-chat-attention > .terminal-layer { grid-area: 2 / 1; }
+  .terminal-container.worker-chat-attention {
+    grid-template-rows: minmax(0, min(7rem, 35%)) minmax(0, 1fr);
+  }
+  .worker-chat-attention > .agent-info { align-self: stretch; max-height: none; }
+  .worker-chat-attention > .terminal-layer, .worker-chat-attention > .chat-layer { grid-area: 2 / 1; }
   /* Keep xterm's initial fit measurable and move its native drop rectangle offscreen. */
   .terminal-layer.chat-hidden { visibility: hidden; pointer-events: none; transform: translateX(-200vw); }
   .chat-layer.pane-hidden { visibility: hidden; pointer-events: none; }
@@ -980,5 +982,4 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
   }
-  .ops-wall.has-maximized > .terminal-item { position: absolute; }
 </style>

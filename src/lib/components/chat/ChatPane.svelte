@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { tick } from 'svelte';
+  import { getContext, tick, type Snippet } from 'svelte';
+  import { agentMentions } from '$lib/composer/sources';
   import { agentEvents, type AgentEvent } from '$lib/stores/agentEvents';
   import { activeAgents } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
@@ -9,6 +10,7 @@
   import { toolbarFacts } from '../composer/toolbarFacts';
   import ActivityGroup from './ActivityGroup.svelte';
   import MarkdownBlocks from '../ui/MarkdownBlocks.svelte';
+  import { paneStatusLineContext } from './paneMode';
   import { CHAT_WINDOW_SIZE, formatRaw, liveActivityState, transcriptRows } from './transcript';
 
   let { sessionId, agentId, events, raw = false, visible = true, composer = true, paging = true, variant = 'focus', draft = $bindable('') }: {
@@ -19,6 +21,9 @@
   const rows = $derived(transcriptRows(events, { agentId, isQueen: $activeAgents.some(candidate => candidate.id === agentId && candidate.role === 'Queen'), log: $coordination.sessionId === sessionId ? ($coordination.log ?? []) : [] }));
   $effect(() => { if (visible) void coordination.ensureLog(sessionId); });
   const agent = $derived($activeAgents.find((candidate) => candidate.id === agentId));
+  const targetLabel = $derived(agent ? agentMentions([agent])[0].label.trim() || agentId : agentId);
+  const getStatusLine = getContext<(() => Snippet | undefined) | undefined>(paneStatusLineContext);
+  const statusLine = $derived(getStatusLine?.());
   const facts = $derived(toolbarFacts(agent, $agentEvents.sessionId === sessionId ? $agentEvents.feeds?.[agentId]?.capabilities.event_source : undefined));
   let now = $state(Date.now());
   const activity = $derived(liveActivityState(events, agent?.status, now));
@@ -136,9 +141,12 @@
   </div>
   {#if error}<p class="feed-error" role="alert">Message could not be sent: {error}</p>{/if}
   {#if composer}
-  <div class="chat-composer"><Composer {sessionId} {agentId} {prepareSubmit} submissionKey={`${sessionId}:${agentId}`} bind:value={draft} persistDraft={false} disabled={sending || !visible} onsubmit={send} placeholder={facts.placeholder}>
-    {#snippet toolbar(controls)}{#if visible}<ComposerToolbar {controls} accessLabel={facts.accessLabel} model={facts.model} effort={facts.effort} {sending} />{/if}{/snippet}
-  </Composer></div>
+  <div class="chat-composer">
+    {@render statusLine?.()}
+    <Composer {sessionId} {agentId} {prepareSubmit} submissionKey={`${sessionId}:${agentId}`} bind:value={draft} persistDraft={false} disabled={sending || !visible} onsubmit={send} placeholder={facts.placeholder}>
+      {#snippet toolbar(controls)}{#if visible}<ComposerToolbar {controls} {targetLabel} accessLabel={facts.accessLabel} model={facts.model} effort={facts.effort} {sending} />{/if}{/snippet}
+    </Composer>
+  </div>
   {/if}
 </section>
 

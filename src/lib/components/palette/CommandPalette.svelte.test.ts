@@ -20,6 +20,7 @@ vi.mock('$lib/stores/layout', () => ({ layout: { toggleRight: vi.fn(), setRightT
 vi.mock('$lib/stores/shell', () => ({ shell: { openAddWorker: vi.fn(), requestStartAction: vi.fn() } }));
 vi.mock('$app/navigation', () => ({ goto: vi.fn().mockResolvedValue(undefined) }));
 import { goto } from '$app/navigation';
+import { accent } from '$lib/stores/accent';
 import { sessions } from '$lib/stores/sessions';
 import { ui } from '$lib/stores/ui';
 import { layout } from '$lib/stores/layout';
@@ -94,6 +95,15 @@ describe('G-palette-key', () => {
 });
 
 describe('command action wiring and navigation', () => {
+  it('runs the shared accent switch from the palette', async () => {
+    const toggle = vi.spyOn(accent, 'toggle').mockImplementation(() => {});
+    const view = render(CommandPalette);
+    await openPalette();
+    await fireEvent.click(view.getByRole('button', { name: 'Switch accent' }));
+    expect(toggle).toHaveBeenCalledOnce();
+    expect(view.queryByRole('dialog')).toBeNull();
+  });
+
   it.each([
     ['Sessions', '/'], ['Dashboard', '/dashboard'], ['Knowledge', '/knowledge'],
   ])('keeps %s reachable from the palette with the sidebar collapsed', async (destination, path) => {

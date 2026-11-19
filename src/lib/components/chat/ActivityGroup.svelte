@@ -5,10 +5,11 @@
   let { group, expanded = false, onchange }: {
     group: TranscriptRow; expanded?: boolean; onchange(open: boolean): void;
   } = $props();
+  const toolCount = $derived(group.tools?.length ?? 0);
 </script>
 
 <details class="activity-group lattice-forced-colors-boundary" open={expanded} ontoggle={(event) => onchange(event.currentTarget.open)}>
-  <summary>Worked for {Math.round((group.durationMs ?? 0) / 1000)}s{#if group.failedCount} · {group.failedCount} failed{/if}</summary>
+  <summary>{toolCount} {toolCount === 1 ? 'tool call' : 'tool calls'} · {Math.round((group.durationMs ?? 0) / 1000)}s{#if group.failedCount} · {group.failedCount} failed{/if}</summary>
   {#if expanded}
     {#each group.tools ?? [] as tool (tool.id)}
       <article class="tool-call" aria-label={tool.name}>

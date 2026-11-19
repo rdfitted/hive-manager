@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, within } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 
+vi.mock('@tauri-apps/api/core', () => ({ invoke: async () => undefined }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }));
 vi.mock('./StatusPanel.svelte', () => ({ default: () => {} }));
 vi.mock('./PlanView.svelte', () => ({ default: () => {} }));
 vi.mock('./workgraph/WorkGraphView.svelte', () => ({ default: () => {} }));
@@ -14,9 +16,13 @@ vi.mock('./review/ReviewView.svelte', () => ({ default: () => {} }));
 vi.mock('./replay/ReplayView.svelte', () => ({ default: () => {} }));
 vi.mock('./replay/ReplayControls.svelte', () => ({ default: () => {} }));
 vi.mock('./artifacts/ArtifactBrowser.svelte', () => ({ default: () => {} }));
-vi.mock('$lib/stores/sessions', async () => {
+vi.mock('$lib/stores/sessions', async (importOriginal) => {
   const { writable } = await import('svelte/store');
-  return { activeSession: writable({ id: 'session-a', project_path: 'C:/project', agents: [] }) };
+  const actual = await importOriginal<typeof import('$lib/stores/sessions')>();
+  return {
+    ...actual,
+    activeSession: writable({ id: 'session-a', project_path: 'C:/project', agents: [] }),
+  };
 });
 
 import RightPanel from './RightPanel.svelte';

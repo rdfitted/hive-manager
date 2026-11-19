@@ -3,9 +3,11 @@ import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/sv
 import { tick } from 'svelte';
 import type { Session } from '$lib/stores/sessions';
 import type { AgentEventsState } from '$lib/stores/agentEvents';
+import type { PtyOutputEvent } from '$lib/terminal/ptyStream';
 
 const fixture = vi.hoisted(() => ({
-  terminals: [] as { buffer: string; disposed: boolean; textarea: HTMLTextAreaElement; keyHandler: (event: KeyboardEvent) => boolean }[],
+  terminals: [] as { scrollback: string; disposed: boolean; textarea: HTMLTextAreaElement; keyHandler: (event: KeyboardEvent) => boolean }[],
+  outputListeners: new Map<string, (event: { payload: PtyOutputEvent }) => void>(),
   webglCreated: 0, webglDisposed: 0, focuses: 0,
   setAgentEvents: null as ((value: AgentEventsState) => void) | null,
   invoke: vi.fn(async (command: string, args: { id: string }) => command === 'get_pty_snapshot'
@@ -16,16 +18,29 @@ vi.mock('phosphor-svelte', () => ({
   ArrowDown: () => {}, ArrowUp: () => {}, Broom: () => {}, CaretDown: () => {}, CaretUp: () => {}, CheckSquare: () => {},
   ClipboardText: () => {}, FileText: () => {}, MagnifyingGlass: () => {}, X: () => {},
   ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {}, Hourglass: () => {}, Plus: () => {},
+  ChatCircle: () => {}, ListBullets: () => {}, SquareSplitVertical: () => {}, TerminalWindow: () => {},
+  Bell: () => {}, Clock: () => {}, File: () => {}, Graph: () => {}, Pulse: () => {}, Timer: () => {}, Users: () => {},
 }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async (name: string, callback: (event: { payload: PtyOutputEvent }) => void) => {
+  if (name.startsWith('pty-output:')) fixture.outputListeners.set(name, callback);
+  return () => fixture.outputListeners.delete(name);
+}) }));
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ onDragDropEvent: vi.fn().mockResolvedValue(() => {}) }) }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: vi.fn(), readText: vi.fn() }));
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
-  buffer = ''; disposed = false; textarea = document.createElement('textarea');
+  scrollback = ''; disposed = false; textarea = document.createElement('textarea');
   keyHandler = (_event: KeyboardEvent) => true;
   constructor(public options: Record<string, unknown>) { fixture.terminals.push(this); }
   open(node: HTMLElement) { this.textarea.className = 'xterm-helper-textarea'; node.append(this.textarea); }
-  write(text: string) { this.buffer += text; }
+  get buffer() {
+    const rows = this.scrollback.split('\n');
+    return { active: { baseY: 0, cursorY: rows.length - 1, getLine: (row: number) => ({ translateToString: () => rows[row].trimEnd() }) } };
+  }
+  write(text: string, done?: () => void) {
+    const parse = () => { this.scrollback += text; done?.(); };
+    if (done) queueMicrotask(parse);
+    else parse();
+  }
   focus() { fixture.focuses++; this.textarea.focus(); }
   loadAddon() {}
   onData() { return { dispose() {} }; }
@@ -72,11 +87,13 @@ function publishFeed(withRecord = true) {
 }
 
 import TerminalGrid from '../TerminalGrid.svelte';
+import Terminal from '../Terminal.svelte';
 import { layout } from '$lib/stores/layout';
 const { readFileSync } = await vi.importActual<{ readFileSync(path: string, encoding: 'utf8'): string }>('node:fs');
 
 beforeEach(() => {
   fixture.terminals.length = 0; fixture.webglCreated = 0; fixture.webglDisposed = 0; fixture.focuses = 0;
+  fixture.outputListeners.clear();
   localStorage.clear(); layout.setMaximizedTerminalId(null);
   publishFeed();
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
@@ -98,6 +115,26 @@ const session: Session = {
 };
 
 describe('real Terminal component behind chat (renderer doubles)', () => {
+  it('publishes parsed replay and live output once per change and skips writes completed after teardown', async () => {
+    const onLastLine = vi.fn();
+    const view = render(Terminal, { agentId: 'claude', onLastLine });
+    await waitFor(() => expect(onLastLine.mock.calls).toEqual([['fixture scrollback']]));
+    const output = fixture.outputListeners.get('pty-output:claude')!;
+    output({ payload: { id: 'claude', offset: 17, data: btoa('\nnew row\n') } });
+    expect(onLastLine).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onLastLine).toHaveBeenLastCalledWith('new row'));
+    view.component.write('\n');
+    await tick();
+    expect(onLastLine).toHaveBeenCalledTimes(2);
+    fixture.terminals[0].scrollback = '';
+    view.component.write('\n');
+    await waitFor(() => expect(onLastLine).toHaveBeenLastCalledWith(''));
+    view.component.write('late output');
+    view.unmount();
+    await tick();
+    expect(onLastLine).toHaveBeenCalledTimes(3);
+  });
+
   it.each(['focus', 'grid'] as const)('T15: %s Codex transcript keeps its terminal until the first record without remount or focus', async (mode) => {
     layout.setSessionViewMode(mode);
     const publishCodex = (withRecord: boolean) => fixture.setAgentEvents!({
@@ -158,7 +195,7 @@ describe('real Terminal component behind chat (renderer doubles)', () => {
   it.each(['focus', 'grid'] as const)('G9: %s twenty toggles keep xterm scrollback, instances and WebGL allocation count flat', async (mode) => {
     layout.setSessionViewMode(mode);
     const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
-    await waitFor(() => expect(fixture.terminals.filter((term) => term.buffer === 'fixture scrollback')).toHaveLength(2));
+    await waitFor(() => expect(fixture.terminals.filter((term) => term.scrollback === 'fixture scrollback')).toHaveLength(2));
     const original = [...fixture.terminals];
     const allocations = fixture.webglCreated;
     expect(allocations).toBeGreaterThan(0);
@@ -168,7 +205,7 @@ describe('real Terminal component behind chat (renderer doubles)', () => {
       await fireEvent.click(view.getByRole('button', { name: index % 2 === 0 ? 'Terminal' : 'Chat' }));
       await tick();
       expect(fixture.terminals).toEqual(original);
-      expect(original.every((term) => !term.disposed && term.buffer === 'fixture scrollback')).toBe(true);
+      expect(original.every((term) => !term.disposed && term.scrollback === 'fixture scrollback')).toBe(true);
       expect(fixture.webglCreated).toBe(allocations);
       expect(fixture.webglDisposed).toBe(0);
       expect(fixture.focuses).toBe(focuses);

@@ -13,73 +13,56 @@ export function paneFor(page, agent) {
   return page.locator('.terminal-panel:not(.hidden) .terminal-item').filter({ has: page.locator(`button[aria-label=${JSON.stringify(`Focus ${agent.label}`)}]`) });
 }
 export async function scrollColumn(pane) {
-  await pane.scrollIntoViewIfNeeded();
   await pane.evaluate(node => {
-    if (node.dataset.pinned === 'true') return;
-    const grid = node.closest('.terminal-grid');
-    const outer = grid.getBoundingClientRect();
-    const space = parseFloat(getComputedStyle(grid).getPropertyValue('--pin-space')) || 0;
-    const box = node.getBoundingClientRect();
-    if (box.left < outer.left + space) grid.scrollLeft -= outer.left + space - box.left;
-    const after = node.getBoundingClientRect();
-    if (after.right > outer.right) grid.scrollLeft += after.right - outer.right;
+    const viewport = node.closest('.worker-viewport');
+    const header = node.querySelector('.terminal-pane-focus');
+    if (!viewport || !header) return;
+    const outer = viewport.getBoundingClientRect();
+    const box = header.getBoundingClientRect();
+    if (box.top < outer.top) viewport.scrollTop -= outer.top - box.top;
+    else if (box.bottom > outer.bottom) viewport.scrollTop += box.bottom - outer.bottom;
   });
-  // Programmatic writes precede the browser's queued scroll/clip update.
-  // Matching clips and repeated animation-frame geometry signal completion.
-  await waitForPinLayout(pane.page());
 }
-export async function waitForPinLayout(page) {
-  await page.locator('.terminal-panel:not(.hidden) .terminal-grid').evaluate(grid => new Promise((resolve, reject) => {
-    const started = performance.now();
-    let previous, stable = 0;
-    const frame = () => {
-      const outer = grid.getBoundingClientRect();
-      const space = parseFloat(getComputedStyle(grid).getPropertyValue('--pin-space')) || 0;
-      const rows = [...grid.querySelectorAll(':scope > .terminal-item')].map(node => {
-        const box = node.getBoundingClientRect();
-        const pinned = node.dataset.pinned === 'true';
-        const clip = parseFloat(getComputedStyle(node).getPropertyValue('--wall-clip')) || 0;
-        const expected = pinned ? 0 : Math.min(box.width, Math.max(0, outer.left + space - box.left));
-        return { id: node.dataset.agentId, left: box.left, right: box.right, width: box.width, pinned, clip, expected };
-      });
-      const snapshot = JSON.stringify({ left: outer.left, width: outer.width, scroll: grid.scrollLeft, space, rows });
-      const ready = (!document.fonts || document.fonts.status === 'loaded') && rows.every(row => Math.abs(row.clip - row.expected) < 1 / 64);
-      stable = ready && snapshot === previous ? stable + 1 : 0;
-      previous = snapshot;
-      if (stable >= 2) return resolve();
-      if (performance.now() - started > 5000) return reject(new Error(`Wall scroll/clipping did not settle: ${snapshot}`));
-      requestAnimationFrame(frame);
+
+export async function stageGeometry(page, selectedId) {
+  return page.locator('.terminal-panel:not(.hidden) .terminal-grid').evaluate((stage, selectedId) => {
+    const queen = stage.querySelector('.queen-column');
+    const viewport = stage.querySelector('.worker-viewport');
+    const selected = [...stage.querySelectorAll('.terminal-item')].find(item => item.dataset.agentId === selectedId);
+    if (!queen || !viewport || !selected) return { missing: { queen: !queen, viewport: !viewport, selected: !selected } };
+
+    const stageBox = stage.getBoundingClientRect();
+    const queenBox = queen.getBoundingClientRect();
+    const workersBox = viewport.getBoundingClientRect();
+    const hit = item => {
+      const header = item.querySelector('.terminal-pane-focus');
+      if (!header) return false;
+      const box = header.getBoundingClientRect();
+      const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return !!top && (top === header || header.contains(top));
     };
-    requestAnimationFrame(frame);
-  }));
-}
-export async function pinGeometry(page, selectedId) {
-  return page.locator('.terminal-panel:not(.hidden) .terminal-grid').evaluate((grid, selectedId) => {
-    const outer = grid.getBoundingClientRect();
-    const rows = [...grid.querySelectorAll(':scope > .terminal-item')].map(node => {
-      const box = node.getBoundingClientRect(), css = getComputedStyle(node);
-      const control = node.querySelector('.terminal-pane-focus'), header = control.getBoundingClientRect();
-      const top = document.elementFromPoint(header.x + header.width / 2, header.y + header.height / 2);
-      const clip = parseFloat(css.getPropertyValue('--wall-clip')) || 0;
-      return { id: node.dataset.agentId, pinned: css.position === 'sticky', queen: node.classList.contains('queen-column'), attention: node.classList.contains('attention-column'),
-        clip, box: { left: box.left, right: box.right, width: box.width }, paint: { left: Math.max(outer.left, box.left + clip), right: Math.min(outer.right, box.right) },
-        hit: !!top && (top === control || control.contains(top)) };
-    });
-    const pins = rows.filter(row => row.pinned);
-    const overlaps = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1;
-    const padding = parseFloat(getComputedStyle(grid).paddingLeft) || 0;
-    let next = outer.left + grid.clientLeft + padding + 4;
-    const offsets = pins.every(pin => { const fits = Math.abs(pin.box.left - next) <= 1; next = pin.box.right + 12; return fits; });
-    const overlapPairs = [
-      ...pins.flatMap((pin, index) => pins.slice(index + 1).filter(other => overlaps(pin.box, other.box)).map(other => ({ first: pin.id, second: other.id, kind: 'pinned', firstRect: pin.box, secondRect: other.box }))),
-      ...rows.filter(row => !row.pinned && row.paint.right > row.paint.left).flatMap(row => pins.filter(pin => overlaps(row.paint, pin.box)).map(pin => ({ first: row.id, second: pin.id, kind: 'scrolling', firstRect: row.paint, secondRect: pin.box }))),
-    ];
-    const noOverlap = overlapPairs.length === 0;
-    const reserve = pins.length === 0 || outer.right - next >= 280 - 1;
-    const selected = rows.find(row => row.id === selectedId);
-    const unselected = pins.every(pin => pin.id !== selectedId);
-    return { offsets, noOverlap, reserve, unselected, hits: pins.every(pin => pin.hit) && selected?.hit === true,
-      queen: pins.some(pin => pin.queen), attention: pins.some(pin => pin.attention), width: outer.width, left: outer.left, padding, pins, selected, rows, overlapPairs };
+    const hits = hit(queen) && hit(selected);
+    const before = viewport.scrollTop;
+    const maxScroll = viewport.scrollHeight - viewport.clientHeight;
+    viewport.scrollTop = before > 0 ? 0 : maxScroll;
+    const scrollDelta = Math.abs(viewport.scrollTop - before);
+    const queenAfter = queen.getBoundingClientRect();
+    viewport.scrollTop = before;
+
+    const anchored = ['left', 'right', 'top', 'bottom'].every(key => Math.abs(queenBox[key] - queenAfter[key]) <= 1);
+    const queenOutside = !viewport.contains(queen) && viewport.contains(selected);
+    const queenInsideStage = queenBox.width > 0 && queenBox.height > 0
+      && queenBox.left >= stageBox.left - 1 && queenBox.top >= stageBox.top - 1
+      && queenBox.right <= workersBox.left + 1 && queenBox.bottom <= stageBox.bottom + 1;
+    const stageStyle = getComputedStyle(stage);
+    const viewportStyle = getComputedStyle(viewport);
+    const horizontalOverflow = [stage, viewport].some(node => node.scrollWidth > node.clientWidth + 1);
+    const scrollPolicy = stageStyle.overflowX === 'clip'
+      && viewportStyle.overflowX === 'hidden' && viewportStyle.overflowY === 'auto';
+    return {
+      anchored, queenOutside, queenInsideStage, hits, scrollDelta, maxScroll, scrollPolicy, horizontalOverflow,
+      passed: [anchored, queenOutside, queenInsideStage, hits, scrollDelta > 0, scrollPolicy, !horizontalOverflow].every(Boolean),
+    };
   }, selectedId);
 }
 export async function expandAgents(page, session) {
@@ -375,28 +358,32 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await prove('grid-eight-panes', roster, () => removeNode(panes.last()), context);
     await prove(`wall-roster-${viewport.width}`, roster, () => removeNode(panes.last()), context);
     const columnWidths = async () => {
-      const widths = await panes.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().width));
-      return { passed: widths.length === 8 && widths.slice(1).every(width => width >= manifest.opswall.minimumColumnWidth - 1) && widths.slice(1).every(width => widths[0] >= width * manifest.opswall.queenRatio - 1), details: { widths } };
+      const details = await panes.evaluateAll(nodes => {
+        const [queen, ...workers] = nodes;
+        const viewport = workers[0]?.closest('.worker-viewport');
+        if (!queen || !viewport) return { passed: false, widths: [] };
+        const widths = nodes.map(node => node.getBoundingClientRect().width);
+        return {
+          passed: widths.length === 8 && widths[0] >= viewport.clientWidth
+            && widths.slice(1).every(width => Math.abs(width - viewport.clientWidth) <= 1),
+          widths, workerWidth: viewport.clientWidth,
+        };
+      });
+      return { passed: details.passed, details };
     };
     await probe(`wall-width-${viewport.width}`, columnWidths, context);
     await prove(`wall-width-${viewport.width}`, columnWidths, () => styleChange(panes.first(), { transform: 'scaleX(0.2)', 'transform-origin': 'left' }), context);
     const far = session.agents.at(-1);
     await revealGridAgent(far);
-    const pinMeasure = async () => {
-      const details = await pinGeometry(page, far.id);
-      return { passed: details.offsets && details.noOverlap && details.reserve && details.unselected && details.hits && (viewport.width !== 1440 || (details.queen && details.attention)), details };
+    const stackMeasure = async () => {
+      const details = await stageGeometry(page, far.id);
+      return { passed: details.passed === true, details };
     };
-    await probe(`wall-pin-${viewport.width}`, pinMeasure, context);
-    await prove(`wall-pin-${viewport.width}`, pinMeasure, async () => {
-      const undo = [];
-      for (const pane of await panes.all()) undo.push(await styleChange(pane, { position: 'sticky', left: '4px' }));
-      return async () => { for (const restore of undo.reverse()) await restore(); };
-    }, context);
-    if (viewport.width === 1440) await prove('wall-pin-fixed', pinMeasure, async () => {
-      const undo = [];
-      for (const pane of await panes.filter({ has: page.locator('.attention-chip') }).all()) undo.push(await styleChange(pane, { left: '4px' }));
-      return async () => { for (const restore of undo.reverse()) await restore(); };
-    }, context);
+    await probe(`wall-pin-${viewport.width}`, stackMeasure, context);
+    const stageRoot = page.locator('.terminal-panel:not(.hidden) .terminal-grid');
+    await prove(`wall-pin-${viewport.width}`, stackMeasure, () => styleChange(stageRoot, { 'overflow-x': 'auto' }), context);
+    if (viewport.width === 1440) await prove('wall-pin-fixed', stackMeasure,
+      () => styleChange(panes.first(), { transform: 'translateY(2000px)' }), context);
     for (const [index, agent] of session.agents.entries()) {
       const pane = paneFor(page, agent);
       await scrollColumn(pane);
@@ -423,7 +410,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await farPane.getByRole('button', { name: `Maximize ${far.label}`, exact: true }).click();
     const maximized = async () => {
       const box = await farPane.boundingBox(), outer = await page.locator('.terminal-panel:not(.hidden) .terminal-grid').boundingBox();
-      const count = await panes.count(), hidden = await page.locator('.terminal-panel:not(.hidden) .terminal-grid > .terminal-item.hidden-by-maximize').count();
+      const count = await panes.count(), hidden = await page.locator('.terminal-panel:not(.hidden) .terminal-grid .terminal-item.hidden-by-maximize').count();
       const bar = await wallBarGeometry(page);
       const contained = !!box && !!outer && box.width > 0 && box.height > 0 && box.x >= Math.max(0, outer.x) - 1 && box.y >= Math.max(0, outer.y) - 1 && box.x + box.width <= Math.min(viewport.width, outer.x + outer.width) + 1 && box.y + box.height <= Math.min(viewport.height, outer.y + outer.height) + 1;
       return { passed: contained && count === 8 && hidden === 7 && bar.contained, details: { box, outer, count, hidden, bar, contained } };

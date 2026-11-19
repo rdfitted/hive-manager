@@ -13,6 +13,7 @@ const fixture = vi.hoisted(() => ({
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('phosphor-svelte', () => ({
+  Bell: () => {}, ChatCircle: () => {}, ListBullets: () => {}, SquareSplitVertical: () => {}, TerminalWindow: () => {}, Timer: () => {},
   ArrowDown: () => {}, ArrowUp: () => {}, Broom: () => {}, CaretDown: () => {}, CaretUp: () => {}, CheckSquare: () => {},
   ClipboardText: () => {}, FileText: () => {}, MagnifyingGlass: () => {}, X: () => {},
   ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {}, Hourglass: () => {}, Plus: () => {},
@@ -98,53 +99,34 @@ const session: Session = {
 };
 
 describe('attention across pane modes (real Terminal, renderer doubles)', () => {
-  it('G59 synchronous scroll clipping clears stale clips on maximize before any scroll event', async () => {
+  it('G59 scroll: restore returns to the worker stack position with the same terminal instances', async () => {
     layout.setSessionViewMode('grid');
-    const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-      if (this.classList.contains('terminal-grid')) return DOMRect.fromRect({ x: 100, width: 800, height: 500 });
-      if (this.classList.contains('terminal-item')) {
-        const index = ['claude', 'codex', 'tail'].indexOf(this.dataset.agentId!);
-        const grid = this.closest<HTMLElement>('.terminal-grid')!;
-        const left = this.dataset.pinned === 'true' ? 104 + parseFloat(this.style.getPropertyValue('--pin-left')) : 108 + [0, 432, 724][index] - grid.scrollLeft;
-        return DOMRect.fromRect({ x: left, width: index === 0 ? 420 : 280, height: 500 });
-      }
-      return DOMRect.fromRect({ width: 80, height: 40 });
-    });
-    const widthSpy = vi.spyOn(Element.prototype, 'clientWidth', 'get').mockImplementation(function (this: Element) { return this.classList.contains('terminal-grid') ? 800 : 80; });
-    try {
-      const roster: Session = { ...session, agents: [...session.agents, { ...session.agents[1], id: 'tail' }].map((agent, index) => ({ ...agent, role: index === 0 ? 'Queen' : { Worker: { index, parent: null } } })) };
-      const view = render(TerminalGrid, { session: roster, focusedAgentId: 'claude', onSelect: vi.fn() });
-      const wall = view.container.querySelector<HTMLElement>('.terminal-grid')!;
-      await waitFor(() => expect(Number.parseFloat(wall.style.getPropertyValue('--pin-space'))).toBeGreaterThan(0));
-      wall.scrollLeft = 212;
-      await fireEvent.scroll(wall);
-      let scrollEvents = 0;
-      wall.addEventListener('scroll', () => scrollEvents++);
-      const middle = view.container.querySelector<HTMLElement>('[data-agent-id="codex"]')!;
-      expect(Number.parseFloat(middle.style.getPropertyValue('--wall-clip'))).toBeGreaterThan(0);
-      view.getByRole('button', { name: 'Maximize Claude agent' }).click();
-      expect(wall.scrollLeft).toBe(0);
-      expect(scrollEvents).toBe(0);
-      expect(Number.parseFloat(middle.style.getPropertyValue('--wall-clip'))).toBe(0);
-      await tick();
-    } finally { rectSpy.mockRestore(); widthSpy.mockRestore(); }
-  });
-  it('G59 scroll: maximize and Focus clear horizontal offset, restore retains the wall position and terminal instances', async () => {
-    layout.setSessionViewMode('grid');
-    const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
+    const roster = { ...session, agents: [session.agents[0], { ...session.agents[1], role: { Worker: { index: 1, parent: null } } }] };
+    const view = render(TerminalGrid, { session: roster, focusedAgentId: 'claude', onSelect: vi.fn() });
     await waitFor(() => expect(fixture.terminals).toHaveLength(2));
     const original = [...fixture.terminals];
-    const wall = view.container.querySelector<HTMLElement>('.terminal-grid')!;
-    wall.scrollLeft = 500;
+    const workers = view.container.querySelector<HTMLElement>('.worker-viewport')!;
+    workers.scrollTop = 125;
+
     await fireEvent.click(view.getByRole('button', { name: 'Maximize Claude agent' }));
-    expect(wall.scrollLeft).toBe(0);
+    expect(workers.hidden).toBe(true);
+    workers.scrollTop = 0;
     await fireEvent.click(view.getByRole('button', { name: 'Restore Claude agent' }));
-    await tick(); expect(wall.scrollLeft).toBe(500);
-    layout.setSessionViewMode('focus'); await tick();
-    expect(wall.scrollLeft).toBe(0);
+    await tick();
+    expect(workers.hidden).toBe(false);
+    expect(workers.scrollTop).toBe(125);
+
+    layout.setSessionViewMode('focus');
+    await tick();
+    expect(workers.hidden).toBe(true);
+    workers.scrollTop = 0;
+    layout.setSessionViewMode('grid');
+    await tick();
+    expect(workers.scrollTop).toBe(125);
     expect(fixture.terminals).toEqual(original);
     expect(fixture.terminalsDisposed).toBe(0);
   });
+
   it('CR-5 replacement: stable editors, per-agent drafts across both view cycles, exact routing and unchanged terminals', async () => {
     layout.setSessionViewMode('grid');
     const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
@@ -252,20 +234,21 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
   it('focuses and scrolls on each new reveal nonce, even for the same agent', async () => {
     layout.setSessionViewMode('grid');
     const onSelect = vi.fn();
-    const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect });
-    const pane = view.container.querySelector<HTMLElement>('[data-agent-id="codex"]')!;
+    const roster = { ...session, agents: [session.agents[0], { ...session.agents[1], role: { Worker: { index: 1, parent: null } } }] };
+    const view = render(TerminalGrid, { session: roster, focusedAgentId: 'claude', onSelect });
+    const header = view.getByRole('button', { name: 'Focus Codex PTY' });
     const scrollIntoView = vi.fn();
-    pane.scrollIntoView = scrollIntoView;
+    header.scrollIntoView = scrollIntoView;
 
     await view.rerender({ revealRequest: { agentId: 'codex', nonce: 1 } });
     expect(onSelect.mock.calls).toEqual([['codex']]);
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }));
 
     await view.rerender({ revealRequest: { agentId: 'claude', nonce: 1 } });
     expect(onSelect).toHaveBeenCalledTimes(1);
     await view.rerender({ revealRequest: { agentId: 'codex', nonce: 2 } });
     expect(onSelect.mock.calls).toEqual([['codex'], ['codex']]);
-    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));
   });
 
   it('publishes attention and stale seats when they change', async () => {
@@ -284,13 +267,16 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     expect(onSeats).toHaveBeenLastCalledWith({ attention: new Set(), stale: new Set() });
   });
 
-  it('G59 quiet seats dim in place with no terminal disposal or finished attention', async () => {
+  it('G59 quiet workers collapse in place with no terminal disposal or finished attention', async () => {
     layout.setSessionViewMode('grid');
-    const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
+    const roster = { ...session, agents: [session.agents[0], { ...session.agents[1], role: { Worker: { index: 1, parent: null } } }] };
+    const view = render(TerminalGrid, { session: roster, focusedAgentId: 'claude', onSelect: vi.fn() });
     await waitFor(() => expect(fixture.terminals).toHaveLength(2));
     const original = [...fixture.terminals];
-    await view.rerender({ session: { ...session, agents: session.agents.map(agent => ({ ...agent, status: agent.id === 'claude' ? 'Completed' as const : 'Running' as const, work_state: agent.id === 'codex' ? 'idle' : undefined })) } });
+    await view.rerender({ session: { ...roster, agents: roster.agents.map(agent => ({ ...agent, status: agent.id === 'claude' ? 'Completed' as const : 'Running' as const, work_state: agent.id === 'codex' ? 'idle' : undefined })) } });
     expect(view.container.querySelectorAll('.quiet-column')).toHaveLength(2);
+    expect(view.container.querySelector('.worker-viewport .collapsed')?.getAttribute('data-agent-id')).toBe('codex');
+    expect(view.container.querySelector('.queen-column.collapsed')).toBeNull();
     expect(view.container.querySelectorAll('.terminal-item')).toHaveLength(2);
     expect(view.queryByRole('region', { name: 'Agent needs attention' })).toBeNull();
     expect(fixture.terminals).toEqual(original);

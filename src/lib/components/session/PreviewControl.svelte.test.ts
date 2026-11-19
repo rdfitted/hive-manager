@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import type { Session } from '$lib/stores/sessions';
-import SessionHeader from './SessionHeader.svelte';
+import PreviewControl from './PreviewControl.svelte';
 
 /**
  * Regression cover for the dockable-preview header (issue #157).
@@ -37,20 +37,16 @@ vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
 
 // `activeSession` is a derived store (src/lib/stores/sessions.ts:769-770), so it
 // cannot be set directly — the component only renders its body when it is
-// truthy. Swap it for a writable holding a minimal fake session and re-export
-// the real `serdeEnumVariantName`, which the header uses for its badges.
+// truthy. Swap it for a writable holding a minimal fake session.
 const storeMocks = vi.hoisted(() => ({
   setActiveSession: undefined as ((session: Session | null) => void) | undefined,
 }));
 
 vi.mock('$lib/stores/sessions', async () => {
-  const actual = await vi.importActual<typeof import('$lib/stores/sessions')>(
-    '$lib/stores/sessions',
-  );
   const { writable } = await import('svelte/store');
   const activeSession = writable<Session | null>(null);
   storeMocks.setActiveSession = activeSession.set;
-  return { activeSession, serdeEnumVariantName: actual.serdeEnumVariantName, sessionDisplayName: actual.sessionDisplayName };
+  return { activeSession };
 });
 
 function fakeSession(id: string): Session {
@@ -85,7 +81,7 @@ const CLOSED_STATUS = { open: false, docked: false, url: null, session_url: null
 
 /** Renders the header with `session` active and the preview form expanded. */
 async function renderExpanded(session: Session) {
-  const view = render(SessionHeader);
+  const view = render(PreviewControl);
   storeMocks.setActiveSession?.(session);
 
   const toggle = await waitFor(() => {
@@ -112,7 +108,7 @@ afterEach(() => {
   storeMocks.setActiveSession?.(null);
 });
 
-describe('SessionHeader preview URL input', () => {
+describe('PreviewControl preview URL input', () => {
   it('uses type="text" so scheme-less input survives native constraint validation', async () => {
     tauriMocks.invoke.mockResolvedValue(CLOSED_STATUS);
 
@@ -168,7 +164,7 @@ describe('SessionHeader preview URL input', () => {
   });
 });
 
-describe('SessionHeader preview action freshness', () => {
+describe('PreviewControl preview action freshness', () => {
   it('drops a dock/close status that resolves after the session changed', async () => {
     const staleDock = deferred<unknown>();
 
@@ -184,8 +180,14 @@ describe('SessionHeader preview action freshness', () => {
       return Promise.resolve(CLOSED_STATUS);
     });
 
-    const { container } = render(SessionHeader);
+    const { container } = render(PreviewControl);
     storeMocks.setActiveSession?.(fakeSession('session-a'));
+    const toggle = await waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>('.preview-toggle');
+      if (!button) throw new Error('preview toggle never rendered');
+      return button;
+    });
+    await fireEvent.click(toggle);
 
     const dockButton = await waitFor(() => {
       const buttons = container.querySelectorAll<HTMLButtonElement>('.preview-action');
@@ -201,7 +203,7 @@ describe('SessionHeader preview action freshness', () => {
     // ...while the operator switches to a session that has no remembered URL.
     storeMocks.setActiveSession?.(fakeSession('session-b'));
     await waitFor(() => {
-      expect(container.querySelector('.preview-toggle')).not.toBeNull();
+      expect(container.querySelector('.preview-toggle')?.getAttribute('aria-expanded')).toBe('false');
     });
 
     // The late response carries session-a's URL. It must not be applied.
@@ -247,8 +249,14 @@ describe('SessionHeader preview action freshness', () => {
       return Promise.resolve(CLOSED_STATUS);
     });
 
-    const { container } = render(SessionHeader);
+    const { container } = render(PreviewControl);
     storeMocks.setActiveSession?.(fakeSession('session-a'));
+    const toggle = await waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>('.preview-toggle');
+      if (!button) throw new Error('preview toggle never rendered');
+      return button;
+    });
+    await fireEvent.click(toggle);
 
     const dockButton = await waitFor(() => {
       const buttons = container.querySelectorAll<HTMLButtonElement>('.preview-action');
@@ -329,7 +337,7 @@ describe('SessionHeader preview action freshness', () => {
       return Promise.resolve(OPEN_STATUS);
     });
 
-    const { container } = render(SessionHeader);
+    const { container } = render(PreviewControl);
     storeMocks.setActiveSession?.(fakeSession('session-a'));
 
     const submitUrl = async (value: string) => {
@@ -382,11 +390,4 @@ describe('SessionHeader preview action freshness', () => {
     await flush();
     expect(dockButton()!.disabled).toBe(false);
   });
-});
-
-it('uses the project folder when an unnamed session has a UUID', async () => {
-  const session = { ...fakeSession('12345678-abcd-4000-8000-123456789abc'), name: '', project_path: 'C:\\Projects\\sample-project\\' };
-  const view = render(SessionHeader);
-  storeMocks.setActiveSession?.(session);
-  await waitFor(() => expect(view.getByRole('heading', { level: 1 }).textContent).toBe('sample-project'));
 });

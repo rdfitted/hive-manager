@@ -16,20 +16,21 @@ const fixture = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
-vi.mock('phosphor-svelte', () => ({
+vi.mock('phosphor-svelte', async (importOriginal) => ({
+  ...await importOriginal<typeof import('phosphor-svelte')>(),
   ArrowUp: () => {}, ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {},
   Hourglass: () => {}, Plus: () => {}, X: () => {}, Minus: () => {}, Square: () => {},
   SidebarSimple: () => {}, MagnifyingGlass: () => {},
 }));
-vi.mock('./SessionHeader.svelte', () => ({ default: () => {} }));
 
-vi.mock('$lib/stores/sessions', async () => {
+vi.mock('$lib/stores/sessions', async (importOriginal) => {
   const { writable, derived } = await import('svelte/store');
   const state = writable({ sessions: [] as Session[] });
   const activeSession = writable<Session | null>(null);
   fixture.setSessions = (sessions) => state.set({ sessions });
   fixture.setActive = activeSession.set;
   return {
+    ...await importOriginal<typeof import('$lib/stores/sessions')>(),
     sessions: { subscribe: state.subscribe }, activeSession,
     activeAgents: derived(activeSession, (session) => session?.agents ?? []),
     resumeBlockedReason: () => null,
@@ -140,6 +141,15 @@ describe('Focus/Grid session terminals', () => {
     }, histories: { [id]: { events, before: null, hasMore: false, loading: false, error: null } }, connected: true, error });
   }
 
+  it('shows one header above the active session stage', () => {
+    const shell = render(TitleBar);
+    const session = render(SessionOverview);
+    const banners = [...shell.queryAllByRole('banner'), ...within(session.container).queryAllByRole('banner')];
+    expect(new Set(banners).size).toBe(1);
+    expect(session.container.querySelector('.session-overview header')).toBeNull();
+    expect(session.container.querySelector('.terminal-section')).toBeTruthy();
+  });
+
   it.each(['focus', 'grid'] as const)('G9: twenty chat/terminal toggles retain terminal nodes and scrollback in %s', async (mode) => {
     layout.setSessionViewMode(mode);
     chatFeed();
@@ -175,7 +185,8 @@ describe('Focus/Grid session terminals', () => {
     await tick();
     const attention = within(pane).getByRole('region', { name: 'Agent needs attention' });
     if (mode === 'grid') {
-      const tile = view.getByRole('button', { name: 'Attention 1' });
+      const band = view.container.querySelector<HTMLElement>('.session-ops-band')!;
+      const tile = within(band).getByRole('button', { name: 'Attention 1' });
       await fireEvent.click(tile);
       expect(pane.classList.contains('resource-match')).toBe(true);
     }

@@ -1,22 +1,24 @@
 <script lang="ts">
+  import { GridFour, Rectangle } from 'phosphor-svelte';
   import { layout } from '$lib/stores/layout';
-  const modes = ['focus', 'grid'] as const;
+  import { IconButton } from '../ui';
+
+  const modes = [
+    { id: 'focus', label: 'Focus', icon: Rectangle },
+    { id: 'grid', label: 'Grid', icon: GridFour },
+  ] as const;
 </script>
 
-<div class="view-mode-switch lattice-track" role="group" aria-label="Terminal view">
-  {#each modes as mode}
-    <button
-      type="button"
-      class="lattice-tab"
-      aria-pressed={$layout.sessionViewMode === mode}
-      onclick={() => layout.setSessionViewMode(mode)}
-    >{mode === 'focus' ? 'Focus' : 'Grid'}</button>
+<div class="view-mode-switch" role="group" aria-label="Terminal view">
+  {#each modes as mode (mode.id)}
+    <IconButton size="sm" icon={mode.icon} label={mode.label} tooltip={`${mode.label} view`}
+      pressed={$layout.sessionViewMode === mode.id} onclick={() => layout.setSessionViewMode(mode.id)} />
   {/each}
 </div>
 
 <style>
   .view-mode-switch {
     display: flex;
-    gap: 2px;
+    gap: var(--space-1);
   }
 </style>

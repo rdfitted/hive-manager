@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Tooltip as BitsTooltip } from 'bits-ui';
   import type { Snippet } from 'svelte';
   import '../lib/styles/lattice-tokens.css';
   import '../lib/styles/lattice.css';
@@ -44,19 +45,21 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="app">
-  <TitleBar />
-  <div class="app-body">
-  <SessionSidebar
-    onLaunchHiveV2={handleLaunchHiveV2}
-    onLaunchFusion={handleLaunchFusion}
-    onLaunchDebate={handleLaunchDebate}
-    onOpenAddWorker={() => shell.openAddWorker()}
-    startAction={$shell.startAction}
-  />
-  {@render children?.()}
+<BitsTooltip.Provider>
+  <div class="app">
+    <TitleBar />
+    <div class="app-body">
+      <SessionSidebar
+        onLaunchHiveV2={handleLaunchHiveV2}
+        onLaunchFusion={handleLaunchFusion}
+        onLaunchDebate={handleLaunchDebate}
+        onOpenAddWorker={() => shell.openAddWorker()}
+        startAction={$shell.startAction}
+      />
+      {@render children?.()}
+    </div>
   </div>
-</div>
 
-<AddWorkerDialog bind:open={showAddWorkerDialog} on:close={() => shell.closeAddWorker()} />
-<CommandPalette />
+  <AddWorkerDialog bind:open={showAddWorkerDialog} on:close={() => shell.closeAddWorker()} />
+  <CommandPalette />
+</BitsTooltip.Provider>

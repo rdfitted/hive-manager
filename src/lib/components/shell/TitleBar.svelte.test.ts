@@ -1,21 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import { get } from 'svelte/store';
+import { get, type Writable } from 'svelte/store';
 // @ts-expect-error Node types are intentionally absent from the frontend tsconfig.
 import { readFileSync } from 'node:fs';
 
 const native = vi.hoisted(() => ({ minimize: vi.fn(), toggleMaximize: vi.fn(), close: vi.fn() }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: async () => undefined }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }));
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => native }));
-vi.mock('$lib/stores/sessions', async () => {
+vi.mock('$lib/stores/sessions', async (importOriginal) => {
   const { writable } = await import('svelte/store');
-  return { activeSession: writable({
+  return { ...await importOriginal<typeof import('$lib/stores/sessions')>(), activeSession: writable({
     id: 'session-a', project_path: 'C:/projects/example', agents: [
       { id: 'queen', config: { label: 'Queen' } },
     ],
   }) };
 });
 
+import { activeSession, type Session } from '$lib/stores/sessions';
 import TitleBar from './TitleBar.svelte';
 import TitleBarDialog from './TitleBarDialog.test.svelte';
 import { layout } from '$lib/stores/layout';
@@ -50,6 +53,22 @@ describe('TitleBar', () => {
     for (const button of view.container.querySelectorAll('button')) expect(button.tabIndex).toBe(0);
   });
 
+  it('uses the project folder when an unnamed session has a UUID', () => {
+    const active = activeSession as Writable<Session | null>;
+    const original = get(active);
+    active.set({ ...original!, id: '12345678-abcd-4000-8000-123456789abc', name: '',
+      project_path: 'C:\\Projects\\sample-project\\', worktree_branch: 'feature/example', state: 'Running' });
+    try {
+      const view = render(TitleBar);
+      expect(view.getByText('sample-project').title).toContain('12345678-abcd-4000-8000-123456789abc');
+      expect(view.getByText('feature/example')).toBeTruthy();
+      expect(view.getByRole('img', { name: 'Session state: Running' })).toBeTruthy();
+      expect(view.getByRole('button', { name: 'Preview' })).toBeTruthy();
+    } finally {
+      active.set(original);
+    }
+  });
+
   it('keeps drag targets on passive surfaces and off every interactive descendant', () => {
     const view = render(TitleBar);
     const bar = view.getByRole('banner');
@@ -63,7 +82,7 @@ describe('TitleBar', () => {
     }
     const source = readFileSync('src/lib/components/shell/TitleBar.svelte', 'utf8');
     expect(source).toMatch(/\.shell-actions\s*\{[^}]*pointer-events:\s*none/s);
-    expect(source).toMatch(/\.window-control :global\(svg\)\s*\{\s*pointer-events:\s*none/s);
+    expect(source).toMatch(/:global\(\.window-control svg\)\s*\{\s*pointer-events:\s*none/s);
   });
 
   it('keeps native chrome live above the Bits overlay while application controls are inert', async () => {

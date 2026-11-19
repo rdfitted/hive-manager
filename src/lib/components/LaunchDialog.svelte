@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { Dialog } from '$lib/components/ui';
+  import { Dialog, HiveMark } from '$lib/components/ui';
   import LaunchAdvanced from './launch/LaunchAdvanced.svelte';
   import { automaticAdversarialLaneCount } from './hiveLaunch';
   import { predefinedRoles, normalizeTierLadderPreview, type SessionMode, type WorkGraphParameterRow, type TierLadderPreviewCell, type TierLadderOmission } from './launch/launchForm';
   import './launch/launchForm.css';
-  import { createEventDispatcher, tick } from 'svelte';
+  import { createEventDispatcher } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import {
     fetchCliHealth,
@@ -36,22 +36,18 @@
   export let defaultProjectPath: string = '';
 
   let handledModeRequestId: number | undefined;
+  let composer: { focusTask(): void } | undefined;
   $: if (show && modeRequestId !== undefined && modeRequestId !== handledModeRequestId) {
     handledModeRequestId = modeRequestId;
     if (initialMode !== undefined) mode = initialMode;
     showAdvanced = false;
   }
   $: if (!projectPath && defaultProjectPath) projectPath = defaultProjectPath;
-  $: if (show && presentation === 'inline' && !showAdvanced) {
+  $: if (show && presentation === 'inline' && !showAdvanced && composer) {
     // Repeated requests focus the existing textarea, even when show stays true.
     modeRequestId;
-    void tick().then(() => {
-      if (show && presentation === 'inline' && !showAdvanced) {
-        document.getElementById('launch-task')?.focus();
-      }
-    });
+    composer.focusTask();
   }
-
   const dispatch = createEventDispatcher<{
     close: void;
     launchHive: HiveLaunchConfig;
@@ -716,7 +712,10 @@
 {#snippet content()}
   <div data-launch-owned class="launch-content">
     {#if presentation === 'inline'}
-      <p data-launch-owned id="launch-dialog-title" class="launch-title">Hive Manager</p>
+      <div data-launch-owned class="launch-lockup">
+        <span data-launch-owned aria-hidden="true"><HiveMark title="Hive" size={58} /></span>
+        <h1 data-launch-owned id="launch-dialog-title" class="launch-title">Hive Manager</h1>
+      </div>
     {:else}
       <h2 data-launch-owned id="launch-dialog-title">Launch New Session</h2>
     {/if}
@@ -751,6 +750,7 @@
 />
     {:else}
         <LaunchComposer
+          bind:this={composer} landing={presentation === 'inline'}
           {codexAppServer} {claudeStreamJson}
           oncodextransport={(enabled) => { codexAppServer = enabled; }}
           onclaudetransport={(enabled) => { claudeStreamJson = enabled; }}
@@ -781,7 +781,6 @@
           onsmoke={handleSmokeTest}
           oncancel={presentation === 'inline' ? undefined : handleClose}
         />
-
     {/if}
   </div>
 {/snippet}

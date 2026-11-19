@@ -1,6 +1,9 @@
 <script lang="ts">
   import type { SessionTemplate } from '$lib/types/domain';
+  import { FolderSimple, SlidersHorizontal } from 'phosphor-svelte';
+  import { IconButton } from '$lib/components/ui';
 
+  export let landing = false;
   export let mode = 'hive';
   export let codexAppServer = false;
   export let claudeStreamJson = false;
@@ -33,11 +36,23 @@
   export let onsmoke: () => void = () => {};
 
   let editor: HTMLTextAreaElement;
+  const modes = [
+    { value: 'hive', label: 'Hive' },
+    { value: 'fusion', label: 'Fusion' },
+    { value: 'solo', label: 'Solo' },
+    { value: 'research', label: 'Research' },
+    { value: 'debate', label: 'Debate' },
+    { value: 'templates', label: 'Templates' },
+  ];
+
+  export function focusTask() {
+    if (!launching) editor?.focus();
+  }
 
   function focusCard(event: PointerEvent) {
     if (!launching && event.target === event.currentTarget) {
       event.preventDefault();
-      editor.focus();
+      focusTask();
     }
   }
 
@@ -51,7 +66,7 @@
   }
 </script>
 
-<form class="launch-composer" on:submit|preventDefault={onlaunch}>
+<form class="launch-composer" class:landing on:submit|preventDefault={onlaunch}>
   <label class="task-label" for="launch-task">What would you like to work on?</label>
   <div class="composer-input lattice-forced-colors-boundary" role="group" aria-label="Launch composer" on:pointerdown={focusCard}>
     <textarea
@@ -68,15 +83,22 @@
     ></textarea>
 
     <div class="launch-chips">
-      <label class="launch-chip">
+      {#if landing}
+        <fieldset class="mode-pills" aria-label="Launch mode" disabled={launching}>
+          {#each modes as choice (choice.value)}
+            <label class="mode-pill">
+              <input type="radio" name="launch-mode" value={choice.value} checked={mode === choice.value} on:change={() => onmode(choice.value)} />
+              <span class="lattice-forced-colors-boundary">{choice.label}</span>
+            </label>
+          {/each}
+        </fieldset>
+      {/if}
+      <label class="launch-chip" class:compact-mode={landing}>
         <span>Mode</span>
         <select class="lattice-input" value={mode} on:change={(event) => onmode(event.currentTarget.value)} disabled={launching}>
-          <option value="hive">Hive</option>
-          <option value="fusion">Fusion</option>
-          <option value="solo">Solo</option>
-          <option value="research">Research</option>
-          <option value="debate">Debate</option>
-          <option value="templates">Templates</option>
+          {#each modes as choice (choice.value)}
+            <option value={choice.value}>{choice.label}</option>
+          {/each}
         </select>
       </label>
       <label class="launch-chip">
@@ -96,13 +118,15 @@
           {/each}
         </select>
       </label>
-      <div class="launch-chip project-chip">
-        <span id="launch-project-label">Project</span>
-        <button type="button" class="lattice-btn lattice-btn--secondary" on:click={onbrowse} disabled={launching} aria-labelledby="launch-project-label launch-project-value" title={projectPath || 'Select a project folder'}>
-          <span id="launch-project-value">{projectPath || 'Choose folder…'}</span>
-        </button>
-      </div>
-      {#if mode === 'hive' || mode === 'solo'}
+      {#if !landing}
+        <div class="launch-chip project-chip">
+          <span id="launch-project-label">Project</span>
+          <button type="button" class="lattice-btn lattice-btn--secondary" on:click={onbrowse} disabled={launching} aria-labelledby="launch-project-label launch-project-value" title={projectPath || 'Select a project folder'}>
+            <span id="launch-project-value">{projectPath || 'Choose folder…'}</span>
+          </button>
+        </div>
+      {/if}
+      {#if !landing && (mode === 'hive' || mode === 'solo')}
         <label class="launch-chip">
           <span>Codex transport</span>
           <select class="lattice-input" value={codexAppServer ? 'protocol' : 'pty'} on:change={(event) => oncodextransport(event.currentTarget.value === 'protocol')} disabled={launching}>
@@ -131,7 +155,26 @@
     {#if error}<div class="error-message lattice-forced-colors-boundary" role="alert">{error}</div>{/if}
 
     <div class="composer-actions">
-      <button type="button" class="lattice-btn lattice-btn--ghost" on:click={onadvanced} disabled={launching}>Advanced</button>
+      {#if landing}
+        <IconButton
+          type="button"
+          icon={FolderSimple}
+          label={projectPath ? `Project ${projectPath}` : 'Project'}
+          tooltip={projectPath || 'Select a project folder'}
+          onclick={onbrowse}
+          disabled={launching}
+        />
+        <IconButton
+          type="button"
+          icon={SlidersHorizontal}
+          label="Advanced"
+          tooltip="Advanced launch settings"
+          onclick={onadvanced}
+          disabled={launching}
+        />
+      {:else}
+        <button type="button" class="lattice-btn lattice-btn--ghost" on:click={onadvanced} disabled={launching}>Advanced</button>
+      {/if}
       <span class="hint" id="launch-submit-hint">Ctrl/Cmd+Enter to launch · Enter for a new line</span>
       {#if showSmoke}<button type="button" class="lattice-btn lattice-btn--secondary" on:click={onsmoke} disabled={launching || !projectPath.trim() || mode === 'templates'}>Smoke Test</button>{/if}
       {#if oncancel}<button type="button" class="lattice-btn lattice-btn--secondary" on:click={oncancel} disabled={launching}>Cancel</button>{/if}
@@ -142,9 +185,11 @@
 
 <style>
   .launch-composer { display: flex; flex-direction: column; gap: var(--space-4); }
+  .landing { container: launch-composer / inline-size; }
   .task-label { color: var(--text-primary); font-size: var(--text-base); }
   .composer-input { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; padding: var(--space-3); border: 1px solid var(--border-control); border-radius: var(--radius-shell); background: var(--input); }
   .composer-input:focus-within { border-color: var(--accent); }
+  .landing .composer-input { background: var(--glass-strong); }
   textarea { display: block; box-sizing: border-box; width: 100%; min-height: 12rem; resize: vertical; line-height: 1.6; padding: 0; border: 0; border-radius: 0; background: transparent; }
   textarea:focus { border: 0; outline: none; box-shadow: none; }
   textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -152,15 +197,36 @@
   .composer-send:hover:enabled { background: var(--accent); }
   .launch-chips { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; min-width: 0; }
   .launch-chip { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
-  .launch-chip > span { font-size: var(--text-small); color: var(--text-muted); }
+  .launch-chip > span { font-size: var(--text-small); color: var(--ink-muted); }
   .launch-chip select { width: 100%; }
+  .compact-mode { display: none; }
+  .mode-pills { display: flex; flex: 1 0 100%; flex-wrap: wrap; gap: var(--space-2); min-width: 0; margin: 0; padding: 0; border: 0; }
+  .mode-pill { position: relative; }
+  .mode-pill input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .mode-pill span {
+    display: flex;
+    align-items: center;
+    min-height: var(--control-height);
+    padding-inline: var(--space-3);
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-full);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  .mode-pill input:checked + span { background: var(--accent-bg); color: var(--accent); border-color: var(--accent); }
+  .mode-pill input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .mode-pill input:disabled + span { opacity: .55; cursor: default; }
+  @container launch-composer (max-width: 26rem) {
+    .mode-pills { display: none; }
+    .compact-mode { display: flex; }
+  }
   .preset-chip, .project-chip { flex: 1 1 12rem; }
   .project-chip button { max-width: 100%; text-transform: none; }
   .qa-chip { max-width: 100%; white-space: normal; text-align: left; text-transform: none; }
   #launch-project-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
   .composer-actions .hint { flex: 1 1 10rem; }
-  .hint { margin: 0; color: var(--text-muted); font-size: var(--text-small); }
+  .hint { margin: 0; color: var(--ink-muted); font-size: var(--text-small); }
   .error-message { color: var(--status-error); }
   @media (forced-colors: active) {
     .composer-input { border-color: CanvasText; }
@@ -168,5 +234,9 @@
     textarea:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
     .composer-send { border-color: ButtonText; background: ButtonFace; color: ButtonText; }
     .composer-send:disabled { color: GrayText; opacity: 1; }
+    .mode-pill span.lattice-forced-colors-boundary { border-color: ButtonText !important; }
+    .mode-pill input:checked + span.lattice-forced-colors-boundary { border-color: Highlight !important; color: Highlight; }
+    .mode-pill input:focus-visible + span { outline-color: Highlight; }
+    .mode-pill input:disabled + span.lattice-forced-colors-boundary { border-color: GrayText !important; color: GrayText; opacity: 1; }
   }
 </style>

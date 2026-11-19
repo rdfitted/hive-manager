@@ -36,7 +36,7 @@ describe('terminal frame styles', () => {
     expect(card).toMatch(/align-self:\s*start\s*;/);
     expect(card).toMatch(/min-height:\s*0\s*;/);
     expect(card).toMatch(/max-height:\s*min\(7rem,\s*35%\)\s*;/);
-    expect(card).toMatch(/overflow:\s*auto\s*;/);
+    expect(card).toMatch(/overflow:\s*hidden\s+auto\s*;/);
     expect(styles).toMatch(/\.terminal-layer,\s*\.chat-layer\s*\{\s*grid-area:\s*1\s*\/\s*1/);
     expect(styles).toMatch(/\.terminal-container\s*\{[^{}]*grid-template:\s*minmax\(0,\s*1fr\)\s*\/\s*minmax\(0,\s*1fr\)/);
   });
@@ -44,7 +44,7 @@ describe('terminal frame styles', () => {
     const shared = readFileSync('src/lib/styles/globals/surfaces.css', 'utf8');
     const grid = readFileSync('src/lib/components/TerminalGrid.svelte', 'utf8').split('<style>')[1].split('</style>')[0];
     const panelRule = shared.match(/\.lattice-panel\s*\{([^{}]*)\}/)?.[1] ?? '';
-    const frameRule = grid.match(/\.terminal-item\s*\{([^{}]*)\}/)?.[1] ?? '';
+    const frameRule = grid.match(/(?:^|\n)\s*\.terminal-item\s*\{([^{}]*)\}/)?.[1] ?? '';
     const tokenSource = readFileSync('src/lib/styles/lattice-tokens.css', 'utf8');
     const space = tokenSource.match(/--space-4:\s*([^;]+);/)?.[1].trim();
     expect(space).toBe('16px');
