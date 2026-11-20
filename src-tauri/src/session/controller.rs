@@ -12131,7 +12131,16 @@ The backend composed and persisted the following authoritative skeleton before l
                 config.qa_workers.as_deref(),
                 &project_path,
                 &planner_seat.cli,
-                config.evaluator_config.as_ref().map(|config| config.cli.as_str()),
+                // The evaluator inherits the session default, which is the
+                // Queen's CLI, so its fallback must not follow the planner.
+                Some(
+                    config
+                        .evaluator_config
+                        .as_ref()
+                        .map(|config| config.cli.as_str())
+                        .filter(|cli| !cli.trim().is_empty())
+                        .unwrap_or(config.queen_config.cli.as_str()),
+                ),
             )
         } else {
             let prompt = config.prompt.as_deref().unwrap_or("");
