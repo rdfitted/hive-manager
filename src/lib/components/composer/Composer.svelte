@@ -469,38 +469,35 @@
     min-width: 0;
     border: 1px solid var(--border-control);
     border-radius: var(--radius-shell);
-    background: var(--input);
-    padding: var(--space-2);
+    background: var(--wash);
+    padding: 10px 10px 8px 12px;
+    transition: border-color var(--motion-ui);
   }
 
   .composer-wrap:focus-within {
     border-color: var(--accent);
   }
 
-  .composer-wrap.has-toolbar {
-    padding: var(--space-3);
-  }
-
   .composer-toolbar {
-    padding-top: var(--space-3);
+    padding-top: 6px;
   }
 
   .composer {
     width: 100%;
-    min-height: 34px;
+    min-height: 22px;
     max-height: 160px;
     overflow-y: auto;
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
     font-family: var(--font-body);
-    font-size: var(--text-small);
-    color: var(--text-primary);
+    font-size: 13.5px;
+    color: var(--ink);
     outline: none;
   }
 
   .has-toolbar .composer {
-    min-height: 64px;
+    min-height: 22px;
   }
 
   .composer :global(.composer-token) {
@@ -509,26 +506,19 @@
     max-width: 100%;
     margin: 0 2px;
     padding: 1px 6px;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, var(--border-structural));
-    border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-radius: 6px;
+    background: var(--accent-bg);
     color: var(--accent);
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 11.5px;
     line-height: 1.35;
     vertical-align: baseline;
     white-space: nowrap;
   }
 
-  .composer :global(.composer-token.command) {
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, var(--border-structural));
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--accent);
-  }
-
   .composer:empty::before {
     content: attr(data-placeholder);
-    color: var(--text-muted);
+    color: var(--ink-dim);
     pointer-events: none;
   }
 

@@ -145,6 +145,12 @@ try {
     performance.setResourceTimingBufferSize(size);
     performance.addEventListener('resourcetimingbufferfull', () => console.error('render:check resource timing buffer full'));
   }, report.resourceTimingBufferSize);
+  // The session rail is the resting state since 0.73.1. These checks drive the
+  // full session list, so open the drawer through the shipped title-bar control.
+  const sidebarToggle = page.locator('#title-bar-sidebar-toggle');
+  await sidebarToggle.waitFor({ state: 'visible' });
+  if (await sidebarToggle.getAttribute('aria-expanded') === 'false') await sidebarToggle.click();
+  await page.locator('.session-button').filter({ hasText: manifest.sessions[0].name }).first().waitFor({ state: 'visible' });
   await page.waitForFunction(name => document.body.innerText.includes(name), manifest.sessions[0].name);
   assertion('custom-protocol-origin', new URL(page.url()).hostname === 'tauri.localhost', page.url());
   const marker = await page.evaluate(() => window.__HIVE_INSTANCE__);

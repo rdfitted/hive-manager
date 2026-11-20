@@ -52,6 +52,19 @@ describe('IconButton', () => {
   });
 });
 
+describe('IconButton glyphs', () => {
+  it('draws a named glyph from the local line set, sized with the button', () => {
+    render(IconButton, { label: 'Open full pane', tooltip: 'Open full pane', icon: 'open', size: 'xs' });
+    const button = screen.getByRole('button', { name: 'Open full pane' });
+    expect(button.dataset.size).toBe('xs');
+    const glyph = button.querySelector('[aria-hidden="true"] svg.glyph')!;
+    expect(glyph.getAttribute('data-glyph')).toBe('open');
+    expect(glyph.getAttribute('width')).toBe('14');
+    expect(glyph.getAttribute('aria-hidden')).toBe('true');
+    expect(glyph.querySelector('path')?.getAttribute('d')).toBeTruthy();
+  });
+});
+
 describe('Tooltip', () => {
   it.each([false, true])('provides one focus tooltip (shared provider: %s)', async (provider) => {
     render(TooltipTestHarness, { provider });

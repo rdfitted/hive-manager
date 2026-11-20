@@ -687,7 +687,6 @@
     flex-direction: column;
     flex-shrink: 0;
     min-width: 0;
-    background: var(--chrome);
     z-index: 20;
   }
 
@@ -706,8 +705,19 @@
     flex-direction: column;
     overflow: hidden;
     flex: 1;
-    background: var(--chrome);
-    box-shadow: var(--depth-1);
+    margin: var(--space-1) 0 var(--space-5) var(--space-3);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-glass);
+    box-shadow: 0 10px 30px rgb(0 0 0 / .35);
+  }
+
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .sidebar-drawer {
+      background: var(--glass);
+      -webkit-backdrop-filter: var(--glass-blur);
+      backdrop-filter: var(--glass-blur);
+    }
   }
 
   .sidebar-drawer.collapsed {
@@ -962,7 +972,7 @@
   }
 
   @media (forced-colors: active) {
-    .sidebar-drawer { border-right: 1px solid CanvasText; box-shadow: none; }
+    .sidebar-drawer { border-color: CanvasText; background: Canvas; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
     .session-color { background: CanvasText !important; border-color: CanvasText; }
     .destination[aria-current="page"] { outline: 1px solid Highlight; }
   }

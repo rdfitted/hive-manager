@@ -482,7 +482,8 @@
   // Handle resize. Guard: skip fit if terminal is hidden (visibility: hidden returns
   // 0x0 dimensions, corrupting xterm's scroll state) unless force-fitting.
   function handleResize(forceFit = false) {
-    if (fitAddon && term) {
+    // A queued resize can outlive the pane: the container binding is null after unmount.
+    if (fitAddon && term && terminalContainer) {
       if (!forceFit) {
         if (!isVisible) return;
         const rect = terminalContainer.getBoundingClientRect();

@@ -176,22 +176,35 @@
 <style>
   .chat-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; color: var(--chat-text); background: var(--chat-well); font-size: 13.5px; line-height: 1.55; }
   .chat-pane :global(.markdown-blocks) { color: var(--chat-text); line-height: 1.55; }
+  .chat-pane :global(.markdown-blocks > :last-child) { margin-bottom: 0; }
   .chat-pane :global(.markdown-blocks .language), .chat-pane :global(.markdown-blocks blockquote) { color: var(--chat-text-meta); }
-  .history-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2); font-size: var(--text-small); color: var(--chat-text-meta); }
-  .transcript { flex: 1; min-height: 0; overflow: auto; padding: var(--space-3); overflow-wrap: anywhere; }
-  .message { min-width: 0; padding: var(--space-2) 0 var(--space-4); }
-  .user-message { margin: var(--space-2) 0 var(--space-4) auto; width: fit-content; max-width: 85%; padding: var(--space-3); border-radius: var(--radius-shell); background: var(--surface-overlay); }
-  .message[data-sender='queen'] { margin-left: 0; max-width: 100%; border: 1px solid var(--fitted-orchid); border-radius: var(--radius-sm); background: rgba(193,66,196,.10); }
-  .sender-label { display: block; color: var(--chat-text-meta); font-size: var(--text-small); font-weight: 600; margin-bottom: var(--space-1); }
-  .message[data-sender='operator'] { border: 1px solid var(--border-control); background: var(--chat-well); }
-  .message[aria-label='Approval decision'], .message[aria-label='Agent error'] { padding: var(--space-3); border: 1px solid var(--status-warning); border-radius: var(--radius-sm); background: rgba(236,221,165,.10); }
+  .history-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 2px var(--space-2); min-height: 26px; padding: 0 12px; color: var(--ink-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .history-controls button { min-height: 22px; padding: 0 8px; border-radius: 11px; font-size: 11px; }
+  /* A calm column: 12px between turns, the operator on the right. */
+  .transcript { display: flex; flex-direction: column; flex: 1; gap: 12px; min-height: 0; overflow: auto; padding: 4px 18px 14px; overflow-wrap: anywhere; }
+  .transcript > :global(*) { flex: none; }
+  [data-variant='column'] .transcript { gap: 10px; padding: 2px 13px 10px; }
+  .message { min-width: 0; }
+  .message :global(p) { max-width: 68ch; }
+  .user-message { align-self: flex-end; width: fit-content; max-width: 85%; padding: 8px 13px; border: 1px solid var(--line); border-radius: 13px 13px 3px 13px; background: var(--glass-strong); }
+  /* A Queen directive is a ruling-style card in the one accent. */
+  .message[data-sender='queen'] { align-self: flex-start; max-width: min(100%, 560px); padding: 9px 13px 10px; border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); border-radius: var(--radius-lg); background: var(--accent-bg); }
+  .sender-label { display: block; margin-bottom: 3px; color: var(--accent); font: 500 15px/1.25 var(--font-display); }
+  .message[aria-label='Approval decision'], .message[aria-label='Agent error'] { padding: 9px 13px 10px; border: 1px solid var(--status-warning); border-radius: var(--radius-lg); background: rgba(236,221,165,.10); }
+  .message[aria-label='Approval decision'] strong, .message[aria-label='Agent error'] strong { display: block; margin-bottom: 3px; color: var(--status-warning); font: 500 15px/1.25 var(--font-display); }
   .message p { margin: 0; white-space: pre-wrap; }
   .message .clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; }
-  .truncation, .live-activity, .raw-event > span { color: var(--chat-text-meta); font-size: var(--text-small); }
+  .message > button { min-height: 22px; margin-top: 4px; padding: 0 8px; border-radius: 11px; font-size: 11px; }
+  .truncation, .raw-event > span { color: var(--chat-text-meta); font-size: var(--text-small); }
+  .live-activity { color: var(--ink-dim); font: 11.5px/1.5 var(--font-mono); }
+  .live-activity p { margin: 0; }
   .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-small); }
-  .chat-composer { flex: 0 0 auto; padding: var(--space-2); }
-  .feed-error { margin: 0; padding: var(--space-2); border: 1px solid var(--status-warning); border-radius: var(--radius-sm); background: rgba(236,221,165,.10); color: var(--chat-text); }
-  .empty-chat { color: var(--chat-text-meta); }
-  @media (forced-colors: active) { .user-message, .message[data-sender] { border: 1px solid CanvasText; } .chat-pane :global(.markdown-blocks), .live-activity { color: CanvasText; } }
+  /* The terminal line runs edge to edge above the composer card. */
+  .chat-composer { flex: 0 0 auto; }
+  .chat-composer > :global(.composer-wrap) { margin: 0 10px 10px; }
+  .chat-composer > :global(.composer-wrap:first-child) { margin-top: 2px; }
+  .feed-error { margin: 0 10px 8px; padding: var(--space-2) var(--space-3); border: 1px solid var(--status-warning); border-radius: var(--control-radius); background: rgba(236,221,165,.10); color: var(--chat-text); font-size: var(--text-small); }
+  .empty-chat { margin: 0; color: var(--ink-dim); }
+  @media (forced-colors: active) { .user-message, .message[data-sender] { border: 1px solid CanvasText; } .chat-pane :global(.markdown-blocks), .live-activity, .sender-label { color: CanvasText; } }
 </style>

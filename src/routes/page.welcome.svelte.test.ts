@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { get, type Writable } from 'svelte/store';
 import type { Session } from '$lib/stores/sessions';
@@ -143,7 +143,7 @@ describe('inline composer landing', () => {
     expect(view.queryByRole('dialog')).toBeNull();
     expect(view.queryByRole('button', { name: 'Cancel' })).toBeNull();
     expect(view.queryByRole('heading', { name: 'Launch New Session' })).toBeNull();
-    expect(view.getByText('Hive Manager')).toBeTruthy();
+    expect(view.getByRole('heading', { name: 'Hive Manager' })).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(textarea(view)));
   });
 
@@ -258,7 +258,8 @@ describe('inline composer landing', () => {
     expect(buffer.isConnected).toBe(true);
     expect([mocks.terminalsCreated, mocks.terminalsDestroyed, mocks.gridsCreated, mocks.gridsDestroyed]).toEqual(lifetimes);
     await fireEvent.input(textarea(view), { target: { value: 'New draft while session runs' } });
-    await fireEvent.click(sidebar.getByRole('button', { name: /Running hive/ }));
+    // The landing also lists the open hive as a card; this step is the sidebar row.
+    await fireEvent.click(within(sidebar.container).getByRole('button', { name: /Running hive/ }));
     expect(get(activeSession)).toBe(running);
     expect(view.queryByLabelText(taskLabel)).toBeNull();
     expect(view.container.querySelector<HTMLElement>('.terminal-area')!.hidden).toBe(false);

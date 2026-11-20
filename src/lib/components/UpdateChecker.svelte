@@ -194,17 +194,20 @@
 {/if}
 
 <style>
+  /* A quiet footer line in the gutter under the band, clear of every pane. */
   .update-check-actions {
     position: fixed;
-    bottom: 8px;
+    bottom: 2px;
     right: 16px;
     z-index: 1000;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
     max-width: min(280px, calc(100vw - 32px));
   }
   .update-check-actions.expanded {
+    bottom: 8px;
+    gap: 8px;
     padding: 6px;
     border-radius: var(--radius-md);
     background: var(--surface);
@@ -214,43 +217,33 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
+    width: 20px;
+    height: 20px;
     padding: 0;
-    border: 1px solid var(--border-control);
-    border-radius: var(--radius-md);
-    background: var(--surface);
-    color: var(--text-muted);
-    box-shadow: var(--elev-1);
+    border: 1px solid transparent;
+    border-radius: var(--radius-full);
+    background: transparent;
+    color: var(--ink-dim);
+    cursor: pointer;
   }
+  .check-icon :global(svg) { width: 12px; height: 12px; }
   .check-icon:focus-visible {
     outline: 2px solid var(--focus);
     outline-offset: 2px;
   }
   .check-icon:hover:where(:not(:disabled)) {
-    color: var(--text-primary);
-    background: var(--surface-raised);
+    color: var(--ink);
+    background: var(--wash-strong);
   }
-  /* Sits over terminal output when the row is not expanded, so it carries its own surface. */
   .app-version {
     display: inline-flex;
     align-items: center;
-    height: 28px;
-    padding: 0 8px;
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-md);
-    background: var(--surface);
-    box-shadow: var(--elev-1);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-muted);
-    white-space: nowrap;
-  }
-  .update-check-actions.expanded .app-version {
-    border-color: transparent;
-    background: transparent;
-    box-shadow: none;
+    height: 20px;
     padding: 0 2px;
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-dim);
+    white-space: nowrap;
   }
   .update-status {
     font-size: 11px;

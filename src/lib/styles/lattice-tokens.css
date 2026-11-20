@@ -121,6 +121,23 @@
   --glass-strong: rgba(36, 32, 27, .72);
   --line: rgba(255, 236, 210, .1);
   --line-strong: rgba(255, 236, 210, .2);
+
+  /* Glass stage (0.73.1). Cream ink and a dim tier for the UI; panes are wells
+     on the canvas; soft status tones for dots and lanes. Terminal inputs above
+     are untouched. --ink-dim is a step lighter than the mockup's dim so 11px
+     metadata still clears 4.5:1 on glass. */
+  --ink: #f2ece3;
+  --ink-dim: #8f8578;
+  --well: var(--chat-well);
+  --wash: rgba(255, 255, 255, .035);
+  --wash-strong: rgba(255, 255, 255, .06);
+  --tone-ok: #a8d5a2;
+  --tone-err: #ffaaa0;
+  --tone-info: #9fc3e6;
+  --glass-blur: blur(18px) saturate(1.2);
+  --glass-shadow: 0 18px 50px rgba(0, 0, 0, .45);
+  --radius-glass: 14px;
+  --motion-panel: 180ms;
   --accent-tint: color-mix(in srgb, var(--accent) 10%, var(--surface));
   --accent-shape: var(--fitted-main);
   --orchid-shape: var(--fitted-orchid);

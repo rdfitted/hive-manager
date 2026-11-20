@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { SessionTemplate } from '$lib/types/domain';
   import { FolderSimple, SlidersHorizontal } from 'phosphor-svelte';
-  import { IconButton } from '$lib/components/ui';
+  import { Glyph, IconButton } from '$lib/components/ui';
 
   export let landing = false;
   export let mode = 'hive';
@@ -56,6 +56,7 @@
     }
   }
 
+  $: projectName = projectPath.trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'Choose folder';
   $: minWorkers = mode === 'fusion' || mode === 'debate' ? Math.min(2, workerCount) : 1;
 
   function handleKeydown(event: KeyboardEvent) {
@@ -75,7 +76,7 @@
       class="lattice-input lattice-scroll-chrome lattice-forced-colors-boundary"
       {value}
       on:input={(event) => onvalue(event.currentTarget.value)}
-      rows="6"
+      rows={landing ? 3 : 6}
       placeholder="Describe a task for your session…"
       disabled={launching}
       aria-describedby="launch-submit-hint"
@@ -143,11 +144,11 @@
         </label>
       {/if}
       {#if showQa}
-        <button type="button" class="lattice-btn lattice-btn--secondary qa-chip" aria-pressed={qaEnabled} aria-describedby={qaCaveat ? 'launch-qa-caveat' : undefined} on:click={() => onqa(!qaEnabled)} disabled={launching}>{qaSummary}</button>
+        <button type="button" class="lattice-btn lattice-btn--secondary qa-chip" aria-pressed={qaEnabled} aria-describedby={qaCaveat ? 'launch-qa-caveat' : undefined} title={landing && qaCaveat ? qaCaveat : undefined} on:click={() => onqa(!qaEnabled)} disabled={launching}>{qaSummary}</button>
       {/if}
     </div>
 
-    {#if showQa && qaCaveat}<p class="hint" id="launch-qa-caveat">{qaCaveat}</p>{/if}
+    {#if showQa && qaCaveat}<p class="hint quiet-hint" id="launch-qa-caveat">{qaCaveat}</p>{/if}
 
     {#if templatesLoading}<p class="hint" role="status">Loading presets…</p>{/if}
     {#if templatesError}<p class="hint" role="status">Presets unavailable: {templatesError}. You can still configure a session.</p>{/if}
@@ -156,45 +157,54 @@
 
     <div class="composer-actions">
       {#if landing}
-        <IconButton
-          type="button"
-          icon={FolderSimple}
-          label={projectPath ? `Project ${projectPath}` : 'Project'}
-          tooltip={projectPath || 'Select a project folder'}
-          onclick={onbrowse}
-          disabled={launching}
-        />
+        <button type="button" class="lattice-btn lattice-btn--ghost project-pill" on:click={onbrowse} disabled={launching}
+          aria-label={projectPath ? `Project ${projectPath}` : 'Project'} title={projectPath || 'Select a project folder'}>
+          <FolderSimple size={14} aria-hidden="true" /><span>{projectName}</span>
+        </button>
         <IconButton
           type="button"
           icon={SlidersHorizontal}
+          size="sm"
           label="Advanced"
-          tooltip="Advanced launch settings"
+          tooltip="Advanced: roles, models, transports"
           onclick={onadvanced}
           disabled={launching}
         />
       {:else}
         <button type="button" class="lattice-btn lattice-btn--ghost" on:click={onadvanced} disabled={launching}>Advanced</button>
       {/if}
-      <span class="hint" id="launch-submit-hint">Ctrl/Cmd+Enter to launch · Enter for a new line</span>
-      {#if showSmoke}<button type="button" class="lattice-btn lattice-btn--secondary" on:click={onsmoke} disabled={launching || !projectPath.trim() || mode === 'templates'}>Smoke Test</button>{/if}
+      <span class="hint quiet-hint" id="launch-submit-hint">Ctrl/Cmd+Enter to launch · Enter for a new line</span>
+      {#if showSmoke}<button type="button" class="lattice-btn lattice-btn--secondary smoke" on:click={onsmoke} disabled={launching || !projectPath.trim() || mode === 'templates'}>Smoke Test</button>{/if}
       {#if oncancel}<button type="button" class="lattice-btn lattice-btn--secondary" on:click={oncancel} disabled={launching}>Cancel</button>{/if}
-      <button type="submit" class="lattice-btn composer-send" disabled={launching || !projectPath.trim() || mode === 'templates'} aria-busy={launching}>{launching ? 'Launching...' : 'Launch'}</button>
+      <button type="submit" class="lattice-btn composer-send" title="Launch (Ctrl/Cmd+Enter)" disabled={launching || !projectPath.trim() || mode === 'templates'} aria-busy={launching}>
+        {#if landing}<Glyph name="send" size={14} /><span class="sr-only">{launching ? 'Launching...' : 'Launch'}</span>{:else}{launching ? 'Launching...' : 'Launch'}{/if}
+      </button>
     </div>
   </div>
 </form>
 
 <style>
   .launch-composer { display: flex; flex-direction: column; gap: var(--space-4); }
-  .landing { container: launch-composer / inline-size; }
+  .landing { container: launch-composer / inline-size; gap: 0; }
   .task-label { color: var(--text-primary); font-size: var(--text-base); }
+  /* On the landing the question reads as the line under the lockup. */
+  .landing .task-label { margin: 0 0 26px; color: var(--ink-muted); font: italic 19px/1.4 var(--font-display); text-align: center; }
   .composer-input { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; padding: var(--space-3); border: 1px solid var(--border-control); border-radius: var(--radius-shell); background: var(--input); }
   .composer-input:focus-within { border-color: var(--accent); }
-  .landing .composer-input { background: var(--glass-strong); }
+  .landing .composer-input { gap: 10px; padding: 16px 16px 12px; border-color: var(--line); border-radius: var(--radius-glass); background: var(--surface); box-shadow: var(--glass-shadow); transition: border-color var(--motion-ui); }
+  .landing .composer-input:focus-within { border-color: var(--accent); }
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .landing .composer-input { background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); }
+  }
   textarea { display: block; box-sizing: border-box; width: 100%; min-height: 12rem; resize: vertical; line-height: 1.6; padding: 0; border: 0; border-radius: 0; background: transparent; }
+  .landing textarea { min-height: 4.75rem; color: var(--ink); font-size: 15px; line-height: 1.5; }
+  .landing textarea::placeholder { color: var(--ink-dim); }
   textarea:focus { border: 0; outline: none; box-shadow: none; }
   textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .landing textarea:focus-visible { outline: none; }
   .composer-send { flex-shrink: 0; min-height: 32px; border: 1px solid transparent; border-radius: var(--control-radius); background: var(--accent); color: var(--on-accent); }
   .composer-send:hover:enabled { background: var(--accent); }
+  .landing .composer-send { width: 28px; min-height: 28px; height: 28px; padding: 0; border-radius: var(--radius-full); color: var(--accent-ink); }
   .launch-chips { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; min-width: 0; }
   .launch-chip { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
   .launch-chip > span { font-size: var(--text-small); color: var(--ink-muted); }
@@ -203,19 +213,33 @@
   .mode-pills { display: flex; flex: 1 0 100%; flex-wrap: wrap; gap: var(--space-2); min-width: 0; margin: 0; padding: 0; border: 0; }
   .mode-pill { position: relative; }
   .mode-pill input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  /* Mode pills carry no ring at rest; the chosen one takes the strong glass. */
   .mode-pill span {
     display: flex;
     align-items: center;
-    min-height: var(--control-height);
-    padding-inline: var(--space-3);
-    border: 1px solid var(--border-control);
-    border-radius: var(--radius-full);
-    color: var(--text-primary);
+    height: 28px;
+    padding-inline: 13px;
+    border: 1px solid transparent;
+    border-radius: 14px;
+    color: var(--ink-muted);
+    font-size: 12.5px;
     cursor: pointer;
+    transition: background-color var(--motion-ui), color var(--motion-ui), border-color var(--motion-ui);
   }
-  .mode-pill input:checked + span { background: var(--accent-bg); color: var(--accent); border-color: var(--accent); }
+  .mode-pill:hover span { color: var(--ink); }
+  .mode-pill input:checked + span { background: var(--glass-strong); color: var(--ink); border-color: var(--line-strong); font-weight: 600; }
   .mode-pill input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 2px; }
   .mode-pill input:disabled + span { opacity: .55; cursor: default; }
+  /* Landing: modes lead under a hairline; the setup reads as one quiet line. */
+  .landing .launch-chips { align-items: center; gap: 6px 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .landing .mode-pills { gap: 6px; margin-left: -4px; }
+  .landing .launch-chip { flex-direction: row; align-items: center; gap: 2px; }
+  .landing .launch-chip > span { color: var(--ink-dim); font-size: 11.5px; }
+  .landing .launch-chip select { height: 26px; min-height: 26px; padding: 0 20px 0 6px; border-color: transparent; border-radius: 13px; background-color: transparent; color: var(--ink-muted); font-size: 11.5px; }
+  .landing .launch-chip select:hover:enabled { border-color: var(--line-strong); color: var(--ink); }
+  .landing .preset-chip { flex: 0 1 15rem; }
+  .landing .qa-chip { min-height: 26px; padding: 0 10px; border-radius: 13px; --lattice-btn-ring: var(--line-strong); background: transparent; color: var(--ink-muted); font-size: 11.5px; }
+  .landing .qa-chip[aria-pressed='true'] { --lattice-btn-ring: transparent; background: var(--accent-bg); color: var(--accent); }
   @container launch-composer (max-width: 26rem) {
     .mode-pills { display: none; }
     .compact-mode { display: flex; }
@@ -226,11 +250,18 @@
   #launch-project-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
   .composer-actions .hint { flex: 1 1 10rem; }
+  .landing .composer-actions { justify-content: flex-end; gap: 6px; margin-top: -2px; }
+  .project-pill { min-width: 0; max-width: 16rem; min-height: 28px; height: 28px; margin-right: auto; margin-left: -6px; padding: 0 12px 0 10px; gap: 7px; border-radius: 14px; color: var(--ink-muted); font-size: 12.5px; }
+  .project-pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .landing .smoke { min-height: 28px; padding: 0 12px; border-radius: 14px; --lattice-btn-ring: var(--line-strong); background: transparent; font-size: 12.5px; }
   .hint { margin: 0; color: var(--ink-muted); font-size: var(--text-small); }
+  /* Kept for assistive technology and the control tooltips, off the landing surface. */
+  .landing .quiet-hint, .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .error-message { color: var(--status-error); }
   @media (forced-colors: active) {
     .composer-input { border-color: CanvasText; }
     .composer-input:focus-within { border-color: Highlight; }
+    .landing .composer-input { background: Canvas; -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
     textarea:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
     .composer-send { border-color: ButtonText; background: ButtonFace; color: ButtonText; }
     .composer-send:disabled { color: GrayText; opacity: 1; }

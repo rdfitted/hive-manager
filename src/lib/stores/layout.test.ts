@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createLayoutStore, migrateRightTab, type LayoutState } from './layout';
+import { createLayoutStore, LAYOUT_COMPOSITION, migrateRightTab, type LayoutState } from './layout';
 
 function createStorage(initial: Record<string, string> = {}): Storage {
   const values = new Map(Object.entries(initial));
@@ -99,7 +99,9 @@ describe('layout panel state', () => {
   });
 
   it('collapses the open active right tab without changing the tab', () => {
-    const storage = createStorage();
+    const storage = createStorage({
+      'hive-manager-layout': JSON.stringify({ rightTab: 'overview', rightCollapsed: false, composition: LAYOUT_COMPOSITION }),
+    });
     const layout = loadStore(storage);
 
     layout.activateRightTab('overview');
@@ -151,18 +153,18 @@ describe('layout panel state', () => {
     expect(readStore(layout).leftCollapsed).toBe(false);
   });
 
-  it('round-trips collapsed panel state through localStorage', () => {
+  it('round-trips panel state through localStorage', () => {
     const storage = createStorage();
     const layout = loadStore(storage);
+    layout.setLeftCollapsed(false);
+    layout.toggleRight();
+
+    expect(readStore(createLayoutStore())).toMatchObject({ leftCollapsed: false, rightCollapsed: false });
+
     layout.setLeftCollapsed(true);
     layout.toggleRight();
 
-    const restoredLayout = createLayoutStore();
-
-    expect(readStore(restoredLayout)).toMatchObject({
-      leftCollapsed: true,
-      rightCollapsed: true,
-    });
+    expect(readStore(createLayoutStore())).toMatchObject({ leftCollapsed: true, rightCollapsed: true });
   });
 });
 
@@ -191,29 +193,40 @@ describe('layout terminal maximize state', () => {
 });
 
 describe('session Focus/Grid preference', () => {
-  it('defaults to Focus for a new layout', () => {
-    expect(readStore(loadStore(createStorage())).sessionViewMode).toBe('focus');
-  });
-
-  it('loads an old layout without a view mode as Focus, preserving rail migration', () => {
-    const storage = createStorage({
-      'hive-manager-layout': JSON.stringify({ rightTab: 'chat', leftWidth: 310 }),
-    });
-    expect(readStore(loadStore(storage))).toMatchObject({
-      sessionViewMode: 'focus', rightTab: 'activity', leftWidth: 310,
+  it('opens a new layout on the stage: Grid, the session rail and a closed inspector', () => {
+    expect(readStore(loadStore(createStorage()))).toMatchObject({
+      sessionViewMode: 'grid', leftCollapsed: true, rightCollapsed: true, composition: LAYOUT_COMPOSITION,
     });
   });
 
-  it.each(['unknown', '', null, 42, {}, []])('coerces stored mode %j to Focus', (sessionViewMode) => {
+  it('adopts the stage once for a layout saved before it, keeping tab and width migration', () => {
     const storage = createStorage({
-      'hive-manager-layout': JSON.stringify({ sessionViewMode }),
+      'hive-manager-layout': JSON.stringify({
+        rightTab: 'chat', leftWidth: 310, sessionViewMode: 'focus', leftCollapsed: false, rightCollapsed: false,
+      }),
     });
-    expect(readStore(loadStore(storage)).sessionViewMode).toBe('focus');
+    const layout = loadStore(storage);
+    expect(readStore(layout)).toMatchObject({
+      sessionViewMode: 'grid', leftCollapsed: true, rightCollapsed: true, rightTab: 'activity', leftWidth: 310,
+    });
+
+    // Choices made after the adoption persist and are not reset again.
+    layout.setSessionViewMode('focus');
+    layout.setLeftCollapsed(false);
+    expect(readPersistedLayout(storage).composition).toBe(LAYOUT_COMPOSITION);
+    expect(readStore(createLayoutStore())).toMatchObject({ sessionViewMode: 'focus', leftCollapsed: false });
+  });
+
+  it.each(['unknown', '', null, 42, {}, []])('coerces stored mode %j to Grid', (sessionViewMode) => {
+    const storage = createStorage({
+      'hive-manager-layout': JSON.stringify({ sessionViewMode, composition: LAYOUT_COMPOSITION }),
+    });
+    expect(readStore(loadStore(storage)).sessionViewMode).toBe('grid');
   });
 
   it.each(['focus', 'grid'] as const)('preserves saved %s mode', (sessionViewMode) => {
     const storage = createStorage({
-      'hive-manager-layout': JSON.stringify({ sessionViewMode }),
+      'hive-manager-layout': JSON.stringify({ sessionViewMode, composition: LAYOUT_COMPOSITION }),
     });
     expect(readStore(loadStore(storage)).sessionViewMode).toBe(sessionViewMode);
   });
@@ -232,10 +245,10 @@ describe('session Focus/Grid preference', () => {
     const storage = createStorage();
     const layout = loadStore(storage);
     layout.toggleSessionViewMode();
-    expect(readStore(layout).sessionViewMode).toBe('grid');
-    expect(readStore(createLayoutStore()).sessionViewMode).toBe('grid');
-    layout.toggleSessionViewMode();
     expect(readStore(layout).sessionViewMode).toBe('focus');
-    expect(readPersistedLayout(storage).sessionViewMode).toBe('focus');
+    expect(readStore(createLayoutStore()).sessionViewMode).toBe('focus');
+    layout.toggleSessionViewMode();
+    expect(readStore(layout).sessionViewMode).toBe('grid');
+    expect(readPersistedLayout(storage).sessionViewMode).toBe('grid');
   });
 });

@@ -128,7 +128,10 @@
 
 <style>
   .command-bar { height: 100%; min-width: 0; min-height: 0; }
-  .routing-active :global(.composer-toolbar) { display: flex; gap: var(--space-1); flex-wrap: wrap; align-items: center; }
+  .routing-active :global(.composer-toolbar) { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .routing-active :global(.composer-toolbar > .toolbar) { flex: 1 1 auto; }
-  .target-picker { max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The message target is the composer's accent chip. */
+  .target-picker.lattice-btn { display: inline-block; max-width: 55%; height: 24px; min-height: 24px; padding: 0 10px; overflow: hidden; border-radius: 12px; background: var(--accent-bg); box-shadow: none; color: var(--accent); font-size: 11.5px; line-height: 24px; text-overflow: ellipsis; white-space: nowrap; }
+  .target-picker.lattice-btn:hover:enabled { background: color-mix(in srgb, var(--accent) 24%, transparent); color: var(--accent); }
+  @media (forced-colors: active) { .target-picker.lattice-btn { border: 1px solid ButtonText; line-height: 22px; } }
 </style>
