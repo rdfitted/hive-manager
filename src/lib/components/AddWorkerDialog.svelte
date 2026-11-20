@@ -154,7 +154,7 @@
   <div class="dialog">
     <div class="dialog-header lattice-forced-colors-boundary">
       <h2>Add Managed Principal</h2>
-      <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={close} aria-label="Close add principal dialog">&times;</button>
+      <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={close} aria-label="Close add principal dialog" title="Close add principal dialog">&times;</button>
     </div>
 
     <form on:submit|preventDefault={handleSubmit}>

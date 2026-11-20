@@ -34,7 +34,7 @@
             <h3>Event Details</h3>
             <div class="header-actions">
                 <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact" on:click={copyToClipboard}>Copy JSON</button>
-                <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={closeModal} aria-label="Close event details">&times;</button>
+                <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={closeModal} aria-label="Close event details" title="Close event details">&times;</button>
             </div>
         </div>
 

@@ -146,7 +146,7 @@
   {#if $coordination.error}
     <div class="error">
       {$coordination.error}
-      <button class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon" on:click={() => coordination.clearError()} aria-label="Dismiss coordination error">\u2715</button>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon" on:click={() => coordination.clearError()} aria-label="Dismiss coordination error" title="Dismiss coordination error">\u2715</button>
     </div>
   {/if}
 </div>

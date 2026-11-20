@@ -75,7 +75,7 @@
   {#if targetLabel}
     <span class="message-target" id={targetId} title={`Send to ${targetLabel}`}><span class="visually-hidden">Send to </span><span aria-hidden="true">@</span>{targetLabel}</span>
   {/if}
-  <button bind:this={addButton} type="button" class="toolbar-button add-button" aria-label="Add mention or command" aria-haspopup="menu" aria-expanded={menuOpen} disabled={sending} onmousedown={(event) => event.preventDefault()} onclick={toggleMenu} onkeydown={addKeydown}>
+  <button bind:this={addButton} type="button" class="toolbar-button add-button" aria-label="Add mention or command" title="Add mention or command" aria-haspopup="menu" aria-expanded={menuOpen} disabled={sending} onmousedown={(event) => event.preventDefault()} onclick={toggleMenu} onkeydown={addKeydown}>
     <Plus size={18} aria-hidden="true" />
   </button>
   {#if accessLabel}<span class="access-label">{accessLabel}</span>{/if}
@@ -83,7 +83,7 @@
     {#if model}<span class="model">{model}</span>{/if}
     {#if effort}<span class="effort">{effort}</span>{/if}
   </div>
-  <button type="button" class="toolbar-button send-button" aria-label={sending ? 'Sending message' : 'Send message'} aria-describedby={targetLabel ? targetId : undefined} aria-busy={sending} disabled={!controls.canSend || sending} onmousedown={(event) => event.preventDefault()} onclick={send}>
+  <button type="button" class="toolbar-button send-button" aria-label={sending ? 'Sending message' : 'Send message'} title={sending ? 'Sending message' : 'Send message'} aria-describedby={targetLabel ? targetId : undefined} aria-busy={sending} disabled={!controls.canSend || sending} onmousedown={(event) => event.preventDefault()} onclick={send}>
     <ArrowUp size={18} weight="bold" aria-hidden="true" />
   </button>
 </div>

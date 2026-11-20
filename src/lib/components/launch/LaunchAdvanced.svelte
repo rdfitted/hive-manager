@@ -195,6 +195,7 @@
                   style:background={color.value}
                   aria-pressed={sessionColor === color.value}
                   on:click={() => sessionColor = color.value}
+                  aria-label={color.name}
                   title={color.name}
                 >
                 </button>

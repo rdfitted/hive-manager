@@ -455,6 +455,7 @@
                           <button
                             class="color-toggle lattice-btn lattice-btn--ghost lattice-btn--icon"
                             onclick={() => showColorPicker = !showColorPicker}
+                            aria-label="Choose Color"
                             title="Choose Color"
                             style="width: 18px; height: 18px; flex-basis: 18px; border-radius: 50%; background: {editColor || 'var(--canvas)'};"
                             type="button"
@@ -467,6 +468,7 @@
                                   class="color-option lattice-btn lattice-btn--ghost lattice-btn--icon"
                                   style="width: 16px; height: 16px; flex-basis: 16px; border-radius: 50%; padding: 0; border: 1px solid color-mix(in srgb, var(--canvas) 20%, transparent); background: {color.value};"
                                   aria-pressed={editColor === color.value}
+                                  aria-label={color.name}
                                   onclick={() => { editColor = color.value; showColorPicker = false; }}
                                   title={color.name}
                                   type="button"
