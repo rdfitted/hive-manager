@@ -37,6 +37,14 @@ describe('AgentPaneBody', () => {
       const status = view.queryByText('Live output');
       if (mode === 'chat') expect(status?.nextElementSibling?.getAttribute('aria-label')).toBe('Message composer');
       else expect(status).toBeNull();
+      // Split reserves the drawer's place between the transcript and the composer;
+      // the one terminal layer is positioned over it and never re-parented.
+      const slot = chatLayer.querySelector('.terminal-slot');
+      if (mode === 'split') {
+        expect(slot?.getAttribute('aria-hidden')).toBe('true');
+        expect(slot?.previousElementSibling?.classList.contains('transcript')).toBe(true);
+        expect(slot?.nextElementSibling?.querySelector('[aria-label="Message composer"]')).toBeTruthy();
+      } else expect(slot).toBeNull();
     }
     view.unmount();
     expect(dispose).toHaveBeenCalledTimes(1);

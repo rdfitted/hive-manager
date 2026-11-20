@@ -758,6 +758,12 @@
     color: inherit;
   }
 
+  /* The agent tree is already inside a section; do not inset it twice. */
+  .session-agents {
+    margin: var(--space-1) 0 var(--space-2);
+    padding: 0;
+  }
+
   .chevron {
     font-size: 8px;
     color: var(--text-muted);

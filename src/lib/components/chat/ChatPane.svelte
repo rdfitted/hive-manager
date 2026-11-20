@@ -10,7 +10,7 @@
   import { toolbarFacts } from '../composer/toolbarFacts';
   import ActivityGroup from './ActivityGroup.svelte';
   import MarkdownBlocks from '../ui/MarkdownBlocks.svelte';
-  import { paneStatusLineContext } from './paneMode';
+  import { paneSplitContext, paneStatusLineContext } from './paneMode';
   import { CHAT_WINDOW_SIZE, formatRaw, liveActivityState, transcriptRows } from './transcript';
 
   type ComposerRoute = {
@@ -35,6 +35,8 @@
   const targetLabel = $derived(agent ? agentMentions([agent])[0].label.trim() || agentId : agentId);
   const getStatusLine = getContext<(() => Snippet | undefined) | undefined>(paneStatusLineContext);
   const statusLine = $derived(getStatusLine?.());
+  const getSplit = getContext<(() => boolean) | undefined>(paneSplitContext);
+  const split = $derived(getSplit?.() ?? false);
   const composeAgentId = $derived(composerRoute?.agentId ?? agentId);
   const composeAgent = $derived(composeAgentId === agentId ? agent : $activeAgents.find(candidate => candidate.id === composeAgentId));
   const facts = $derived(toolbarFacts(composeAgent, $agentEvents.sessionId === sessionId ? $agentEvents.feeds?.[composeAgentId]?.capabilities.event_source : undefined));
@@ -153,6 +155,7 @@
       {/if}
     {/if}
   </div>
+  {#if split}<div class="terminal-slot" aria-hidden="true"></div>{/if}
   {#if composeError}<p class="feed-error" role="alert">Message could not be sent: {composeError}</p>{/if}
   {#if composer}
   <div class="chat-composer">
@@ -201,6 +204,11 @@
   .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
   pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-small); }
   /* The terminal line runs edge to edge above the composer card. */
+  /* Split: room for the terminal drawer between the transcript and the composer. */
+  .terminal-slot { display: none; }
+  @supports (anchor-name: --pane-terminal-slot) and (anchor-scope: --pane-terminal-slot) {
+    .terminal-slot { display: block; flex: 0 0 min(11rem, 40%); margin-bottom: var(--space-2); anchor-name: --pane-terminal-slot; }
+  }
   .chat-composer { flex: 0 0 auto; }
   .chat-composer > :global(.composer-wrap) { margin: 0 10px 10px; }
   .chat-composer > :global(.composer-wrap:first-child) { margin-top: 2px; }

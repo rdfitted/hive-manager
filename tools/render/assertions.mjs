@@ -582,7 +582,9 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       await page.route('**/agent-feeds', hold);
       try {
         await selectSession(page, session, report);
-        const terminal = page.locator('.terminal-panel:not(.hidden) .xterm-helper-textarea').first();
+        // Grid is the default view: before the roster arrives the Queen pane is already in
+        // Chat with its terminal inert, so take a pane whose terminal is the live layer.
+        const terminal = page.locator('.terminal-panel:not(.hidden) .terminal-container:not([hidden]) .terminal-layer:not([inert]) .xterm-helper-textarea').first();
         await terminal.waitFor({ state: 'attached' });
         await proveTerminalFocus({ page, target: page.locator('.session-button').filter({ hasText: session.name }).first(), terminal, prove });
       } finally { release(); await page.unroute('**/agent-feeds', hold); }

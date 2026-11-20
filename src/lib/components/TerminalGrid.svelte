@@ -802,6 +802,7 @@
   .toolbar-label {
     display: inline-flex;
     align-items: baseline;
+    flex: none;
     gap: 10px;
     color: var(--ink);
     font: 500 18px/1 var(--font-display);
@@ -812,12 +813,17 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* In a narrow column the shell picker gives way before the stage can overflow. */
   .scratch-controls {
     display: flex;
     align-items: center;
+    flex: 0 1 auto;
     gap: 4px;
+    min-width: 0;
     margin-left: auto;
   }
+  .shell-picker { flex: 0 1 auto; min-width: 0; }
+  .shell-picker select { width: 100%; min-width: 0; text-overflow: ellipsis; }
 
   .shell-picker :global(.lattice-input), .pane-picker :global(.lattice-input) {
     height: 26px;

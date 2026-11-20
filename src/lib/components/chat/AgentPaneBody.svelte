@@ -1,6 +1,6 @@
 <script lang="ts">
   import { setContext, type Snippet } from 'svelte';
-  import { paneStatusLineContext, type PaneMode } from './paneMode';
+  import { paneSplitContext, paneStatusLineContext, type PaneMode } from './paneMode';
 
   let { mode, terminal, chat, statusLine }: {
     mode: PaneMode;
@@ -12,6 +12,7 @@
   const terminalHidden = $derived(mode === 'chat' || mode === 'raw');
   const chatHidden = $derived(mode === 'terminal');
   setContext(paneStatusLineContext, () => mode === 'chat' ? statusLine : undefined);
+  setContext(paneSplitContext, () => mode === 'split');
 </script>
 
 <div class="agent-pane-body" data-mode={mode}>
@@ -46,4 +47,23 @@
 
   /* Keep the terminal measurable, with its native drop rectangle outside the pane. */
   .chat-hidden { transform: translateX(-200vw); }
+
+  [data-mode='split'] .terminal-layer { border-top: 1px solid var(--line); }
+
+  /* Where anchor positioning exists, the drawer sits between the transcript and
+     the composer, as specced: the chat leaves a slot there and the pane's one
+     terminal layer is laid over it. Elsewhere it stays below the composer. */
+  @supports (anchor-name: --pane-terminal-slot) and (anchor-scope: --pane-terminal-slot) {
+    .agent-pane-body[data-mode='split'] {
+      position: relative;
+      grid-template: 'body' minmax(0, 1fr) / minmax(0, 1fr);
+      anchor-scope: --pane-terminal-slot;
+    }
+    [data-mode='split'] .chat-layer { grid-area: body; }
+    [data-mode='split'] .terminal-layer {
+      position: absolute;
+      position-anchor: --pane-terminal-slot;
+      inset: anchor(top) anchor(right) anchor(bottom) anchor(left);
+    }
+  }
 </style>
