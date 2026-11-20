@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
 import type { Session } from '$lib/stores/sessions';
 import type { AgentEventsState } from '$lib/stores/agentEvents';
 
@@ -351,6 +352,49 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
 
     await fireEvent.keyDown(picker, { key: 'Escape', bubbles: true, cancelable: true });
     expect(view.getByRole('button', { name: 'Maximize Claude agent' })).toBeTruthy();
+  });
+
+  it('restores a maximized Grid pane before xterm consumes Escape', async () => {
+    layout.setSessionViewMode('grid');
+    const view = render(TerminalGrid, { session: stageRoster, focusedAgentId: 'codex', onSelect: vi.fn() });
+    const worker = view.container.querySelector<HTMLElement>('[data-agent-id="codex"]')!;
+    const maximize = () => fireEvent.click(within(worker).getByRole('button', { name: 'Maximize Codex PTY' }));
+    await maximize();
+    const terminalInput = worker.querySelector<HTMLTextAreaElement>('textarea.xterm-helper-textarea')!;
+    terminalInput.focus();
+    expect(document.activeElement).toBe(terminalInput);
+
+    const terminalKey = vi.fn((event: KeyboardEvent) => {
+      const before = { maximized: get(layout).maximizedTerminalId, prevented: event.defaultPrevented };
+      event.preventDefault();
+      event.stopPropagation();
+      return before;
+    });
+    const escape = () => fireEvent.keyDown(terminalInput, { key: 'Escape', bubbles: true, cancelable: true });
+    const modal = document.createElement('div');
+    modal.setAttribute('aria-modal', 'true');
+
+    terminalInput.addEventListener('keydown', terminalKey, true);
+    try {
+      await escape();
+      expect(terminalKey).toHaveBeenCalledTimes(1);
+      expect(terminalKey).toHaveReturnedWith({ maximized: null, prevented: true });
+      expect(within(worker).getByRole('button', { name: 'Maximize Codex PTY' })).toBeTruthy();
+
+      await escape();
+      expect(terminalKey).toHaveBeenCalledTimes(2);
+      expect(terminalKey).toHaveLastReturnedWith({ maximized: null, prevented: false });
+
+      await maximize();
+      document.body.append(modal);
+      await escape();
+      expect(terminalKey).toHaveBeenCalledTimes(3);
+      expect(terminalKey).toHaveLastReturnedWith({ maximized: 'codex', prevented: false });
+      expect(within(worker).getByRole('button', { name: 'Restore Codex PTY' })).toBeTruthy();
+    } finally {
+      terminalInput.removeEventListener('keydown', terminalKey, true);
+      modal.remove();
+    }
   });
 
   it('G59: Queen leads the full roster, column clicks set the shared target and the resource filter highlights without unmounting', async () => {

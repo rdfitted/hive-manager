@@ -326,7 +326,7 @@
     layout.toggleMaximizedTerminal(pane.id);
   }
 
-  function handleWindowKeydown(event: KeyboardEvent) {
+  function restoreMaximizedOnEscape(event: KeyboardEvent) {
     if (
       focusMode ||
       !visible ||
@@ -454,7 +454,7 @@
   });
 </script>
 
-<svelte:window onkeydown={handleWindowKeydown} />
+<svelte:window onkeydown={restoreMaximizedOnEscape} />
 
 <div class="terminal-workspace" bind:this={workspace}>
   <div class="terminal-toolbar">
@@ -702,6 +702,11 @@
             {#snippet terminal()}
               {#if hasTerminal}
                 <div class="terminal-input"
+                  onkeydowncapture={(event) => {
+                    if (event.target instanceof HTMLTextAreaElement && event.target.classList.contains('xterm-helper-textarea')) {
+                      restoreMaximizedOnEscape(event);
+                    }
+                  }}
                   onfocusin={() => { terminalFocusId = pane.id; }}
                   onfocusout={(event) => {
                     if (terminalFocusId === pane.id && (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget))) terminalFocusId = null;
