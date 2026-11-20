@@ -9,6 +9,7 @@ const attention = 'section[aria-label="Agent needs attention"]';
 const composer = '.composer-wrap[aria-label="Message composer"]';
 const queenComposer = '.terminal-panel:not(.hidden) .queen-column .chat-composer';
 const chatSelector = '.chat-pane[aria-label="Agent chat"]';
+const chatWellByAccent = { honey: 'rgb(6, 5, 4)', sky: 'rgb(4, 5, 6)' };
 // Existing shipped selectors, inventoried read-only; no component test hooks added.
 export function paneFor(page, agent) {
   return page.locator('.terminal-panel:not(.hidden) .terminal-item').filter({ has: page.locator(`button[aria-label=${JSON.stringify(`Focus ${agent.label}`)}]`) });
@@ -100,14 +101,18 @@ export async function showChat(pane) {
 }
 export const principalSelect = page => page.locator('.review-view .pickers > label').filter({ hasText: /^Principal/ }).locator('select');
 const cellSelect = page => page.locator('.review-view .pickers > label').filter({ hasText: /^Cell/ }).locator('select');
-async function openReview(page) {
+async function openPanelView(page, name) {
   const toggle = page.locator('#title-bar-panel-toggle');
   if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
   await page.locator('.panel-drawer:not(.collapsed)').waitFor({ state: 'visible' });
-  const changes = page.getByRole('group', { name: 'Panel views', exact: true }).getByRole('button', { name: 'Changes', exact: true });
+  const tab = page.getByRole('group', { name: 'Panel views', exact: true }).getByRole('button', { name, exact: true });
   // The active top-level tab collapses on click; preserve its current state.
-  if (await changes.getAttribute('aria-pressed') !== 'true') await changes.click();
-  await page.getByRole('group', { name: 'Changes sections', exact: true }).getByRole('button', { name: 'Review', exact: true }).click();
+  if (await tab.getAttribute('aria-pressed') !== 'true') await tab.click();
+}
+
+async function openReview(page) {
+  await openPanelView(page, 'Changes');
+  await page.getByRole('region', { name: 'Review', exact: true }).locator('.review-view').waitFor();
 }
 export async function composerGeometry(pane) {
   const element = pane.locator(`${composer}:visible`).first();
@@ -119,15 +124,27 @@ export async function composerGeometry(pane) {
     return { contained: box.width > 0 && box.height > 0 && box.left >= outer.left - 1 && box.top >= outer.top - 1 && box.right <= outer.right + 1 && box.bottom <= outer.bottom + 1, composer: rect(box), pane: rect(outer) };
   });
 }
-export async function wallBarGeometry(page) {
+async function queenTerminalCapability(session, apiPort) {
+  const queen = session.agents.find(agent => agent.role === 'Queen');
+  const response = await fetch(`http://127.0.0.1:${apiPort}/api/sessions/${encodeURIComponent(session.id)}/agent-feeds`, { signal: AbortSignal.timeout(5000) });
+  if (!response.ok) throw new Error(`Cannot read render fixture feed capabilities: HTTP ${response.status}`);
+  const roster = await response.json();
+  const hasTerminal = roster.agents.find(feed => feed.agent_id === queen.id)?.capabilities.has_terminal;
+  if (typeof hasTerminal !== 'boolean') throw new Error(`Missing terminal capability for render fixture Queen ${queen.id}`);
+  return hasTerminal;
+}
+
+export async function wallBarGeometry(page, hasTerminal) {
   const bar = page.locator(`${queenComposer}:visible`);
   if (await bar.count() !== 1) return { contained: false, count: await bar.count() };
-  return bar.evaluate(node => {
+  return bar.evaluate((node, hasTerminal) => {
     const pane = node.closest('.terminal-item').getBoundingClientRect();
     const outer = node.getBoundingClientRect();
+    const splitActions = node.querySelectorAll('[aria-label="Open Split"]');
+    const splitCount = splitActions.length;
     const elements = [
       node, node.querySelector('.terminal-status-line'), node.querySelector('[data-composer]'),
-      node.querySelector('.send-button'), node.querySelector('.target-picker'), node.querySelector('[aria-label="Open Split"]'),
+      node.querySelector('.send-button'), node.querySelector('.target-picker'), ...splitActions,
     ];
     const boxes = elements.map(element => element?.getBoundingClientRect());
     const visible = elements.every(element => {
@@ -138,15 +155,16 @@ export async function wallBarGeometry(page) {
       }
       return true;
     });
-    const hit = elements.slice(1).every(element => {
-      if (!element) return false;
-      const box = element.getBoundingClientRect(), top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
-      return !!top && (top === element || element.contains(top));
+    const hit = elements.slice(1).every((element, index) => {
+      const box = boxes[index + 1];
+      return !!box && element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
     });
     const inside = box => !!box && box.width > 0 && box.height > 0 && box.left >= Math.max(0, pane.left, outer.left) - 1 && box.top >= Math.max(0, pane.top, outer.top) - 1 && box.right <= Math.min(innerWidth, pane.right, outer.right) + 1 && box.bottom <= Math.min(innerHeight, pane.bottom, outer.bottom) + 1;
     const statusAboveEditor = !!boxes[1] && !!boxes[2] && boxes[1].bottom <= boxes[2].top + 1;
-    return { contained: visible && hit && statusAboveEditor && boxes.every(inside), visible, hit, statusAboveEditor, boxes: boxes.map(box => box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null) };
-  });
+    const splitMatchesCapability = splitCount === Number(hasTerminal);
+    return { contained: visible && hit && statusAboveEditor && splitMatchesCapability && boxes.every(inside),
+      visible, hit, statusAboveEditor, hasTerminal, splitCount, boxes: boxes.map(box => box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null) };
+  }, hasTerminal);
 }
 async function queenComposerTabOrder(page, bar) {
   const picker = bar.locator('.target-picker');
@@ -221,6 +239,29 @@ export async function visibleTargetState(target) {
     return { visible: intersects(box, viewport) && texts.length > 0, text: node.innerText, visibleText: texts.join(' '), rect: { x: box.x, y: box.y, width: box.width, height: box.height } };
   });
 }
+
+async function resumeActionState(pane, button, expected, viewport) {
+  const paneExists = await pane.count() === 1;
+  const count = await button.count();
+  const status = paneExists ? await pane.locator('.pane-status-text').textContent() : null;
+  const enabled = count === 1 && await button.isEnabled();
+  const buttonBox = count === 1 ? await button.boundingBox() : null;
+  const paneBox = paneExists ? await pane.boundingBox() : null;
+  const contained = !!buttonBox && !!paneBox && buttonBox.width > 0 && buttonBox.height > 0
+    && buttonBox.x >= Math.max(0, paneBox.x) - 1 && buttonBox.y >= Math.max(0, paneBox.y) - 1
+    && buttonBox.x + buttonBox.width <= Math.min(viewport.width, paneBox.x + paneBox.width) + 1
+    && buttonBox.y + buttonBox.height <= Math.min(viewport.height, paneBox.y + paneBox.height) + 1;
+  const hit = contained && await button.evaluate(node => {
+    for (let current = node; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.visibility !== 'visible' || Number(style.opacity) === 0) return false;
+    }
+    const box = node.getBoundingClientRect();
+    return node.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+  });
+  return { passed: paneExists && status === 'Completed' && (expected ? count === 1 && enabled && contained && hit : count === 0),
+    details: { paneExists, status, count, enabled, contained, hit, buttonBox, paneBox, expected } };
+}
 export async function diagnoseReview({ page, manifest, report, out }) {
   const session = manifest.sessions.find(item => item.id === manifest.screens.review.sessionId);
   await selectSession(page, session, report);
@@ -242,12 +283,15 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   let settled = false;
   const prove = mutationProver(report, assert);
   const probe = async (name, fn, context) => { try { const result = await fn(); assert(name, result.passed, result.details, context); } catch (error) { assert(name, false, error.message, context); } };
-  const capture = async (screen, viewport, target, expected, variant, expectedVisible = expected) => {
+  const capture = async (screen, viewport, target, expected, variant, expectedVisible = expected, extraMeasure) => {
     console.log(`render:check capture ${screen} ${viewport.width}x${viewport.height}`);
     const context = { screen, viewport: `${viewport.width}x${viewport.height}`, ...(variant ? { variant } : {}) };
     const screenMeasure = async () => {
       const details = await visibleTargetState(target);
-      return { passed: details.visible && expected(details.text) && expectedVisible(details.visibleText), details };
+      const textMatches = details.visible && expected(details.text) && expectedVisible(details.visibleText);
+      if (!textMatches || !extraMeasure) return { passed: textMatches, details };
+      const extra = await extraMeasure();
+      return { passed: extra.passed, details: { ...details, action: extra.details } };
     };
     await probe('screen-not-empty', screenMeasure, context);
     await prove('screen-not-empty', screenMeasure, () => styleChange(target, { display: 'none' }), context);
@@ -296,30 +340,16 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     const button = pane.getByRole('button', { name: `Resume ${agent.label}`, exact: true });
     const name = `resume-${expected ? 'available' : 'unavailable'}-${mode.toLowerCase()}-${viewport.width}`;
     const context = { screen: mode.toLowerCase(), viewport: `${viewport.width}x${viewport.height}`, agentId: agent.id };
-    const measure = async () => {
-      const paneExists = await pane.count() === 1;
-      const count = await button.count();
-      const status = paneExists ? await pane.locator('.pane-status-text').textContent() : null;
-      const visible = count === 1 ? await visibleTargetState(button) : { visible: false, visibleText: '' };
-      const enabled = count === 1 && !await button.isDisabled();
-      const buttonBox = count === 1 ? await button.boundingBox() : null;
-      const paneBox = paneExists ? await pane.boundingBox() : null;
-      const contained = !!buttonBox && !!paneBox && buttonBox.width > 0 && buttonBox.height > 0
-        && buttonBox.x >= Math.max(0, paneBox.x) - 1 && buttonBox.y >= Math.max(0, paneBox.y) - 1
-        && buttonBox.x + buttonBox.width <= Math.min(viewport.width, paneBox.x + paneBox.width) + 1
-        && buttonBox.y + buttonBox.height <= Math.min(viewport.height, paneBox.y + paneBox.height) + 1;
-      return { passed: paneExists && status === 'Completed' && (expected
-        ? count === 1 && visible.visible && !visible.visibleText.trim() && enabled && contained
-        : count === 0), details: { paneExists, status, count, visible, enabled, contained, buttonBox, paneBox, expected } };
-    };
+    const measure = () => resumeActionState(pane, button, expected, viewport);
     await probe(name, measure, context);
     if (expected) await prove(`resume-clip-${mode.toLowerCase()}-${viewport.width}`, measure, async () => {
       const buttonBox = await button.boundingBox(), paneBox = await pane.boundingBox();
       return styleChange(button, { transform: `translateX(${paneBox.x + paneBox.width - buttonBox.x - buttonBox.width + 6}px)` });
     }, context);
     await prove(name, measure, () => expected ? removeNode(button) : appendNode(pane.locator('.terminal-header'), {
-      tag: 'button', attributes: { 'aria-label': `Resume ${agent.label}` }, text: 'Resume',
+      tag: 'button', attributes: { 'aria-label': `Resume ${agent.label}` },
     }), context);
+    return measure;
   };
   const revealGridAgent = async agent => {
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(agent.id)}]`).click();
@@ -327,7 +357,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await scrollColumn(pane);
     return pane;
   };
-  const gridChecks = async (viewport, stage) => {
+  const gridChecks = async (viewport, stage, queenHasTerminal) => {
     const context = { screen: 'grid', viewport: `${viewport.width}x${viewport.height}`, stage };
     const band = page.locator('.session-ops-band');
     const region = band.getByRole('region', { name: 'Session event ticker', exact: true });
@@ -484,7 +514,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       const pane = await revealGridAgent(agent);
       await showChat(pane);
       const measure = async () => {
-        const details = await wallBarGeometry(page);
+        const details = await wallBarGeometry(page, queenHasTerminal);
         const card = (await pane.locator(`${attention}:visible`).count()) > 0;
         return { passed: details.contained && card === hasAttention, details: { ...details, card } };
       };
@@ -507,13 +537,21 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     assert(`viewport-${viewport.width}`, dimensions.width === viewport.width && dimensions.height === viewport.height, dimensions);
     await prove(`viewport-${viewport.width}`, async () => { const details = await page.evaluate(() => ({ width: innerWidth, height: innerHeight })); return { passed: details.width === viewport.width && details.height === viewport.height, details }; }, async () => { await page.setViewportSize({ ...viewport, width: viewport.width - 10 }); return () => page.setViewportSize(viewport); });
     await page.getByRole('button', { name: 'New Session', exact: true }).click();
-    const projectField = page.locator('#launch-project-value');
+    const projectButton = page.locator('.launch-inline').getByRole('button', { name: /^Project(?: |$)/ });
     const projectMeasure = async () => {
-      const value = await projectField.textContent();
+      const label = await projectButton.getAttribute('aria-label');
+      const value = label?.startsWith('Project ') ? label.slice('Project '.length) : '';
       return { passed: path.isAbsolute(value) && !value.startsWith('\\\\?\\') && value === report.root, details: { value, expected: report.root } };
     };
     await probe('launch-project-ordinary-path', projectMeasure, { screen: 'launch', viewport: `${viewport.width}x${viewport.height}` });
-    await prove('launch-project-verbatim-prefix', projectMeasure, async () => textChange(projectField, `\\\\?\\${await projectField.textContent()}`), { screen: 'launch' });
+    await prove('launch-project-verbatim-prefix', projectMeasure, async () => {
+      const label = await projectButton.evaluate(node => {
+        const original = node.getAttribute('aria-label');
+        node.setAttribute('aria-label', 'Project \\\\?\\' + original.slice('Project '.length));
+        return original;
+      });
+      return () => projectButton.evaluate((node, original) => node.setAttribute('aria-label', original), label);
+    }, { screen: 'launch' });
     await capture('launch', viewport, page.locator('.launch-inline'), text => text.includes('What would you like to work on?'));
     // Hold capabilities only for the focus mutation. This exposes the real
     // pre-roster xterm mount without changing app source or fixture data.
@@ -539,13 +577,17 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     for (const key of ['table', 'code', 'literal']) assert(`chat-${key}`, chat[key], chat, { screen: 'focus', viewport: `${viewport.width}x${viewport.height}` });
     for (const key of ['table', 'code', 'literal']) await prove(`chat-${key}`, async () => { const details = await chatState(focused, manifest); return { passed: details[key], details }; }, () => key === 'table' ? removeNode(focused.locator('[aria-label="Markdown table"] table').first()) : key === 'code' ? textChange(focused.locator('pre[aria-label^="Code block"] code').first(), 'mutated code') : appendNode(focused.locator(`${chatSelector}:visible`).first(), { attributes: { 'data-fixture': 'literal' } }), { screen: 'focus' });
     for (const key of ['table', 'code']) await prove(`chat-empty-${key}`, async () => { const details = await chatState(focused, manifest); return { passed: details[key], details }; }, () => emptyContents(focused.locator(key === 'table' ? '[aria-label="Markdown table"] table' : 'pre[aria-label^="Code block"] code').first()), { screen: 'focus' });
-    await capture('focus', viewport, focused, text => text.includes(manifest.chat.tableText) && text.includes(manifest.chat.codeText));
+    const hasTable = text => [manifest.chat.tableText, manifest.chat.tableHeader, manifest.chat.tableCell].every(value => text.includes(value));
+    await capture('focus', viewport, focused, hasTable);
+    await focused.locator('pre[aria-label^="Code block"] code').filter({ hasText: manifest.chat.codeText }).first().scrollIntoViewIfNeeded();
+    await capture('focus', viewport, focused, text => text.includes(manifest.chat.codeText), 'markdown-code');
     await runSecurityAssertions({ page, pane: focused, report, assert, consoleErrors, sessionId: manifest.chat.sessionId,
       capture: () => capture('focus', viewport, focused, text => text.includes('Close HTML preview'), 'html') });
     const toggle = page.locator('#title-bar-panel-toggle');
     if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
     await viewMode(page, 'Grid');
-    await gridChecks(viewport, 'load');
+    const queenHasTerminal = await queenTerminalCapability(session, report.ports.api);
+    await gridChecks(viewport, 'load', queenHasTerminal);
     if (!settled) {
       console.log('render:check observing the 60-second stall loop and 5-second sweep');
       const started = Date.now();
@@ -553,7 +595,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       report.stallSweepWaitSeconds = (Date.now() - started) / 1000;
       settled = true;
     }
-    await gridChecks(viewport, 'after-stall-and-sweep');
+    await gridChecks(viewport, 'after-stall-and-sweep', queenHasTerminal);
     await resumeChecks(resumable, true, 'Grid', viewport);
     // Every column was individually painted/reachable above; preserve captures
     // of both meaningful attention states without treating offscreen text as painted.
@@ -677,13 +719,10 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await dialog.waitFor();
     await capture('dialog', viewport, dialog, text => text.includes('Keyboard Shortcuts'));
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await openPanelView(page, 'Activity');
     // Exercise the persisted result envelope through the shipped conversation UI.
     const conversationFixture = manifest.conversation;
-    if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
-    const activity = page.getByRole('group', { name: 'Panel views', exact: true }).getByRole('button', { name: 'Activity', exact: true });
-    if (await activity.getAttribute('aria-pressed') !== 'true') await activity.click();
-    await page.getByRole('group', { name: 'Activity sections', exact: true }).getByRole('button', { name: 'Chat', exact: true }).click();
-    const viewer = page.locator('.conversation-viewer');
+    const viewer = page.locator('.activity-tab [aria-label="Chat"] .conversation-viewer');
     await viewer.getByRole('tab', { name: 'Queen', exact: true }).click();
     const diffWidget = viewer.locator('.diff-widget').first();
     await diffWidget.waitFor({ state: 'visible' });
@@ -744,10 +783,10 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await selectSession(page, session, report);
     await viewMode(page, 'Focus');
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(resumable.id)}]`).click();
-    await resumeChecks(resumable, true, 'Focus', viewport);
+    const measureResume = await resumeChecks(resumable, true, 'Focus', viewport);
     await capture('focus', viewport, paneFor(page, resumable),
-      text => text.includes(resumable.label) && text.includes('Resume') && text.includes('Completed'), 'resume-available',
-      text => text.includes('Resume') && text.includes('Completed'));
+      text => text.includes(resumable.label) && text.includes('Completed'), 'resume-available',
+      text => text.includes('Completed'), measureResume);
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(normal.id)}]`).click();
     await page.getByRole('link', { name: 'Dashboard', exact: true }).click();
     // Open the already-loaded completed fixture through the shipped Dashboard
@@ -812,6 +851,8 @@ export async function runChatContrastAssertions({ page, session, manifest, repor
       const body = chat.locator('.message p').first();
       const meta = queen.locator('.sender-label');
       await body.scrollIntoViewIfNeeded();
+      const accent = await page.locator('html').getAttribute('data-accent') ?? 'honey';
+      const chatWell = chatWellByAccent[accent];
       const sample = locator => locator.evaluate(node => {
         const css = getComputedStyle(node);
         return { color: css.color, background: css.backgroundColor, font: css.fontSize, line: css.lineHeight,
@@ -820,19 +861,19 @@ export async function runChatContrastAssertions({ page, session, manifest, repor
           text: node.textContent, label: node.querySelector('.sender-label, strong')?.textContent };
       });
       const cases = [
-        ['well', chat, css => css.background === 'rgb(7, 22, 40)', { 'background-color': 'rgb(244,247,251)' }],
+        ['well', chat, css => css.background === chatWell, { 'background-color': 'rgb(244,247,251)' }],
         ['body', body, css => css.color === 'rgb(244, 247, 251)', { color: 'rgb(7,22,40)' }],
         ['meta', meta, css => css.color === 'rgb(201, 213, 228)', { color: 'rgb(7,22,40)' }],
         ['font', body, css => css.font === '13.5px' && Math.abs(parseFloat(css.line) - 20.925) < .01, { 'font-size': '12px' }],
         ['line', body, css => Math.abs(parseFloat(css.line) - 20.925) < .01, { 'line-height': '1' }],
         ['queen', queen, css => css.text.includes(manifest.chat.queenDirective) && css.background === 'rgba(193, 66, 196, 0.1)' && css.border === 'rgb(193, 66, 196)' && css.outline && css.label === 'Queen', { 'border-top-width': '0px' }],
         ['warn', chat.locator('.message[aria-label="Agent error"]'), css => css.background === 'rgba(236, 221, 165, 0.1)' && css.border === 'rgb(236, 221, 165)' && css.outline && css.label === 'Error', { 'border-top-width': '0px' }],
-        ['operator', operator, css => css.text.includes(manifest.chat.operatorMessage) && css.background === 'rgb(7, 22, 40)' && css.borderWidth === '1px' && parseFloat(css.radius) > 0, { 'border-left-width': '0px' }],
+        ['operator', operator, css => css.text.includes(manifest.chat.operatorMessage) && css.background === chatWell && css.borderWidth === '1px' && parseFloat(css.radius) > 0, { 'border-left-width': '0px' }],
       ];
       for (const [part, locator, accepts, mutation] of cases) {
         await locator.scrollIntoViewIfNeeded();
         const measure = async () => {
-          const details = await sample(locator);
+          const details = { ...await sample(locator), accent, expectedChatWell: chatWell };
           return { passed: await locator.isVisible() && accepts(details), details };
         };
         const name = `chat-${part}-${mode.toLowerCase()}-${viewport.width}`;

@@ -193,6 +193,7 @@
         if (previewBusy) return;
         const sessionId = previewSessionId;
         const generation = selectionGeneration;
+        const revision = liveStatusRevision;
         previewBusy = key;
         const busyGeneration = ++previewBusyGeneration;
         previewError = '';
@@ -201,8 +202,10 @@
             // The response carries a saved URL for this selection. Keep it scoped
             // without invalidating openPreview's independent request ID.
             if (status && selectionIsCurrent(generation) && busyGeneration === previewBusyGeneration) {
-                applyLiveStatus(status);
                 rememberSessionUrl(sessionId, status.session_url);
+                if (revision === liveStatusRevision) applyLiveStatus(status);
+                // Navigation has no dock state. Reconcile without restoring the reply's older URL.
+                else void refreshPreviewStatus(sessionId);
             }
         } catch (error) {
             if (selectionIsCurrent(generation) && busyGeneration === previewBusyGeneration) previewError = String(error);

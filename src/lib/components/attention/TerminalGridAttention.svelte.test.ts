@@ -286,10 +286,14 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     expect(within(pane).getByRole('region', { name: 'Agent needs attention' })).toBeTruthy();
     await fireEvent.click(view.getByRole('button', { name: 'Focus Codex PTY' }));
     expect(shared().textContent).toBe('Beta private draft');
+    await fireEvent.click(shared());
+    expect(within(pane).getByRole('button', { name: 'Command target: @Codex PTY' })).toBeTruthy();
+    expect(shared().textContent).toBe('Beta private draft');
     await fireEvent.click(view.getByRole('button', { name: 'Send message' }));
     await waitFor(() => expect(fixture.invoke).toHaveBeenCalledWith('operator_inject', { request: { session_id: 's', target_agent_id: 'codex', message: 'Beta private draft' } }));
     expect(fixture.invoke.mock.calls.filter(([command]) => command === 'operator_inject')).toHaveLength(1);
-    await fireEvent.click(view.getByRole('button', { name: 'Focus Claude agent' }));
+    await fireEvent.click(pane);
+    expect(within(pane).getByRole('button', { name: 'Command target: @Claude agent' })).toBeTruthy();
     expect(shared().textContent).toBe('Alpha Focus draft');
     layout.setSessionViewMode('focus'); await tick();
     expect(focus().textContent).toBe('Alpha Focus draft');
@@ -297,6 +301,22 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     original.forEach((terminal, index) => { expect(fixture.terminals[index]).toBe(terminal); expect(terminal.disposed).toBe(false); });
     expect(fixture.terminalsDisposed).toBe(0);
     expect(fixture.focuses).toBe(0);
+  });
+
+  it('lets the Grid target picker consume Escape before restoring the maximized Queen', async () => {
+    layout.setSessionViewMode('grid');
+    const view = render(TerminalGrid, { session: stageRoster, focusedAgentId: 'claude', onSelect: vi.fn() });
+    await fireEvent.click(view.getByRole('button', { name: 'Maximize Claude agent' }));
+    const picker = view.getByRole('button', { name: 'Command target: @Claude agent' });
+    await fireEvent.click(picker);
+    expect(picker.getAttribute('aria-expanded')).toBe('true');
+
+    await fireEvent.keyDown(picker, { key: 'Escape', bubbles: true, cancelable: true });
+    expect(picker.getAttribute('aria-expanded')).toBe('false');
+    expect(view.getByRole('button', { name: 'Restore Claude agent' })).toBeTruthy();
+
+    await fireEvent.keyDown(picker, { key: 'Escape', bubbles: true, cancelable: true });
+    expect(view.getByRole('button', { name: 'Maximize Claude agent' })).toBeTruthy();
   });
 
   it('G59: Queen leads the full roster, column clicks set the shared target and the resource filter highlights without unmounting', async () => {

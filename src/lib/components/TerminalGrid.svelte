@@ -452,7 +452,7 @@
   });
 </script>
 
-<svelte:window onkeydowncapture={handleWindowKeydown} />
+<svelte:window onkeydown={handleWindowKeydown} />
 
 <div class="terminal-workspace" bind:this={workspace}>
   <div class="terminal-toolbar">
@@ -570,7 +570,10 @@
         class:resource-match={!focusMode && resourceFilter !== null && pane.kind === 'agent' && (resourceFilter === 'attention' ? attentionSeats.has(pane.id) : resourceFilter === 'stale' ? staleSeats.has(pane.id) : serdeEnumVariantName(pane.agent.status) === 'WaitingForInput')}
         data-agent-id={pane.kind === 'agent' ? pane.id : undefined}
         inert={eclipsed}
-        onclick={() => focusPane(pane)}
+        onclick={(event) => {
+          if (gridComposer && event.target instanceof Element && event.target.closest('.chat-composer')) return;
+          focusPane(pane);
+        }}
       >
         <div
           class="terminal-header"

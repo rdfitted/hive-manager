@@ -422,6 +422,33 @@ describe('PreviewControl preview action freshness', () => {
 
 
 describe('Preview status probe ordering', () => {
+  it('keeps newer navigation while reconciling a late dock response', async () => {
+    const dock = deferred<typeof LIVE_STATUS | { session_url: string }>();
+    const probe = deferred<typeof LIVE_STATUS>();
+    const initial = { ...LIVE_STATUS, docked: false };
+    const laterUrl = 'http://localhost:5174/';
+    const saved = 'http://localhost:4173/';
+    tauriMocks.invoke.mockResolvedValueOnce(initial).mockReturnValueOnce(dock.promise).mockReturnValueOnce(probe.promise);
+    const view = await renderExpanded(fakeSession('session-a'));
+    await fireEvent.click(view.getByRole('button', { name: 'Dock the preview beside Hive Manager' }));
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, 'dock_preview_window', { sessionId: 'session-a' });
+    emitPreviewEvent('preview-navigated', { url: laterUrl });
+    await view.findByText(laterUrl);
+
+    dock.resolve({ ...LIVE_STATUS, session_url: saved });
+    await dock.promise;
+    await flush();
+    expect(view.getByText(laterUrl)).toBeTruthy();
+    expect(view.input.value).toBe(saved);
+    expect(view.getByText('Popped out')).toBeTruthy();
+
+    probe.resolve({ ...LIVE_STATUS, url: laterUrl });
+    expect(await view.findByText('Docked')).toBeTruthy();
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, 'get_preview_status', { sessionId: 'session-a' });
+    expect(view.getByText(laterUrl)).toBeTruthy();
+    expect(view.input.value).toBe(saved);
+  });
+
   it.each(['preview-navigated', 'preview-status'])('keeps live state from %s and prefills the saved session URL', async (eventName) => {
     const probe = deferred<typeof CLOSED_STATUS | { session_url: string }>();
     tauriMocks.invoke.mockReturnValue(probe.promise);
