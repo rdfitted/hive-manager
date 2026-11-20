@@ -17,7 +17,7 @@
   let windowError = $state('');
   let modalFocusTarget: HTMLButtonElement | null = null;
   const focusedAgent = $derived($activeSession?.agents.find((agent) => agent.id === ($ui.focusedAgentId || $ui.selectedAgentId)));
-  const sessionLabel = $derived($activeSession ? sessionDisplayName($activeSession) : 'Hive Manager');
+  const sessionLabel = $derived($activeSession ? sessionDisplayName($activeSession) : '');
   const sessionDetails = $derived($activeSession && [
     sessionLabel,
     serdeEnumVariantName($activeSession.session_type),
@@ -98,8 +98,11 @@
   </div>
   <div class="breadcrumb" data-tauri-drag-region data-window-chrome>
     <div class="brand-mark" data-tauri-drag-region data-window-chrome><HiveMark title="Hive" size={20} /></div>
-    <span class="session-name" title={sessionDetails ?? undefined} data-tauri-drag-region data-window-chrome>{sessionLabel}</span>
-    {#if $activeSession}<SessionHeader session={$activeSession} />{/if}
+    <span class="brand-wordmark" data-tauri-drag-region data-window-chrome>Hive Manager</span>
+    {#if $activeSession}
+      <span class="session-name" title={sessionDetails ?? undefined} data-tauri-drag-region data-window-chrome>{sessionLabel}</span>
+      <SessionHeader session={$activeSession} />
+    {/if}
     {#if focusedAgent}
       <span class="separator" data-tauri-drag-region data-window-chrome>/</span>
       <span class="agent-name" data-tauri-drag-region data-window-chrome>{focusedAgent.config.label || focusedAgent.id}</span>
@@ -161,11 +164,12 @@
   .shell-actions :global(svg), :global(.window-control svg) { pointer-events: none; }
   .brand-mark :global(svg) { pointer-events: none; }
   .brand-mark { display: flex; }
+  .brand-wordmark { flex: none; white-space: nowrap; color: var(--text-primary); font-family: var(--font-display); font-size: var(--text-h3); font-weight: 600; }
   .breadcrumb :global([data-window-chrome]) { pointer-events: auto; }
   :global(.panel-toggle svg) { transform: scaleX(-1); }
   .breadcrumb { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; align-self: stretch; font-size: var(--text-small); }
   .session-name, .agent-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .session-name { color: var(--text-primary); font-family: var(--font-display); font-size: var(--text-base); }
+  .session-name { color: var(--ink-muted); font-family: var(--font-display); font-size: var(--text-base); font-style: italic; }
   .agent-name { color: var(--ink-muted); }
   .separator { color: var(--ink-muted); }
   .traffic-light-space { flex: 0 0 68px; align-self: stretch; }

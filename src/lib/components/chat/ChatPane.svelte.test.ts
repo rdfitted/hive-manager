@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
-import { tick } from 'svelte';
+import { createRawSnippet, tick } from 'svelte';
 import { get } from 'svelte/store';
 import type { AgentEvent } from '$lib/stores/agentEvents';
 import { CHAT_WINDOW_SIZE, passiveToolResult, protocolAttention, transcriptRows } from './transcript';
+import { paneStatusLineContext } from './paneMode';
 
 const fixture = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue(undefined), loadOlder: vi.fn(), setAgents: (_agents: import('$lib/stores/sessions').AgentInfo[]) => {}, setSource: (_source: import('$lib/stores/agentEvents').AgentFeed['capabilities']['event_source']) => {} }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
@@ -276,6 +277,7 @@ describe('agent chat', () => {
   it('reuses Composer and sends only through operator_inject to this agent', async () => {
     const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [] } });
     const editor = view.getByRole('textbox', { name: 'Message this agent…' });
+    expect(view.getByRole('button', { name: 'Send message', description: 'Send to a' })).toBeTruthy();
     editor.textContent = 'Continue with fixture';
     await fireEvent.input(editor);
     await fireEvent.keyDown(editor, { key: 'Enter' });
@@ -283,6 +285,50 @@ describe('agent chat', () => {
       request: { session_id: 's', target_agent_id: 'a', message: 'Continue with fixture' },
     }));
     expect(fixture.invoke.mock.calls.filter(([command]) => command === 'operator_inject')).toHaveLength(1);
+  });
+
+  it('uses the supplied composer route for its target, submission and error beneath the status line', async () => {
+    fixture.setAgents([
+      { ...runningAgent(), config: { cli: 'codex', flags: [], label: 'Queen' } },
+      { ...runningAgent(), id: 'backend', config: { cli: 'codex', flags: [], label: 'Backend', model: 'routed-model' } },
+    ]);
+    const send = vi.fn();
+    const clear = vi.fn();
+    const route = {
+      agentId: 'backend', placeholder: 'Message routed agent', disabled: false, sending: false,
+      prepareSubmit: vi.fn(() => ({ send, clear })), onsubmit: vi.fn(),
+      targetControl: createRawSnippet(() => ({ render: () => '<button type="button" aria-label="Command target: @Backend">@Backend</button>' })),
+    };
+    const statusLine = createRawSnippet(() => ({ render: () => '<div>Queen terminal status</div>' }));
+    const view = render(ChatPane, {
+      props: { sessionId: 's', agentId: 'a', events: [event('queen-transcript')], composerRoute: route },
+      context: new Map([[paneStatusLineContext, () => statusLine]]),
+    });
+
+    const editor = view.getByRole('textbox', { name: route.placeholder });
+    const composer = view.getByRole('group', { name: 'Message composer' });
+    const toolbar = within(composer).getByRole('group', { name: 'Composer toolbar' });
+    expect(view.getByText('Queen terminal status').nextElementSibling).toBe(composer);
+    expect(view.getByText('queen-transcript')).toBeTruthy();
+    expect(within(toolbar).getByRole('button', { name: 'Command target: @Backend' })).toBeTruthy();
+    expect(within(toolbar).getByText('routed-model')).toBeTruthy();
+    expect(view.queryByTitle('Send to Queen')).toBeNull();
+
+    editor.textContent = 'Routed message';
+    await fireEvent.input(editor);
+    await fireEvent.click(within(toolbar).getByRole('button', { name: 'Send message' }));
+    await waitFor(() => expect(send).toHaveBeenCalledWith('Routed message'));
+    expect(route.prepareSubmit).toHaveBeenCalledTimes(1);
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(route.onsubmit).not.toHaveBeenCalled();
+    expect(fixture.invoke.mock.calls.some(([command]) => command === 'operator_inject')).toBe(false);
+
+    await view.rerender({ composerRoute: { ...route, disabled: true, sending: true, error: 'Target is busy' } });
+    expect(editor.getAttribute('aria-disabled')).toBe('true');
+    expect((view.getByRole('button', { name: 'Sending message' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(view.getByRole('alert').textContent).toContain('Message could not be sent: Target is busy');
+    await view.rerender({ composerRoute: route });
+    expect(view.queryByRole('alert')).toBeNull();
   });
 
   it('holds the current reading window when new live records arrive after scrolling up', async () => {

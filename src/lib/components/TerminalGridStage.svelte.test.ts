@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { heartbeatStore } from '$lib/stores/conversations';
 import { layout } from '$lib/stores/layout';
 import { scratchTerminals } from '$lib/stores/scratchTerminals';
 import type { AgentInfo, Session } from '$lib/stores/sessions';
@@ -11,7 +12,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn().mockResolvedValue(undef
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock('phosphor-svelte', () => ({
   Bell: () => {}, ChatCircle: () => {}, ListBullets: () => {}, SquareSplitVertical: () => {}, TerminalWindow: () => {}, Timer: () => {},
-  ArrowUp: () => {}, ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {},
+  ArrowUpRight: () => {}, ArrowUp: () => {}, ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {},
   Circle: () => {}, Hourglass: () => {}, Plus: () => {}, X: () => {},
 }));
 vi.mock('./Terminal.svelte', async () => ({
@@ -72,6 +73,14 @@ afterEach(() => {
 });
 
 describe('vertical terminal stage', () => {
+  it('offers Open Terminal as a named icon with a focus tooltip', async () => {
+    const view = renderStage();
+    const button = view.getByRole('button', { name: 'Open Terminal' });
+    expect(button.textContent?.trim()).toBe('');
+    button.focus();
+    expect((await view.findByRole('tooltip')).textContent).toContain('Open Terminal');
+  });
+
   it('G-vertical-stack: one Queen outside the y-scrolling viewport of five workers', () => {
     const { stage, workers, card } = renderStage();
     const queen = card('queen');
@@ -85,6 +94,52 @@ describe('vertical terminal stage', () => {
     expect(overflowAxes(workers)).toEqual({ x: 'hidden', y: 'auto' });
     expect(getComputedStyle(workers).flexDirection).toBe('column');
     expect(getComputedStyle(stage).gridTemplateColumns).toMatch(/minmax\(0, 1[.]42fr\) minmax\(0, 1fr\)/);
+  });
+
+  it('expands a worker when current work and newer input supersede its idle heartbeat', async () => {
+    const workerId = 'worker-1';
+    const time = Date.now();
+    const lastActivity = new Date(time - 10_000).toISOString();
+    const newerInput = new Date(time - 5_000).toISOString();
+    const fetchActive = vi.fn();
+    vi.stubGlobal('fetch', fetchActive);
+    const updateWorker = async (workState?: string, latestInput?: string) => {
+      const agents = [{ id: workerId, status: 'idle', last_activity: lastActivity,
+        work_state: workState, latest_input_at: latestInput }];
+      fetchActive.mockResolvedValue({ ok: true, json: async () => ({ sessions: [{ id: roster.id, agents }] }) });
+      await heartbeatStore.loadHeartbeats(roster.id);
+      await tick();
+    };
+
+    try {
+      await updateWorker('working');
+      const { card } = renderStage();
+      const worker = within(card(workerId));
+      const terminal = () => terminalLifecycle.terminals.get(workerId)!;
+      const node = terminal().node;
+      expect(terminal().props.isVisible).toBe(false);
+
+      for (const [state, input] of [
+        ['working', lastActivity], [undefined, newerInput], ['finished', newerInput], ['retired', newerInput],
+      ]) {
+        await updateWorker(state, input);
+        expect(terminal().props.isVisible).toBe(false);
+      }
+
+      await updateWorker('working', newerInput);
+      expect(terminal().props.isVisible).toBe(true);
+      expect(terminal().node).toBe(node);
+      await fireEvent.click(worker.getByRole('button', { name: 'Collapse Worker 1' }));
+      await updateWorker('working', new Date(time).toISOString());
+      expect(terminal().props.isVisible).toBe(false);
+      expect(terminal().node).toBe(node);
+      expect(terminalLifecycle.created.filter(id => id === workerId)).toHaveLength(1);
+      expect(terminalLifecycle.destroyed).not.toContain(workerId);
+    } finally {
+      fetchActive.mockResolvedValue({ ok: true, json: async () => ({ sessions: [] }) });
+      await heartbeatStore.loadHeartbeats(null);
+      vi.unstubAllGlobals();
+    }
   });
 
   it('keeps each terminal alive through collapse, expansion, attention, focus, maximise and scratch actions', async () => {
@@ -123,9 +178,14 @@ describe('vertical terminal stage', () => {
     await view.rerender({ session: roster });
     expect(visible('worker-4')).toBe(false);
 
+    const queen = card('queen');
+    await fireEvent.click(within(queen).getByRole('button', { name: /^Terminal$/ }));
+    expect(queen.querySelector<HTMLElement>('.agent-pane-body')?.dataset.mode).toBe('terminal');
     await fireEvent.click(quiet.getByRole('button', { name: 'Message Worker 4' }));
+    expect(queen.querySelector<HTMLElement>('.agent-pane-body')?.dataset.mode).toBe('chat');
+    expect(within(queen).getByRole('button', { name: 'Command target: @Worker 4' })).toBeTruthy();
     expect(view.onSelect).toHaveBeenLastCalledWith('worker-4');
-    expect(document.activeElement).toBe(view.container.querySelector('.command-bar [data-composer]'));
+    expect(document.activeElement).toBe(view.container.querySelector('.queen-column .chat-composer [data-composer]'));
 
     await view.rerender({ focusedAgentId: 'worker-4' });
     layout.setSessionViewMode('focus');

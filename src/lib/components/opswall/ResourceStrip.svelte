@@ -9,10 +9,15 @@
   } = $props();
 </script>
 
+{#snippet metricValue(label: string, value: string | number | null)}
+  <span class="metric-label">{label}{' '}{value === null ? 'unavailable' : ''}</span>
+  <span aria-hidden={value === null ? 'true' : undefined}>{value ?? '—'}</span>
+{/snippet}
+
 <nav class="resource-strip" aria-label="Agent resources">
   {#if metrics}
-    <span class="metric" title={`${metrics.agents} agents`}><Users size={14} aria-hidden="true" /><span aria-label={`Agents ${metrics.agents}`}>{metrics.agents}</span></span>
-    <span class="metric" title={`${metrics.running} running`}><Pulse size={14} aria-hidden="true" /><span aria-label={`Running ${metrics.running}`}>{metrics.running}</span></span>
+    <span class="metric" title={`${metrics.agents} agents`}><Users size={14} aria-hidden="true" />{@render metricValue('Agents', metrics.agents)}</span>
+    <span class="metric" title={`${metrics.running} running`}><Pulse size={14} aria-hidden="true" />{@render metricValue('Running', metrics.running)}</span>
   {/if}
   {#each [
     { id: 'attention', label: 'Attention', count: attention, icon: Bell, tip: 'Need your attention' },
@@ -27,9 +32,9 @@
   {/each}
   {#if metrics}
     <div class="band-metrics">
-      <span class="metric" title="Elapsed time"><Clock size={14} aria-hidden="true" /><span aria-label={`Elapsed ${metrics.elapsed ?? 'unavailable'}`}>{metrics.elapsed ?? '—'}</span></span>
-      <span class="metric" title="Completed work graph nodes"><Graph size={14} aria-hidden="true" /><span aria-label={`Nodes ${metrics.nodes ?? 'unavailable'}`}>{metrics.nodes ?? '—'}</span></span>
-      <span class="metric" title="Changed files reported in artifacts"><File size={14} aria-hidden="true" /><span aria-label={`Files ${metrics.files ?? 'unavailable'}`}>{metrics.files ?? '—'}</span></span>
+      <span class="metric" title="Elapsed time"><Clock size={14} aria-hidden="true" />{@render metricValue('Elapsed', metrics.elapsed)}</span>
+      <span class="metric" title="Completed work graph nodes"><Graph size={14} aria-hidden="true" />{@render metricValue('Nodes', metrics.nodes)}</span>
+      <span class="metric" title="Changed files reported in artifacts"><File size={14} aria-hidden="true" />{@render metricValue('Files', metrics.files)}</span>
     </div>
   {/if}
   <span class="phase" class:lattice-sr-only={metrics !== undefined}><span>Phase</span> <strong>{phase}</strong></span>
@@ -41,7 +46,7 @@
   .resource-tile { min-height: var(--control-height-sm); padding: 0 var(--space-2); }
   .metric { padding-inline: var(--space-1); color: var(--ink-muted); font-variant-numeric: tabular-nums; }
   .band-metrics { display: flex; gap: var(--space-2); margin-left: auto; }
-  .phase.lattice-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .phase.lattice-sr-only, .metric-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   @media (forced-colors: active) {
     .resource-tile[aria-pressed='true'] { outline: 1px solid Highlight; }
   }

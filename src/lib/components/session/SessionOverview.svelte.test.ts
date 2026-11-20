@@ -150,6 +150,32 @@ describe('Focus/Grid session terminals', () => {
     expect(session.container.querySelector('.terminal-section')).toBeTruthy();
   });
 
+  it('shows one band below the Focus stage and reveals an agent through its filter', async () => {
+    const active = session();
+    const waiting = active.agents[1];
+    waiting.status = { WaitingForInput: 'awaiting_injected_turn' };
+    publish(active);
+    const view = render(SessionOverview);
+    await tick();
+
+    expect(get(layout).sessionViewMode).toBe('focus');
+    const bands = view.container.querySelectorAll<HTMLElement>('.session-ops-band');
+    expect(bands).toHaveLength(1);
+    const band = bands[0];
+    expect(band.previousElementSibling?.classList.contains('terminal-section')).toBe(true);
+    expect(within(band).getByRole('region', { name: 'Session event ticker' })).toBeTruthy();
+
+    const tile = within(band).getByRole('button', { name: 'Waiting 1' });
+    await fireEvent.click(tile);
+    expect(tile.getAttribute('aria-pressed')).toBe('true');
+    expect(get(ui).focusedAgentId).toBe(waiting.id);
+    expect(visiblePane(view.container).getAttribute('data-agent-id')).toBe(waiting.id);
+
+    layout.setSessionViewMode('grid');
+    await tick();
+    expect([...view.container.querySelectorAll('.session-ops-band')]).toEqual([band]);
+  });
+
   it.each(['focus', 'grid'] as const)('G9: twenty chat/terminal toggles retain terminal nodes and scrollback in %s', async (mode) => {
     layout.setSessionViewMode(mode);
     chatFeed();

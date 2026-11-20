@@ -10,7 +10,6 @@
     import { TERMINAL_SESSION_STATES, terminalPool } from '../../stores/terminalPool';
     import OpsWall from '../opswall/OpsWall.svelte';
     import type { ComponentProps } from 'svelte';
-    import { layout } from '../../stores/layout';
     import TerminalGrid from '../TerminalGrid.svelte';
     const sessionId = $derived($activeSession?.id);
     const terminalAgentId = $derived($ui.focusedAgentId || $ui.selectedAgentId);
@@ -189,7 +188,7 @@
                     {/each}
                 </div>
             </div>
-            {#if $activeSession && $layout.sessionViewMode === 'grid'}
+            {#if $activeSession}
                 <div class="session-ops-band">
                     <OpsWall band session={$activeSession} attention={seats.attention} stale={seats.stale}
                         filter={resourceFilter ?? null} onfilter={filterResources} onselect={revealAgent} />

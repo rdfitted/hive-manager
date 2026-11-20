@@ -17,7 +17,10 @@
 
 <span class="session-state" data-tauri-drag-region data-window-chrome
   role="img" aria-label={`Session state: ${state}`} title={`Session state: ${state}`}
-  style:--state-color={statusColors[state.toLowerCase()] ?? 'var(--ink-muted)'}></span>
+  style:--state-color={statusColors[state.toLowerCase()] ?? 'var(--ink-muted)'}>
+  <span class="session-state-dot" aria-hidden="true" data-tauri-drag-region data-window-chrome></span>
+  {state}
+</span>
 {#if branch || worktree}
   <span class="worktree-chip" data-tauri-drag-region data-window-chrome title={worktree ?? branch}>
     <GitBranch size={14} aria-hidden="true" />
@@ -27,6 +30,12 @@
 
 <style>
   .session-state {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    white-space: nowrap;
+  }
+  .session-state-dot {
     flex: none;
     width: var(--space-2);
     height: var(--space-2);
@@ -46,6 +55,6 @@
   .worktree-label { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
   @media (forced-colors: active) {
-    .session-state { border-color: CanvasText; }
+    .session-state-dot { border-color: CanvasText; }
   }
 </style>

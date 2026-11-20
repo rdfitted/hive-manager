@@ -1,22 +1,30 @@
+<script module lang="ts">
+  import type { ComponentProps, Snippet } from 'svelte';
+  import type ChatPane from '../chat/ChatPane.svelte';
+
+  export type GridComposerRoute = NonNullable<ComponentProps<typeof ChatPane>['composerRoute']>;
+</script>
+
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { agentMentions, type MentionItem } from '$lib/composer/sources';
   import type { AgentInfo } from '$lib/stores/sessions';
   import { agentEvents } from '$lib/stores/agentEvents';
-  import Composer from '../composer/Composer.svelte';
-  import ComposerToolbar from '../composer/ComposerToolbar.svelte';
   import MentionMenu from '../composer/MentionMenu.svelte';
   import { toolbarFacts } from '../composer/toolbarFacts';
 
-  let { sessionId, agents, targetId = $bindable(null), drafts = $bindable({}), ondelivery }: {
+  let { sessionId, agents, defaultTargetId, enabled = true, targetId = $bindable(null), drafts = $bindable({}), ondelivery, children }: {
     sessionId: string;
     agents: AgentInfo[];
+    defaultTargetId?: string;
+    enabled?: boolean;
+    children: Snippet<[GridComposerRoute]>;
     targetId?: string | null;
     drafts?: Record<string, string>;
     ondelivery?: (sessionId: string, agentId: string, state: string) => void;
   } = $props();
 
-  const target = $derived(targetId === '@all' ? '@all' : agents.some(agent => agent.id === targetId) ? targetId! : agents[0]?.id ?? '');
+  const target = $derived(targetId === '@all' ? '@all' : agents.some(agent => agent.id === targetId) ? targetId! : defaultTargetId ?? agents[0]?.id ?? '');
   const selected = $derived(agents.find(agent => agent.id === target));
   const facts = $derived(toolbarFacts(selected, $agentEvents.sessionId === sessionId ? $agentEvents.feeds?.[target]?.capabilities.event_source : undefined));
   const items = $derived<MentionItem[]>([{ kind: 'agent', id: '@all', label: 'all', detail: 'Every agent once' }, ...agentMentions([...new Map(agents.map(agent => [agent.id, agent])).values()])]);
@@ -29,7 +37,8 @@
   let x = $state(0);
   let y = $state(0);
   let picker: HTMLButtonElement;
-  let bar: HTMLElement;
+  let bar: HTMLDivElement;
+  $effect(() => { if (!enabled) menuOpen = false; });
 
   function choose(item: MentionItem) { targetId = item.id; menuOpen = false; }
   function openPicker() {
@@ -67,7 +76,7 @@
     return false;
   }
   function captureKeydown(event: KeyboardEvent) {
-    if (!(event.target instanceof Node) || !bar?.contains(event.target)) return;
+    if (!enabled || !(event.target instanceof Node) || !bar?.contains(event.target)) return;
     const editorShortcut = event.altKey && event.target instanceof HTMLElement && event.target.matches('[data-composer]') && (event.key === 'ArrowUp' || event.key === 'ArrowDown');
     if ((menuOpen || editorShortcut) && keydown(event)) event.stopPropagation();
   }
@@ -99,24 +108,27 @@
   }
 </script>
 
-<svelte:window onkeydowncapture={captureKeydown} onkeydown={(event) => { if (!menuOpen && event.target instanceof Node && bar?.contains(event.target)) keydown(event); }} onpointerdown={(event) => { if (event.target instanceof Element && !event.target.closest('.target-picker, .mention-menu')) menuOpen = false; }} />
+<svelte:window onkeydowncapture={captureKeydown}
+  onkeydown={(event) => { if (enabled && !menuOpen && event.target instanceof Node && bar?.contains(event.target)) keydown(event); }}
+  onpointerdown={(event) => { if (menuOpen && event.target instanceof Element && !event.target.closest('.target-picker, .mention-menu')) menuOpen = false; }} />
 
-<section bind:this={bar} class="command-bar" aria-label="Shared agent command bar">
-  <div class="command-target">
-    <button bind:this={picker} type="button" class="target-picker lattice-btn lattice-btn--ghost" aria-label={`Command target: @${label}`} aria-haspopup="listbox" aria-expanded={menuOpen} disabled={!agents.length} onmousedown={(event) => event.preventDefault()} onclick={openPicker}>@{label}</button>
-    <span class="target-hint">{menuOpen ? 'Tab cycles targets · Esc closes' : 'Alt+↑/↓ changes target'}</span>
-  </div>
+{#snippet targetControl()}
+  <button bind:this={picker} type="button" class="target-picker lattice-btn lattice-btn--ghost"
+    aria-label={`Command target: @${label}`} aria-haspopup="listbox" aria-expanded={menuOpen} disabled={!agents.length}
+    title="Choose message target (Alt+↑/↓ changes target)" onmousedown={(event) => event.preventDefault()} onclick={openPicker}>@{label}</button>
   {#if menuOpen}<MentionMenu {items} {activeIndex} {x} {y} onselect={choose} />{/if}
-  <Composer {sessionId} agentId={target} submissionKey={draftKey} {prepareSubmit} persistDraft={false} bind:value={() => drafts[draftKey] ?? '', (value) => { drafts = { ...drafts, [draftKey]: value }; }} disabled={sending || !agents.length} onsubmit={send} placeholder={target === '@all' ? 'Message all agents' : facts.placeholder}>
-    {#snippet toolbar(controls)}<ComposerToolbar {controls} accessLabel={facts.accessLabel} model={facts.model} effort={facts.effort} {sending} />{/snippet}
-  </Composer>
-  {#if error}<p class="send-error" role="alert">Message could not be sent: {error}</p>{/if}
-</section>
+{/snippet}
+
+<div bind:this={bar} class="command-bar" class:routing-active={enabled}>
+  {@render children({
+    agentId: target, placeholder: target === '@all' ? 'Message all agents' : facts.placeholder,
+    disabled: sending || !agents.length, sending, prepareSubmit, onsubmit: send, targetControl, error,
+  })}
+</div>
 
 <style>
-  .command-bar { flex: 0 0 auto; min-width: 0; padding: var(--space-2); background: var(--surface); box-shadow: var(--edge-seam); }
-  .command-target { display: flex; align-items: center; gap: var(--space-2); min-width: 0; margin-bottom: var(--space-1); }
-  .target-picker { max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .target-hint { color: var(--text-muted); font-size: var(--text-micro); }
-  .send-error { margin: var(--space-1) 0 0; color: var(--status-error); font-size: var(--text-small); overflow-wrap: anywhere; }
+  .command-bar { height: 100%; min-width: 0; min-height: 0; }
+  .routing-active :global(.composer-toolbar) { display: flex; gap: var(--space-1); flex-wrap: wrap; align-items: center; }
+  .routing-active :global(.composer-toolbar > .toolbar) { flex: 1 1 auto; }
+  .target-picker { max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

@@ -14,7 +14,7 @@ const fixture = vi.hoisted(() => ({
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('phosphor-svelte', () => ({
-  ArrowUpRight: () => {}, Bell: () => {}, ChatCircle: () => {}, ListBullets: () => {}, SquareSplitVertical: () => {}, TerminalWindow: () => {}, Timer: () => {},
+  Play: () => {}, ArrowUpRight: () => {}, Bell: () => {}, ChatCircle: () => {}, ListBullets: () => {}, SquareSplitVertical: () => {}, TerminalWindow: () => {}, Timer: () => {},
   ArrowDown: () => {}, ArrowUp: () => {}, Broom: () => {}, CaretDown: () => {}, CaretUp: () => {}, CheckSquare: () => {},
   ClipboardText: () => {}, FileText: () => {}, MagnifyingGlass: () => {}, X: () => {},
   ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {}, Hourglass: () => {}, Plus: () => {},
@@ -123,7 +123,7 @@ describe('G49 pane resume', () => {
     expect(view.getByRole('button', { name: 'Resume Codex PTY' })).toBeTruthy();
     expect(view.container.querySelector('button[aria-label="Resume Claude agent"]')).toBeNull();
   });
-  it('shows an ellipsis while Resume is pending and restores the idle label', async () => {
+  it('shows the Resume tooltip and exposes a busy disabled icon while pending', async () => {
     layout.setSessionViewMode('focus');
     let finishResume!: () => void;
     const resumable: Session = { ...session, agents: [
@@ -131,16 +131,20 @@ describe('G49 pane resume', () => {
     ] };
     const view = render(TerminalGrid, { session: resumable, focusedAgentId: 'claude', onSelect: vi.fn() });
     const resume = view.getByRole('button', { name: 'Resume Claude agent' }) as HTMLButtonElement;
+    expect(resume.textContent?.trim()).toBe('');
+    resume.focus();
+    expect((await view.findByRole('tooltip')).textContent).toContain('Resume');
     fixture.invoke.mockImplementationOnce(() => new Promise<undefined>((resolve) => {
       finishResume = () => resolve(undefined);
     }));
     await fireEvent.click(resume);
     expect(resume.disabled).toBe(true);
-    expect(resume.textContent?.trim()).toBe('Resuming\u2026');
+    expect(resume.getAttribute('aria-busy')).toBe('true');
     finishResume();
     await waitFor(() => {
       expect(resume.disabled).toBe(false);
-      expect(resume.textContent?.trim()).toBe('Resume');
+      expect(resume.getAttribute('aria-busy')).toBe('false');
+      expect(resume.getAttribute('aria-label')).toBe('Resume Claude agent');
     });
   });
 

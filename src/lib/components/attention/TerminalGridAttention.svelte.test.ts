@@ -168,12 +168,19 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     expect(fixture.terminalsDisposed).toBe(0);
   });
 
-  it('opens Split from the parsed terminal line above the Focus Chat composer', async () => {
-    layout.setSessionViewMode('focus');
+  it.each(['grid', 'focus'] as const)('opens Split from the parsed terminal line above the %s Queen composer', async (mode) => {
+    layout.setSessionViewMode(mode);
     publishModeFeed(true);
     const view = render(TerminalGrid, { session: stageRoster, focusedAgentId: 'claude', onSelect: vi.fn() });
     const pane = view.container.querySelector<HTMLElement>('[data-agent-id="claude"]')!;
     const status = pane.querySelector<HTMLElement>('.chat-composer .terminal-status-line')!;
+    const editor = within(pane).getByRole('textbox');
+    expect(editor.getAttribute('aria-disabled')).toBe('false');
+    expect(status.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    if (mode === 'grid') {
+      expect(view.container.querySelectorAll('[data-composer]')).toHaveLength(1);
+      expect(within(pane).getByRole('button', { name: 'Command target: @Claude agent' }).textContent?.trim()).toBe('@Claude agent');
+    }
     await waitFor(() => expect(status.textContent).toContain('fixture scrollback'));
     const button = within(status).getByRole('button', { name: 'Open Split' });
     button.focus();
@@ -230,18 +237,18 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
 
   it('CR-5 replacement: stable editors, per-agent drafts across both view cycles, exact routing and unchanged terminals', async () => {
     layout.setSessionViewMode('grid');
-    const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
+    const view = render(TerminalGrid, { session: stageRoster, focusedAgentId: 'claude', onSelect: vi.fn() });
     await waitFor(() => expect(fixture.terminals).toHaveLength(2));
     const original = [...fixture.terminals];
     const pane = view.container.querySelector<HTMLElement>('[data-agent-id="claude"]')!;
-    const shared = () => view.container.querySelector<HTMLElement>('.command-bar [data-composer]')!;
-    const focus = () => pane.querySelector<HTMLElement>('.chat-composer [data-composer]')!;
+    const shared = () => pane.querySelector<HTMLElement>('.chat-composer [data-composer]')!;
+    const focus = shared;
     const type = async (editor: HTMLElement, text: string) => { editor.textContent = text; await fireEvent.input(editor); };
     const gridEditor = shared();
-    expect(view.container.querySelectorAll('.terminal-item .chat-composer')).toHaveLength(0);
-    expect(view.container.querySelectorAll('.command-bar [data-composer]')).toHaveLength(1);
+    expect(view.container.querySelectorAll('.terminal-item .chat-composer')).toHaveLength(1);
+    expect(view.container.querySelector('.worker-viewport .chat-composer')).toBeNull();
     await type(gridEditor, 'Alpha private draft');
-    const waiting = { ...session, agents: session.agents.map(agent => agent.id === 'claude' ? { ...agent, status: { WaitingForInput: 'injected_delivery_failed:fixture' } } : agent) };
+    const waiting = { ...stageRoster, agents: stageRoster.agents.map(agent => agent.id === 'claude' ? { ...agent, status: { WaitingForInput: 'injected_delivery_failed:fixture' } } : agent) };
     await view.rerender({ session: waiting });
     expect(shared()).toBe(gridEditor);
     for (const label of ['Terminal', 'Chat']) {
@@ -261,9 +268,10 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     expect(gridEditor.textContent).toBe('Alpha private draft');
     layout.setSessionViewMode('focus'); await tick();
     const focusEditor = focus();
+    expect(focusEditor).toBe(gridEditor);
     expect(focusEditor.textContent).toBe('Alpha private draft');
     await type(focusEditor, 'Alpha Focus draft');
-    await view.rerender({ session });
+    await view.rerender({ session: stageRoster });
     expect(focus()).toBe(focusEditor);
     expect(pane.querySelector('.agent-info')).toBeNull();
     await view.rerender({ session: waiting });
@@ -506,12 +514,12 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     const pane = view.getByText('Claude agent').closest('.terminal-item')!;
     const content = pane.querySelector('.terminal-container')!;
     const original = [...fixture.terminals];
-    let composer = view.container.querySelector('.command-bar [role="textbox"]');
+    let composer = view.container.querySelector('.queen-column .chat-composer [role="textbox"]');
     expect(composer).toBeTruthy();
     expect(content.classList.contains('non-chat-attention'), 'chat panes retain their composer layout').toBe(false);
     expect(content.querySelector('.agent-info'), 'no opaque wrapper or padding without attention').toBeNull();
     expect(pane.querySelector('.terminal-header .activity-line'), 'activity belongs in the existing header').toBeTruthy();
-    expect(content.querySelector('.activity-line')).toBeNull();
+    expect([...content.querySelectorAll('.activity-line')].every(line => line.closest('.terminal-status-line'))).toBe(true);
     const waiting = { ...session, agents: session.agents.map((agent) => agent.id === 'claude'
       ? { ...agent, status: { WaitingForInput: 'injected_delivery_failed:fixture' } } : agent) };
     await view.rerender({ session: waiting });
@@ -522,8 +530,8 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     for (const next of ['focus', 'grid'] as const) {
       layout.setSessionViewMode(next); await tick();
       expect(within(pane as HTMLElement).getByRole('region', { name: 'Agent needs attention' })).toBeTruthy();
-      expect(next === 'focus' ? pane.querySelector('.chat-composer [role="textbox"]') : view.container.querySelector('.command-bar [role="textbox"]')).toBeTruthy();
-      if (next === 'grid') composer = view.container.querySelector('.command-bar [role="textbox"]');
+      expect(next === 'focus' ? pane.querySelector('.chat-composer [role="textbox"]') : view.container.querySelector('.queen-column .chat-composer [role="textbox"]')).toBeTruthy();
+      if (next === 'grid') composer = view.container.querySelector('.queen-column .chat-composer [role="textbox"]');
       expect(fixture.terminals).toHaveLength(original.length);
       original.forEach((term, index) => expect(fixture.terminals[index]).toBe(term));
       expect(original.every((term) => !term.disposed)).toBe(true);
@@ -531,8 +539,9 @@ describe('attention across pane modes (real Terminal, renderer doubles)', () => 
     await view.rerender({ session });
     expect(content.querySelector('.agent-info')).toBeNull();
     expect(within(pane as HTMLElement).queryByRole('region', { name: 'Agent needs attention' })).toBeNull();
-    expect(view.container.querySelector('.command-bar [role="textbox"]')).toBe(composer);
-    expect(pane.querySelector('.chat-composer')).toBeNull();
+    expect(view.container.querySelector('.queen-column .chat-composer [role="textbox"]')).toBe(composer);
+    expect(pane.querySelector('.chat-composer')).toBeTruthy();
+    expect(view.container.querySelectorAll('.chat-composer')).toHaveLength(1);
     original.forEach((term, index) => expect(fixture.terminals[index]).toBe(term));
     expect(original.every((term) => !term.disposed)).toBe(true);
     expect(fixture.focuses).toBe(0);

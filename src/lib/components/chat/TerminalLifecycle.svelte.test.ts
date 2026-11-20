@@ -6,7 +6,14 @@ import type { AgentEventsState } from '$lib/stores/agentEvents';
 import type { PtyOutputEvent } from '$lib/terminal/ptyStream';
 
 const fixture = vi.hoisted(() => ({
-  terminals: [] as { scrollback: string; disposed: boolean; textarea: HTMLTextAreaElement; keyHandler: (event: KeyboardEvent) => boolean }[],
+  terminals: [] as {
+    scrollback: string;
+    disposed: boolean;
+    textarea: HTMLTextAreaElement;
+    keyHandler: (event: KeyboardEvent) => boolean;
+    buffer: { active: { baseY: number } };
+  }[],
+  screenRows: 24,
   outputListeners: new Map<string, (event: { payload: PtyOutputEvent }) => void>(),
   webglCreated: 0, webglDisposed: 0, focuses: 0,
   setAgentEvents: null as ((value: AgentEventsState) => void) | null,
@@ -36,7 +43,8 @@ vi.mock('@xterm/xterm', () => ({ Terminal: class {
   open(node: HTMLElement) { this.textarea.className = 'xterm-helper-textarea'; node.append(this.textarea); }
   get buffer() {
     const rows = this.scrollback.split('\n');
-    return { active: { baseY: 0, cursorY: rows.length - 1, getLine: (row: number) => ({ translateToString: () => rows[row].trimEnd() }) } };
+    const baseY = Math.max(0, rows.length - fixture.screenRows);
+    return { active: { baseY, cursorY: rows.length - baseY - 1, getLine: (row: number) => ({ translateToString: () => rows[row].trimEnd() }) } };
   }
   write(text: string, done?: () => void) {
     const parse = () => { this.scrollback += text; done?.(); };
@@ -51,7 +59,7 @@ vi.mock('@xterm/xterm', () => ({ Terminal: class {
   scrollToBottom() {}
   dispose() { this.disposed = true; }
 } }));
-vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } } }));
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} proposeDimensions() { return { cols: 80, rows: fixture.screenRows }; } } }));
 vi.mock('@xterm/addon-search', () => ({ SearchAddon: class { onDidChangeResults() { return { dispose() {} }; } clearDecorations() {} } }));
 vi.mock('@xterm/addon-webgl', () => ({ WebglAddon: class {
   constructor() { fixture.webglCreated++; }
@@ -137,6 +145,29 @@ describe('real Terminal component behind chat (renderer doubles)', () => {
     expect(onLastLine).toHaveBeenCalledTimes(3);
   });
 
+  it('reports the latest retained line when blank output pushes it above the bottom page', async () => {
+    const onLastLine = vi.fn();
+    const view = render(Terminal, { agentId: 'claude', onLastLine });
+    await waitFor(() => expect(onLastLine.mock.calls).toEqual([['fixture scrollback']]));
+    const terminal = fixture.terminals[0];
+    const blankPage = '\n'.repeat(fixture.screenRows);
+
+    terminal.scrollback = '';
+    view.component.write(`retained line${blankPage}`);
+    await tick();
+    expect(terminal.buffer.active.baseY).toBe(1);
+    expect(onLastLine.mock.calls).toEqual([['fixture scrollback'], ['retained line']]);
+
+    view.component.write(blankPage);
+    await tick();
+    expect(onLastLine).toHaveBeenCalledTimes(2);
+
+    terminal.scrollback = '';
+    view.component.write(blankPage);
+    await tick();
+    expect(onLastLine.mock.calls).toEqual([['fixture scrollback'], ['retained line'], ['']]);
+  });
+
   it.each(['focus', 'grid'] as const)('T15: %s Codex transcript keeps its terminal until the first record without remount or focus', async (mode) => {
     layout.setSessionViewMode(mode);
     const publishCodex = (withRecord: boolean) => fixture.setAgentEvents!({
@@ -148,14 +179,15 @@ describe('real Terminal component behind chat (renderer doubles)', () => {
     const view = render(TerminalGrid, { session, focusedAgentId: 'codex', onSelect: vi.fn() });
     await waitFor(() => expect(fixture.terminals).toHaveLength(2));
     const original = [...fixture.terminals];
-    const toggle = view.getByRole('button', { name: 'Terminal' });
+    const codex = within(view.container.querySelector<HTMLElement>('[data-agent-id="codex"]')!);
+    const toggle = codex.getByRole('button', { name: 'Terminal' });
     expect(toggle.getAttribute('aria-pressed')).toBe('true');
     const terminal = fixture.terminals[1];
     expect(terminal.textarea.closest<HTMLElement>('.terminal-layer')!.inert).toBe(false);
     expect(fixture.focuses).toBe(0);
     publishCodex(true); await tick();
     expect(terminal.textarea.closest<HTMLElement>('.terminal-layer')!.inert).toBe(true);
-    expect(view.getByRole('button', { name: 'Chat' }).getAttribute('aria-pressed')).toBe('true');
+    expect(codex.getByRole('button', { name: 'Chat' }).getAttribute('aria-pressed')).toBe('true');
     expect(fixture.terminals).toEqual(original);
     expect(original.every((term) => !term.disposed)).toBe(true);
     expect(fixture.focuses).toBe(0);

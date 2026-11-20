@@ -8,6 +8,7 @@
     Check,
     Circle,
     Hourglass,
+    Play,
     Plus,
     X,
   } from 'phosphor-svelte';
@@ -36,7 +37,7 @@
   import TerminalStatusLine from './chat/TerminalStatusLine.svelte';
   import type { PaneMode } from './chat/paneMode';
   import { protocolAttention } from './chat/transcript';
-  import CommandBar from './opswall/CommandBar.svelte';
+  import CommandBar, { type GridComposerRoute } from './opswall/CommandBar.svelte';
 
   interface Props {
     session: Session;
@@ -176,6 +177,7 @@
   })));
   // Each id stays in its role's keyed block for its entire lifetime.
   const queenPanes = $derived(agentPanes.filter(isQueen));
+  const gridComposerId = $derived(queenPanes[0]?.id ?? agentPanes[0]?.id);
   const workerPanes = $derived([...agentPanes.filter(pane => !isQueen(pane)), ...scratchPanes]);
   const panes = $derived([...queenPanes, ...workerPanes]);
   let maximizedTerminalId = $derived($layout.maximizedTerminalId);
@@ -269,7 +271,10 @@
   function isQuiet(agent: AgentInfo) {
     const status = serdeEnumVariantName(agent.status);
     const heartbeat = $heartbeatStore.agents[agent.id];
-    return status === 'Idle' || status === 'Completed' || heartbeat?.status === 'idle'
+    // A working projection alone is also the legacy fallback. Require newer input to supersede an idle heartbeat.
+    const reactivated = heartbeat?.work_state === 'working'
+      && Date.parse(heartbeat.latest_input_at ?? '') > Date.parse(heartbeat.timestamp);
+    return status === 'Idle' || status === 'Completed' || (heartbeat?.status === 'idle' && !reactivated)
       || ['finished', 'retired', 'idle'].includes(workStateFor(agent, heartbeat) ?? '');
   }
 
@@ -293,6 +298,17 @@
     if (sessionId) scratchTerminals.focus(sessionId, null);
     commandTargetId = pane.id;
     onSelect(pane.id);
+  }
+
+  function messageWorker(event: MouseEvent, pane: TerminalPane) {
+    event.stopPropagation();
+    const id = gridComposerId;
+    if (!id) return;
+    focusPane(pane);
+    if (gridMaximizedId && gridMaximizedId !== id) layout.setMaximizedTerminalId(null);
+    if (paneModes[id] !== 'split') changePaneMode(id, 'chat');
+    void tick().then(() => workspace
+      ?.querySelector<HTMLElement>(`[data-agent-id=${JSON.stringify(id)}] .chat-composer [data-composer]`)?.focus());
   }
 
   function isPaneFocused(pane: TerminalPane) {
@@ -471,15 +487,17 @@
           {/if}
         </select>
       </label>
-      <button
+      <IconButton
         type="button"
-        class="open-terminal-button lattice-btn lattice-btn--secondary lattice-btn--compact"
+        class="open-terminal-button"
+        label={openingScratch ? 'Opening…' : 'Open Terminal'}
+        tooltip={openingScratch ? 'Opening…' : 'Open Terminal'}
+        icon={Plus}
+        size="sm"
+        aria-busy={openingScratch}
         disabled={!scratchSessionAvailable || openingScratch}
         onclick={openScratchTerminal}
-      >
-        <Plus size={13} weight="bold" />
-        {openingScratch ? 'Opening…' : 'Open Terminal'}
-      </button>
+      />
     </div>
   </div>
 
@@ -511,28 +529,28 @@
       </div>
     {/if}
   </div>
-  {#if !focusMode && visible}
-    <CommandBar sessionId={session.id} agents={panes.filter((pane): pane is AgentTerminalPane => pane.kind === 'agent').map(pane => pane.agent)} bind:targetId={commandTargetId} bind:drafts ondelivery={(sid, id, state) => { delivery[`${sid}:${id}`] = state; }} />
-  {/if}
 </div>
 
 {#snippet paneCard(pane: TerminalPane)}
       {@const focused = isPaneFocused(pane)}
       {@const feed = pane.kind === 'agent' && $agentEvents.sessionId === session.id ? $agentEvents.feeds[pane.id] : undefined}
       {@const chatEligible = !!feed && feed.capabilities.event_source !== 'none'}
+      {@const ownsGridComposer = pane.id === gridComposerId}
+      {@const gridComposer = !focusMode && ownsGridComposer}
+      {@const chatAvailable = chatEligible || gridComposer}
       {@const hasTerminal = feed?.capabilities.has_terminal !== false}
       {@const history = $agentEvents.sessionId === session.id ? $agentEvents.histories[pane.id]?.events ?? [] : []}
       {@const defaultMode = hasTerminal && feed?.capabilities.event_source === 'transcript' && history.length === 0 ? 'terminal' : 'chat'}
       {@const requestedMode = paneModes[pane.id] ?? defaultMode}
-      {@const mode = !chatEligible ? 'terminal' : !hasTerminal && (requestedMode === 'terminal' || requestedMode === 'split') ? 'chat' : requestedMode}
-      {@const chatShowing = chatEligible && mode !== 'terminal'}
+      {@const mode = !chatAvailable ? 'terminal' : !hasTerminal && (requestedMode === 'terminal' || requestedMode === 'split') ? 'chat' : requestedMode}
+      {@const chatShowing = chatAvailable && mode !== 'terminal'}
       {@const terminalInputEnabled = hasTerminal && (mode === 'split' || mode === 'terminal')}
       {@const eventAttention = protocolAttention(history)}
       {@const feedError = chatEligible ? $agentEvents.error ?? $agentEvents.histories[pane.id]?.error : null}
       {@const queen = isQueen(pane)}
       {@const showAttention = pane.kind === 'agent' && attentionSeats.has(pane.id)}
       {@const quiet = pane.kind === 'agent' && !showAttention && isQuiet(pane.agent)}
-      {@const collapsible = pane.kind === 'agent' && !queen && !fullStage && !showAttention}
+      {@const collapsible = pane.kind === 'agent' && !queen && !gridComposer && !fullStage && !showAttention}
       {@const collapsed = collapsible && (collapseOverrides[pane.id] ?? quiet)}
       {@const eclipsed = fullStage && pane.id !== localMaximizedId}
       {@const paneVisible = visible && !eclipsed && !collapsed}
@@ -591,15 +609,14 @@
               {#if resumableStatus && blockedResume}
                 <span class="resume-blocked">{blockedResume}</span>
               {:else if resumableStatus && pane.agent.provider_session_id}
-                <button type="button" class="lattice-btn lattice-btn--ghost"
-                  aria-label={`Resume ${pane.title}`} disabled={resumingAgents[pane.id]}
+                <IconButton type="button" label={`Resume ${pane.title}`}
+                  tooltip={resumingAgents[pane.id] ? 'Resuming…' : 'Resume'}
+                  icon={Play} size="sm" disabled={resumingAgents[pane.id]} aria-busy={resumingAgents[pane.id] ?? false}
                   onmousedown={(event) => event.preventDefault()}
-                  onclick={(event) => resumeAgent(event, pane.id)}>
-                  {resumingAgents[pane.id] ? 'Resuming…' : 'Resume'}
-                </button>
+                  onclick={(event) => resumeAgent(event, pane.id)} />
               {/if}
               {#if resumeErrors[pane.id]}<span role="alert">{resumeErrors[pane.id]}</span>{/if}
-              {#if chatEligible && !collapsed}<PaneToggle {hasTerminal} {mode} onchange={(next) => changePaneMode(pane.id, next)} />{/if}
+              {#if chatAvailable && !collapsed}<PaneToggle {hasTerminal} {mode} onchange={(next) => changePaneMode(pane.id, next)} />{/if}
               <span class="cli-badge">{pane.agent.config?.cli || 'unknown'}</span>
               <span class="pane-status-text">{status ?? 'Unknown'}</span>
               <span
@@ -634,11 +651,7 @@
             {#if !focusMode}
               {#if pane.kind === 'agent' && !queen}
                 <IconButton label={`Message ${pane.title}`} tooltip="Message worker" icon={ArrowUp} size="sm"
-                  onclick={(event) => {
-                    event.stopPropagation();
-                    focusPane(pane);
-                    void tick().then(() => workspace?.querySelector<HTMLElement>('.command-bar [data-composer]')?.focus());
-                  }} />
+                  onclick={(event) => messageWorker(event, pane)} />
               {/if}
               {#if collapsible}
                 <IconButton label={`${collapsed ? 'Expand' : 'Collapse'} ${pane.title}`}
@@ -691,7 +704,7 @@
                   <Terminal
                     agentId={pane.id}
                     isAgent={pane.kind === 'agent'}
-                    isFocused={paneVisible && focused && terminalInputEnabled && (!chatEligible || terminalFocusId === pane.id)}
+                    isFocused={paneVisible && focused && terminalInputEnabled && (!chatAvailable || terminalFocusId === pane.id)}
                     isVisible={paneVisible}
                     layoutRevision={localMaximizedId}
                     onLastLine={pane.kind === 'agent' ? (line) => { lastLines[pane.id] = line; } : undefined}
@@ -702,8 +715,25 @@
               {/if}
             {/snippet}
             {#snippet chat()}
-              {#if chatEligible}
-                <ChatPane sessionId={session.id} agentId={pane.id} events={history} composer={focusMode} variant={focusMode ? 'focus' : 'column'} bind:draft={() => drafts[`${session.id}:${pane.id}`] ?? '', (value) => { drafts = { ...drafts, [`${session.id}:${pane.id}`]: value }; }} raw={mode === 'raw'} visible={paneVisible && chatShowing} />
+              {#snippet agentChat(route: GridComposerRoute | undefined)}
+                {@const draftKey = `${session.id}:${route?.agentId ?? pane.id}`}
+                <ChatPane sessionId={session.id} agentId={pane.id} events={history}
+                  composer={focusMode || gridComposer} composerRoute={route} variant={focusMode ? 'focus' : 'column'}
+                  bind:draft={() => drafts[draftKey] ?? '', (value) => { drafts = { ...drafts, [draftKey]: value }; }}
+                  raw={mode === 'raw'} visible={paneVisible && chatShowing} />
+              {/snippet}
+              {#if chatAvailable}
+                {#if ownsGridComposer}
+                  <CommandBar sessionId={session.id} {agents} defaultTargetId={pane.id}
+                    enabled={gridComposer && paneVisible && chatShowing} bind:targetId={commandTargetId} bind:drafts
+                    ondelivery={(sid, id, state) => { delivery[`${sid}:${id}`] = state; }}>
+                    {#snippet children(route)}
+                      {@render agentChat(gridComposer ? route : undefined)}
+                    {/snippet}
+                  </CommandBar>
+                {:else}
+                  {@render agentChat(undefined)}
+                {/if}
               {/if}
             {/snippet}
             {#snippet statusLine()}

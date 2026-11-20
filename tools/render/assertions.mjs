@@ -7,6 +7,7 @@ import { runSecurityAssertions } from './security.mjs';
 
 const attention = 'section[aria-label="Agent needs attention"]';
 const composer = '.composer-wrap[aria-label="Message composer"]';
+const queenComposer = '.terminal-panel:not(.hidden) .queen-column .chat-composer';
 const chatSelector = '.chat-pane[aria-label="Agent chat"]';
 // Existing shipped selectors, inventoried read-only; no component test hooks added.
 export function paneFor(page, agent) {
@@ -119,12 +120,15 @@ export async function composerGeometry(pane) {
   });
 }
 export async function wallBarGeometry(page) {
-  const bar = page.locator('.terminal-panel:not(.hidden) .command-bar');
+  const bar = page.locator(`${queenComposer}:visible`);
   if (await bar.count() !== 1) return { contained: false, count: await bar.count() };
   return bar.evaluate(node => {
-    const workspace = node.closest('.terminal-workspace').getBoundingClientRect();
+    const pane = node.closest('.terminal-item').getBoundingClientRect();
     const outer = node.getBoundingClientRect();
-    const elements = [node, node.querySelector('[data-composer]'), node.querySelector('.send-button'), node.querySelector('.target-picker')];
+    const elements = [
+      node, node.querySelector('.terminal-status-line'), node.querySelector('[data-composer]'),
+      node.querySelector('.send-button'), node.querySelector('.target-picker'), node.querySelector('[aria-label="Open Split"]'),
+    ];
     const boxes = elements.map(element => element?.getBoundingClientRect());
     const visible = elements.every(element => {
       if (!element) return false;
@@ -139,9 +143,30 @@ export async function wallBarGeometry(page) {
       const box = element.getBoundingClientRect(), top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
       return !!top && (top === element || element.contains(top));
     });
-    const inside = box => !!box && box.width > 0 && box.height > 0 && box.left >= Math.max(0, workspace.left, outer.left) - 1 && box.top >= Math.max(0, workspace.top, outer.top) - 1 && box.right <= Math.min(innerWidth, workspace.right, outer.right) + 1 && box.bottom <= Math.min(innerHeight, workspace.bottom, outer.bottom) + 1;
-    return { contained: visible && hit && boxes.every(inside), visible, hit, boxes: boxes.map(box => box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null) };
+    const inside = box => !!box && box.width > 0 && box.height > 0 && box.left >= Math.max(0, pane.left, outer.left) - 1 && box.top >= Math.max(0, pane.top, outer.top) - 1 && box.right <= Math.min(innerWidth, pane.right, outer.right) + 1 && box.bottom <= Math.min(innerHeight, pane.bottom, outer.bottom) + 1;
+    const statusAboveEditor = !!boxes[1] && !!boxes[2] && boxes[1].bottom <= boxes[2].top + 1;
+    return { contained: visible && hit && statusAboveEditor && boxes.every(inside), visible, hit, statusAboveEditor, boxes: boxes.map(box => box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null) };
   });
+}
+async function queenComposerTabOrder(page, bar) {
+  const picker = bar.locator('.target-picker');
+  const target = await picker.textContent();
+  const stops = await bar.locator('[data-composer]:visible, button:enabled:visible').all();
+  if (stops.length < 3) return { passed: false, details: { tabStops: stops.length } };
+  for (let index = 0; index < stops.length - 1; index++) {
+    const current = stops[index], next = stops[index + 1];
+    await pressOutsideTerminal(page, current, 'Tab');
+    const forward = await next.evaluate(node => document.activeElement === node);
+    await pressOutsideTerminal(page, next, 'Shift+Tab');
+    const backward = await current.evaluate(node => document.activeElement === node);
+    if (!forward || !backward) return { passed: false, details: { index, forward, backward } };
+  }
+  await pressOutsideTerminal(page, stops.at(-1), 'Tab');
+  const outsideForward = await bar.evaluate(node => !!document.activeElement && document.activeElement !== document.body && !node.contains(document.activeElement));
+  await pressOutsideTerminal(page, stops[0], 'Shift+Tab');
+  const outsideReverse = await bar.evaluate(node => !!document.activeElement && document.activeElement !== document.body && !node.contains(document.activeElement));
+  const unchangedTarget = await picker.textContent() === target;
+  return { passed: outsideForward && outsideReverse && unchangedTarget, details: { outsideForward, outsideReverse, unchangedTarget } };
 }
 export async function badgeGeometry(page) {
   return page.locator('.app-version[title="Installed version"]').evaluate(node => {
@@ -284,7 +309,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
         && buttonBox.x + buttonBox.width <= Math.min(viewport.width, paneBox.x + paneBox.width) + 1
         && buttonBox.y + buttonBox.height <= Math.min(viewport.height, paneBox.y + paneBox.height) + 1;
       return { passed: paneExists && status === 'Completed' && (expected
-        ? count === 1 && visible.visible && visible.visibleText === 'Resume' && enabled && contained
+        ? count === 1 && visible.visible && !visible.visibleText.trim() && enabled && contained
         : count === 0), details: { paneExists, status, count, visible, enabled, contained, buttonBox, paneBox, expected } };
     };
     await probe(name, measure, context);
@@ -306,6 +331,8 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     const context = { screen: 'grid', viewport: `${viewport.width}x${viewport.height}`, stage };
     const band = page.locator('.session-ops-band');
     const region = band.getByRole('region', { name: 'Session event ticker', exact: true });
+    const bar = page.locator(queenComposer);
+    await showChat(paneFor(page, normal));
     if (stage === 'load') {
       const first = region.locator('.ticker-item').first();
       const label = region.locator('.ticker-label');
@@ -320,25 +347,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       await probe(`wall-tick-default-${viewport.width}`, defaultTicker, context);
       await prove(`wall-tick-default-${viewport.width}`, defaultTicker, () => styleChange(first, { transform: 'translateY(2000px)' }), context);
       await prove(`wall-tick-label-${viewport.width}`, defaultTicker, () => removeNode(label), context);
-      const bar = page.locator('.terminal-panel:not(.hidden) .command-bar');
-      const editor = bar.locator('[data-composer]'), add = bar.locator('.add-button'), picker = bar.locator('.target-picker');
-      const freeTab = async () => {
-        const target = await picker.textContent();
-        await pressOutsideTerminal(page, editor, 'Tab');
-        const forward = await add.evaluate(node => document.activeElement === node);
-        if (!forward) return { passed: false, details: { forward } };
-        await pressOutsideTerminal(page, add, 'Shift+Tab');
-        const reverse = await editor.evaluate(node => document.activeElement === node);
-        const last = bar.locator('button:enabled').last();
-        await pressOutsideTerminal(page, last, 'Tab');
-        const outsideForward = await bar.evaluate(node => !!document.activeElement && document.activeElement !== document.body && !node.contains(document.activeElement));
-        await pressOutsideTerminal(page, editor, 'Shift+Tab');
-        const pickerReached = await picker.evaluate(node => document.activeElement === node);
-        await pressOutsideTerminal(page, picker, 'Shift+Tab');
-        const outsideReverse = await bar.evaluate(node => !!document.activeElement && document.activeElement !== document.body && !node.contains(document.activeElement));
-        const unchangedTarget = await picker.textContent() === target;
-        return { passed: forward && reverse && pickerReached && outsideForward && outsideReverse && unchangedTarget, details: { forward, reverse, pickerReached, outsideForward, outsideReverse, unchangedTarget } };
-      };
+      const freeTab = () => queenComposerTabOrder(page, bar);
       await probe(`wall-tab-free-${viewport.width}`, freeTab, context);
       await prove(`wall-tab-free-${viewport.width}`, freeTab, async () => {
         const handle = await bar.evaluateHandle(node => {
@@ -403,18 +412,19 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       await probe(name, reachable, context);
       await prove(name, reachable, () => styleChange(button, { visibility: 'hidden' }), context);
     }
-    const noColumnComposer = async () => ({ passed: await panes.locator('.chat-composer, [data-composer]').count() === 0 });
-    await probe('grid-no-column-composer', noColumnComposer, context);
-    await prove('grid-no-column-composer', noColumnComposer, () => appendNode(panes.first(), { attributes: { class: 'chat-composer' } }), context);
-    await prove(`wall-tail-${viewport.width}`, noColumnComposer, () => appendNode(panes.first(), { attributes: { class: 'chat-composer' } }), context);
+    const workers = page.locator('.terminal-panel:not(.hidden) .worker-viewport .terminal-item');
+    const oneQueenComposer = async () => ({ passed: await bar.locator('[data-composer]').count() === 1 && await workers.locator('.chat-composer, [data-composer]').count() === 0 });
+    await probe('grid-no-column-composer', oneQueenComposer, context);
+    await prove('grid-no-column-composer', oneQueenComposer, () => appendNode(workers.first(), { attributes: { class: 'chat-composer' } }), context);
+    await prove(`wall-tail-${viewport.width}`, oneQueenComposer, () => appendNode(workers.first(), { attributes: { class: 'chat-composer' } }), context);
     const farPane = await revealGridAgent(far);
     await farPane.getByRole('button', { name: `Maximize ${far.label}`, exact: true }).click();
     const maximized = async () => {
       const box = await farPane.boundingBox(), outer = await page.locator('.terminal-panel:not(.hidden) .terminal-grid').boundingBox();
       const count = await panes.count(), hidden = await page.locator('.terminal-panel:not(.hidden) .terminal-grid .terminal-item.hidden-by-maximize').count();
-      const bar = await wallBarGeometry(page);
+      const composerVisible = await bar.isVisible();
       const contained = !!box && !!outer && box.width > 0 && box.height > 0 && box.x >= Math.max(0, outer.x) - 1 && box.y >= Math.max(0, outer.y) - 1 && box.x + box.width <= Math.min(viewport.width, outer.x + outer.width) + 1 && box.y + box.height <= Math.min(viewport.height, outer.y + outer.height) + 1;
-      return { passed: contained && count === 8 && hidden === 7 && bar.contained, details: { box, outer, count, hidden, bar, contained } };
+      return { passed: contained && count === 8 && hidden === 7 && !composerVisible, details: { box, outer, count, hidden, composerVisible, contained } };
     };
     await probe(`wall-max-${viewport.width}`, maximized, context);
     await prove(`wall-max-${viewport.width}`, maximized, () => styleChange(farPane, { transform: 'translateX(2000px)' }), context);
@@ -434,7 +444,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await waitForHeader(manifest.opswall.tickerAgentId);
     const tickAgent = session.agents.find(agent => agent.id === manifest.opswall.tickerAgentId);
     const tickTarget = async () => {
-      const target = page.locator('.terminal-panel:not(.hidden) .command-bar .target-picker');
+      const target = bar.locator('.target-picker');
       const header = paneFor(page, tickAgent).getByRole('button', { name: `Focus ${tickAgent.label}`, exact: true });
       const visible = await visibleTargetState(header);
       if (!visible.visible) return { passed: false, details: { visible, hit: false } };
@@ -473,7 +483,6 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     for (const [agent, hasAttention] of [[normal, false], [stalled, true]]) {
       const pane = await revealGridAgent(agent);
       await showChat(pane);
-      const bar = page.locator('.terminal-panel:not(.hidden) .command-bar');
       const measure = async () => {
         const details = await wallBarGeometry(page);
         const card = (await pane.locator(`${attention}:visible`).count()) > 0;

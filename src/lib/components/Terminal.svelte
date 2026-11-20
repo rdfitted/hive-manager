@@ -366,7 +366,8 @@
     if (destroyed || !term || !onLastLine) return;
     const buffer = term.buffer.active;
     let text = '';
-    for (let row = buffer.baseY + buffer.cursorY; row >= buffer.baseY; row--) {
+    // Index zero is the start of retained history, including rows above the bottom page.
+    for (let row = buffer.baseY + buffer.cursorY; row >= 0; row--) {
       text = buffer.getLine(row)?.translateToString(true) ?? '';
       if (text) break;
     }

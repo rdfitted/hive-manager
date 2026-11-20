@@ -24,7 +24,9 @@
     let openingPreview = false;
     let previewInput: HTMLInputElement;
     let previewSessionId: string | null = null;
+    let selectionGeneration = 0;
     let previewRequestId = 0;
+    let liveStatusRevision = 0;
 
     let previewOpen = false;
     let previewDocked = false;
@@ -52,68 +54,89 @@
     let destroyed = false;
     let copyResetTimer: ReturnType<typeof setTimeout> | undefined;
 
-    function applyPreviewStatus(status: PreviewStatus | null, sessionId: string | null) {
-        if (!status) return;
+    function clearCopyFeedback() {
+        previewUrlCopied = false;
+        if (copyResetTimer) clearTimeout(copyResetTimer);
+        copyResetTimer = undefined;
+    }
+
+    function setCurrentPreviewUrl(url: string) {
+        if (url !== previewCurrentUrl) clearCopyFeedback();
+        previewCurrentUrl = url;
+    }
+
+    function applyLiveStatus(status: PreviewStatus) {
+        liveStatusRevision += 1;
         previewOpen = status.open;
         previewDocked = status.docked;
-        previewCurrentUrl = status.url ?? '';
+        setCurrentPreviewUrl(status.url ?? '');
         previewStatusResolved = true;
-        if (sessionId && status.session_url) {
-            rememberedPreviewUrls.set(sessionId, status.session_url);
-            if (!previewUrl) previewUrl = status.session_url;
+    }
+
+    function rememberSessionUrl(sessionId: string | null, url: string | null) {
+        if (sessionId && url) {
+            rememberedPreviewUrls.set(sessionId, url);
+            if (!previewUrl) previewUrl = url;
         }
     }
 
+    function selectionIsCurrent(generation: number) {
+        return !destroyed && generation === selectionGeneration;
+    }
+
     async function refreshPreviewStatus(sessionId: string | null) {
+        const generation = selectionGeneration;
+        const revision = liveStatusRevision;
         try {
             const status = await invoke<PreviewStatus>('get_preview_status', { sessionId });
-            if (sessionId === previewSessionId) applyPreviewStatus(status, sessionId);
+            if (!status || !selectionIsCurrent(generation)) return;
+            if (revision === liveStatusRevision) applyLiveStatus(status);
+            // Global events know the live URL, but only this probe can seed an uncached session URL.
+            if (sessionId && !rememberedPreviewUrls.has(sessionId)) {
+                rememberSessionUrl(sessionId, status.session_url);
+            }
         } catch {
             // A status probe failing must never block the header from rendering.
         }
     }
 
+    function retainListener(registration: Promise<UnlistenFn>) {
+        void registration.then((unlisten) => {
+            if (destroyed) unlisten();
+            else unlisteners.push(unlisten);
+        }).catch(() => {});
+    }
+
     onMount(() => {
-        Promise.all([
-            listen<{ url: string }>('preview-navigated', (event) => {
-                if (!event.payload?.url) return;
-                previewCurrentUrl = event.payload.url;
-                previewOpen = true;
-                previewStatusResolved = true;
-            }),
-            listen<PreviewStatus>('preview-status', (event) => {
-                if (!event.payload) return;
-                previewOpen = event.payload.open;
-                previewDocked = event.payload.docked;
-                previewCurrentUrl = event.payload.url ?? '';
-                previewStatusResolved = true;
-            })
-        ])
-            .then((fns) => {
-                if (destroyed) {
-                    fns.forEach((fn) => fn());
-                    return;
-                }
-                unlisteners = fns;
-            })
-            .catch(() => {});
+        retainListener(listen<{ url: string }>('preview-navigated', (event) => {
+            if (!event.payload?.url || destroyed) return;
+            liveStatusRevision += 1;
+            setCurrentPreviewUrl(event.payload.url);
+            previewOpen = true;
+            previewStatusResolved = true;
+        }));
+        retainListener(listen<PreviewStatus>('preview-status', (event) => {
+            if (event.payload && !destroyed) applyLiveStatus(event.payload);
+        }));
     });
 
     onDestroy(() => {
         destroyed = true;
         unlisteners.forEach((fn) => fn());
         unlisteners = [];
-        if (copyResetTimer) clearTimeout(copyResetTimer);
+        clearCopyFeedback();
     });
 
     $: session = $activeSession;
     $: if ((session?.id ?? null) !== previewSessionId) {
+        selectionGeneration += 1;
         previewRequestId += 1;
         previewSessionId = session?.id ?? null;
         previewExpanded = false;
         // Per-session recall rather than an unconditional clear.
         previewUrl = previewSessionId ? rememberedPreviewUrls.get(previewSessionId) ?? '' : '';
         previewError = '';
+        clearCopyFeedback();
         openingPreview = false;
         void refreshPreviewStatus(previewSessionId);
     }
@@ -139,9 +162,12 @@
         previewError = '';
         try {
             const status = await invoke<PreviewStatus>('open_preview_window', { url, sessionId });
-            if (requestId === previewRequestId) {
+            if (!destroyed && requestId === previewRequestId) {
                 if (sessionId) rememberedPreviewUrls.set(sessionId, url);
-                applyPreviewStatus(status, sessionId);
+                if (status) {
+                    applyLiveStatus(status);
+                    rememberSessionUrl(sessionId, status.session_url);
+                }
             }
         } catch (error) {
             if (requestId === previewRequestId) {
@@ -166,28 +192,20 @@
     async function runPreviewAction(command: string, key: string) {
         if (previewBusy) return;
         const sessionId = previewSessionId;
+        const generation = selectionGeneration;
         previewBusy = key;
         const busyGeneration = ++previewBusyGeneration;
         previewError = '';
         try {
             const status = await invoke<PreviewStatus>(command, { sessionId });
-            // Freshness gate, mirroring refreshPreviewStatus: the payload is
-            // session-scoped (status_for derives session_url from the caller's
-            // session_id), so a response that lands after the operator switched
-            // sessions would otherwise seed the OLD session's URL into the NEW
-            // session's input via applyPreviewStatus.
-            //
-            // Deliberately NOT the `++previewRequestId` pattern used by
-            // openPreview: bumping it from the dock/close path would invalidate
-            // a concurrently in-flight openPreview and skip its
-            // `openingPreview = false` reset, leaving the UI stuck busy.
-            if (sessionId === previewSessionId) applyPreviewStatus(status, sessionId);
+            // The response carries a saved URL for this selection. Keep it scoped
+            // without invalidating openPreview's independent request ID.
+            if (status && selectionIsCurrent(generation) && busyGeneration === previewBusyGeneration) {
+                applyLiveStatus(status);
+                rememberSessionUrl(sessionId, status.session_url);
+            }
         } catch (error) {
-            // Same gate as the success path: the session-change reactive block
-            // clears previewError, so an ungated write here would replay the
-            // OLD session's failure into the NEW session's header — announced
-            // via role="alert" and flagging that session's URL input invalid.
-            if (sessionId === previewSessionId) previewError = String(error);
+            if (selectionIsCurrent(generation) && busyGeneration === previewBusyGeneration) previewError = String(error);
         } finally {
             // Ownership-gated, like openPreview. `openPreview` does NOT check
             // `previewBusy` before claiming it (it guards on `openingPreview`),
@@ -211,13 +229,14 @@
 
     async function reloadPreview() {
         if (previewBusy) return;
+        const generation = selectionGeneration;
         previewBusy = 'reload';
         const busyGeneration = ++previewBusyGeneration;
         previewError = '';
         try {
             await invoke('reload_preview_window');
         } catch (error) {
-            previewError = String(error);
+            if (selectionIsCurrent(generation) && busyGeneration === previewBusyGeneration) previewError = String(error);
         } finally {
             // Ownership-gated for the same reason as the two above.
             if (busyGeneration === previewBusyGeneration) {
@@ -227,16 +246,18 @@
     }
 
     async function copyPreviewUrl() {
-        if (!previewCurrentUrl) return;
+        const url = previewCurrentUrl;
+        if (!url) return;
+        const generation = selectionGeneration;
+        const canShowFeedback = () => selectionIsCurrent(generation) && url === previewCurrentUrl;
         try {
-            await writeText(previewCurrentUrl);
+            await writeText(url);
+            if (!canShowFeedback()) return;
+            clearCopyFeedback();
             previewUrlCopied = true;
-            if (copyResetTimer) clearTimeout(copyResetTimer);
-            copyResetTimer = setTimeout(() => {
-                previewUrlCopied = false;
-            }, 1400);
+            copyResetTimer = setTimeout(clearCopyFeedback, 1400);
         } catch (error) {
-            previewError = String(error);
+            if (canShowFeedback()) previewError = String(error);
         }
     }
 
@@ -250,10 +271,10 @@
         <Popover.Trigger>
             {#snippet child({ props })}
                 <IconButton {...props} class="preview-toggle" size="sm" icon={Browser} label="Preview"
-                    tooltip="Preview a dev server or pull request URL" />
+                    tooltip="Preview a dev server or pull request URL" aria-haspopup="false" />
             {/snippet}
         </Popover.Trigger>
-        <Popover.Content class="preview-popover" aria-label="Preview" align="end" sideOffset={8}
+        <Popover.Content class="preview-popover" role="region" aria-label="Preview" align="end" sideOffset={8}
             onOpenAutoFocus={(event) => { event.preventDefault(); previewInput?.focus(); }}>
             <div class="preview-control">
                 <form class="preview-form" onsubmit={openPreview}>

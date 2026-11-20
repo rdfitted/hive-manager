@@ -48,7 +48,7 @@
   function inspectorEscape(node: HTMLDivElement) {
     function onKeydown(event: KeyboardEvent) {
       if (event.key !== 'Escape' || event.defaultPrevented || collapsed ||
-          document.querySelector('[aria-modal="true"]')) return;
+          document.querySelector('[aria-modal="true"]') || node.querySelector('#wg-node-inspector')) return;
       event.preventDefault();
       void collapsePanel();
     }

@@ -6,8 +6,11 @@ const fixture = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue(undefined)
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock('$lib/stores/agentEvents', async () => ({ agentEvents: (await import('svelte/store')).writable({ sessionId: 's', feeds: {}, histories: {} }) }));
+vi.mock('$lib/stores/coordination', async () => ({ coordination: {
+  ...(await import('svelte/store')).writable({ sessionId: null, log: [] }),
+  ensureLog: vi.fn().mockResolvedValue(undefined),
+} }));
 vi.mock('$lib/stores/pendingContext', async () => ({ pendingContext: { ...(await import('svelte/store')).writable({ current: null }), consume: fixture.consume, render: () => 'Fixture context' } }));
-import CommandBar from './CommandBar.svelte';
 import CommandBarHarness from './CommandBarHarness.test.svelte';
 const agents: AgentInfo[] = ['Alpha', 'Beta'].map((label, index) => ({ id: label.toLowerCase(), role: index ? { Worker: { index, parent: null } } : 'Queen', status: 'Running', parent_id: null, config: { label, cli: 'codex', model: 'fixture-model', flags: ['-c', 'model_reasoning_effort="high"'] } }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); fixture.invoke.mockResolvedValue(undefined); fixture.consume.mockResolvedValue(null); });
@@ -41,7 +44,7 @@ describe('Ops Wall command routing', () => {
     }
   });
   it.each([false, true])('G59 keyboard escape: closed-menu Tab is native from editor and picker (shift=%s)', async (shiftKey) => {
-    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'alpha' });
+    const view = render(CommandBarHarness, { sessionId: 's', agents, targetId: 'alpha' });
     for (const control of [view.getByRole('textbox'), view.getByRole('button', { name: 'Command target: @Alpha' })]) {
       control.focus();
       const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
@@ -51,7 +54,7 @@ describe('Ops Wall command routing', () => {
     }
   });
   it('G59 open target menu owns Tab cycles without submitting or replacing the editor', async () => {
-    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'alpha' });
+    const view = render(CommandBarHarness, { sessionId: 's', agents, targetId: 'alpha' });
     const editor = await type(view.getByRole('textbox'), 'Alpha unsent'); editor.focus();
     await fireEvent.click(view.getByRole('button', { name: 'Command target: @Alpha' }));
     expect(await fireEvent.keyDown(editor, { key: 'Tab' })).toBe(false);
@@ -66,7 +69,7 @@ describe('Ops Wall command routing', () => {
     expect(fixture.consume).not.toHaveBeenCalled(); expect(fixture.invoke).not.toHaveBeenCalled();
   });
   it('G59 target shortcuts: editor Alt+Arrow and picker horizontal arrows select stable recipients', async () => {
-    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'alpha' });
+    const view = render(CommandBarHarness, { sessionId: 's', agents, targetId: 'alpha' });
     const editor = view.getByRole('textbox'); editor.focus();
     await fireEvent.keyDown(editor, { key: 'ArrowDown', altKey: true });
     expect(view.getByRole('button', { name: 'Command target: @Beta' })).toBeTruthy();
@@ -99,7 +102,7 @@ describe('Ops Wall command routing', () => {
     expect(editor.textContent).toBe('');
   });
   it('G59 picker Enter selects a target while the editor retains focus, without submitting', async () => {
-    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'alpha' });
+    const view = render(CommandBarHarness, { sessionId: 's', agents, targetId: 'alpha' });
     const editor = await type(view.getByRole('textbox'), 'Alpha unsent'); editor.focus();
     await fireEvent.click(view.getByRole('button', { name: 'Command target: @Alpha' }));
     await fireEvent.keyDown(editor, { key: 'ArrowDown' });
@@ -112,7 +115,7 @@ describe('Ops Wall command routing', () => {
     expect(editor.textContent).toBe('Alpha unsent');
   });
   it('G59 picker opens above the bottom bar and remains within the viewport', async () => {
-    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'alpha' });
+    const view = render(CommandBarHarness, { sessionId: 's', agents, targetId: 'alpha' });
     const picker = view.getByRole('button', { name: 'Command target: @Alpha' });
     picker.getBoundingClientRect = () => ({ left: window.innerWidth - 20, top: window.innerHeight - 40, right: window.innerWidth, bottom: window.innerHeight - 20, width: 20, height: 20, x: window.innerWidth - 20, y: window.innerHeight - 40, toJSON() {} });
     await fireEvent.click(picker);
@@ -121,7 +124,7 @@ describe('Ops Wall command routing', () => {
     expect(parseFloat(menu.style.top) + Math.min(240, 3 * 34 + 8)).toBeLessThan(window.innerHeight - 40);
   });
   it('G59 target-only: payload mentions never change the selected recipient', async () => {
-    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'beta' });
+    const view = render(CommandBarHarness, { sessionId: 's', agents, targetId: 'beta' });
     await type(view.getByRole('textbox'), 'Message @Alpha');
     await fireEvent.click(view.getByRole('button', { name: 'Send message' }));
     await waitFor(() => expect(fixture.invoke).toHaveBeenCalledWith('operator_inject', { request: { session_id: 's', target_agent_id: 'beta', message: 'Message @Alpha' } }));
@@ -130,7 +133,7 @@ describe('Ops Wall command routing', () => {
   it('G59 all: each unique agent receives once even when another recipient fails', async () => {
     fixture.invoke.mockImplementation(async (_command: string, args: { request: { target_agent_id: string } }) => { if (args.request.target_agent_id === 'alpha') throw new Error('Fixture send failure'); });
     const delivery = vi.fn();
-    const view = render(CommandBar, { sessionId: 's', agents: [...agents, agents[0]], targetId: '@all', ondelivery: delivery });
+    const view = render(CommandBarHarness, { sessionId: 's', agents: [...agents, agents[0]], targetId: '@all', ondelivery: delivery });
     await type(view.getByRole('textbox'), 'Broadcast fixture');
     await fireEvent.click(view.getByRole('button', { name: 'Send message' }));
     await waitFor(() => expect(fixture.invoke).toHaveBeenCalledTimes(2));
@@ -140,7 +143,7 @@ describe('Ops Wall command routing', () => {
   });
   it('CR-5 Grid: editor identity and per-agent drafts survive target shortcuts', async () => {
     const drafts = { 's:alpha': 'Alpha saved', 's:beta': 'Beta saved' };
-    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'alpha', drafts });
+    const view = render(CommandBarHarness, { sessionId: 's', agents, targetId: 'alpha', initialDrafts: drafts });
     const editor = view.getByRole('textbox');
     expect(editor.textContent).toBe('Alpha saved');
     await type(view.getByRole('textbox'), 'Alpha draft');
@@ -159,7 +162,7 @@ describe('Ops Wall command routing', () => {
     expect(editor.textContent).toBe('Beta draft');
   });
   it('G59 picker reuses stable IDs and preserves an editor-owned Tab', async () => {
-    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'alpha' });
+    const view = render(CommandBarHarness, { sessionId: 's', agents, targetId: 'alpha' });
     const editor = view.getByRole('textbox');
     const handled = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }); handled.preventDefault(); editor.dispatchEvent(handled); await tick();
     expect(view.getByRole('button', { name: 'Command target: @Alpha' })).toBeTruthy();
@@ -172,7 +175,7 @@ describe('Ops Wall command routing', () => {
     let resolve!: () => void;
     fixture.invoke.mockImplementation(() => new Promise<void>(done => { resolve = done; }));
     const delivery = vi.fn();
-    const view = render(CommandBar, { sessionId: 's', agents, targetId: 'beta', ondelivery: delivery });
+    const view = render(CommandBarHarness, { sessionId: 's', agents, targetId: 'beta', ondelivery: delivery });
     await type(view.getByRole('textbox'), 'Captured recipient'); await fireEvent.click(view.getByRole('button', { name: 'Send message' }));
     await waitFor(() => expect(delivery).toHaveBeenCalledWith('s', 'beta', 'Sending'));
     await view.rerender({ sessionId: 'other', targetId: 'alpha' }); resolve();

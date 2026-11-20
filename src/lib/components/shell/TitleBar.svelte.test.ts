@@ -21,6 +21,7 @@ vi.mock('$lib/stores/sessions', async (importOriginal) => {
 import { activeSession, type Session } from '$lib/stores/sessions';
 import TitleBar from './TitleBar.svelte';
 import TitleBarDialog from './TitleBarDialog.test.svelte';
+import sessionHeaderSource from '../session/SessionHeader.svelte?raw';
 import { layout } from '$lib/stores/layout';
 import { ui } from '$lib/stores/ui';
 
@@ -38,7 +39,10 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe('TitleBar', () => {
   it('shows the breadcrumb and keyboard-reachable controls, and calls the exact native operations', async () => {
     const view = render(TitleBar);
-    expect(view.getByText('example')).toBeTruthy();
+    const header = within(view.getByRole('banner'));
+    expect(header.getByRole('img', { name: 'Hive' })).toBeTruthy();
+    expect(header.getByText('Hive Manager').classList.contains('brand-wordmark')).toBe(true);
+    expect(header.getByText('example').classList.contains('session-name')).toBe(true);
     expect(view.getByText('Queen')).toBeTruthy();
     for (const [label, action] of [
       ['Minimize window', 'minimize'], ['Maximize or restore window', 'toggleMaximize'], ['Close window', 'close'],
@@ -64,6 +68,26 @@ describe('TitleBar', () => {
       expect(view.getByText('feature/example')).toBeTruthy();
       expect(view.getByRole('img', { name: 'Session state: Running' })).toBeTruthy();
       expect(view.getByRole('button', { name: 'Preview' })).toBeTruthy();
+    } finally {
+      active.set(original);
+    }
+  });
+
+  it.each([
+    { state: { Starting: null }, label: 'Starting' },
+    { state: 'Running', label: 'Running' },
+  ])('shows $label without hover and keeps the branch label truncatable', ({ state, label }) => {
+    const active = activeSession as Writable<Session | null>;
+    const original = get(active);
+    active.set({ ...original!, state: state as Session['state'], worktree_branch: 'feature/long-branch-name' });
+    try {
+      const view = render(TitleBar);
+      const badge = view.getByRole('img', { name: `Session state: ${label}` });
+      expect(within(view.getByRole('banner')).getByText(label)).toBe(badge);
+      expect(badge.hasAttribute('data-tauri-drag-region')).toBe(true);
+      expect(view.getByText('feature/long-branch-name').classList.contains('worktree-label')).toBe(true);
+      expect(sessionHeaderSource).toMatch(/\.worktree-chip\s*\{[^}]*min-width:\s*0/);
+      expect(sessionHeaderSource).toMatch(/\.worktree-label\s*\{[^}]*text-overflow:\s*ellipsis/);
     } finally {
       active.set(original);
     }

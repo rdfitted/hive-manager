@@ -32,14 +32,16 @@
     const id = session.id;
     const controller = new AbortController();
     const { signal } = controller;
+    let refreshGeneration = 0;
     nodes = null;
     files = null;
 
     async function refresh() {
+      const generation = ++refreshGeneration;
       const [nodeResult, fileResult] = await Promise.allSettled([
         bandNodeCount(id, signal), bandFileCount(id, signal),
       ]);
-      if (signal.aborted) return;
+      if (signal.aborted || generation !== refreshGeneration) return;
       if (nodeResult.status === 'fulfilled') nodes = nodeResult.value;
       if (fileResult.status === 'fulfilled') files = fileResult.value;
     }

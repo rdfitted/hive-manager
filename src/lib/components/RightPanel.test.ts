@@ -1,13 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, within } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: async () => undefined }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }));
 vi.mock('./StatusPanel.svelte', () => ({ default: () => {} }));
 vi.mock('./PlanView.svelte', () => ({ default: () => {} }));
-vi.mock('./workgraph/WorkGraphView.svelte', () => ({ default: () => {} }));
 vi.mock('./CoordinationPanel.svelte', () => ({ default: () => {} }));
 vi.mock('./ConversationViewer.svelte', () => ({ default: () => {} }));
 vi.mock('./timeline/TimelineView.svelte', () => ({ default: () => {} }));
@@ -37,6 +36,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -106,6 +106,36 @@ describe('RightPanel header tabs and title-bar toggle', () => {
     const tab = panel.getByRole('button', { name: 'Overview' });
     tab.focus();
     await fireEvent.keyDown(tab, { key: 'Escape' });
+    expect(get(layout).rightCollapsed).toBe(true);
+    expect(document.activeElement).toBe(within(toolbar.container).getByRole('button', { name: /Expand panel/ }));
+  });
+
+  it('dismisses a pinned WorkGraph inspector before closing the outer panel on Escape', async () => {
+    const lane = { kind: 'role', value: 'frontend' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+      view: 'runtime', source: 'live', nodes: [{
+        id: 'T1', title: 'Prepare contract', kind: 'task', tier: 'medium', status: 'pending', lane,
+        contract: { inputs: [], outputs: [], acceptance: [] },
+        contract_summary: { input_count: 0, output_count: 0, acceptance_count: 0 },
+        expansion: null, progress: null,
+      }], edges: [], waves: [['T1']], status_by_node: { T1: 'pending' }, lane_assignment: { T1: lane },
+      completion_provenance: {}, completion_source_refs: {}, critical_path: [], agents_by_lane: {},
+      provenance_by_edge: [], divergence: null,
+    }) }));
+    layout.setRightTab('graph');
+    const panel = render(RightPanel);
+    const toolbar = render(TitleBar);
+    const node = await panel.findByRole('button', { name: /^Prepare contract/ });
+    await fireEvent.keyDown(node, { key: 'Enter' });
+    const header = within(panel.getByRole('group', { name: 'Panel views' })).getByRole('button', { name: 'Graph' });
+    header.focus();
+    await waitFor(() => expect(panel.container.querySelector('#wg-node-inspector')).toBeTruthy());
+
+    await fireEvent.keyDown(header, { key: 'Escape' });
+    await waitFor(() => expect(panel.container.querySelector('#wg-node-inspector')).toBeNull());
+    expect(get(layout).rightCollapsed).toBe(false);
+
+    await fireEvent.keyDown(header, { key: 'Escape' });
     expect(get(layout).rightCollapsed).toBe(true);
     expect(document.activeElement).toBe(within(toolbar.container).getByRole('button', { name: /Expand panel/ }));
   });
