@@ -4052,6 +4052,12 @@ impl SessionController {
         }
     }
 
+    /// The config the Master Planner seat launches with: an explicit planner
+    /// config, or the Queen's for callers that send none.
+    pub(crate) fn effective_planner_config(config: &HiveLaunchConfig) -> &AgentConfig {
+        config.planner_config.as_ref().unwrap_or(&config.queen_config)
+    }
+
     /// Default Master Planner: Fable at low effort.
     pub(crate) fn default_master_planner_config() -> AgentConfig {
         AgentConfig {
@@ -12113,7 +12119,9 @@ The backend composed and persisted the following authoritative skeleton before l
             return Err(error);
         }
 
-        // Build the appropriate prompt based on mode
+        // Build the appropriate prompt based on mode. The planner reads this
+        // prompt, so its capability card and paths follow the planner seat.
+        let planner_seat = Self::effective_planner_config(&config).clone();
         let mut planner_prompt = if config.smoke_test {
             tracing::info!("Running in SMOKE TEST mode - skipping real investigation");
             Self::build_smoke_test_prompt(
@@ -12122,7 +12130,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 config.with_evaluator,
                 config.qa_workers.as_deref(),
                 &project_path,
-                &config.queen_config.cli,
+                &planner_seat.cli,
                 config.evaluator_config.as_ref().map(|config| config.cli.as_str()),
             )
         } else {
@@ -12130,7 +12138,7 @@ The backend composed and persisted the following authoritative skeleton before l
             Self::build_master_planner_prompt(
                 &session_id,
                 prompt,
-                &config.queen_config,
+                &planner_seat,
                 &config.workers,
                 &config.execution_policy,
                 &project_path,
@@ -12180,7 +12188,7 @@ The backend composed and persisted the following authoritative skeleton before l
             let planner_id = format!("{}-master-planner", session_id);
             // An explicit planner config wins; older callers launch the
             // planner from the Queen's config.
-            let planner_base = config.planner_config.as_ref().unwrap_or(&config.queen_config);
+            let planner_base = Self::effective_planner_config(&config);
             let (cmd, mut args) = Self::build_command(planner_base);
 
             // Write Master Planner prompt to file
@@ -21837,6 +21845,22 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
             assert_eq!(Some(preset.model), config.model);
             assert_eq!(preset.flags, config.flags);
         }
+    }
+
+    #[test]
+    fn planner_seat_uses_its_own_config_and_falls_back_to_the_queen() {
+        let mut config: HiveLaunchConfig = serde_json::from_value(serde_json::json!({
+            "project_path": "D:/tmp/project",
+            "queen_config": {"cli": "claude"},
+            "workers": [{"cli": "codex"}],
+            "prompt": null,
+        }))
+        .unwrap();
+        assert_eq!(SessionController::effective_planner_config(&config).cli, "claude");
+
+        config.planner_config = Some(AgentConfig { cli: "cursor".to_string(), ..AgentConfig::default() });
+        assert_eq!(SessionController::effective_planner_config(&config).cli, "cursor");
+        assert_eq!(config.queen_config.cli, "claude");
     }
 
     #[test]

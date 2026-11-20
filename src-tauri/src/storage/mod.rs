@@ -902,15 +902,22 @@ impl SessionStorage {
     /// Bring a persisted config up to the current Antigravity entry. Configs
     /// written while agy was removed have no entry, and configs from before the
     /// removal carry the old shape with no model flag (agy then had none).
+    ///
+    /// A pre-removal entry gets only its model fields filled in. Its command,
+    /// approval flag and environment are the operator's and are kept.
     fn upgrade_antigravity_cli_config(config: &mut AppConfig) {
-        let stale = config
-            .clis
-            .get("antigravity")
-            .map_or(true, |entry| entry.model_flag.is_none());
-        if stale {
-            config
-                .clis
-                .insert("antigravity".to_string(), Self::default_antigravity_cli_config());
+        let default_entry = Self::default_antigravity_cli_config();
+        match config.clis.get_mut("antigravity") {
+            None => {
+                config.clis.insert("antigravity".to_string(), default_entry);
+            }
+            Some(entry) if entry.model_flag.is_none() => {
+                entry.model_flag = default_entry.model_flag;
+                if entry.default_model.trim().is_empty() {
+                    entry.default_model = default_entry.default_model;
+                }
+            }
+            Some(_) => {}
         }
     }
 
@@ -2351,6 +2358,27 @@ mod tests {
         let loaded = storage.load_config().unwrap();
         assert_eq!(loaded.clis["antigravity"].model_flag.as_deref(), Some("--model"));
         assert_eq!(loaded.clis["antigravity"].default_model, "gemini-4-neon-high");
+
+        // A pre-removal entry with the operator's own executable, approval
+        // flag and environment keeps them; only the model fields are filled in.
+        config.clis.insert(
+            "antigravity".to_string(),
+            CliConfig {
+                command: "C:/tools/agy-nightly.exe".to_string(),
+                auto_approve_flag: None,
+                model_flag: None,
+                default_model: String::new(),
+                env: Some(HashMap::from([("AGY_PROFILE".to_string(), "work".to_string())])),
+            },
+        );
+        storage.save_config(&config).unwrap();
+        let loaded = storage.load_config().unwrap();
+        let entry = &loaded.clis["antigravity"];
+        assert_eq!(entry.command, "C:/tools/agy-nightly.exe");
+        assert_eq!(entry.auto_approve_flag, None);
+        assert_eq!(entry.env.as_ref().unwrap()["AGY_PROFILE"], "work");
+        assert_eq!(entry.model_flag.as_deref(), Some("--model"));
+        assert_eq!(entry.default_model, "gemini-4-neon-high");
 
         // An operator's current-shape override is kept.
         config.clis.get_mut("antigravity").unwrap().model_flag = Some("--model".to_string());
