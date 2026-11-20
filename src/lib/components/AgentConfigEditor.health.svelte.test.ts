@@ -243,7 +243,7 @@ describe('fetchPresetCatalogue', () => {
 });
 
 describe('retired provider catalogue compatibility', () => {
-  it.each(['droid', 'opencode', 'qwen', 'agy', 'gemini', 'antigravity'])('ignores stale %s presets without dropping supported entries', (provider) => {
+  it.each(['droid', 'opencode', 'qwen', 'agy', 'gemini'])('ignores stale %s presets without dropping supported entries', (provider) => {
     const preset = { id: 'sample', label: 'Sample', model: 'sample', flags: [] };
     expect(normalizePresetCatalogue({ presets: [
       { ...preset, provider }, { ...preset, provider: 'cursor' },

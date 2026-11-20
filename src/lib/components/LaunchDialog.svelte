@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { Dialog } from '$lib/components/ui';
+  import { Dialog, HiveMark } from '$lib/components/ui';
   import LaunchAdvanced from './launch/LaunchAdvanced.svelte';
   import { automaticAdversarialLaneCount } from './hiveLaunch';
   import { predefinedRoles, normalizeTierLadderPreview, type SessionMode, type WorkGraphParameterRow, type TierLadderPreviewCell, type TierLadderOmission } from './launch/launchForm';
   import './launch/launchForm.css';
-  import { createEventDispatcher, tick } from 'svelte';
+  import { createEventDispatcher } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import {
     fetchCliHealth,
@@ -14,6 +14,7 @@
     buildHiveLaunchConfig,
     createDefaultCodingPrincipal,
     createDefaultHiveFormState,
+    MAX_CODING_PRINCIPALS,
     nextCodingPrincipalIndex,
     type CodingPrincipalFormConfig,
     type TierRoutingPolicy,
@@ -35,22 +36,18 @@
   export let defaultProjectPath: string = '';
 
   let handledModeRequestId: number | undefined;
+  let composer: { focusTask(): void } | undefined;
   $: if (show && modeRequestId !== undefined && modeRequestId !== handledModeRequestId) {
     handledModeRequestId = modeRequestId;
     if (initialMode !== undefined) mode = initialMode;
     showAdvanced = false;
   }
   $: if (!projectPath && defaultProjectPath) projectPath = defaultProjectPath;
-  $: if (show && presentation === 'inline' && !showAdvanced) {
+  $: if (show && presentation === 'inline' && !showAdvanced && composer) {
     // Repeated requests focus the existing textarea, even when show stays true.
     modeRequestId;
-    void tick().then(() => {
-      if (show && presentation === 'inline' && !showAdvanced) {
-        document.getElementById('launch-task')?.focus();
-      }
-    });
+    composer.focusTask();
   }
-
   const dispatch = createEventDispatcher<{
     close: void;
     launchHive: HiveLaunchConfig;
@@ -124,7 +121,7 @@
     : mode === 'research' ? researchWorkers.length
     : mode === 'fusion' ? variantCount
     : mode === 'debate' ? debaterCount : 1;
-  $: composerMaxWorkers = mode === 'hive' ? Math.max(3, codingPrincipals.length)
+  $: composerMaxWorkers = mode === 'hive' ? Math.max(MAX_CODING_PRINCIPALS, codingPrincipals.length)
     : mode === 'research' ? Math.max(6, researchWorkers.length)
     : mode === 'solo' || mode === 'templates' ? 1
     : Math.max(4, composerWorkerCount);
@@ -189,6 +186,7 @@
 
   const defaultHiveForm = createDefaultHiveFormState();
   let queenConfig: AgentConfig = defaultHiveForm.queenConfig;
+  let plannerConfig: AgentConfig = defaultHiveForm.plannerConfig;
   let tierPolicy: TierRoutingPolicy = {
     ...defaultHiveForm.tierPolicy,
     ladder: {},
@@ -326,6 +324,8 @@
           flags: [],
           label: 'Queen',
         };
+        // Templates predate a separate planner: it follows the template's Queen.
+        plannerConfig = { ...queenConfig, label: 'Master Planner' };
       }
 
       const principalCells = template.cells.filter((cell) => cell !== queenCell);
@@ -426,7 +426,7 @@
   }
 
   function addCodingPrincipal() {
-    if (codingPrincipals.length < 3) {
+    if (codingPrincipals.length < MAX_CODING_PRINCIPALS) {
       codingPrincipals = [
         ...codingPrincipals,
         createDefaultCodingPrincipal(nextCodingPrincipalIndex(codingPrincipals)),
@@ -576,6 +576,7 @@
           color: sessionColor || undefined,
           projectPath,
           queenConfig,
+          plannerConfig: withPlanning ? plannerConfig : undefined,
           principals: principalsWithRoles,
           workspaceStrategy,
           queenDelegationMode,
@@ -711,7 +712,10 @@
 {#snippet content()}
   <div data-launch-owned class="launch-content">
     {#if presentation === 'inline'}
-      <p data-launch-owned id="launch-dialog-title" class="launch-title">Hive Manager</p>
+      <div data-launch-owned class="launch-lockup">
+        <span data-launch-owned aria-hidden="true"><HiveMark title="Hive" size={58} /></span>
+        <h1 data-launch-owned id="launch-dialog-title" class="launch-title">Hive Manager</h1>
+      </div>
     {:else}
       <h2 data-launch-owned id="launch-dialog-title">Launch New Session</h2>
     {/if}
@@ -724,7 +728,7 @@
   bind:error {launchError} bind:showPreview
   bind:showAdvanced bind:showHiveAdvanced {launching}
   bind:withPlanning bind:withEvaluator bind:withSoloEvaluator
-  {tierLadderLoading} {presentation} bind:queenConfig
+  {tierLadderLoading} {presentation} bind:queenConfig bind:plannerConfig
   bind:soloConfig bind:evaluatorConfig {judgeAgentConfig}
   {debateJudgeAgentConfig} bind:codingPrincipals bind:researchWorkers
   bind:qaWorkers bind:workspaceStrategy bind:queenDelegationMode
@@ -746,6 +750,7 @@
 />
     {:else}
         <LaunchComposer
+          bind:this={composer} landing={presentation === 'inline'}
           {codexAppServer} {claudeStreamJson}
           oncodextransport={(enabled) => { codexAppServer = enabled; }}
           onclaudetransport={(enabled) => { claudeStreamJson = enabled; }}
@@ -776,7 +781,6 @@
           onsmoke={handleSmokeTest}
           oncancel={presentation === 'inline' ? undefined : handleClose}
         />
-
     {/if}
   </div>
 {/snippet}

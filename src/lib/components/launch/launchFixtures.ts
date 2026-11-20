@@ -27,7 +27,17 @@ export const builtinFixtures: SessionTemplate[] = [
   },
 ];
 
-export const legacyQueen = { cli: 'claude', model: 'opus', flags: [], label: 'Queen' };
+export const legacyQueen = { cli: 'claude', model: 'opus', flags: ['--settings', '{"effortLevel":"medium"}'], label: 'Queen' };
+// A template names its Queen without effort flags, and its planner follows that Queen.
+export const templateQueen = { cli: 'claude', model: 'opus', flags: [], label: 'Queen' };
+export const defaultPlanner = { cli: 'claude', model: 'fable', flags: ['--settings', '{"effortLevel":"low"}'], label: 'Master Planner' };
+// Default worker lineup by slot: Carbon, Sol, Neon, Sol.
+export const defaultLineup = [
+  { cli: 'antigravity', model: 'gemini-4-carbon-high' },
+  { cli: 'codex', model: 'gpt-6.2-sol' },
+  { cli: 'antigravity', model: 'gemini-4-neon-high' },
+  { cli: 'codex', model: 'gpt-6.2-sol' },
+];
 export const legacyEvaluator = { cli: 'claude', model: 'opus', flags: [], label: 'Evaluator' };
 export const legacyQa = ['ui', 'api', 'a11y'].map((specialization) => ({ specialization, cli: 'codex', model: 'gpt-6.2-sol', flags: [] }));
 export const legacyPolicy = {
@@ -46,11 +56,13 @@ export function legacyPayload(mode: string, project: string, task: string, templ
         label: entry.role.charAt(0).toUpperCase() + entry.role.slice(1),
         role: { role_type: entry.role, label: entry.role.charAt(0).toUpperCase() + entry.role.slice(1), default_cli: entry.cli, prompt_template: entry.prompt_template },
       }))
-      : Array.from({ length: count ?? 1 }, (_, index) => ({
-        cli: 'codex', model: 'gpt-6.2-sol', flags: [], label: `Coding Principal ${index + 1}`,
-        role: { role_type: 'principal', label: 'Coding Principal', default_cli: 'codex', prompt_template: null },
+      : Array.from({ length: count ?? 4 }, (_, index) => ({
+        ...defaultLineup[index], flags: [], label: `Coding Principal ${index + 1}`,
+        role: { role_type: 'principal', label: 'Coding Principal', default_cli: defaultLineup[index].cli, prompt_template: null },
       }));
-    return { ...common, queen_config: legacyQueen, workers, execution_policy: legacyPolicy, work_graph_archetype: null, work_graph_parameters: {}, prompt: task || undefined, with_planning: true, smoke_test: false, with_evaluator: true, evaluator_config: legacyEvaluator, qa_workers: legacyQa };
+    const queen = template ? templateQueen : legacyQueen;
+    const planner = template ? { ...templateQueen, label: 'Master Planner' } : defaultPlanner;
+    return { ...common, queen_config: queen, planner_config: planner, workers, execution_policy: legacyPolicy, work_graph_archetype: null, work_graph_parameters: {}, prompt: task || undefined, with_planning: true, smoke_test: false, with_evaluator: true, evaluator_config: legacyEvaluator, qa_workers: legacyQa };
   }
   if (mode === 'research') return {
     ...common, queen_config: legacyQueen,

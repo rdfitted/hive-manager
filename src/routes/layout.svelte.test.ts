@@ -12,14 +12,18 @@ const testMocks = vi.hoisted(() => ({
   sessionSidebar: vi.fn(),
 }));
 
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock('$lib/stores/layout', async () => {
   const actual = await vi.importActual<typeof import('$lib/stores/layout')>('$lib/stores/layout');
   return { ...actual, layout: { ...actual.layout, toggleLeft: testMocks.toggleLeft } };
 });
 
-vi.mock('$lib/stores/sessions', async () => {
+vi.mock('$lib/stores/sessions', async (importOriginal) => {
   const { writable } = await import('svelte/store');
+  const { sessionDisplayName } = await importOriginal<typeof import('$lib/stores/sessions')>();
   return {
+    sessionDisplayName,
     sessions: {
       launchHiveV2: testMocks.launchHiveV2,
       launchFusion: testMocks.launchFusion,

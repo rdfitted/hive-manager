@@ -34,7 +34,7 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); });
 describe('Activity rail composition', () => {
   it('opens Chat with the real composer reachable in one click', async () => {
     const view = render(ActivityTab);
-    expect(view.getByRole('button', { name: 'Chat' }).getAttribute('aria-pressed')).toBe('true');
+    expect(view.getByRole('region', { name: 'Chat' })).toBeTruthy();
     await fireEvent.click(view.getByRole('tab', { name: 'Queen' }));
     expect(view.getByRole('textbox', { name: 'Send message as operator… (@ to mention, / for commands)' })).toBeTruthy();
   });
@@ -44,9 +44,9 @@ describe('Activity rail composition', () => {
     expect(view.getByText('Replay').closest('details')?.open).toBe(false);
     expect(mounts.replay).toHaveBeenCalled();
     expect(mounts.controls).toHaveBeenCalled();
-    await fireEvent.click(view.getByRole('button', { name: 'Logs' }));
+    await view.rerender({ tab: 'logs' });
     expect(mounts.logs).toHaveBeenCalled();
-    await fireEvent.click(view.getByRole('button', { name: 'Timeline' }));
+    await view.rerender({ tab: 'timeline' });
     expect(mounts.timeline).toHaveBeenCalled();
   });
 });

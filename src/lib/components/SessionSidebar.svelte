@@ -4,7 +4,7 @@
   import { goto } from '$app/navigation';
   import { launch, type LaunchMode } from '$lib/stores/launch';
   import { sessions, activeSession, activeAgents, serdeEnumVariantName, sessionDisplayName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
-  import { layout, COLLAPSED_PANEL_WIDTH } from '$lib/stores/layout';
+  import { layout, SESSION_RAIL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
   import { heartbeatStore } from '$lib/stores/conversations';
   import { agentActivity, needsAttention, workStateFor } from '$lib/stores/agentActivity';
@@ -17,6 +17,7 @@
   import { COLORS } from './launch/launchForm';
   import AgentTree from './AgentTree.svelte';
   import QueenControls from './QueenControls.svelte';
+  import SessionRail from './rail/SessionRail.svelte';
   import ResizeHandle from './ResizeHandle.svelte';
   import ResumeConfirmModal from './ResumeConfirmModal.svelte';
   import Skeleton from './Skeleton.svelte';
@@ -104,7 +105,7 @@
     document.getElementById('title-bar-sidebar-toggle')?.focus({ preventScroll: true });
   }
   let toggleLabel = $derived(`${collapsed ? 'Expand' : 'Collapse'} sidebar (${toggleShortcut})`);
-  let sidebarWidth = $derived(collapsed ? COLLAPSED_PANEL_WIDTH : $layout.leftWidth);
+  let sidebarWidth = $derived(collapsed ? SESSION_RAIL_WIDTH : $layout.leftWidth);
   let visibleSessions = $derived($sessions.sessions.filter(s => isActiveState(s.state) || s.id === $activeSession?.id));
   let projectGroups = $derived.by(() => {
     const groups = new Map<string, Session[]>();
@@ -209,6 +210,11 @@
   function selectSession(sessionId: string) {
     launch.close();
     sessions.setActiveSession(sessionId);
+  }
+
+  async function selectRailSession(sessionId: string) {
+    if ($page.url.pathname !== '/') await goto('/');
+    selectSession(sessionId);
   }
 
   function handleSessionButtonKeydown(event: KeyboardEvent, sessionId: string) {
@@ -353,6 +359,10 @@
   style:min-width={`${sidebarWidth}px`}
   style:flex-basis={`${sidebarWidth}px`}
 >
+  {#if collapsed}
+    <SessionRail sessions={visibleSessions} activeId={$activeSession?.id}
+      onselect={selectRailSession} oncreate={() => openLaunch()} />
+  {/if}
   <div
     class="sidebar-drawer lattice-forced-colors-boundary"
     class:collapsed
@@ -445,6 +455,7 @@
                           <button
                             class="color-toggle lattice-btn lattice-btn--ghost lattice-btn--icon"
                             onclick={() => showColorPicker = !showColorPicker}
+                            aria-label="Choose Color"
                             title="Choose Color"
                             style="width: 18px; height: 18px; flex-basis: 18px; border-radius: 50%; background: {editColor || 'var(--canvas)'};"
                             type="button"
@@ -457,6 +468,7 @@
                                   class="color-option lattice-btn lattice-btn--ghost lattice-btn--icon"
                                   style="width: 16px; height: 16px; flex-basis: 16px; border-radius: 50%; padding: 0; border: 1px solid color-mix(in srgb, var(--canvas) 20%, transparent); background: {color.value};"
                                   aria-pressed={editColor === color.value}
+                                  aria-label={color.name}
                                   onclick={() => { editColor = color.value; showColorPicker = false; }}
                                   title={color.name}
                                   type="button"

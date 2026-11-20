@@ -110,6 +110,7 @@
         class="lattice-btn lattice-btn--ghost lattice-btn--icon"
         on:click={toggleExpand}
         aria-label={expanded ? 'Collapse' : 'Expand'}
+        title={expanded ? 'Collapse' : 'Expand'}
       >
         {#if expanded}
           <CaretDown size={12} weight="light" />

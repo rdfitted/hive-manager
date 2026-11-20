@@ -7,79 +7,64 @@ import { runSecurityAssertions } from './security.mjs';
 
 const attention = 'section[aria-label="Agent needs attention"]';
 const composer = '.composer-wrap[aria-label="Message composer"]';
+const queenComposer = '.terminal-panel:not(.hidden) .queen-column .chat-composer';
 const chatSelector = '.chat-pane[aria-label="Agent chat"]';
+const chatWellByAccent = { honey: 'rgb(6, 5, 4)', sky: 'rgb(4, 5, 6)' };
 // Existing shipped selectors, inventoried read-only; no component test hooks added.
 export function paneFor(page, agent) {
   return page.locator('.terminal-panel:not(.hidden) .terminal-item').filter({ has: page.locator(`button[aria-label=${JSON.stringify(`Focus ${agent.label}`)}]`) });
 }
 export async function scrollColumn(pane) {
-  await pane.scrollIntoViewIfNeeded();
   await pane.evaluate(node => {
-    if (node.dataset.pinned === 'true') return;
-    const grid = node.closest('.terminal-grid');
-    const outer = grid.getBoundingClientRect();
-    const space = parseFloat(getComputedStyle(grid).getPropertyValue('--pin-space')) || 0;
-    const box = node.getBoundingClientRect();
-    if (box.left < outer.left + space) grid.scrollLeft -= outer.left + space - box.left;
-    const after = node.getBoundingClientRect();
-    if (after.right > outer.right) grid.scrollLeft += after.right - outer.right;
+    const viewport = node.closest('.worker-viewport');
+    const header = node.querySelector('.terminal-pane-focus');
+    if (!viewport || !header) return;
+    const outer = viewport.getBoundingClientRect();
+    const box = header.getBoundingClientRect();
+    if (box.top < outer.top) viewport.scrollTop -= outer.top - box.top;
+    else if (box.bottom > outer.bottom) viewport.scrollTop += box.bottom - outer.bottom;
   });
-  // Programmatic writes precede the browser's queued scroll/clip update.
-  // Matching clips and repeated animation-frame geometry signal completion.
-  await waitForPinLayout(pane.page());
 }
-export async function waitForPinLayout(page) {
-  await page.locator('.terminal-panel:not(.hidden) .terminal-grid').evaluate(grid => new Promise((resolve, reject) => {
-    const started = performance.now();
-    let previous, stable = 0;
-    const frame = () => {
-      const outer = grid.getBoundingClientRect();
-      const space = parseFloat(getComputedStyle(grid).getPropertyValue('--pin-space')) || 0;
-      const rows = [...grid.querySelectorAll(':scope > .terminal-item')].map(node => {
-        const box = node.getBoundingClientRect();
-        const pinned = node.dataset.pinned === 'true';
-        const clip = parseFloat(getComputedStyle(node).getPropertyValue('--wall-clip')) || 0;
-        const expected = pinned ? 0 : Math.min(box.width, Math.max(0, outer.left + space - box.left));
-        return { id: node.dataset.agentId, left: box.left, right: box.right, width: box.width, pinned, clip, expected };
-      });
-      const snapshot = JSON.stringify({ left: outer.left, width: outer.width, scroll: grid.scrollLeft, space, rows });
-      const ready = (!document.fonts || document.fonts.status === 'loaded') && rows.every(row => Math.abs(row.clip - row.expected) < 1 / 64);
-      stable = ready && snapshot === previous ? stable + 1 : 0;
-      previous = snapshot;
-      if (stable >= 2) return resolve();
-      if (performance.now() - started > 5000) return reject(new Error(`Wall scroll/clipping did not settle: ${snapshot}`));
-      requestAnimationFrame(frame);
+
+export async function stageGeometry(page, selectedId) {
+  return page.locator('.terminal-panel:not(.hidden) .terminal-grid').evaluate((stage, selectedId) => {
+    const queen = stage.querySelector('.queen-column');
+    const viewport = stage.querySelector('.worker-viewport');
+    const selected = [...stage.querySelectorAll('.terminal-item')].find(item => item.dataset.agentId === selectedId);
+    if (!queen || !viewport || !selected) return { missing: { queen: !queen, viewport: !viewport, selected: !selected } };
+
+    const stageBox = stage.getBoundingClientRect();
+    const queenBox = queen.getBoundingClientRect();
+    const workersBox = viewport.getBoundingClientRect();
+    const hit = item => {
+      const header = item.querySelector('.terminal-pane-focus');
+      if (!header) return false;
+      const box = header.getBoundingClientRect();
+      const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return !!top && (top === header || header.contains(top));
     };
-    requestAnimationFrame(frame);
-  }));
-}
-export async function pinGeometry(page, selectedId) {
-  return page.locator('.terminal-panel:not(.hidden) .terminal-grid').evaluate((grid, selectedId) => {
-    const outer = grid.getBoundingClientRect();
-    const rows = [...grid.querySelectorAll(':scope > .terminal-item')].map(node => {
-      const box = node.getBoundingClientRect(), css = getComputedStyle(node);
-      const control = node.querySelector('.terminal-pane-focus'), header = control.getBoundingClientRect();
-      const top = document.elementFromPoint(header.x + header.width / 2, header.y + header.height / 2);
-      const clip = parseFloat(css.getPropertyValue('--wall-clip')) || 0;
-      return { id: node.dataset.agentId, pinned: css.position === 'sticky', queen: node.classList.contains('queen-column'), attention: node.classList.contains('attention-column'),
-        clip, box: { left: box.left, right: box.right, width: box.width }, paint: { left: Math.max(outer.left, box.left + clip), right: Math.min(outer.right, box.right) },
-        hit: !!top && (top === control || control.contains(top)) };
-    });
-    const pins = rows.filter(row => row.pinned);
-    const overlaps = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1;
-    const padding = parseFloat(getComputedStyle(grid).paddingLeft) || 0;
-    let next = outer.left + grid.clientLeft + padding + 4;
-    const offsets = pins.every(pin => { const fits = Math.abs(pin.box.left - next) <= 1; next = pin.box.right + 12; return fits; });
-    const overlapPairs = [
-      ...pins.flatMap((pin, index) => pins.slice(index + 1).filter(other => overlaps(pin.box, other.box)).map(other => ({ first: pin.id, second: other.id, kind: 'pinned', firstRect: pin.box, secondRect: other.box }))),
-      ...rows.filter(row => !row.pinned && row.paint.right > row.paint.left).flatMap(row => pins.filter(pin => overlaps(row.paint, pin.box)).map(pin => ({ first: row.id, second: pin.id, kind: 'scrolling', firstRect: row.paint, secondRect: pin.box }))),
-    ];
-    const noOverlap = overlapPairs.length === 0;
-    const reserve = pins.length === 0 || outer.right - next >= 280 - 1;
-    const selected = rows.find(row => row.id === selectedId);
-    const unselected = pins.every(pin => pin.id !== selectedId);
-    return { offsets, noOverlap, reserve, unselected, hits: pins.every(pin => pin.hit) && selected?.hit === true,
-      queen: pins.some(pin => pin.queen), attention: pins.some(pin => pin.attention), width: outer.width, left: outer.left, padding, pins, selected, rows, overlapPairs };
+    const hits = hit(queen) && hit(selected);
+    const before = viewport.scrollTop;
+    const maxScroll = viewport.scrollHeight - viewport.clientHeight;
+    viewport.scrollTop = before > 0 ? 0 : maxScroll;
+    const scrollDelta = Math.abs(viewport.scrollTop - before);
+    const queenAfter = queen.getBoundingClientRect();
+    viewport.scrollTop = before;
+
+    const anchored = ['left', 'right', 'top', 'bottom'].every(key => Math.abs(queenBox[key] - queenAfter[key]) <= 1);
+    const queenOutside = !viewport.contains(queen) && viewport.contains(selected);
+    const queenInsideStage = queenBox.width > 0 && queenBox.height > 0
+      && queenBox.left >= stageBox.left - 1 && queenBox.top >= stageBox.top - 1
+      && queenBox.right <= workersBox.left + 1 && queenBox.bottom <= stageBox.bottom + 1;
+    const stageStyle = getComputedStyle(stage);
+    const viewportStyle = getComputedStyle(viewport);
+    const horizontalOverflow = [stage, viewport].some(node => node.scrollWidth > node.clientWidth + 1);
+    const scrollPolicy = stageStyle.overflowX === 'clip'
+      && viewportStyle.overflowX === 'hidden' && viewportStyle.overflowY === 'auto';
+    return {
+      anchored, queenOutside, queenInsideStage, hits, scrollDelta, maxScroll, scrollPolicy, horizontalOverflow,
+      passed: [anchored, queenOutside, queenInsideStage, hits, scrollDelta > 0, scrollPolicy, !horizontalOverflow].every(Boolean),
+    };
   }, selectedId);
 }
 export async function expandAgents(page, session) {
@@ -116,14 +101,18 @@ export async function showChat(pane) {
 }
 export const principalSelect = page => page.locator('.review-view .pickers > label').filter({ hasText: /^Principal/ }).locator('select');
 const cellSelect = page => page.locator('.review-view .pickers > label').filter({ hasText: /^Cell/ }).locator('select');
-async function openReview(page) {
+async function openPanelView(page, name) {
   const toggle = page.locator('#title-bar-panel-toggle');
   if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
   await page.locator('.panel-drawer:not(.collapsed)').waitFor({ state: 'visible' });
-  const changes = page.getByRole('group', { name: 'Panel views', exact: true }).getByRole('button', { name: 'Changes', exact: true });
+  const tab = page.getByRole('group', { name: 'Panel views', exact: true }).getByRole('button', { name, exact: true });
   // The active top-level tab collapses on click; preserve its current state.
-  if (await changes.getAttribute('aria-pressed') !== 'true') await changes.click();
-  await page.getByRole('group', { name: 'Changes sections', exact: true }).getByRole('button', { name: 'Review', exact: true }).click();
+  if (await tab.getAttribute('aria-pressed') !== 'true') await tab.click();
+}
+
+async function openReview(page) {
+  await openPanelView(page, 'Changes');
+  await page.getByRole('region', { name: 'Review', exact: true }).locator('.review-view').waitFor();
 }
 export async function composerGeometry(pane) {
   const element = pane.locator(`${composer}:visible`).first();
@@ -135,13 +124,28 @@ export async function composerGeometry(pane) {
     return { contained: box.width > 0 && box.height > 0 && box.left >= outer.left - 1 && box.top >= outer.top - 1 && box.right <= outer.right + 1 && box.bottom <= outer.bottom + 1, composer: rect(box), pane: rect(outer) };
   });
 }
-export async function wallBarGeometry(page) {
-  const bar = page.locator('.terminal-panel:not(.hidden) .command-bar');
+async function queenTerminalCapability(session, apiPort) {
+  const queen = session.agents.find(agent => agent.role === 'Queen');
+  const response = await fetch(`http://127.0.0.1:${apiPort}/api/sessions/${encodeURIComponent(session.id)}/agent-feeds`, { signal: AbortSignal.timeout(5000) });
+  if (!response.ok) throw new Error(`Cannot read render fixture feed capabilities: HTTP ${response.status}`);
+  const roster = await response.json();
+  const hasTerminal = roster.agents.find(feed => feed.agent_id === queen.id)?.capabilities.has_terminal;
+  if (typeof hasTerminal !== 'boolean') throw new Error(`Missing terminal capability for render fixture Queen ${queen.id}`);
+  return hasTerminal;
+}
+
+export async function wallBarGeometry(page, hasTerminal) {
+  const bar = page.locator(`${queenComposer}:visible`);
   if (await bar.count() !== 1) return { contained: false, count: await bar.count() };
-  return bar.evaluate(node => {
-    const workspace = node.closest('.terminal-workspace').getBoundingClientRect();
+  return bar.evaluate((node, hasTerminal) => {
+    const pane = node.closest('.terminal-item').getBoundingClientRect();
     const outer = node.getBoundingClientRect();
-    const elements = [node, node.querySelector('[data-composer]'), node.querySelector('.send-button'), node.querySelector('.target-picker')];
+    const splitActions = node.querySelectorAll('[aria-label="Open Split"]');
+    const splitCount = splitActions.length;
+    const elements = [
+      node, node.querySelector('.terminal-status-line'), node.querySelector('[data-composer]'),
+      node.querySelector('.send-button'), node.querySelector('.target-picker'), ...splitActions,
+    ];
     const boxes = elements.map(element => element?.getBoundingClientRect());
     const visible = elements.every(element => {
       if (!element) return false;
@@ -151,14 +155,36 @@ export async function wallBarGeometry(page) {
       }
       return true;
     });
-    const hit = elements.slice(1).every(element => {
-      if (!element) return false;
-      const box = element.getBoundingClientRect(), top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
-      return !!top && (top === element || element.contains(top));
+    const hit = elements.slice(1).every((element, index) => {
+      const box = boxes[index + 1];
+      return !!box && element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
     });
-    const inside = box => !!box && box.width > 0 && box.height > 0 && box.left >= Math.max(0, workspace.left, outer.left) - 1 && box.top >= Math.max(0, workspace.top, outer.top) - 1 && box.right <= Math.min(innerWidth, workspace.right, outer.right) + 1 && box.bottom <= Math.min(innerHeight, workspace.bottom, outer.bottom) + 1;
-    return { contained: visible && hit && boxes.every(inside), visible, hit, boxes: boxes.map(box => box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null) };
-  });
+    const inside = box => !!box && box.width > 0 && box.height > 0 && box.left >= Math.max(0, pane.left, outer.left) - 1 && box.top >= Math.max(0, pane.top, outer.top) - 1 && box.right <= Math.min(innerWidth, pane.right, outer.right) + 1 && box.bottom <= Math.min(innerHeight, pane.bottom, outer.bottom) + 1;
+    const statusAboveEditor = !!boxes[1] && !!boxes[2] && boxes[1].bottom <= boxes[2].top + 1;
+    const splitMatchesCapability = splitCount === Number(hasTerminal);
+    return { contained: visible && hit && statusAboveEditor && splitMatchesCapability && boxes.every(inside),
+      visible, hit, statusAboveEditor, hasTerminal, splitCount, boxes: boxes.map(box => box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null) };
+  }, hasTerminal);
+}
+async function queenComposerTabOrder(page, bar) {
+  const picker = bar.locator('.target-picker');
+  const target = await picker.textContent();
+  const stops = await bar.locator('[data-composer]:visible, button:enabled:visible').all();
+  if (stops.length < 3) return { passed: false, details: { tabStops: stops.length } };
+  for (let index = 0; index < stops.length - 1; index++) {
+    const current = stops[index], next = stops[index + 1];
+    await pressOutsideTerminal(page, current, 'Tab');
+    const forward = await next.evaluate(node => document.activeElement === node);
+    await pressOutsideTerminal(page, next, 'Shift+Tab');
+    const backward = await current.evaluate(node => document.activeElement === node);
+    if (!forward || !backward) return { passed: false, details: { index, forward, backward } };
+  }
+  await pressOutsideTerminal(page, stops.at(-1), 'Tab');
+  const outsideForward = await bar.evaluate(node => !!document.activeElement && document.activeElement !== document.body && !node.contains(document.activeElement));
+  await pressOutsideTerminal(page, stops[0], 'Shift+Tab');
+  const outsideReverse = await bar.evaluate(node => !!document.activeElement && document.activeElement !== document.body && !node.contains(document.activeElement));
+  const unchangedTarget = await picker.textContent() === target;
+  return { passed: outsideForward && outsideReverse && unchangedTarget, details: { outsideForward, outsideReverse, unchangedTarget } };
 }
 export async function badgeGeometry(page) {
   return page.locator('.app-version[title="Installed version"]').evaluate(node => {
@@ -213,6 +239,43 @@ export async function visibleTargetState(target) {
     return { visible: intersects(box, viewport) && texts.length > 0, text: node.innerText, visibleText: texts.join(' '), rect: { x: box.x, y: box.y, width: box.width, height: box.height } };
   });
 }
+
+async function resumeActionState(pane, button, expected, viewport) {
+  const paneExists = await pane.count() === 1;
+  const count = await button.count();
+  const status = paneExists ? await pane.locator('.pane-status-text').textContent() : null;
+  const enabled = count === 1 && await button.isEnabled();
+  const buttonBox = count === 1 ? await button.boundingBox() : null;
+  const paneBox = paneExists ? await pane.boundingBox() : null;
+  const contained = !!buttonBox && !!paneBox && buttonBox.width > 0 && buttonBox.height > 0
+    && buttonBox.x >= Math.max(0, paneBox.x) - 1 && buttonBox.y >= Math.max(0, paneBox.y) - 1
+    && buttonBox.x + buttonBox.width <= Math.min(viewport.width, paneBox.x + paneBox.width) + 1
+    && buttonBox.y + buttonBox.height <= Math.min(viewport.height, paneBox.y + paneBox.height) + 1;
+  const hit = contained && await button.evaluate(node => {
+    for (let current = node; current; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.visibility !== 'visible' || Number(style.opacity) === 0) return false;
+    }
+    const box = node.getBoundingClientRect();
+    return node.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+  });
+  const iconOnly = hit ? await resumeIconState(button) : null;
+  return { passed: paneExists && status === 'Completed' && (expected ? enabled && iconOnly?.passed === true : count === 0),
+    details: { paneExists, status, count, enabled, contained, hit, iconOnly, buttonBox, paneBox, expected } };
+}
+
+async function resumeIconState(button) {
+  const glyph = await button.locator('svg').evaluateAll(nodes => nodes.some(node => {
+    for (let current = node; current && current.tagName !== 'BUTTON'; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.visibility !== 'visible' || Number(style.opacity) === 0) return false;
+    }
+    const box = node.getBoundingClientRect(), shape = node.getBBox();
+    return box.width > 0 && box.height > 0 && shape.width > 0 && shape.height > 0;
+  }));
+  const { visibleText } = await visibleTargetState(button);
+  return { passed: glyph && !visibleText.trim(), glyph, visibleText };
+}
 export async function diagnoseReview({ page, manifest, report, out }) {
   const session = manifest.sessions.find(item => item.id === manifest.screens.review.sessionId);
   await selectSession(page, session, report);
@@ -234,12 +297,15 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
   let settled = false;
   const prove = mutationProver(report, assert);
   const probe = async (name, fn, context) => { try { const result = await fn(); assert(name, result.passed, result.details, context); } catch (error) { assert(name, false, error.message, context); } };
-  const capture = async (screen, viewport, target, expected, variant, expectedVisible = expected) => {
+  const capture = async (screen, viewport, target, expected, variant, expectedVisible = expected, extraMeasure) => {
     console.log(`render:check capture ${screen} ${viewport.width}x${viewport.height}`);
     const context = { screen, viewport: `${viewport.width}x${viewport.height}`, ...(variant ? { variant } : {}) };
     const screenMeasure = async () => {
       const details = await visibleTargetState(target);
-      return { passed: details.visible && expected(details.text) && expectedVisible(details.visibleText), details };
+      const textMatches = details.visible && expected(details.text) && expectedVisible(details.visibleText);
+      if (!textMatches || !extraMeasure) return { passed: textMatches, details };
+      const extra = await extraMeasure();
+      return { passed: extra.passed, details: { ...details, action: extra.details } };
     };
     await probe('screen-not-empty', screenMeasure, context);
     await prove('screen-not-empty', screenMeasure, () => styleChange(target, { display: 'none' }), context);
@@ -286,32 +352,19 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       await scrollColumn(pane);
     }
     const button = pane.getByRole('button', { name: `Resume ${agent.label}`, exact: true });
+    if (expected && await button.count() === 1) await button.scrollIntoViewIfNeeded();
     const name = `resume-${expected ? 'available' : 'unavailable'}-${mode.toLowerCase()}-${viewport.width}`;
     const context = { screen: mode.toLowerCase(), viewport: `${viewport.width}x${viewport.height}`, agentId: agent.id };
-    const measure = async () => {
-      const paneExists = await pane.count() === 1;
-      const count = await button.count();
-      const status = paneExists ? await pane.locator('.pane-status-text').textContent() : null;
-      const visible = count === 1 ? await visibleTargetState(button) : { visible: false, visibleText: '' };
-      const enabled = count === 1 && !await button.isDisabled();
-      const buttonBox = count === 1 ? await button.boundingBox() : null;
-      const paneBox = paneExists ? await pane.boundingBox() : null;
-      const contained = !!buttonBox && !!paneBox && buttonBox.width > 0 && buttonBox.height > 0
-        && buttonBox.x >= Math.max(0, paneBox.x) - 1 && buttonBox.y >= Math.max(0, paneBox.y) - 1
-        && buttonBox.x + buttonBox.width <= Math.min(viewport.width, paneBox.x + paneBox.width) + 1
-        && buttonBox.y + buttonBox.height <= Math.min(viewport.height, paneBox.y + paneBox.height) + 1;
-      return { passed: paneExists && status === 'Completed' && (expected
-        ? count === 1 && visible.visible && visible.visibleText === 'Resume' && enabled && contained
-        : count === 0), details: { paneExists, status, count, visible, enabled, contained, buttonBox, paneBox, expected } };
-    };
+    const measure = () => resumeActionState(pane, button, expected, viewport);
     await probe(name, measure, context);
     if (expected) await prove(`resume-clip-${mode.toLowerCase()}-${viewport.width}`, measure, async () => {
       const buttonBox = await button.boundingBox(), paneBox = await pane.boundingBox();
       return styleChange(button, { transform: `translateX(${paneBox.x + paneBox.width - buttonBox.x - buttonBox.width + 6}px)` });
     }, context);
     await prove(name, measure, () => expected ? removeNode(button) : appendNode(pane.locator('.terminal-header'), {
-      tag: 'button', attributes: { 'aria-label': `Resume ${agent.label}` }, text: 'Resume',
+      tag: 'button', attributes: { 'aria-label': `Resume ${agent.label}` },
     }), context);
+    return measure;
   };
   const revealGridAgent = async agent => {
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(agent.id)}]`).click();
@@ -319,10 +372,13 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await scrollColumn(pane);
     return pane;
   };
-  const gridChecks = async (viewport, stage) => {
+  const gridChecks = async (viewport, stage, queenHasTerminal) => {
     const context = { screen: 'grid', viewport: `${viewport.width}x${viewport.height}`, stage };
+    const band = page.locator('.session-ops-band');
+    const region = band.getByRole('region', { name: 'Session event ticker', exact: true });
+    const bar = page.locator(queenComposer);
+    await showChat(paneFor(page, normal));
     if (stage === 'load') {
-      const region = page.locator('.terminal-panel:not(.hidden) .event-ticker');
       const first = region.locator('.ticker-item').first();
       const label = region.locator('.ticker-label');
       await first.waitFor({ state: 'attached' });
@@ -336,25 +392,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       await probe(`wall-tick-default-${viewport.width}`, defaultTicker, context);
       await prove(`wall-tick-default-${viewport.width}`, defaultTicker, () => styleChange(first, { transform: 'translateY(2000px)' }), context);
       await prove(`wall-tick-label-${viewport.width}`, defaultTicker, () => removeNode(label), context);
-      const bar = page.locator('.terminal-panel:not(.hidden) .command-bar');
-      const editor = bar.locator('[data-composer]'), add = bar.locator('.add-button'), picker = bar.locator('.target-picker');
-      const freeTab = async () => {
-        const target = await picker.textContent();
-        await pressOutsideTerminal(page, editor, 'Tab');
-        const forward = await add.evaluate(node => document.activeElement === node);
-        if (!forward) return { passed: false, details: { forward } };
-        await pressOutsideTerminal(page, add, 'Shift+Tab');
-        const reverse = await editor.evaluate(node => document.activeElement === node);
-        const last = bar.locator('button:enabled').last();
-        await pressOutsideTerminal(page, last, 'Tab');
-        const outsideForward = await bar.evaluate(node => !!document.activeElement && document.activeElement !== document.body && !node.contains(document.activeElement));
-        await pressOutsideTerminal(page, editor, 'Shift+Tab');
-        const pickerReached = await picker.evaluate(node => document.activeElement === node);
-        await pressOutsideTerminal(page, picker, 'Shift+Tab');
-        const outsideReverse = await bar.evaluate(node => !!document.activeElement && document.activeElement !== document.body && !node.contains(document.activeElement));
-        const unchangedTarget = await picker.textContent() === target;
-        return { passed: forward && reverse && pickerReached && outsideForward && outsideReverse && unchangedTarget, details: { forward, reverse, pickerReached, outsideForward, outsideReverse, unchangedTarget } };
-      };
+      const freeTab = () => queenComposerTabOrder(page, bar);
       await probe(`wall-tab-free-${viewport.width}`, freeTab, context);
       await prove(`wall-tab-free-${viewport.width}`, freeTab, async () => {
         const handle = await bar.evaluateHandle(node => {
@@ -375,28 +413,32 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await prove('grid-eight-panes', roster, () => removeNode(panes.last()), context);
     await prove(`wall-roster-${viewport.width}`, roster, () => removeNode(panes.last()), context);
     const columnWidths = async () => {
-      const widths = await panes.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().width));
-      return { passed: widths.length === 8 && widths.slice(1).every(width => width >= manifest.opswall.minimumColumnWidth - 1) && widths.slice(1).every(width => widths[0] >= width * manifest.opswall.queenRatio - 1), details: { widths } };
+      const details = await panes.evaluateAll(nodes => {
+        const [queen, ...workers] = nodes;
+        const viewport = workers[0]?.closest('.worker-viewport');
+        if (!queen || !viewport) return { passed: false, widths: [] };
+        const widths = nodes.map(node => node.getBoundingClientRect().width);
+        return {
+          passed: widths.length === 8 && widths[0] >= viewport.clientWidth
+            && widths.slice(1).every(width => Math.abs(width - viewport.clientWidth) <= 1),
+          widths, workerWidth: viewport.clientWidth,
+        };
+      });
+      return { passed: details.passed, details };
     };
     await probe(`wall-width-${viewport.width}`, columnWidths, context);
     await prove(`wall-width-${viewport.width}`, columnWidths, () => styleChange(panes.first(), { transform: 'scaleX(0.2)', 'transform-origin': 'left' }), context);
     const far = session.agents.at(-1);
     await revealGridAgent(far);
-    const pinMeasure = async () => {
-      const details = await pinGeometry(page, far.id);
-      return { passed: details.offsets && details.noOverlap && details.reserve && details.unselected && details.hits && (viewport.width !== 1440 || (details.queen && details.attention)), details };
+    const stackMeasure = async () => {
+      const details = await stageGeometry(page, far.id);
+      return { passed: details.passed === true, details };
     };
-    await probe(`wall-pin-${viewport.width}`, pinMeasure, context);
-    await prove(`wall-pin-${viewport.width}`, pinMeasure, async () => {
-      const undo = [];
-      for (const pane of await panes.all()) undo.push(await styleChange(pane, { position: 'sticky', left: '4px' }));
-      return async () => { for (const restore of undo.reverse()) await restore(); };
-    }, context);
-    if (viewport.width === 1440) await prove('wall-pin-fixed', pinMeasure, async () => {
-      const undo = [];
-      for (const pane of await panes.filter({ has: page.locator('.attention-chip') }).all()) undo.push(await styleChange(pane, { left: '4px' }));
-      return async () => { for (const restore of undo.reverse()) await restore(); };
-    }, context);
+    await probe(`wall-pin-${viewport.width}`, stackMeasure, context);
+    const stageRoot = page.locator('.terminal-panel:not(.hidden) .terminal-grid');
+    await prove(`wall-pin-${viewport.width}`, stackMeasure, () => styleChange(stageRoot, { 'overflow-x': 'auto' }), context);
+    if (viewport.width === 1440) await prove('wall-pin-fixed', stackMeasure,
+      () => styleChange(panes.first(), { transform: 'translateY(2000px)' }), context);
     for (const [index, agent] of session.agents.entries()) {
       const pane = paneFor(page, agent);
       await scrollColumn(pane);
@@ -415,18 +457,19 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       await probe(name, reachable, context);
       await prove(name, reachable, () => styleChange(button, { visibility: 'hidden' }), context);
     }
-    const noColumnComposer = async () => ({ passed: await panes.locator('.chat-composer, [data-composer]').count() === 0 });
-    await probe('grid-no-column-composer', noColumnComposer, context);
-    await prove('grid-no-column-composer', noColumnComposer, () => appendNode(panes.first(), { attributes: { class: 'chat-composer' } }), context);
-    await prove(`wall-tail-${viewport.width}`, noColumnComposer, () => appendNode(panes.first(), { attributes: { class: 'chat-composer' } }), context);
+    const workers = page.locator('.terminal-panel:not(.hidden) .worker-viewport .terminal-item');
+    const oneQueenComposer = async () => ({ passed: await bar.locator('[data-composer]').count() === 1 && await workers.locator('.chat-composer, [data-composer]').count() === 0 });
+    await probe('grid-no-column-composer', oneQueenComposer, context);
+    await prove('grid-no-column-composer', oneQueenComposer, () => appendNode(workers.first(), { attributes: { class: 'chat-composer' } }), context);
+    await prove(`wall-tail-${viewport.width}`, oneQueenComposer, () => appendNode(workers.first(), { attributes: { class: 'chat-composer' } }), context);
     const farPane = await revealGridAgent(far);
     await farPane.getByRole('button', { name: `Maximize ${far.label}`, exact: true }).click();
     const maximized = async () => {
       const box = await farPane.boundingBox(), outer = await page.locator('.terminal-panel:not(.hidden) .terminal-grid').boundingBox();
-      const count = await panes.count(), hidden = await page.locator('.terminal-panel:not(.hidden) .terminal-grid > .terminal-item.hidden-by-maximize').count();
-      const bar = await wallBarGeometry(page);
+      const count = await panes.count(), hidden = await page.locator('.terminal-panel:not(.hidden) .terminal-grid .terminal-item.hidden-by-maximize').count();
+      const composerVisible = await bar.isVisible();
       const contained = !!box && !!outer && box.width > 0 && box.height > 0 && box.x >= Math.max(0, outer.x) - 1 && box.y >= Math.max(0, outer.y) - 1 && box.x + box.width <= Math.min(viewport.width, outer.x + outer.width) + 1 && box.y + box.height <= Math.min(viewport.height, outer.y + outer.height) + 1;
-      return { passed: contained && count === 8 && hidden === 7 && bar.contained, details: { box, outer, count, hidden, bar, contained } };
+      return { passed: contained && count === 8 && hidden === 7 && !composerVisible, details: { box, outer, count, hidden, composerVisible, contained } };
     };
     await probe(`wall-max-${viewport.width}`, maximized, context);
     await prove(`wall-max-${viewport.width}`, maximized, () => styleChange(farPane, { transform: 'translateX(2000px)' }), context);
@@ -437,7 +480,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       const box = node.getBoundingClientRect(), top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
       return !!top && (top === node || node.contains(top));
     }, id, { timeout: 5000 });
-    const ticker = page.locator('.terminal-panel:not(.hidden) .event-ticker').getByRole('button', { name: `Task: ${manifest.opswall.tickerText}`, exact: true });
+    const ticker = region.getByRole('button', { name: `Task: ${manifest.opswall.tickerText}`, exact: true });
     await ticker.scrollIntoViewIfNeeded();
     const tickerVisible = async () => { const details = await visibleTargetState(ticker); return { passed: details.visible && details.visibleText.includes(manifest.opswall.tickerText), details }; };
     await probe(`wall-tick-${viewport.width}`, tickerVisible, context);
@@ -446,7 +489,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await waitForHeader(manifest.opswall.tickerAgentId);
     const tickAgent = session.agents.find(agent => agent.id === manifest.opswall.tickerAgentId);
     const tickTarget = async () => {
-      const target = page.locator('.terminal-panel:not(.hidden) .command-bar .target-picker');
+      const target = bar.locator('.target-picker');
       const header = paneFor(page, tickAgent).getByRole('button', { name: `Focus ${tickAgent.label}`, exact: true });
       const visible = await visibleTargetState(header);
       if (!visible.visible) return { passed: false, details: { visible, hit: false } };
@@ -455,7 +498,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     };
     await probe(`wall-tick-go-${viewport.width}`, tickTarget, context);
     await prove(`wall-tick-go-${viewport.width}`, tickTarget, () => styleChange(paneFor(page, tickAgent).locator('.terminal-pane-focus'), { visibility: 'hidden' }), context);
-    const attentionTile = page.locator('.terminal-panel:not(.hidden) .resource-strip').getByRole('button', { name: /^Attention \d+$/ });
+    const attentionTile = band.getByRole('navigation', { name: 'Agent resources', exact: true }).getByRole('button', { name: /^Attention \d+$/ });
     await attentionTile.click();
     const firstAttention = session.agents.find(agent => ['stalled', 'exited_during_startup', 'delivery_failed'].includes(agent.state));
     await waitForHeader(firstAttention.id);
@@ -485,9 +528,8 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     for (const [agent, hasAttention] of [[normal, false], [stalled, true]]) {
       const pane = await revealGridAgent(agent);
       await showChat(pane);
-      const bar = page.locator('.terminal-panel:not(.hidden) .command-bar');
       const measure = async () => {
-        const details = await wallBarGeometry(page);
+        const details = await wallBarGeometry(page, queenHasTerminal);
         const card = (await pane.locator(`${attention}:visible`).count()) > 0;
         return { passed: details.contained && card === hasAttention, details: { ...details, card } };
       };
@@ -510,13 +552,21 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     assert(`viewport-${viewport.width}`, dimensions.width === viewport.width && dimensions.height === viewport.height, dimensions);
     await prove(`viewport-${viewport.width}`, async () => { const details = await page.evaluate(() => ({ width: innerWidth, height: innerHeight })); return { passed: details.width === viewport.width && details.height === viewport.height, details }; }, async () => { await page.setViewportSize({ ...viewport, width: viewport.width - 10 }); return () => page.setViewportSize(viewport); });
     await page.getByRole('button', { name: 'New Session', exact: true }).click();
-    const projectField = page.locator('#launch-project-value');
+    const projectButton = page.locator('.launch-inline').getByRole('button', { name: /^Project(?: |$)/ });
     const projectMeasure = async () => {
-      const value = await projectField.textContent();
+      const label = await projectButton.getAttribute('aria-label');
+      const value = label?.startsWith('Project ') ? label.slice('Project '.length) : '';
       return { passed: path.isAbsolute(value) && !value.startsWith('\\\\?\\') && value === report.root, details: { value, expected: report.root } };
     };
     await probe('launch-project-ordinary-path', projectMeasure, { screen: 'launch', viewport: `${viewport.width}x${viewport.height}` });
-    await prove('launch-project-verbatim-prefix', projectMeasure, async () => textChange(projectField, `\\\\?\\${await projectField.textContent()}`), { screen: 'launch' });
+    await prove('launch-project-verbatim-prefix', projectMeasure, async () => {
+      const label = await projectButton.evaluate(node => {
+        const original = node.getAttribute('aria-label');
+        node.setAttribute('aria-label', 'Project \\\\?\\' + original.slice('Project '.length));
+        return original;
+      });
+      return () => projectButton.evaluate((node, original) => node.setAttribute('aria-label', original), label);
+    }, { screen: 'launch' });
     await capture('launch', viewport, page.locator('.launch-inline'), text => text.includes('What would you like to work on?'));
     // Hold capabilities only for the focus mutation. This exposes the real
     // pre-roster xterm mount without changing app source or fixture data.
@@ -535,6 +585,15 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await viewMode(page, 'Focus');
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(manifest.screens.focus.agentId)}]`).click();
     const focused = paneFor(page, normal);
+    if (viewport.width === 800) {
+      const picker = page.getByRole('combobox', { name: 'Focused terminal', exact: true });
+      const reviewAgent = session.agents.find(agent => agent.id === manifest.screens.review.agentId);
+      await focused.waitFor({ state: 'visible' });
+      await picker.selectOption(reviewAgent.id);
+      await paneFor(page, reviewAgent).waitFor({ state: 'visible' });
+      await picker.selectOption(normal.id);
+      await focused.waitFor({ state: 'visible' });
+    }
     await showChat(focused);
     await focused.locator('[aria-label="Markdown table"] table').first().waitFor();
     await focused.locator('[aria-label="Markdown table"] table').first().scrollIntoViewIfNeeded();
@@ -542,13 +601,17 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     for (const key of ['table', 'code', 'literal']) assert(`chat-${key}`, chat[key], chat, { screen: 'focus', viewport: `${viewport.width}x${viewport.height}` });
     for (const key of ['table', 'code', 'literal']) await prove(`chat-${key}`, async () => { const details = await chatState(focused, manifest); return { passed: details[key], details }; }, () => key === 'table' ? removeNode(focused.locator('[aria-label="Markdown table"] table').first()) : key === 'code' ? textChange(focused.locator('pre[aria-label^="Code block"] code').first(), 'mutated code') : appendNode(focused.locator(`${chatSelector}:visible`).first(), { attributes: { 'data-fixture': 'literal' } }), { screen: 'focus' });
     for (const key of ['table', 'code']) await prove(`chat-empty-${key}`, async () => { const details = await chatState(focused, manifest); return { passed: details[key], details }; }, () => emptyContents(focused.locator(key === 'table' ? '[aria-label="Markdown table"] table' : 'pre[aria-label^="Code block"] code').first()), { screen: 'focus' });
-    await capture('focus', viewport, focused, text => text.includes(manifest.chat.tableText) && text.includes(manifest.chat.codeText));
+    const hasTable = text => [manifest.chat.tableText, manifest.chat.tableHeader, manifest.chat.tableCell].every(value => text.includes(value));
+    await capture('focus', viewport, focused, hasTable);
+    await focused.locator('pre[aria-label^="Code block"] code').filter({ hasText: manifest.chat.codeText }).first().scrollIntoViewIfNeeded();
+    await capture('focus', viewport, focused, text => text.includes(manifest.chat.codeText), 'markdown-code');
     await runSecurityAssertions({ page, pane: focused, report, assert, consoleErrors, sessionId: manifest.chat.sessionId,
       capture: () => capture('focus', viewport, focused, text => text.includes('Close HTML preview'), 'html') });
     const toggle = page.locator('#title-bar-panel-toggle');
     if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
     await viewMode(page, 'Grid');
-    await gridChecks(viewport, 'load');
+    const queenHasTerminal = await queenTerminalCapability(session, report.ports.api);
+    await gridChecks(viewport, 'load', queenHasTerminal);
     if (!settled) {
       console.log('render:check observing the 60-second stall loop and 5-second sweep');
       const started = Date.now();
@@ -556,7 +619,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       report.stallSweepWaitSeconds = (Date.now() - started) / 1000;
       settled = true;
     }
-    await gridChecks(viewport, 'after-stall-and-sweep');
+    await gridChecks(viewport, 'after-stall-and-sweep', queenHasTerminal);
     await resumeChecks(resumable, true, 'Grid', viewport);
     // Every column was individually painted/reachable above; preserve captures
     // of both meaningful attention states without treating offscreen text as painted.
@@ -680,13 +743,10 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await dialog.waitFor();
     await capture('dialog', viewport, dialog, text => text.includes('Keyboard Shortcuts'));
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await openPanelView(page, 'Activity');
     // Exercise the persisted result envelope through the shipped conversation UI.
     const conversationFixture = manifest.conversation;
-    if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
-    const activity = page.getByRole('group', { name: 'Panel views', exact: true }).getByRole('button', { name: 'Activity', exact: true });
-    if (await activity.getAttribute('aria-pressed') !== 'true') await activity.click();
-    await page.getByRole('group', { name: 'Activity sections', exact: true }).getByRole('button', { name: 'Chat', exact: true }).click();
-    const viewer = page.locator('.conversation-viewer');
+    const viewer = page.locator('.activity-tab [aria-label="Chat"] .conversation-viewer');
     await viewer.getByRole('tab', { name: 'Queen', exact: true }).click();
     const diffWidget = viewer.locator('.diff-widget').first();
     await diffWidget.waitFor({ state: 'visible' });
@@ -747,10 +807,10 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await selectSession(page, session, report);
     await viewMode(page, 'Focus');
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(resumable.id)}]`).click();
-    await resumeChecks(resumable, true, 'Focus', viewport);
+    const measureResume = await resumeChecks(resumable, true, 'Focus', viewport);
     await capture('focus', viewport, paneFor(page, resumable),
-      text => text.includes(resumable.label) && text.includes('Resume') && text.includes('Completed'), 'resume-available',
-      text => text.includes('Resume') && text.includes('Completed'));
+      text => text.includes(resumable.label) && text.includes('Completed'), 'resume-available',
+      text => text.includes('Completed'), measureResume);
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(normal.id)}]`).click();
     await page.getByRole('link', { name: 'Dashboard', exact: true }).click();
     // Open the already-loaded completed fixture through the shipped Dashboard
@@ -815,6 +875,8 @@ export async function runChatContrastAssertions({ page, session, manifest, repor
       const body = chat.locator('.message p').first();
       const meta = queen.locator('.sender-label');
       await body.scrollIntoViewIfNeeded();
+      const accent = await page.locator('html').getAttribute('data-accent') ?? 'honey';
+      const chatWell = chatWellByAccent[accent];
       const sample = locator => locator.evaluate(node => {
         const css = getComputedStyle(node);
         return { color: css.color, background: css.backgroundColor, font: css.fontSize, line: css.lineHeight,
@@ -823,19 +885,19 @@ export async function runChatContrastAssertions({ page, session, manifest, repor
           text: node.textContent, label: node.querySelector('.sender-label, strong')?.textContent };
       });
       const cases = [
-        ['well', chat, css => css.background === 'rgb(7, 22, 40)', { 'background-color': 'rgb(244,247,251)' }],
+        ['well', chat, css => css.background === chatWell, { 'background-color': 'rgb(244,247,251)' }],
         ['body', body, css => css.color === 'rgb(244, 247, 251)', { color: 'rgb(7,22,40)' }],
         ['meta', meta, css => css.color === 'rgb(201, 213, 228)', { color: 'rgb(7,22,40)' }],
         ['font', body, css => css.font === '13.5px' && Math.abs(parseFloat(css.line) - 20.925) < .01, { 'font-size': '12px' }],
         ['line', body, css => Math.abs(parseFloat(css.line) - 20.925) < .01, { 'line-height': '1' }],
         ['queen', queen, css => css.text.includes(manifest.chat.queenDirective) && css.background === 'rgba(193, 66, 196, 0.1)' && css.border === 'rgb(193, 66, 196)' && css.outline && css.label === 'Queen', { 'border-top-width': '0px' }],
         ['warn', chat.locator('.message[aria-label="Agent error"]'), css => css.background === 'rgba(236, 221, 165, 0.1)' && css.border === 'rgb(236, 221, 165)' && css.outline && css.label === 'Error', { 'border-top-width': '0px' }],
-        ['operator', operator, css => css.text.includes(manifest.chat.operatorMessage) && css.background === 'rgb(7, 22, 40)' && css.borderWidth === '1px' && parseFloat(css.radius) > 0, { 'border-left-width': '0px' }],
+        ['operator', operator, css => css.text.includes(manifest.chat.operatorMessage) && css.background === chatWell && css.borderWidth === '1px' && parseFloat(css.radius) > 0, { 'border-left-width': '0px' }],
       ];
       for (const [part, locator, accepts, mutation] of cases) {
         await locator.scrollIntoViewIfNeeded();
         const measure = async () => {
-          const details = await sample(locator);
+          const details = { ...await sample(locator), accent, expectedChatWell: chatWell };
           return { passed: await locator.isVisible() && accepts(details), details };
         };
         const name = `chat-${part}-${mode.toLowerCase()}-${viewport.width}`;

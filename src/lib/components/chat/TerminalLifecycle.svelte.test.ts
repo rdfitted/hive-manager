@@ -3,29 +3,54 @@ import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/sv
 import { tick } from 'svelte';
 import type { Session } from '$lib/stores/sessions';
 import type { AgentEventsState } from '$lib/stores/agentEvents';
+import type { PtyOutputEvent } from '$lib/terminal/ptyStream';
 
 const fixture = vi.hoisted(() => ({
-  terminals: [] as { buffer: string; disposed: boolean; textarea: HTMLTextAreaElement; keyHandler: (event: KeyboardEvent) => boolean }[],
+  terminals: [] as {
+    scrollback: string;
+    disposed: boolean;
+    textarea: HTMLTextAreaElement;
+    keyHandler: (event: KeyboardEvent) => boolean;
+    buffer: { active: { baseY: number } };
+  }[],
+  screenRows: 24,
+  outputListeners: new Map<string, (event: { payload: PtyOutputEvent }) => void>(),
   webglCreated: 0, webglDisposed: 0, focuses: 0,
   setAgentEvents: null as ((value: AgentEventsState) => void) | null,
   invoke: vi.fn(async (command: string, args: { id: string }) => command === 'get_pty_snapshot'
     ? { id: args.id, offset_start: 0, offset_end: 17, data: btoa('fixture scrollback') } : undefined),
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
-vi.mock('phosphor-svelte', () => ({
+vi.mock('phosphor-svelte', async (importOriginal) => ({
+  ...await importOriginal<typeof import('phosphor-svelte')>(),
+  ArrowUpRight: () => {},
   ArrowDown: () => {}, ArrowUp: () => {}, Broom: () => {}, CaretDown: () => {}, CaretUp: () => {}, CheckSquare: () => {},
   ClipboardText: () => {}, FileText: () => {}, MagnifyingGlass: () => {}, X: () => {},
   ArrowsIn: () => {}, ArrowsOut: () => {}, Check: () => {}, Circle: () => {}, Hourglass: () => {}, Plus: () => {},
+  ChatCircle: () => {}, ListBullets: () => {}, SquareSplitVertical: () => {}, TerminalWindow: () => {},
+  Bell: () => {}, Clock: () => {}, File: () => {}, Graph: () => {}, Pulse: () => {}, Timer: () => {}, Users: () => {},
 }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async (name: string, callback: (event: { payload: PtyOutputEvent }) => void) => {
+  if (name.startsWith('pty-output:')) fixture.outputListeners.set(name, callback);
+  return () => fixture.outputListeners.delete(name);
+}) }));
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ onDragDropEvent: vi.fn().mockResolvedValue(() => {}) }) }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: vi.fn(), readText: vi.fn() }));
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
-  buffer = ''; disposed = false; textarea = document.createElement('textarea');
+  scrollback = ''; disposed = false; textarea = document.createElement('textarea');
   keyHandler = (_event: KeyboardEvent) => true;
   constructor(public options: Record<string, unknown>) { fixture.terminals.push(this); }
   open(node: HTMLElement) { this.textarea.className = 'xterm-helper-textarea'; node.append(this.textarea); }
-  write(text: string) { this.buffer += text; }
+  get buffer() {
+    const rows = this.scrollback.split('\n');
+    const baseY = Math.max(0, rows.length - fixture.screenRows);
+    return { active: { baseY, cursorY: rows.length - baseY - 1, getLine: (row: number) => ({ translateToString: () => rows[row].trimEnd() }) } };
+  }
+  write(text: string, done?: () => void) {
+    const parse = () => { this.scrollback += text; done?.(); };
+    if (done) queueMicrotask(parse);
+    else parse();
+  }
   focus() { fixture.focuses++; this.textarea.focus(); }
   loadAddon() {}
   onData() { return { dispose() {} }; }
@@ -34,7 +59,7 @@ vi.mock('@xterm/xterm', () => ({ Terminal: class {
   scrollToBottom() {}
   dispose() { this.disposed = true; }
 } }));
-vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } } }));
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} proposeDimensions() { return { cols: 80, rows: fixture.screenRows }; } } }));
 vi.mock('@xterm/addon-search', () => ({ SearchAddon: class { onDidChangeResults() { return { dispose() {} }; } clearDecorations() {} } }));
 vi.mock('@xterm/addon-webgl', () => ({ WebglAddon: class {
   constructor() { fixture.webglCreated++; }
@@ -72,11 +97,13 @@ function publishFeed(withRecord = true) {
 }
 
 import TerminalGrid from '../TerminalGrid.svelte';
+import Terminal from '../Terminal.svelte';
 import { layout } from '$lib/stores/layout';
 const { readFileSync } = await vi.importActual<{ readFileSync(path: string, encoding: 'utf8'): string }>('node:fs');
 
 beforeEach(() => {
   fixture.terminals.length = 0; fixture.webglCreated = 0; fixture.webglDisposed = 0; fixture.focuses = 0;
+  fixture.outputListeners.clear();
   localStorage.clear(); layout.setMaximizedTerminalId(null);
   publishFeed();
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
@@ -98,6 +125,49 @@ const session: Session = {
 };
 
 describe('real Terminal component behind chat (renderer doubles)', () => {
+  it('publishes parsed replay and live output once per change and skips writes completed after teardown', async () => {
+    const onLastLine = vi.fn();
+    const view = render(Terminal, { agentId: 'claude', onLastLine });
+    await waitFor(() => expect(onLastLine.mock.calls).toEqual([['fixture scrollback']]));
+    const output = fixture.outputListeners.get('pty-output:claude')!;
+    output({ payload: { id: 'claude', offset: 17, data: btoa('\nnew row\n') } });
+    expect(onLastLine).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onLastLine).toHaveBeenLastCalledWith('new row'));
+    view.component.write('\n');
+    await tick();
+    expect(onLastLine).toHaveBeenCalledTimes(2);
+    fixture.terminals[0].scrollback = '';
+    view.component.write('\n');
+    await waitFor(() => expect(onLastLine).toHaveBeenLastCalledWith(''));
+    view.component.write('late output');
+    view.unmount();
+    await tick();
+    expect(onLastLine).toHaveBeenCalledTimes(3);
+  });
+
+  it('reports the latest retained line when blank output pushes it above the bottom page', async () => {
+    const onLastLine = vi.fn();
+    const view = render(Terminal, { agentId: 'claude', onLastLine });
+    await waitFor(() => expect(onLastLine.mock.calls).toEqual([['fixture scrollback']]));
+    const terminal = fixture.terminals[0];
+    const blankPage = '\n'.repeat(fixture.screenRows);
+
+    terminal.scrollback = '';
+    view.component.write(`retained line${blankPage}`);
+    await tick();
+    expect(terminal.buffer.active.baseY).toBe(1);
+    expect(onLastLine.mock.calls).toEqual([['fixture scrollback'], ['retained line']]);
+
+    view.component.write(blankPage);
+    await tick();
+    expect(onLastLine).toHaveBeenCalledTimes(2);
+
+    terminal.scrollback = '';
+    view.component.write(blankPage);
+    await tick();
+    expect(onLastLine.mock.calls).toEqual([['fixture scrollback'], ['retained line'], ['']]);
+  });
+
   it.each(['focus', 'grid'] as const)('T15: %s Codex transcript keeps its terminal until the first record without remount or focus', async (mode) => {
     layout.setSessionViewMode(mode);
     const publishCodex = (withRecord: boolean) => fixture.setAgentEvents!({
@@ -109,14 +179,15 @@ describe('real Terminal component behind chat (renderer doubles)', () => {
     const view = render(TerminalGrid, { session, focusedAgentId: 'codex', onSelect: vi.fn() });
     await waitFor(() => expect(fixture.terminals).toHaveLength(2));
     const original = [...fixture.terminals];
-    const toggle = view.getByRole('button', { name: 'Terminal' });
+    const codex = within(view.container.querySelector<HTMLElement>('[data-agent-id="codex"]')!);
+    const toggle = codex.getByRole('button', { name: 'Terminal' });
     expect(toggle.getAttribute('aria-pressed')).toBe('true');
     const terminal = fixture.terminals[1];
     expect(terminal.textarea.closest<HTMLElement>('.terminal-layer')!.inert).toBe(false);
     expect(fixture.focuses).toBe(0);
     publishCodex(true); await tick();
     expect(terminal.textarea.closest<HTMLElement>('.terminal-layer')!.inert).toBe(true);
-    expect(view.getByRole('button', { name: 'Chat' }).getAttribute('aria-pressed')).toBe('true');
+    expect(codex.getByRole('button', { name: 'Chat' }).getAttribute('aria-pressed')).toBe('true');
     expect(fixture.terminals).toEqual(original);
     expect(original.every((term) => !term.disposed)).toBe(true);
     expect(fixture.focuses).toBe(0);
@@ -158,7 +229,7 @@ describe('real Terminal component behind chat (renderer doubles)', () => {
   it.each(['focus', 'grid'] as const)('G9: %s twenty toggles keep xterm scrollback, instances and WebGL allocation count flat', async (mode) => {
     layout.setSessionViewMode(mode);
     const view = render(TerminalGrid, { session, focusedAgentId: 'claude', onSelect: vi.fn() });
-    await waitFor(() => expect(fixture.terminals.filter((term) => term.buffer === 'fixture scrollback')).toHaveLength(2));
+    await waitFor(() => expect(fixture.terminals.filter((term) => term.scrollback === 'fixture scrollback')).toHaveLength(2));
     const original = [...fixture.terminals];
     const allocations = fixture.webglCreated;
     expect(allocations).toBeGreaterThan(0);
@@ -168,7 +239,7 @@ describe('real Terminal component behind chat (renderer doubles)', () => {
       await fireEvent.click(view.getByRole('button', { name: index % 2 === 0 ? 'Terminal' : 'Chat' }));
       await tick();
       expect(fixture.terminals).toEqual(original);
-      expect(original.every((term) => !term.disposed && term.buffer === 'fixture scrollback')).toBe(true);
+      expect(original.every((term) => !term.disposed && term.scrollback === 'fixture scrollback')).toBe(true);
       expect(fixture.webglCreated).toBe(allocations);
       expect(fixture.webglDisposed).toBe(0);
       expect(fixture.focuses).toBe(focuses);
@@ -213,8 +284,9 @@ describe('real Terminal component behind chat (renderer doubles)', () => {
     // This pins sizing/hit-test policy; jsdom does not measure desktop geometry.
     const source = readFileSync('src/lib/components/TerminalGrid.svelte', 'utf8');
     expect(source).toContain('grid-template: minmax(0, 1fr) / minmax(0, 1fr)');
-    expect(source).toContain('transform: translateX(-200vw)');
-    expect(source).not.toMatch(/\.terminal-layer\.chat-hidden\s*\{[^}]*display:\s*none/);
+    const body = readFileSync('src/lib/components/chat/AgentPaneBody.svelte', 'utf8');
+    expect(body).toMatch(/\.chat-hidden\s*\{[^}]*transform:\s*translateX\(-200vw\)/);
+    expect(body).not.toMatch(/\.chat-hidden\s*\{[^}]*display:\s*none/);
   });
 
   it('enables document-targeted paste only after an explicit focus inside the revealed terminal', async () => {

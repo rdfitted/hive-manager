@@ -3,16 +3,13 @@
   import PlanView from '../PlanView.svelte';
   import WorkGraphView from '../workgraph/WorkGraphView.svelte';
 
-  let section = $state<'Status' | 'Plan' | 'Graph'>('Status');
+  import type { OverviewTab } from '$lib/stores/layout';
+
+  let { tab = 'overview' }: { tab?: OverviewTab } = $props();
+  const section = $derived({ overview: 'Status', plan: 'Plan', graph: 'Graph' }[tab]);
 </script>
 
 <div class="overview-tab">
-  <div class="sections lattice-track" role="group" aria-label="Overview sections">
-    {#each ['Status', 'Plan', 'Graph'] as label}
-      <button type="button" class="lattice-tab"
-        aria-pressed={section === label} onclick={() => section = label as typeof section}>{label}</button>
-    {/each}
-  </div>
   <section class="section-content" aria-label={section}>
     {#if section === 'Status'}<StatusPanel />
     {:else if section === 'Plan'}<PlanView />
@@ -22,6 +19,5 @@
 
 <style>
   .overview-tab { display: flex; flex: 1; min-height: 0; flex-direction: column; }
-  .sections { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px; padding: 4px; }
   .section-content { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow: auto; }
 </style>

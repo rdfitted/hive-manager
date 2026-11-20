@@ -5,16 +5,13 @@
   import ReplayView from '../replay/ReplayView.svelte';
   import ReplayControls from '../replay/ReplayControls.svelte';
 
-  let section = $state<'Chat' | 'Logs' | 'Timeline'>('Chat');
+  import type { ActivityTab } from '$lib/stores/layout';
+
+  let { tab = 'activity' }: { tab?: ActivityTab } = $props();
+  const section = $derived({ activity: 'Chat', logs: 'Logs', timeline: 'Timeline' }[tab]);
 </script>
 
 <div class="activity-tab">
-  <div class="sections lattice-track" role="group" aria-label="Activity sections">
-    {#each ['Chat', 'Logs', 'Timeline'] as label}
-      <button type="button" class="lattice-tab"
-        aria-pressed={section === label} onclick={() => section = label as typeof section}>{label}</button>
-    {/each}
-  </div>
   <section class="section-content" aria-label={section}>
     {#if section === 'Chat'}<ConversationViewer />
     {:else if section === 'Logs'}<CoordinationPanel />
@@ -29,7 +26,6 @@
 
 <style>
   .activity-tab { display: flex; flex: 1; min-height: 0; flex-direction: column; }
-  .sections { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px; padding: 4px; }
   .section-content { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow: auto; }
   .replay-section { flex: none; max-height: 45%; overflow: auto; }
   summary { padding: 8px 12px; cursor: pointer; font-size: var(--text-small); }

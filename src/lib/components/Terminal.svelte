@@ -55,6 +55,7 @@
     layoutRevision?: string | null;
     onReady?: () => void;
     onStatusChange?: (status: string) => void;
+    onLastLine?: (text: string) => void;
   }
 
   let {
@@ -65,6 +66,7 @@
     layoutRevision = null,
     onReady,
     onStatusChange,
+    onLastLine,
   }: Props = $props();
 
   let terminalContainer: HTMLDivElement;
@@ -358,14 +360,31 @@
     if (claimRendererGrant(true)) loadWebglRenderer();
   }
 
+  let lastLine: string | undefined;
+
+  function reportLastLine() {
+    if (destroyed || !term || !onLastLine) return;
+    const buffer = term.buffer.active;
+    let text = '';
+    // Index zero is the start of retained history, including rows above the bottom page.
+    for (let row = buffer.baseY + buffer.cursorY; row >= 0; row--) {
+      text = buffer.getLine(row)?.translateToString(true) ?? '';
+      if (text) break;
+    }
+    if (text === lastLine) return;
+    lastLine = text;
+    onLastLine(text);
+  }
+
   function writeSafely(data: string) {
     if (!term) return;
+    const afterWrite = onLastLine ? reportLastLine : undefined;
     try {
-      term.write(data);
+      term.write(data, afterWrite);
     } catch (e) {
       if (fallBackToDomRenderer({ permanentlyDisable: true })) {
         console.error('xterm write failed, disposing WebGL addon and falling back to DOM renderer:', e);
-        try { term.write(data); } catch (e2) {
+        try { term.write(data, afterWrite); } catch (e2) {
           console.error('xterm write failed after WebGL fallback:', e2);
         }
       } else {

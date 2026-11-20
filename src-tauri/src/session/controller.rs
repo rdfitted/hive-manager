@@ -707,6 +707,10 @@ pub struct HiveLaunchConfig {
     #[serde(default)]
     pub color: Option<String>,
     pub queen_config: AgentConfig,
+    /// Master Planner config. Missing keeps the legacy behavior of launching
+    /// the planner from the Queen's config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_config: Option<AgentConfig>,
     pub workers: Vec<AgentConfig>,
     pub prompt: Option<String>,
     #[serde(default)]
@@ -4033,6 +4037,38 @@ impl SessionController {
         config
     }
 
+    fn claude_effort_flags(effort: &str) -> Vec<String> {
+        vec!["--settings".to_string(), format!("{{\"effortLevel\":\"{effort}\"}}")]
+    }
+
+    /// Default Hive Queen: Opus at medium effort.
+    pub(crate) fn default_hive_queen_config() -> AgentConfig {
+        AgentConfig {
+            cli: "claude".to_string(),
+            model: Some("opus".to_string()),
+            flags: Self::claude_effort_flags("medium"),
+            label: Some("Queen".to_string()),
+            ..AgentConfig::default()
+        }
+    }
+
+    /// The config the Master Planner seat launches with: an explicit planner
+    /// config, or the Queen's for callers that send none.
+    pub(crate) fn effective_planner_config(config: &HiveLaunchConfig) -> &AgentConfig {
+        config.planner_config.as_ref().unwrap_or(&config.queen_config)
+    }
+
+    /// Default Master Planner: Fable at low effort.
+    pub(crate) fn default_master_planner_config() -> AgentConfig {
+        AgentConfig {
+            cli: "claude".to_string(),
+            model: Some("fable".to_string()),
+            flags: Self::claude_effort_flags("low"),
+            label: Some("Master Planner".to_string()),
+            ..AgentConfig::default()
+        }
+    }
+
     fn truncate_agent_label(value: String, max_chars: usize) -> String {
         let mut chars = value.chars();
         let truncated: String = chars.by_ref().take(max_chars).collect();
@@ -4248,6 +4284,15 @@ impl SessionController {
                     args.push(model.to_string());
                 }
             }
+            "antigravity" => {
+                // Antigravity CLI (agy): --dangerously-skip-permissions auto-approves,
+                // --model takes catalogue IDs such as gemini-4-neon-high.
+                args.push("--dangerously-skip-permissions".to_string());
+                if let Some(ref model) = effective_model {
+                    args.push("--model".to_string());
+                    args.push(model.to_string());
+                }
+            }
             _ => {
                 // For other CLIs, just add model flag if specified
                 if let Some(ref model) = effective_model {
@@ -4262,8 +4307,9 @@ impl SessionController {
 
         // Determine the actual command to run
         let command = match config.cli.as_str() {
-            "cursor" => "wsl".to_string(), // Cursor runs via WSL
-            _ => config.cli.clone(),       // Others use CLI name as command
+            "cursor" => "wsl".to_string(),      // Cursor runs via WSL
+            "antigravity" => "agy".to_string(), // Antigravity CLI binary is `agy`
+            _ => config.cli.clone(),            // Others use CLI name as command
         };
 
         (command, args)
@@ -4299,6 +4345,13 @@ impl SessionController {
                 // Claude, Codex, Cursor accept prompt as positional argument
                 args.push(prompt_arg);
             }
+            "antigravity" | "agy" => {
+                // agy takes the initial interactive prompt through -i. The "agy"
+                // arm matters: call sites pass the executable from build_command,
+                // which maps "antigravity" to "agy".
+                args.push("-i".to_string());
+                args.push(prompt_arg);
+            }
             _ => {
                 // Default: try positional argument
                 args.push(prompt_arg);
@@ -4320,6 +4373,11 @@ impl SessionController {
                 args.push(task.to_string());
             }
             "cursor" => {
+                args.push(task.to_string());
+            }
+            "antigravity" | "agy" => {
+                // agy -p (alias for --print) runs a single prompt non-interactively.
+                args.push("-p".to_string());
                 args.push(task.to_string());
             }
             _ => {
@@ -4378,6 +4436,13 @@ impl SessionController {
                 }
                 return ("wsl".to_string(), args);
             }
+            "antigravity" => {
+                args.push("--dangerously-skip-permissions".to_string());
+                if let Some(ref model) = effective_model {
+                    args.push("--model".to_string());
+                    args.push(model.to_string());
+                }
+            }
             _ => {
                 if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
@@ -4395,6 +4460,7 @@ impl SessionController {
 
         let command = match config.cli.as_str() {
             "cursor" => "wsl".to_string(),
+            "antigravity" => "agy".to_string(),
             _ => config.cli.clone(),
         };
         (command, args)
@@ -9065,7 +9131,7 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality, researcher |
-| cli | string | No | CLI override: claude, codex, or cursor. Omit to inherit the session principal CLI (`{default_cli}`). |
+| cli | string | No | CLI override: claude, codex, cursor, or antigravity. Omit to inherit the session principal CLI (`{default_cli}`). |
 | model | string | No | Model override (for example gpt-6.2-sol for Codex or fable/opus for Claude). Omit to inherit the principal model. |
 | flags | string[] | No | CLI flag override. Omit to inherit principal flags; send `[]` to clear them. |
 | name | string | No | Stable worker name; defaults to `Worker N (Role)` |
@@ -9194,7 +9260,7 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | specialization | string | Yes | QA specialization: `ui`, `api`, or `a11y` |
-| cli | string | No | CLI to use: {default_cli} (default), claude, codex, cursor |
+| cli | string | No | CLI to use: {default_cli} (default), claude, codex, cursor, antigravity |
 | model | string | No | Optional model override |
 | label | string | No | Custom label for the QA worker |
 | initial_task | string | No | Initial QA assignment |
@@ -9576,8 +9642,8 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
-| cli | string | No | CLI to use: {default_cli} (default), claude, codex, cursor |
-| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-6.2-sol`, `gpt-6-luna`, `composer-2.5`) |
+| cli | string | No | CLI to use: {default_cli} (default), claude, codex, cursor, antigravity |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-6.2-sol`, `gpt-6-luna`, `composer-2.5`, `gemini-4-neon-high`) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -10777,6 +10843,7 @@ Last updated: {timestamp}
             .collect();
 
         let hive_config = HiveLaunchConfig {
+            planner_config: None,
             retirement_settings: None,
             project_path: config.project_path,
             name: config.name,
@@ -12052,7 +12119,9 @@ The backend composed and persisted the following authoritative skeleton before l
             return Err(error);
         }
 
-        // Build the appropriate prompt based on mode
+        // Build the appropriate prompt based on mode. The planner reads this
+        // prompt, so its capability card and paths follow the planner seat.
+        let planner_seat = Self::effective_planner_config(&config).clone();
         let mut planner_prompt = if config.smoke_test {
             tracing::info!("Running in SMOKE TEST mode - skipping real investigation");
             Self::build_smoke_test_prompt(
@@ -12061,15 +12130,24 @@ The backend composed and persisted the following authoritative skeleton before l
                 config.with_evaluator,
                 config.qa_workers.as_deref(),
                 &project_path,
-                &config.queen_config.cli,
-                config.evaluator_config.as_ref().map(|config| config.cli.as_str()),
+                &planner_seat.cli,
+                // The evaluator inherits the session default, which is the
+                // Queen's CLI, so its fallback must not follow the planner.
+                Some(
+                    config
+                        .evaluator_config
+                        .as_ref()
+                        .map(|config| config.cli.as_str())
+                        .filter(|cli| !cli.trim().is_empty())
+                        .unwrap_or(config.queen_config.cli.as_str()),
+                ),
             )
         } else {
             let prompt = config.prompt.as_deref().unwrap_or("");
             Self::build_master_planner_prompt(
                 &session_id,
                 prompt,
-                &config.queen_config,
+                &planner_seat,
                 &config.workers,
                 &config.execution_policy,
                 &project_path,
@@ -12117,7 +12195,10 @@ The backend composed and persisted the following authoritative skeleton before l
 
             // Create Master Planner agent
             let planner_id = format!("{}-master-planner", session_id);
-            let (cmd, mut args) = Self::build_command(&config.queen_config); // Use queen config for planner
+            // An explicit planner config wins; older callers launch the
+            // planner from the Queen's config.
+            let planner_base = Self::effective_planner_config(&config);
+            let (cmd, mut args) = Self::build_command(planner_base);
 
             // Write Master Planner prompt to file
             let prompt_file = match Self::write_prompt_file(
@@ -12175,7 +12256,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
-                config: Self::master_planner_agent_config(&config.queen_config),
+                config: Self::master_planner_agent_config(planner_base),
                 parent_id: None,
                 role_definition_id: None,
                 role_definition_version: None,
@@ -15596,6 +15677,9 @@ The backend composed and persisted the following authoritative skeleton before l
 
     fn validate_hive_continuation_clis(config: &HiveLaunchConfig) -> Result<(), String> {
         Self::validate_launch_cli(&config.queen_config.cli)?;
+        if let Some(planner) = config.planner_config.as_ref() {
+            Self::validate_launch_cli(&planner.cli)?;
+        }
         for worker in &config.workers {
             Self::validate_launch_cli(&worker.cli)?;
         }
@@ -20587,7 +20671,7 @@ mod tests {
     }
 
     fn assert_removed_continuation_rejected(kind: &str, pointer: &str) {
-        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini"] {
             for state in [SessionState::Planning, SessionState::PlanReady] {
                 let temp = tempfile::tempdir().unwrap();
                 let controller = test_controller();
@@ -20710,7 +20794,7 @@ mod tests {
     fn removed_cli_stored_sessions_still_list_load_and_resume_without_spawning() {
         let temp = tempfile::tempdir().unwrap();
         let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
-        for removed in ["droid", "opencode", "qwen", "agy", "gemini", "antigravity"] {
+        for removed in ["droid", "opencode", "qwen", "agy", "gemini"] {
             let id = format!("stored-{removed}");
             let mut original = waiting_worker_session(&id, temp.path(), 1);
             original.default_cli = removed.to_string();
@@ -21742,6 +21826,91 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         SessionController::add_prompt_to_args("wsl", &mut args, prompt_path);
         assert_eq!(args, vec![expected_cursor_prompt], "cli wsl");
 
+        // Call sites pass build_command's executable, so "agy" must match too.
+        for cli in ["antigravity", "agy"] {
+            let mut args = Vec::new();
+            SessionController::add_prompt_to_args(cli, &mut args, prompt_path);
+            assert_eq!(args, vec!["-i".to_string(), expected_prompt.clone()], "cli {cli}");
+        }
+    }
+
+    #[test]
+    fn default_lineup_launches_fable_low_planner_and_opus_medium_queen() {
+        let planner = SessionController::default_master_planner_config();
+        let (command, args) = SessionController::build_command(&planner);
+        assert_eq!(command, "claude");
+        assert!(args.windows(2).any(|pair| pair == ["--model", "fable"]));
+        assert!(args.windows(2).any(|pair| pair == ["--settings", r#"{"effortLevel":"low"}"#]));
+        assert_eq!(planner.label.as_deref(), Some("Master Planner"));
+
+        let queen = SessionController::default_hive_queen_config();
+        let (_, args) = SessionController::build_command(&queen);
+        assert!(args.windows(2).any(|pair| pair == ["--model", "opus"]));
+        assert!(args.windows(2).any(|pair| pair == ["--settings", r#"{"effortLevel":"medium"}"#]));
+
+        // Both defaults match a catalogue preset, so the editor shows them by name.
+        for (id, config) in [("fable-low", &planner), ("opus-medium", &queen)] {
+            let preset = crate::cli::tier_ladder::expand_preset("claude", id).unwrap().resolved;
+            assert_eq!(Some(preset.model), config.model);
+            assert_eq!(preset.flags, config.flags);
+        }
+    }
+
+    #[test]
+    fn planner_seat_uses_its_own_config_and_falls_back_to_the_queen() {
+        let mut config: HiveLaunchConfig = serde_json::from_value(serde_json::json!({
+            "project_path": "D:/tmp/project",
+            "queen_config": {"cli": "claude"},
+            "workers": [{"cli": "codex"}],
+            "prompt": null,
+        }))
+        .unwrap();
+        assert_eq!(SessionController::effective_planner_config(&config).cli, "claude");
+
+        config.planner_config = Some(AgentConfig { cli: "cursor".to_string(), ..AgentConfig::default() });
+        assert_eq!(SessionController::effective_planner_config(&config).cli, "cursor");
+        assert_eq!(config.queen_config.cli, "claude");
+    }
+
+    #[test]
+    fn hive_continuation_rejects_an_unsupported_planner_cli() {
+        let mut config: HiveLaunchConfig = serde_json::from_value(serde_json::json!({
+            "project_path": "D:/tmp/project",
+            "queen_config": {"cli": "claude"},
+            "workers": [{"cli": "codex"}],
+            "prompt": null,
+        }))
+        .unwrap();
+        assert!(config.planner_config.is_none(), "older payloads carry no planner");
+        assert!(SessionController::validate_hive_continuation_clis(&config).is_ok());
+        assert!(!serde_json::to_string(&config).unwrap().contains("planner_config"));
+
+        config.planner_config = Some(AgentConfig { cli: "gemini".to_string(), ..AgentConfig::default() });
+        let error = SessionController::validate_hive_continuation_clis(&config).unwrap_err();
+        assert!(error.contains("gemini"), "{error}");
+    }
+
+    #[test]
+    fn antigravity_commands_launch_agy_with_model_and_prompt_modes() {
+        let config = AgentConfig {
+            cli: "antigravity".to_string(),
+            model: Some("gemini-4-hydrogen-xhigh".to_string()),
+            ..AgentConfig::default()
+        };
+        let (command, args) = SessionController::build_command(&config);
+        assert_eq!(command, "agy");
+        assert_eq!(args[0], "--dangerously-skip-permissions");
+        assert!(args.windows(2).any(|pair| pair == ["--model", "gemini-4-hydrogen-xhigh"]));
+
+        let default_model = AgentConfig { cli: "antigravity".to_string(), ..AgentConfig::default() };
+        let (_, args) = SessionController::build_command(&default_model);
+        assert!(args.windows(2).any(|pair| pair == ["--model", "gemini-4-neon-high"]));
+
+        let (command, args) = SessionController::build_solo_command(&config, Some("Fix the bug"));
+        assert_eq!(command, "agy");
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "gemini-4-hydrogen-xhigh"]));
+        assert!(args.windows(2).any(|pair| pair == ["-p", "Fix the bug"]));
     }
 
     #[test]

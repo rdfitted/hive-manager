@@ -61,6 +61,7 @@
       class="lattice-btn lattice-btn--ghost lattice-btn--icon"
       onclick={closePreview}
       aria-label="Close page preview"
+      title="Close page preview"
     >
       <X size={16} weight="light" />
     </button>

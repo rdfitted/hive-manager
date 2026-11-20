@@ -19,7 +19,7 @@ use crate::pty::AgentConfig;
 use crate::session::{
     CompletionBlockedError, CompletionError, DebateDebaterConfig, DebateDebaterStatus,
     DebateLaunchConfig, FusionLaunchConfig, FusionVariantConfig, FusionVariantStatus,
-    HiveLaunchConfig, QaWorkerConfig,
+    HiveLaunchConfig, QaWorkerConfig, SessionController,
 };
 
 /// Reject a tier ceiling outside `1..=100` at the launch boundary, where the
@@ -402,6 +402,37 @@ pub struct DebateEvaluationResponse {
     pub report: Option<String>,
 }
 
+/// Queen and Master Planner for an HTTP hive launch.
+///
+/// With no caller override the launch uses the default lineup: Opus (medium)
+/// Queen and a Fable (low) Master Planner. A caller that names its own CLI or
+/// model keeps the plain config, and its planner launches from the Queen's
+/// config as before.
+fn hive_queen_and_planner(
+    has_shared_agent_override: bool,
+    default_cli: &str,
+    queen_model: Option<String>,
+) -> (AgentConfig, Option<AgentConfig>) {
+    if has_shared_agent_override {
+        let queen = AgentConfig {
+            cli: default_cli.to_string(),
+            model: queen_model,
+            flags: vec![],
+            label: Some("Queen".to_string()),
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        };
+        (queen, None)
+    } else {
+        (
+            SessionController::default_hive_queen_config(),
+            Some(SessionController::default_master_planner_config()),
+        )
+    }
+}
+
 /// POST /api/sessions - Create a session via the vNext API surface.
 ///
 /// For now this immediately launches Hive/Fusion sessions using the existing controller
@@ -425,16 +456,8 @@ pub async fn create_session(
                 .default_model
                 .clone()
                 .or_else(|| CliRegistry::default_model(&default_cli).map(str::to_string));
-            let queen_config = AgentConfig {
-                cli: default_cli.clone(),
-                model: queen_model.clone(),
-                flags: vec![],
-                label: Some("Queen".to_string()),
-                name: None,
-                description: None,
-                role: None,
-                initial_prompt: None,
-            };
+            let (queen_config, planner_config) =
+                hive_queen_and_planner(has_shared_agent_override, &default_cli, queen_model.clone());
 
             let principal_cli_overridden = req.principal_cli.is_some();
             let principal_cli = req.principal_cli.unwrap_or_else(|| {
@@ -509,6 +532,7 @@ pub async fn create_session(
                 name: req.name,
                 color: req.color,
                 queen_config,
+                planner_config,
                 workers,
                 execution_policy,
                 prompt: req.objective.filter(|value| !value.trim().is_empty()),
@@ -948,6 +972,7 @@ pub async fn launch_solo(
         name: req.name,
         color: req.color,
         queen_config: agent_config,
+        planner_config: None,
         workers: vec![],
         execution_policy: crate::domain::HiveExecutionPolicy {
             launch_kind: crate::domain::HiveLaunchKind::Solo,
@@ -1390,6 +1415,26 @@ pub async fn get_run_journal(
     .map_err(|e| ApiError::internal(format!("Failed to read run journal: {e}")))?;
 
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod hive_default_lineup_tests {
+    use super::*;
+
+    #[test]
+    fn http_hive_defaults_apply_only_without_a_caller_override() {
+        let (queen, planner) = hive_queen_and_planner(false, "claude", Some("opus".into()));
+        assert_eq!(queen.model.as_deref(), Some("opus"));
+        assert_eq!(queen.flags, ["--settings", r#"{"effortLevel":"medium"}"#]);
+        let planner = planner.expect("default launch gets its own planner");
+        assert_eq!(planner.model.as_deref(), Some("fable"));
+        assert_eq!(planner.flags, ["--settings", r#"{"effortLevel":"low"}"#]);
+
+        let (queen, planner) = hive_queen_and_planner(true, "codex", Some("gpt-6.2-sol".into()));
+        assert_eq!((queen.cli.as_str(), queen.model.as_deref()), ("codex", Some("gpt-6.2-sol")));
+        assert!(queen.flags.is_empty());
+        assert!(planner.is_none(), "an overriding caller's planner follows its Queen");
+    }
 }
 
 #[cfg(test)]

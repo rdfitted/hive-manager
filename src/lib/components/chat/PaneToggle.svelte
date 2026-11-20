@@ -1,18 +1,26 @@
 <script lang="ts">
-  let { hasTerminal, mode, onchange }: { hasTerminal: boolean; mode: 'chat' | 'terminal' | 'raw'; onchange: (mode: 'chat' | 'terminal' | 'raw') => void } = $props();
+  import { ChatCircle, ListBullets, SquareSplitVertical, TerminalWindow } from 'phosphor-svelte';
+  import IconButton from '../ui/IconButton.svelte';
+  import type { PaneMode } from './paneMode';
+
+  let { hasTerminal, mode, onchange }: { hasTerminal: boolean; mode: PaneMode; onchange: (m: PaneMode) => void } = $props();
+
+  function select(event: MouseEvent, next: PaneMode) {
+    event.stopPropagation();
+    onchange(next);
+  }
 </script>
 
 <div class="pane-toggle lattice-forced-colors-boundary" role="group" aria-label="Agent pane">
-  <button type="button" class="lattice-btn lattice-btn--ghost" aria-pressed={mode === 'chat'} onclick={(event) => { event.stopPropagation(); onchange('chat'); }}>Chat</button>
+  <IconButton type="button" label="Chat" tooltip="Chat" icon={ChatCircle} size="sm" pressed={mode === 'chat'} onclick={(event) => select(event, 'chat')} />
   {#if hasTerminal}
-    <button type="button" class="lattice-btn lattice-btn--ghost" aria-pressed={mode === 'terminal'} onclick={(event) => { event.stopPropagation(); onchange('terminal'); }}>Terminal</button>
+    <IconButton type="button" label="Split" tooltip="Chat with terminal below" icon={SquareSplitVertical} size="sm" pressed={mode === 'split'} onclick={(event) => select(event, 'split')} />
+    <IconButton type="button" label="Terminal" tooltip="Terminal" icon={TerminalWindow} size="sm" pressed={mode === 'terminal'} onclick={(event) => select(event, 'terminal')} />
   {:else}
-    <button type="button" class="lattice-btn lattice-btn--ghost" aria-pressed={mode === 'raw'} onclick={(event) => { event.stopPropagation(); onchange('raw'); }}>Raw event log</button>
+    <IconButton type="button" label="Raw event log" tooltip="Raw event log" icon={ListBullets} size="sm" pressed={mode === 'raw'} onclick={(event) => select(event, 'raw')} />
   {/if}
 </div>
 
 <style>
   .pane-toggle { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: var(--space-1); border-radius: var(--radius-full); background: var(--track); }
-  .pane-toggle button { padding: var(--space-1) var(--space-2); font-size: var(--text-small); border-radius: var(--radius-full); }
-  .pane-toggle button[aria-pressed='true'] { color: var(--accent); background: var(--track-active); box-shadow: inset 0 0 0 1px var(--border-control); }
 </style>

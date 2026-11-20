@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { tick } from 'svelte';
+  import { getContext, tick, type Snippet } from 'svelte';
+  import { agentMentions } from '$lib/composer/sources';
   import { agentEvents, type AgentEvent } from '$lib/stores/agentEvents';
   import { activeAgents } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
@@ -9,17 +10,34 @@
   import { toolbarFacts } from '../composer/toolbarFacts';
   import ActivityGroup from './ActivityGroup.svelte';
   import MarkdownBlocks from '../ui/MarkdownBlocks.svelte';
+  import { paneStatusLineContext } from './paneMode';
   import { CHAT_WINDOW_SIZE, formatRaw, liveActivityState, transcriptRows } from './transcript';
 
-  let { sessionId, agentId, events, raw = false, visible = true, composer = true, paging = true, variant = 'focus', draft = $bindable('') }: {
+  type ComposerRoute = {
+    agentId: string;
+    placeholder: string;
+    disabled: boolean;
+    sending: boolean;
+    prepareSubmit: () => { send: (text: string) => void; clear: () => void };
+    onsubmit: (text: string) => void;
+    targetControl: Snippet;
+    error?: string;
+  };
+
+  let { sessionId, agentId, events, raw = false, visible = true, composer = true, paging = true, variant = 'focus', composerRoute, draft = $bindable('') }: {
     sessionId: string; agentId: string; events: AgentEvent[]; raw?: boolean; visible?: boolean;
-    composer?: boolean; paging?: boolean; variant?: 'focus' | 'column'; draft?: string;
+    composer?: boolean; composerRoute?: ComposerRoute; paging?: boolean; variant?: 'focus' | 'column'; draft?: string;
   } = $props();
   const history = $derived($agentEvents.sessionId === sessionId ? $agentEvents.histories[agentId] : undefined);
   const rows = $derived(transcriptRows(events, { agentId, isQueen: $activeAgents.some(candidate => candidate.id === agentId && candidate.role === 'Queen'), log: $coordination.sessionId === sessionId ? ($coordination.log ?? []) : [] }));
   $effect(() => { if (visible) void coordination.ensureLog(sessionId); });
   const agent = $derived($activeAgents.find((candidate) => candidate.id === agentId));
-  const facts = $derived(toolbarFacts(agent, $agentEvents.sessionId === sessionId ? $agentEvents.feeds?.[agentId]?.capabilities.event_source : undefined));
+  const targetLabel = $derived(agent ? agentMentions([agent])[0].label.trim() || agentId : agentId);
+  const getStatusLine = getContext<(() => Snippet | undefined) | undefined>(paneStatusLineContext);
+  const statusLine = $derived(getStatusLine?.());
+  const composeAgentId = $derived(composerRoute?.agentId ?? agentId);
+  const composeAgent = $derived(composeAgentId === agentId ? agent : $activeAgents.find(candidate => candidate.id === composeAgentId));
+  const facts = $derived(toolbarFacts(composeAgent, $agentEvents.sessionId === sessionId ? $agentEvents.feeds?.[composeAgentId]?.capabilities.event_source : undefined));
   let now = $state(Date.now());
   const activity = $derived(liveActivityState(events, agent?.status, now));
   const count = $derived(raw ? events.length : rows.length);
@@ -30,6 +48,7 @@
   let atBottom = $state(true);
   let sending = $state(false);
   let error = $state('');
+  const composeError = $derived(composerRoute ? composerRoute.error : error);
   let expandedTools = $state<Record<string, boolean>>({});
   let expandedMessages = $state<Record<string, boolean>>({});
   let overflowingMessages = $state<Record<string, boolean>>({});
@@ -134,11 +153,23 @@
       {/if}
     {/if}
   </div>
-  {#if error}<p class="feed-error" role="alert">Message could not be sent: {error}</p>{/if}
+  {#if composeError}<p class="feed-error" role="alert">Message could not be sent: {composeError}</p>{/if}
   {#if composer}
-  <div class="chat-composer"><Composer {sessionId} {agentId} {prepareSubmit} submissionKey={`${sessionId}:${agentId}`} bind:value={draft} persistDraft={false} disabled={sending || !visible} onsubmit={send} placeholder={facts.placeholder}>
-    {#snippet toolbar(controls)}{#if visible}<ComposerToolbar {controls} accessLabel={facts.accessLabel} model={facts.model} effort={facts.effort} {sending} />{/if}{/snippet}
-  </Composer></div>
+  <div class="chat-composer">
+    {@render statusLine?.()}
+    <Composer {sessionId} agentId={composeAgentId} prepareSubmit={composerRoute?.prepareSubmit ?? prepareSubmit}
+      submissionKey={`${sessionId}:${composeAgentId}`} bind:value={draft} persistDraft={false}
+      disabled={!visible || (composerRoute?.disabled ?? sending)} onsubmit={composerRoute?.onsubmit ?? send}
+      placeholder={composerRoute?.placeholder ?? facts.placeholder}>
+      {#snippet toolbar(controls)}
+        {#if visible}
+          {@render composerRoute?.targetControl()}
+          <ComposerToolbar {controls} targetLabel={composerRoute ? undefined : targetLabel} accessLabel={facts.accessLabel}
+            model={facts.model} effort={facts.effort} sending={composerRoute?.sending ?? sending} />
+        {/if}
+      {/snippet}
+    </Composer>
+  </div>
   {/if}
 </section>
 

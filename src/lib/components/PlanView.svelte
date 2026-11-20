@@ -372,6 +372,8 @@
                 onclick={handleRefinement}
                 disabled={sendingRefinement || !refinementInput.trim()}
                 aria-busy={sendingRefinement}
+                aria-label="Refine"
+                title={sendingRefinement ? 'Refining plan' : 'Refine plan'}
               >
                 {#if sendingRefinement}
                   <span class="spinner lattice-motion-spinner">◐</span>

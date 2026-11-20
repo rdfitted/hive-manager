@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, within } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 
+vi.mock('@tauri-apps/api/core', () => ({ invoke: async () => undefined }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }));
 vi.mock('./StatusPanel.svelte', () => ({ default: () => {} }));
 vi.mock('./PlanView.svelte', () => ({ default: () => {} }));
-vi.mock('./workgraph/WorkGraphView.svelte', () => ({ default: () => {} }));
 vi.mock('./CoordinationPanel.svelte', () => ({ default: () => {} }));
 vi.mock('./ConversationViewer.svelte', () => ({ default: () => {} }));
 vi.mock('./timeline/TimelineView.svelte', () => ({ default: () => {} }));
@@ -14,14 +15,19 @@ vi.mock('./review/ReviewView.svelte', () => ({ default: () => {} }));
 vi.mock('./replay/ReplayView.svelte', () => ({ default: () => {} }));
 vi.mock('./replay/ReplayControls.svelte', () => ({ default: () => {} }));
 vi.mock('./artifacts/ArtifactBrowser.svelte', () => ({ default: () => {} }));
-vi.mock('$lib/stores/sessions', async () => {
+vi.mock('$lib/stores/sessions', async (importOriginal) => {
   const { writable } = await import('svelte/store');
-  return { activeSession: writable({ id: 'session-a', project_path: 'C:/project', agents: [] }) };
+  const actual = await importOriginal<typeof import('$lib/stores/sessions')>();
+  return {
+    ...actual,
+    activeSession: writable({ id: 'session-a', project_path: 'C:/project', agents: [] }),
+  };
 });
 
 import RightPanel from './RightPanel.svelte';
 import TitleBar from './shell/TitleBar.svelte';
 import { layout } from '$lib/stores/layout';
+import { accent } from '$lib/stores/accent';
 
 beforeEach(() => {
   layout.setRightTab('overview');
@@ -30,6 +36,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -70,13 +77,13 @@ describe('RightPanel header tabs and title-bar toggle', () => {
     terminal.remove();
   });
 
-  it('exposes exactly three header tabs and preserves activate-to-collapse behavior', async () => {
+  it('exposes every inspector view in one header group and preserves activate-to-collapse behavior', async () => {
     const view = render(RightPanel);
     const toolbar = render(TitleBar);
-    const header = view.container.querySelector('.panel-header')!;
+    const tabs = view.getByRole('group', { name: 'Panel views' });
     expect(view.container.querySelector('.rail')).toBeNull();
-    expect([...header.querySelectorAll('button[aria-pressed]')].map((button) => button.getAttribute('aria-label')))
-      .toEqual(['Overview', 'Activity', 'Changes']);
+    expect(within(tabs).getAllByRole('button').map((button) => button.getAttribute('aria-label')))
+      .toEqual(['Overview', 'Activity', 'Changes', 'Plan', 'Graph', 'Logs', 'Timeline', 'Files', 'Artifacts']);
     const activity = view.getByRole('button', { name: 'Activity' });
     await fireEvent.click(activity);
     expect(get(layout)).toMatchObject({ rightTab: 'activity', rightCollapsed: false });
@@ -90,6 +97,61 @@ describe('RightPanel header tabs and title-bar toggle', () => {
     await fireEvent.click(view.getByRole('button', { name: 'Changes' }));
     expect(get(layout)).toMatchObject({ rightTab: 'changes', rightCollapsed: false });
     expect(view.getByRole('heading', { name: 'Changes' })).toBeTruthy();
+    expect(view.queryByRole('group', { name: /sections/i })).toBeNull();
+  });
+
+  it('closes on Escape from the inspector and restores focus to its title-bar toggle', async () => {
+    const panel = render(RightPanel);
+    const toolbar = render(TitleBar);
+    const tab = panel.getByRole('button', { name: 'Overview' });
+    tab.focus();
+    await fireEvent.keyDown(tab, { key: 'Escape' });
+    expect(get(layout).rightCollapsed).toBe(true);
+    expect(document.activeElement).toBe(within(toolbar.container).getByRole('button', { name: /Expand panel/ }));
+  });
+
+  it('dismisses a pinned WorkGraph inspector before closing the outer panel on Escape', async () => {
+    const lane = { kind: 'role', value: 'frontend' };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+      view: 'runtime', source: 'live', nodes: [{
+        id: 'T1', title: 'Prepare contract', kind: 'task', tier: 'medium', status: 'pending', lane,
+        contract: { inputs: [], outputs: [], acceptance: [] },
+        contract_summary: { input_count: 0, output_count: 0, acceptance_count: 0 },
+        expansion: null, progress: null,
+      }], edges: [], waves: [['T1']], status_by_node: { T1: 'pending' }, lane_assignment: { T1: lane },
+      completion_provenance: {}, completion_source_refs: {}, critical_path: [], agents_by_lane: {},
+      provenance_by_edge: [], divergence: null,
+    }) }));
+    layout.setRightTab('graph');
+    const panel = render(RightPanel);
+    const toolbar = render(TitleBar);
+    const node = await panel.findByRole('button', { name: /^Prepare contract/ });
+    await fireEvent.keyDown(node, { key: 'Enter' });
+    const header = within(panel.getByRole('group', { name: 'Panel views' })).getByRole('button', { name: 'Graph' });
+    header.focus();
+    await waitFor(() => expect(panel.container.querySelector('#wg-node-inspector')).toBeTruthy());
+
+    await fireEvent.keyDown(header, { key: 'Escape' });
+    await waitFor(() => expect(panel.container.querySelector('#wg-node-inspector')).toBeNull());
+    expect(get(layout).rightCollapsed).toBe(false);
+
+    await fireEvent.keyDown(header, { key: 'Escape' });
+    expect(get(layout).rightCollapsed).toBe(true);
+    expect(document.activeElement).toBe(within(toolbar.container).getByRole('button', { name: /Expand panel/ }));
+  });
+
+  it('switches the accent from the inspector using the shared store', async () => {
+    const initial = get(accent);
+    try {
+      accent.set('honey');
+      const panel = render(RightPanel);
+      await fireEvent.click(panel.getByRole('button', { name: 'Switch accent (current: Honey)' }));
+      expect(get(accent)).toBe('sky');
+      expect(document.documentElement.dataset.accent).toBe('sky');
+      expect(panel.getByRole('button', { name: 'Switch accent (current: Sky)' })).toBeTruthy();
+    } finally {
+      accent.set(initial);
+    }
   });
 
   it('has a visible button that collapses and expands the panel', async () => {

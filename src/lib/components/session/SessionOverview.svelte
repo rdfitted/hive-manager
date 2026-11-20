@@ -8,10 +8,36 @@
     import { conversationStore } from '../../stores/conversations';
     import { activeSession, serdeEnumVariantName, sessions } from '../../stores/sessions';
     import { TERMINAL_SESSION_STATES, terminalPool } from '../../stores/terminalPool';
-    import SessionHeader from './SessionHeader.svelte';
+    import OpsWall from '../opswall/OpsWall.svelte';
+    import type { ComponentProps } from 'svelte';
     import TerminalGrid from '../TerminalGrid.svelte';
     const sessionId = $derived($activeSession?.id);
     const terminalAgentId = $derived($ui.focusedAgentId || $ui.selectedAgentId);
+
+    type GridProps = ComponentProps<typeof TerminalGrid>;
+    type Seats = Parameters<NonNullable<GridProps['onSeats']>>[0];
+    const emptySeats: Seats = { attention: new Set(), stale: new Set() };
+    let reportedSeats = $state.raw<{ sessionId: string; seats: Seats } | null>(null);
+    const seats = $derived(reportedSeats && reportedSeats.sessionId === sessionId ? reportedSeats.seats : emptySeats);
+    let filterSelection = $state<{ sessionId: string; filter: GridProps['resourceFilter'] } | null>(null);
+    const resourceFilter = $derived(filterSelection && filterSelection.sessionId === sessionId ? filterSelection.filter : null);
+    let revealNonce = 0;
+    let reveal = $state<{ sessionId: string; request: NonNullable<GridProps['revealRequest']> } | null>(null);
+    const revealRequest = $derived(reveal && reveal.sessionId === sessionId ? reveal.request : null);
+
+    function revealAgent(agentId: string) {
+        if (sessionId) reveal = { sessionId, request: { agentId, nonce: ++revealNonce } };
+    }
+
+    function filterResources(filter: string | null) {
+        if (!sessionId || (filter !== null && filter !== 'attention' && filter !== 'waiting' && filter !== 'stale')) return;
+        filterSelection = { sessionId, filter };
+        const first = filter === 'attention' ? seats.attention.values().next().value
+            : filter === 'stale' ? seats.stale.values().next().value
+            : filter === 'waiting' ? $activeSession?.agents.find(agent => serdeEnumVariantName(agent.status) === 'WaitingForInput')?.id
+            : undefined;
+        if (first) revealAgent(first);
+    }
 
     function selectTerminalAgent(id: string) {
         ui.setFocusedAgent(id);
@@ -134,10 +160,6 @@
 </script>
 
 <div class="session-overview">
-    <header>
-        <SessionHeader />
-    </header>
-
     <main>
         {#if sessionNotFound}
             <div class="session-not-found">
@@ -158,11 +180,20 @@
                                 visible={isActiveGrid}
                                 focusedAgentId={isActiveGrid ? terminalAgentId : null}
                                 onSelect={selectTerminalAgent}
+                                resourceFilter={isActiveGrid ? resourceFilter : undefined}
+                                revealRequest={isActiveGrid ? revealRequest : undefined}
+                                onSeats={isActiveGrid ? (seats) => { reportedSeats = { sessionId: pooled.id, seats }; } : undefined}
                             />
                         </div>
                     {/each}
                 </div>
             </div>
+            {#if $activeSession}
+                <div class="session-ops-band">
+                    <OpsWall band session={$activeSession} attention={seats.attention} stale={seats.stale}
+                        filter={resourceFilter ?? null} onfilter={filterResources} onselect={revealAgent} />
+                </div>
+            {/if}
         {/if}
     </main>
 </div>
@@ -174,10 +205,6 @@
         height: 100%;
         background: var(--canvas);
         color: var(--text-primary);
-    }
-
-    header {
-        flex: 0 0 auto;
     }
 
     main {
@@ -208,6 +235,8 @@
         color: var(--text-muted);
         margin-bottom: 0.5rem;
     }
+
+    .session-ops-band { flex: 0 0 auto; min-width: 0; }
 
     .terminal-section {
         flex: 1;

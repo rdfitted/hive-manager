@@ -14,7 +14,7 @@ A local, operator-controlled meta-harness for AI coding sessions. Launch, superv
 - **Solo Mode**: One directly supervised coding agent for focused work
 - **Legacy Swarm Compatibility**: Existing Swarm sessions remain programmatically launchable outside the primary flow
 - **Session Persistence**: Save and resume sessions across app restarts
-- **Multi-CLI Support**: Works with Claude Code, Codex, and Cursor
+- **Multi-CLI Support**: Works with Claude Code, Codex, Cursor, and Google Antigravity
 - **Real-time Monitoring**: Watch all agents work simultaneously with live terminal output
 - **Git Integration**: Automatic branch management and coordination
 
@@ -106,13 +106,14 @@ When Master Planner is used, it is contract-only: it converts the objective into
 
 ## Supported CLIs
 
-Claude Code and Codex use their installed native executables on Windows and macOS when available on `PATH` or configured by absolute path. A Finder launch on macOS also discovers common Homebrew and user CLI directories. Cursor launches through WSL on Windows only; it is unavailable on macOS. Scratch terminals offer PowerShell and Command Prompt on Windows, and the login shell on macOS. Install and authenticate each CLI separately.
+Claude Code, Codex, and Antigravity (`agy`) use their installed native executables on Windows and macOS when available on `PATH` or configured by absolute path. A Finder launch on macOS also discovers common Homebrew and user CLI directories. Cursor launches through WSL on Windows only; it is unavailable on macOS. Scratch terminals offer PowerShell and Command Prompt on Windows, and the login shell on macOS. Install and authenticate each CLI separately.
 
 | CLI | Behavior | Notes |
 |-----|----------|-------|
 | [Claude Code](https://claude.ai/claude-code) | Action-Prone | Anthropic's official CLI. Supports native delegation; Opus is the recommended Queen model. |
 | [Codex](https://github.com/openai/codex) | Explicit-Polling | OpenAI's CLI. Supports native delegation; `gpt-6.2-sol` is the recommended coding-principal model and `gpt-6.2-astra` the frontier model; `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` (fast), and GPT-5.6 presets remain selectable. Hive task activation uses a durable polling loop. |
 | [Cursor](https://cursor.sh) | Interactive | Runs via WSL on Windows only (unavailable on macOS). Uses global model setting. |
+| [Antigravity](https://antigravity.google) | Action-Prone | Google's `agy` CLI. Takes the model through `--model` with the effort in the ID: `gemini-4-neon-high` is the default, with Gemini 4 Neon/Hydrogen (low to xhigh), Carbon/Argon (low to high), and Gemini 3.8 Flash presets. Run `agy models` to see what your sign-in offers. |
 
 **Behavior profiles** guide CLI-specific prompt hardening. Capability cards separately report adapter-declared harness support; delegation policy records operator permission.
 

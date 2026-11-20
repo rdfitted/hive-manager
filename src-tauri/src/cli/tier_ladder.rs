@@ -190,6 +190,15 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
     preset!("claude", "fable", "Fable 5", "fable", 3),
     preset!(
         "claude",
+        "fable-low",
+        "Fable 5 (Low effort)",
+        "fable",
+        3,
+        "--settings",
+        "{\"effortLevel\":\"low\"}"
+    ),
+    preset!(
+        "claude",
         "claude-fable-5-2-high",
         "Fable 5.2 (High effort)",
         "claude-fable-5-2",
@@ -232,6 +241,15 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
         "{\"effortLevel\":\"low\"}"
     ),
     preset!("claude", "opus", "Opus", "opus", 2),
+    preset!(
+        "claude",
+        "opus-medium",
+        "Opus (Medium effort)",
+        "opus",
+        2,
+        "--settings",
+        "{\"effortLevel\":\"medium\"}"
+    ),
     preset!(
         "claude",
         "claude-opus-5-5-high",
@@ -939,6 +957,125 @@ const PRESET_CATALOGUE: &[PresetDefinition] = &[
         "gemini-4-argon-high",
         2
     ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-neon-low",
+        "Gemini 4 Neon (Low)",
+        "gemini-4-neon-low",
+        0
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-neon-medium",
+        "Gemini 4 Neon (Medium)",
+        "gemini-4-neon-medium",
+        1
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-neon-high",
+        "Gemini 4 Neon (High)",
+        "gemini-4-neon-high",
+        2
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-neon-xhigh",
+        "Gemini 4 Neon (XHigh)",
+        "gemini-4-neon-xhigh",
+        3
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-hydrogen-low",
+        "Gemini 4 Hydrogen (Low)",
+        "gemini-4-hydrogen-low",
+        0
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-hydrogen-medium",
+        "Gemini 4 Hydrogen (Medium)",
+        "gemini-4-hydrogen-medium",
+        1
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-hydrogen-high",
+        "Gemini 4 Hydrogen (High)",
+        "gemini-4-hydrogen-high",
+        2
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-hydrogen-xhigh",
+        "Gemini 4 Hydrogen (XHigh)",
+        "gemini-4-hydrogen-xhigh",
+        3
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-carbon-low",
+        "Gemini 4 Carbon (Low)",
+        "gemini-4-carbon-low",
+        0
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-carbon-medium",
+        "Gemini 4 Carbon (Medium)",
+        "gemini-4-carbon-medium",
+        1
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-carbon-high",
+        "Gemini 4 Carbon (High)",
+        "gemini-4-carbon-high",
+        2
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-argon-low",
+        "Gemini 4 Argon (Low)",
+        "gemini-4-argon-low",
+        0
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-argon-medium",
+        "Gemini 4 Argon (Medium)",
+        "gemini-4-argon-medium",
+        1
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-4-argon-high",
+        "Gemini 4 Argon (High)",
+        "gemini-4-argon-high",
+        2
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-3.8-flash-low",
+        "Gemini 3.8 Flash (Low)",
+        "gemini-3.8-flash-low",
+        0
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-3.8-flash-medium",
+        "Gemini 3.8 Flash (Medium)",
+        "gemini-3.8-flash-medium",
+        0
+    ),
+    preset!(
+        "antigravity",
+        "agy-gemini-3.8-flash-high",
+        "Gemini 3.8 Flash (High)",
+        "gemini-3.8-flash-high",
+        0
+    ),
 
 ];
 
@@ -1480,11 +1617,12 @@ mod tests {
             assert_eq!(expansion.resolved.flags, preset.flags.to_vec());
         }
 
-        assert_eq!(preset_catalogue().len(), 92);
+        assert_eq!(preset_catalogue().len(), 111);
         assert_eq!(
             provider_counts,
             std::collections::BTreeMap::from([
-                ("claude", 19),
+                ("antigravity", 17),
+                ("claude", 21),
                 ("codex", 68),
                 ("cursor", 5),
             ])
@@ -1545,6 +1683,37 @@ mod tests {
         for retired in ["composer-1", "composer-2", "composer-2-fast"] {
             assert!(expand_preset("cursor", retired).is_none());
         }
+    }
+
+    #[test]
+    fn antigravity_catalogue_lists_live_agy_models_newest_first() {
+        let presets: Vec<_> = preset_catalogue()
+            .iter()
+            .filter(|preset| preset.provider == "antigravity")
+            .collect();
+        assert_eq!(presets.first().map(|preset| preset.id), Some("agy-gemini-4-neon-low"));
+        for preset in &presets {
+            // agy takes the catalogue ID (effort included) through --model; the
+            // preset id only adds the agy- prefix that keeps it distinct from
+            // Cursor's Argon presets.
+            assert_eq!(preset.id, format!("agy-{}", preset.model));
+            assert!(preset.flags.is_empty());
+        }
+        for (family, efforts) in [
+            ("neon", &["low", "medium", "high", "xhigh"][..]),
+            ("hydrogen", &["low", "medium", "high", "xhigh"][..]),
+            ("carbon", &["low", "medium", "high"][..]),
+            ("argon", &["low", "medium", "high"][..]),
+        ] {
+            for (rank, effort) in efforts.iter().enumerate() {
+                let id = format!("agy-gemini-4-{family}-{effort}");
+                let expansion = expand_preset("antigravity", &id).unwrap();
+                assert_eq!(expansion.cost_rank as usize, rank, "{id}");
+            }
+        }
+        assert!(expand_preset("antigravity", "agy-gemini-3.8-flash-high").is_some());
+        assert!(expand_preset("cursor", "agy-gemini-4-neon-high").is_none());
+        assert!(expand_preset("antigravity", "gemini-4-argon-high").is_none());
     }
 
     #[test]

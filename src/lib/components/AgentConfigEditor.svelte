@@ -296,12 +296,14 @@
   $: selectedCliHealth = cliHealth[config.cli];
 
   $: presetDescription = config.cli === 'claude'
-    ? 'Claude effort presets add --settings {"effortLevel":"low|high|max"}'
+    ? 'Claude effort presets add --settings {"effortLevel":"low|medium|high|max"}'
     : config.cli === 'codex'
       ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh|max|ultra"'
       : config.cli === 'cursor'
         ? 'Cursor Composer mode selection'
-        : '';
+        : config.cli === 'antigravity'
+          ? 'Passes the agy model ID (effort included) through --model'
+          : '';
 
   function handleCliChange(e: Event) {
     const target = e.target as HTMLSelectElement;
@@ -453,7 +455,7 @@
     </span>
   </div>
 
-  {#if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'cursor'}
+  {#if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'cursor' || config.cli === 'antigravity'}
     <div class="field">
       <label for={`${idPrefix}-preset`}>Model &amp; Effort</label>
       <select

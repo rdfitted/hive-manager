@@ -38,7 +38,8 @@ vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
 }));
 
-vi.mock('phosphor-svelte', () => ({
+vi.mock('phosphor-svelte', async (importOriginal) => ({
+  ...await importOriginal<typeof import('phosphor-svelte')>(),
   ArrowsIn: () => {},
   ArrowsOut: () => {},
   ArrowsSplit: () => {},

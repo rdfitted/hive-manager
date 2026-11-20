@@ -91,7 +91,7 @@ impl Default for WorkerRole {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentConfig {
     #[serde(default = "default_cli")]
-    pub cli: String,              // "claude", "codex", "cursor"
+    pub cli: String,              // "claude", "codex", "cursor", "antigravity"
     pub model: Option<String>,    // "opus", "gpt-6.2-sol", "gpt-6-luna", etc.
     #[serde(default)]
     pub flags: Vec<String>,       // Additional CLI flags

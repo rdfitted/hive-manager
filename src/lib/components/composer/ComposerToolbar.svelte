@@ -4,14 +4,16 @@
   import { ArrowUp, Plus } from 'phosphor-svelte';
   import type { ComposerControls } from './Composer.svelte';
 
-  let { controls, accessLabel, model, effort, sending }: {
+  let { controls, accessLabel, model, effort, sending, targetLabel }: {
     controls: ComposerControls;
     accessLabel?: string;
     model?: string;
     effort?: string;
     sending: boolean;
+    targetLabel?: string;
   } = $props();
 
+  const targetId = $props.id();
   let menuOpen = $state(false);
   let menuX = $state(0);
   let menuY = $state(0);
@@ -70,7 +72,10 @@
 <svelte:window onpointerdown={outsidePointer} onkeydown={(event) => { if (event.key === 'Escape') menuOpen = false; }} />
 
 <div class="toolbar" role="group" aria-label="Message controls" onpointerdown={(event) => event.preventDefault()}>
-  <button bind:this={addButton} type="button" class="toolbar-button add-button" aria-label="Add mention or command" aria-haspopup="menu" aria-expanded={menuOpen} disabled={sending} onmousedown={(event) => event.preventDefault()} onclick={toggleMenu} onkeydown={addKeydown}>
+  {#if targetLabel}
+    <span class="message-target" id={targetId} title={`Send to ${targetLabel}`}><span class="visually-hidden">Send to </span><span aria-hidden="true">@</span>{targetLabel}</span>
+  {/if}
+  <button bind:this={addButton} type="button" class="toolbar-button add-button" aria-label="Add mention or command" title="Add mention or command" aria-haspopup="menu" aria-expanded={menuOpen} disabled={sending} onmousedown={(event) => event.preventDefault()} onclick={toggleMenu} onkeydown={addKeydown}>
     <Plus size={18} aria-hidden="true" />
   </button>
   {#if accessLabel}<span class="access-label">{accessLabel}</span>{/if}
@@ -78,7 +83,7 @@
     {#if model}<span class="model">{model}</span>{/if}
     {#if effort}<span class="effort">{effort}</span>{/if}
   </div>
-  <button type="button" class="toolbar-button send-button" aria-label={sending ? 'Sending message' : 'Send message'} aria-busy={sending} disabled={!controls.canSend || sending} onmousedown={(event) => event.preventDefault()} onclick={send}>
+  <button type="button" class="toolbar-button send-button" aria-label={sending ? 'Sending message' : 'Send message'} title={sending ? 'Sending message' : 'Send message'} aria-describedby={targetLabel ? targetId : undefined} aria-busy={sending} disabled={!controls.canSend || sending} onmousedown={(event) => event.preventDefault()} onclick={send}>
     <ArrowUp size={18} weight="bold" aria-hidden="true" />
   </button>
 </div>
@@ -94,6 +99,8 @@
 
 <style>
   .toolbar { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+  .message-target { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-muted); font-size: var(--text-small); }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .toolbar-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 32px; height: 32px; padding: 0; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: var(--text-primary); cursor: pointer; }
   .toolbar-button:hover:enabled { background: var(--surface-overlay); }
   .toolbar-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

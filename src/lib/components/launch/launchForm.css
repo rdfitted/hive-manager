@@ -7,11 +7,17 @@
 .launch-content[data-launch-owned] {
     min-width: 0;
   }
+.launch-lockup[data-launch-owned] {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-4);
+    margin-bottom: var(--space-6);
+  }
 .launch-title[data-launch-owned] {
-    margin: 0 0 var(--space-5);
-    font-family: var(--font-body);
-    font-size: var(--text-h3);
-    color: var(--text-muted);
+    margin: 0;
+    font: 600 clamp(2rem, 6vw, 4.25rem)/1 var(--font-display);
+    color: var(--text-primary);
   }
 .dialog-content.lattice-modal.launch-dialog[data-launch-owned] {
     border-radius: var(--control-radius);

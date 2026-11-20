@@ -36,6 +36,7 @@
   export let tierLadderLoading: boolean;
   export let presentation: 'modal' | 'inline';
   export let queenConfig: AgentConfig;
+  export let plannerConfig: AgentConfig;
   export let soloConfig: AgentConfig;
   export let evaluatorConfig: AgentConfig;
   export let judgeAgentConfig: AgentConfig;
@@ -194,6 +195,7 @@
                   style:background={color.value}
                   aria-pressed={sessionColor === color.value}
                   on:click={() => sessionColor = color.value}
+                  aria-label={color.name}
                   title={color.name}
                 >
                 </button>
@@ -244,11 +246,45 @@
           </div>
         {/if}
 
+        {#if mode === 'hive' && withPlanning}
+          <div data-launch-owned class="form-section queen-section lattice-forced-colors-boundary">
+            <div data-launch-owned class="section-heading-copy">
+              <h3 data-launch-owned>Master Planner</h3>
+              <p data-launch-owned>Writes the plan the Queen executes, then retires.</p>
+            </div>
+            <AgentConfigEditor
+              bind:config={plannerConfig}
+              showLabel={false}
+              idPrefix="launch-planner"
+              {cliHealth}
+              {cliHealthLoading}
+              {cliHealthError}
+            />
+          </div>
+        {/if}
+
 {#if mode === 'hive' || mode === 'solo'}
   <fieldset data-launch-owned>
     <legend data-launch-owned>Agent transport</legend>
-    <label data-launch-owned><input data-launch-owned type="checkbox" bind:checked={codexAppServer} disabled={launching} /> Codex app server (experimental)</label>
-    <label data-launch-owned><input data-launch-owned type="checkbox" bind:checked={claudeStreamJson} disabled={launching} /> Claude stream JSON (experimental)</label>
+    {#if presentation === 'inline'}
+      <div data-launch-owned class="form-group">
+        <label data-launch-owned for="launch-codex-transport">Codex transport</label>
+        <select data-launch-owned id="launch-codex-transport" class="lattice-input" value={codexAppServer ? 'protocol' : 'pty'} on:change={(event) => codexAppServer = event.currentTarget.value === 'protocol'} disabled={launching}>
+          <option data-launch-owned value="pty">PTY</option>
+          <option data-launch-owned value="protocol">App server (experimental)</option>
+        </select>
+      </div>
+      <div data-launch-owned class="form-group">
+        <label data-launch-owned for="launch-claude-transport">Claude transport</label>
+        <select data-launch-owned id="launch-claude-transport" class="lattice-input" value={claudeStreamJson ? 'protocol' : 'pty'} on:change={(event) => claudeStreamJson = event.currentTarget.value === 'protocol'} disabled={launching}>
+          <option data-launch-owned value="pty">PTY</option>
+          <option data-launch-owned value="protocol">Stream JSON (experimental)</option>
+        </select>
+      </div>
+    {:else}
+      <label data-launch-owned><input data-launch-owned type="checkbox" bind:checked={codexAppServer} disabled={launching} /> Codex app server (experimental)</label>
+      <label data-launch-owned><input data-launch-owned type="checkbox" bind:checked={claudeStreamJson} disabled={launching} /> Claude stream JSON (experimental)</label>
+    {/if}
     <p data-launch-owned>Applies to matching workers and solo agents. PTY is the default; Queen and Master Planner use PTY.</p>
     <p data-launch-owned>Sub-agents aren't confined to the assignment, the same as PTY Codex.</p>
   </fieldset>

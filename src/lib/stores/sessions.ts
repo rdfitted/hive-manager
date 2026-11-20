@@ -130,6 +130,7 @@ export interface HiveLaunchConfig {
   color?: string;
   project_path: string;
   queen_config: AgentConfig;
+  planner_config?: AgentConfig;
   workers: AgentConfig[];
   execution_policy: HiveLaunchPolicy;
   work_graph_archetype?: string | null;

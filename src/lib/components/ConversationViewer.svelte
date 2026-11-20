@@ -251,7 +251,7 @@
   {#if $conversationStore.error}
     <div class="error lattice-forced-colors-boundary">
       {$conversationStore.error}
-      <button class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon" onclick={() => conversationStore.clearError()} aria-label="Dismiss conversation error">&#10005;</button>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon" onclick={() => conversationStore.clearError()} aria-label="Dismiss conversation error" title="Dismiss conversation error">&#10005;</button>
     </div>
   {/if}
 

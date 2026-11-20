@@ -164,3 +164,44 @@ it('R2-F2 changing sessions loads the new full log instead of reusing the old se
   expect(load.mock.calls).toEqual([[session.id]]);
   expect(get(coordination)).toMatchObject({ sessionId: session.id, log: [], loading: false });
 });
+
+it('keeps newer node and file metrics when a superseded refresh finishes late', async () => {
+  fixture.invoke.mockResolvedValue([]);
+  const nodeReplies: Array<(response: Response) => void> = [];
+  const fileReplies: Array<(response: Response) => void> = [];
+  const response = (body: unknown) => ({ ok: true, json: async () => body }) as Response;
+  const fetcher = vi.fn(async (url: string) => {
+    if (url.includes('/work-graph')) return new Promise<Response>(resolve => nodeReplies.push(resolve));
+    if (url.endsWith('/artifacts')) return new Promise<Response>(resolve => fileReplies.push(resolve));
+    return response([{ id: 'cell-a' }]);
+  });
+  const graph = (count: number) => ({
+    nodes: Array.from({ length: count }, (_, i) => ({ id: `N${i}` })),
+    status_by_node: { N0: 'completed' },
+  });
+  vi.stubGlobal('fetch', fetcher);
+  vi.useFakeTimers();
+  try {
+    const view = render(OpsWall, { ...props(), band: true });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(nodeReplies).toHaveLength(2);
+    expect(fileReplies).toHaveLength(2);
+
+    nodeReplies[1](response(graph(3)));
+    fileReplies[1](response([{ changed_files: ['a.ts', 'b.ts', 'c.ts', 'd.ts'] }]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(view.container.querySelector('[title="Completed work graph nodes"]')?.textContent).toContain('1/3');
+    expect(view.container.querySelector('[title="Changed files reported in artifacts"]')?.textContent).toContain('4');
+
+    nodeReplies[0](response(graph(1)));
+    fileReplies[0](response([{ changed_files: ['older.ts'] }]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(view.container.querySelector('[title="Completed work graph nodes"]')?.textContent).toContain('1/3');
+    expect(view.container.querySelector('[title="Changed files reported in artifacts"]')?.textContent).toContain('4');
+  } finally {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});

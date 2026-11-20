@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
 import type { Session } from '$lib/stores/sessions';
-import SessionHeader from './SessionHeader.svelte';
+import PreviewControl from './PreviewControl.svelte';
 
 /**
  * Regression cover for the dockable-preview header (issue #157).
@@ -19,8 +19,8 @@ import SessionHeader from './SessionHeader.svelte';
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
-  listen: vi.fn(() => Promise.resolve(() => {})),
-  writeText: vi.fn(() => Promise.resolve()),
+  listen: vi.fn((_name: string, _listener: (event: { payload: unknown }) => void) => Promise.resolve(() => {})),
+  writeText: vi.fn((_url: string) => Promise.resolve()),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -37,20 +37,16 @@ vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
 
 // `activeSession` is a derived store (src/lib/stores/sessions.ts:769-770), so it
 // cannot be set directly — the component only renders its body when it is
-// truthy. Swap it for a writable holding a minimal fake session and re-export
-// the real `serdeEnumVariantName`, which the header uses for its badges.
+// truthy. Swap it for a writable holding a minimal fake session.
 const storeMocks = vi.hoisted(() => ({
   setActiveSession: undefined as ((session: Session | null) => void) | undefined,
 }));
 
 vi.mock('$lib/stores/sessions', async () => {
-  const actual = await vi.importActual<typeof import('$lib/stores/sessions')>(
-    '$lib/stores/sessions',
-  );
   const { writable } = await import('svelte/store');
   const activeSession = writable<Session | null>(null);
   storeMocks.setActiveSession = activeSession.set;
-  return { activeSession, serdeEnumVariantName: actual.serdeEnumVariantName, sessionDisplayName: actual.sessionDisplayName };
+  return { activeSession };
 });
 
 function fakeSession(id: string): Session {
@@ -82,10 +78,26 @@ async function flush() {
 }
 
 const CLOSED_STATUS = { open: false, docked: false, url: null, session_url: null };
+const LIVE_URL = 'http://localhost:5173/';
+const LIVE_STATUS = { ...CLOSED_STATUS, open: true, docked: true, url: LIVE_URL };
+
+function emitPreviewEvent(name: string, payload: unknown) {
+  const registration = tauriMocks.listen.mock.calls.find(([event]) => event === name);
+  if (!registration) throw new Error(`Missing ${name} listener`);
+  registration[1]({ payload });
+}
+
+async function reopen(container: HTMLElement) {
+  const scope = within(container);
+  const trigger = scope.getByRole('button', { name: 'Preview' });
+  await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
+  await fireEvent.click(trigger);
+  return await scope.findByRole('textbox', { name: 'Preview URL' }) as HTMLInputElement;
+}
 
 /** Renders the header with `session` active and the preview form expanded. */
 async function renderExpanded(session: Session) {
-  const view = render(SessionHeader);
+  const view = render(PreviewControl);
   storeMocks.setActiveSession?.(session);
 
   const toggle = await waitFor(() => {
@@ -104,15 +116,26 @@ async function renderExpanded(session: Session) {
   return { ...view, input };
 }
 
+let popoverStyle: HTMLStyleElement;
+beforeEach(() => {
+  // JSDOM reports zero-sized anchors. Preserve access to mounted content while
+  // exercising Bits' real open state, focus management and Escape handling.
+  popoverStyle = document.createElement('style');
+  popoverStyle.textContent = '.preview-popover { visibility: visible; }';
+  document.head.append(popoverStyle);
+});
+
 afterEach(() => {
   cleanup();
+  popoverStyle.remove();
   tauriMocks.invoke.mockReset();
   tauriMocks.listen.mockReset();
   tauriMocks.listen.mockImplementation(() => Promise.resolve(() => {}));
+  tauriMocks.writeText.mockReset().mockResolvedValue(undefined);
   storeMocks.setActiveSession?.(null);
 });
 
-describe('SessionHeader preview URL input', () => {
+describe('PreviewControl preview URL input', () => {
   it('uses type="text" so scheme-less input survives native constraint validation', async () => {
     tauriMocks.invoke.mockResolvedValue(CLOSED_STATUS);
 
@@ -168,7 +191,7 @@ describe('SessionHeader preview URL input', () => {
   });
 });
 
-describe('SessionHeader preview action freshness', () => {
+describe('PreviewControl preview action freshness', () => {
   it('drops a dock/close status that resolves after the session changed', async () => {
     const staleDock = deferred<unknown>();
 
@@ -184,8 +207,14 @@ describe('SessionHeader preview action freshness', () => {
       return Promise.resolve(CLOSED_STATUS);
     });
 
-    const { container } = render(SessionHeader);
+    const { container } = render(PreviewControl);
     storeMocks.setActiveSession?.(fakeSession('session-a'));
+    const toggle = await waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>('.preview-toggle');
+      if (!button) throw new Error('preview toggle never rendered');
+      return button;
+    });
+    await fireEvent.click(toggle);
 
     const dockButton = await waitFor(() => {
       const buttons = container.querySelectorAll<HTMLButtonElement>('.preview-action');
@@ -201,7 +230,7 @@ describe('SessionHeader preview action freshness', () => {
     // ...while the operator switches to a session that has no remembered URL.
     storeMocks.setActiveSession?.(fakeSession('session-b'));
     await waitFor(() => {
-      expect(container.querySelector('.preview-toggle')).not.toBeNull();
+      expect(container.querySelector('.preview-toggle')?.getAttribute('aria-expanded')).toBe('false');
     });
 
     // The late response carries session-a's URL. It must not be applied.
@@ -247,8 +276,14 @@ describe('SessionHeader preview action freshness', () => {
       return Promise.resolve(CLOSED_STATUS);
     });
 
-    const { container } = render(SessionHeader);
+    const { container } = render(PreviewControl);
     storeMocks.setActiveSession?.(fakeSession('session-a'));
+    const toggle = await waitFor(() => {
+      const button = container.querySelector<HTMLButtonElement>('.preview-toggle');
+      if (!button) throw new Error('preview toggle never rendered');
+      return button;
+    });
+    await fireEvent.click(toggle);
 
     const dockButton = await waitFor(() => {
       const buttons = container.querySelectorAll<HTMLButtonElement>('.preview-action');
@@ -295,8 +330,9 @@ describe('SessionHeader preview action freshness', () => {
 
     // session-a's failure must not be announced in session-b's header, nor
     // mark session-b's URL input invalid.
-    expect(container.querySelector('.preview-error')).toBeNull();
-    expect(container.querySelector('#session-preview-url')?.getAttribute('aria-invalid')).toBeFalsy();
+    const input = await reopen(container);
+    expect(within(container).queryByRole('alert')).toBeNull();
+    expect(input.getAttribute('aria-invalid')).toBeFalsy();
   });
 
   /**
@@ -329,7 +365,7 @@ describe('SessionHeader preview action freshness', () => {
       return Promise.resolve(OPEN_STATUS);
     });
 
-    const { container } = render(SessionHeader);
+    const { container } = render(PreviewControl);
     storeMocks.setActiveSession?.(fakeSession('session-a'));
 
     const submitUrl = async (value: string) => {
@@ -384,9 +420,197 @@ describe('SessionHeader preview action freshness', () => {
   });
 });
 
-it('uses the project folder when an unnamed session has a UUID', async () => {
-  const session = { ...fakeSession('12345678-abcd-4000-8000-123456789abc'), name: '', project_path: 'C:\\Projects\\sample-project\\' };
-  const view = render(SessionHeader);
-  storeMocks.setActiveSession?.(session);
-  await waitFor(() => expect(view.getByRole('heading', { level: 1 }).textContent).toBe('sample-project'));
+
+describe('Preview status probe ordering', () => {
+  it('keeps newer navigation while reconciling a late dock response', async () => {
+    const dock = deferred<typeof LIVE_STATUS | { session_url: string }>();
+    const probe = deferred<typeof LIVE_STATUS>();
+    const initial = { ...LIVE_STATUS, docked: false };
+    const laterUrl = 'http://localhost:5174/';
+    const saved = 'http://localhost:4173/';
+    tauriMocks.invoke.mockResolvedValueOnce(initial).mockReturnValueOnce(dock.promise).mockReturnValueOnce(probe.promise);
+    const view = await renderExpanded(fakeSession('session-a'));
+    await fireEvent.click(view.getByRole('button', { name: 'Dock the preview beside Hive Manager' }));
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, 'dock_preview_window', { sessionId: 'session-a' });
+    emitPreviewEvent('preview-navigated', { url: laterUrl });
+    await view.findByText(laterUrl);
+
+    dock.resolve({ ...LIVE_STATUS, session_url: saved });
+    await dock.promise;
+    await flush();
+    expect(view.getByText(laterUrl)).toBeTruthy();
+    expect(view.input.value).toBe(saved);
+    expect(view.getByText('Popped out')).toBeTruthy();
+
+    probe.resolve({ ...LIVE_STATUS, url: laterUrl });
+    expect(await view.findByText('Docked')).toBeTruthy();
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, 'get_preview_status', { sessionId: 'session-a' });
+    expect(view.getByText(laterUrl)).toBeTruthy();
+    expect(view.input.value).toBe(saved);
+  });
+
+  it.each(['preview-navigated', 'preview-status'])('keeps live state from %s and prefills the saved session URL', async (eventName) => {
+    const probe = deferred<typeof CLOSED_STATUS | { session_url: string }>();
+    tauriMocks.invoke.mockReturnValue(probe.promise);
+    const view = await renderExpanded(fakeSession('session-a'));
+    emitPreviewEvent(eventName, LIVE_STATUS);
+    const saved = 'http://localhost:4173/';
+    probe.resolve({ ...CLOSED_STATUS, session_url: saved });
+    await probe.promise;
+    await flush();
+
+    expect(view.getByText(LIVE_URL)).toBeTruthy();
+    expect(view.getByText(eventName === 'preview-status' ? 'Docked' : 'Popped out')).toBeTruthy();
+    expect(view.input.value).toBe(saved);
+  });
+
+  it('keeps an accepted open response and the typed URL over an older closed probe', async () => {
+    const probe = deferred<{ session_url: string }>();
+    tauriMocks.invoke.mockImplementation((command: string) =>
+      command === 'get_preview_status' ? probe.promise : Promise.resolve(LIVE_STATUS));
+    const view = await renderExpanded(fakeSession('session-a'));
+    await fireEvent.input(view.input, { target: { value: 'localhost:5173' } });
+    await fireEvent.click(view.getByRole('button', { name: 'Open' }));
+    await view.findByText('Docked');
+    probe.resolve({ ...CLOSED_STATUS, session_url: 'http://localhost:9000/' });
+    await probe.promise;
+    await flush();
+
+    expect(view.getByText(LIVE_URL)).toBeTruthy();
+    expect(view.getByText('Docked')).toBeTruthy();
+    expect(view.input.value).toBe('localhost:5173');
+    storeMocks.setActiveSession?.(fakeSession('session-b'));
+    await flush();
+    storeMocks.setActiveSession?.(fakeSession('session-a'));
+    expect((await reopen(view.container)).value).toBe('localhost:5173');
+  });
+
+  it('keeps a newly selected A free of an earlier A probe after A → B → A', async () => {
+    const firstA = deferred<{ session_url: string }>();
+    const secondA = deferred<typeof LIVE_STATUS>();
+    let aProbes = 0;
+    tauriMocks.invoke.mockImplementation((_command: string, args: { sessionId: string }) =>
+      args.sessionId === 'session-a' ? (++aProbes === 1 ? firstA.promise : secondA.promise) : Promise.resolve(CLOSED_STATUS));
+    const view = await renderExpanded(fakeSession('session-a'));
+    storeMocks.setActiveSession?.(fakeSession('session-b'));
+    await flush();
+    storeMocks.setActiveSession?.(fakeSession('session-a'));
+    const input = await reopen(view.container);
+    secondA.resolve(LIVE_STATUS);
+    await view.findByText('Docked');
+    firstA.resolve({ ...CLOSED_STATUS, session_url: 'http://localhost:9000/' });
+    await firstA.promise;
+    await flush();
+
+    expect(view.getByText(LIVE_URL)).toBeTruthy();
+    expect(input.value).toBe('');
+  });
+});
+
+it.each(['before', 'after'] as const)('releases a successful listener after its peer rejects and it resolves %s unmount', async (timing) => {
+  const pending = deferred<() => void>();
+  const release = vi.fn();
+  tauriMocks.listen.mockImplementation(name => name === 'preview-navigated'
+    ? pending.promise : Promise.reject(new Error('listener unavailable')));
+  const { unmount } = render(PreviewControl);
+  await flush();
+  if (timing === 'before') {
+    pending.resolve(release);
+    await flush();
+    expect(release).not.toHaveBeenCalled();
+  }
+  unmount();
+  if (timing === 'after') pending.resolve(release);
+  await flush();
+  expect(release).toHaveBeenCalledTimes(1);
+});
+
+describe('Preview reload and clipboard feedback', () => {
+  it.each([
+    { name: 'the same session', route: [], showError: true },
+    { name: 'B', route: ['session-b'], showError: false },
+    { name: 'A → B → A', route: ['session-b', 'session-a'], showError: false },
+  ])('scopes a deferred reload failure to $name', async ({ route, showError }) => {
+    const reload = deferred<void>();
+    tauriMocks.invoke.mockImplementation((command: string) =>
+      command === 'reload_preview_window' ? reload.promise : Promise.resolve(LIVE_STATUS));
+    const view = await renderExpanded(fakeSession('session-a'));
+    const button = () => view.getByRole('button', { name: 'Reload the preview' }) as HTMLButtonElement;
+    await fireEvent.click(button());
+    expect(button().disabled).toBe(true);
+    for (const id of route) {
+      storeMocks.setActiveSession?.(fakeSession(id));
+      await flush();
+    }
+    const input = route.length ? await reopen(view.container) : view.input;
+    reload.reject(new Error('reload failed'));
+    await reload.promise.catch(() => {});
+    await flush();
+
+    if (showError) expect(view.getByRole('alert').textContent).toContain('reload failed');
+    else expect(view.queryByRole('alert')).toBeNull();
+    expect(input.getAttribute('aria-invalid')).toBe(showError ? 'true' : null);
+    expect(button().disabled).toBe(false);
+  });
+
+  it('does not display delayed clipboard success over a newer URL', async () => {
+    const copy = deferred<void>();
+    tauriMocks.invoke.mockResolvedValue(LIVE_STATUS);
+    tauriMocks.writeText.mockReturnValueOnce(copy.promise);
+    const view = await renderExpanded(fakeSession('session-a'));
+    await fireEvent.click(view.getByRole('button', { name: 'Copy the current preview URL' }));
+    const newerUrl = 'http://localhost:5174/';
+    emitPreviewEvent('preview-navigated', { url: newerUrl });
+    copy.resolve();
+    await copy.promise;
+    await flush();
+
+    expect(tauriMocks.writeText).toHaveBeenCalledWith(LIVE_URL);
+    expect(view.getByText(newerUrl)).toBeTruthy();
+    expect(view.queryByText('Copied')).toBeNull();
+  });
+
+  it('drops a clipboard rejection after switching sessions even when the live URL matches', async () => {
+    const copy = deferred<void>();
+    tauriMocks.invoke.mockResolvedValue(LIVE_STATUS);
+    tauriMocks.writeText.mockReturnValueOnce(copy.promise);
+    const view = await renderExpanded(fakeSession('session-a'));
+    await fireEvent.click(view.getByRole('button', { name: 'Copy the current preview URL' }));
+    storeMocks.setActiveSession?.(fakeSession('session-b'));
+    await flush();
+    const input = await reopen(view.container);
+    copy.reject(new Error('clipboard failed'));
+    await copy.promise.catch(() => {});
+    await flush();
+
+    expect(view.queryByRole('alert')).toBeNull();
+    expect(input.getAttribute('aria-invalid')).toBeNull();
+  });
+
+  it('clears visible clipboard feedback when the preview navigates', async () => {
+    tauriMocks.invoke.mockResolvedValue(LIVE_STATUS);
+    const view = await renderExpanded(fakeSession('session-a'));
+    await fireEvent.click(view.getByRole('button', { name: 'Copy the current preview URL' }));
+    expect(await view.findByText('Copied')).toBeTruthy();
+    const newerUrl = 'http://localhost:5174/';
+    emitPreviewEvent('preview-status', { ...LIVE_STATUS, url: newerUrl });
+
+    expect(await view.findByText(newerUrl)).toBeTruthy();
+    expect(view.queryByText('Copied')).toBeNull();
+  });
+});
+
+it('opens a named Preview disclosure without advertising a dialog and keeps keyboard behavior', async () => {
+  tauriMocks.invoke.mockResolvedValue(CLOSED_STATUS);
+  const view = await renderExpanded(fakeSession('session-a'));
+  const trigger = view.getByRole('button', { name: 'Preview' });
+  const content = view.getByRole('region', { name: 'Preview' });
+  expect(trigger.getAttribute('aria-haspopup')).toBe('false');
+  expect(trigger.getAttribute('aria-expanded')).toBe('true');
+  expect(trigger.getAttribute('aria-controls')).toBe(content.id);
+  expect(content.contains(view.input)).toBe(true);
+  await waitFor(() => expect(document.activeElement).toBe(view.input));
+  await fireEvent.keyDown(view.input, { key: 'Escape' });
+  await waitFor(() => expect(view.queryByRole('region', { name: 'Preview' })).toBeNull());
+  expect(trigger.getAttribute('aria-expanded')).toBe('false');
 });

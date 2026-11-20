@@ -3,6 +3,7 @@
 //! This module provides the `CliAdapter` trait for abstracting CLI-specific
 //! behavior such as command building, signal detection, and bootstrap prompts.
 
+mod antigravity;
 mod claude_code;
 mod codex;
 mod cursor;
@@ -14,12 +15,13 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+pub use antigravity::AntigravityAdapter;
 pub use claude_code::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;
 pub use cursor::CursorAdapter;
 
 /// Valid CLI names allowed in the system.
-pub const VALID_CLIS: &[&str] = &["claude", "codex", "cursor"];
+pub const VALID_CLIS: &[&str] = &["claude", "codex", "cursor", "antigravity"];
 
 /// Unvalidated default spacing between a PTY payload and its discrete Enter write.
 ///
@@ -52,8 +54,9 @@ pub struct PtySubmitResult {
 }
 
 /// Resolve the policy from the executable that is actually handed to the PTY.
-/// Cursor launches through `wsl`, so that executable is normalized back to the
-/// Cursor adapter instead of silently using the unknown-command fallback.
+/// Cursor launches through `wsl` and Antigravity through `agy`, so those
+/// executables are normalized back to their adapters instead of silently using
+/// the unknown-command fallback.
 pub fn pty_submit_policy(command: &str) -> PtySubmitPolicy {
     let executable = command
         .rsplit(|character| character == '/' || character == '\\')
@@ -63,6 +66,8 @@ pub fn pty_submit_policy(command: &str) -> PtySubmitPolicy {
     let executable = executable.strip_suffix(".exe").unwrap_or(&executable);
     let adapter_name = if executable == "wsl" {
         Some("cursor")
+    } else if executable == "agy" {
+        Some("antigravity")
     } else {
         VALID_CLIS
             .iter()
@@ -247,6 +252,7 @@ pub fn get_adapter(cli: &str) -> Result<Box<dyn CliAdapter>, String> {
         "claude" => Ok(Box::new(ClaudeCodeAdapter)),
         "codex" => Ok(Box::new(CodexAdapter)),
         "cursor" => Ok(Box::new(CursorAdapter)),
+        "antigravity" => Ok(Box::new(AntigravityAdapter)),
         _ => Err(format!("Unknown CLI adapter: {}", cli)),
     }
 }
@@ -264,7 +270,8 @@ mod tests {
         assert!(!is_valid_cli("droid"));
         assert!(!is_valid_cli("qwen"));
         assert!(!is_valid_cli("gemini"));
-        assert!(!is_valid_cli("antigravity"));
+        assert!(is_valid_cli("antigravity"));
+        assert!(!is_valid_cli("agy"));
         assert!(!is_valid_cli("unknown"));
     }
 
@@ -295,6 +302,8 @@ mod tests {
         let cursor = get_adapter("cursor").unwrap();
         assert_eq!(cursor.cli_name(), "cursor");
 
+        let antigravity = get_adapter("antigravity").unwrap();
+        assert_eq!(antigravity.cli_name(), "antigravity");
     }
 
     #[test]
@@ -307,9 +316,9 @@ mod tests {
 
     #[test]
     fn test_get_adapter_rejects_removed_clis() {
-        // gemini and antigravity were removed as spawnable CLIs; workflows now
-        // run GPT-6 tiers (astra/sol/luna) through the codex adapter.
-        for cli in ["gemini", "antigravity", "agy", "droid", "opencode", "qwen"] {
+        // The legacy Gemini CLI stays removed; Google models run through the
+        // `antigravity` adapter, whose binary name `agy` is not a CLI id.
+        for cli in ["gemini", "agy", "droid", "opencode", "qwen"] {
             assert!(!is_valid_cli(cli));
             assert!(get_adapter(cli).is_err(), "{cli} must have no adapter");
         }
@@ -325,6 +334,8 @@ mod tests {
 
         assert_eq!(pty_submit_policy("wsl").adapter, Some("cursor"));
         assert_eq!(pty_submit_policy("WSL.EXE").adapter, Some("cursor"));
+        assert_eq!(pty_submit_policy("agy").adapter, Some("antigravity"));
+        assert_eq!(pty_submit_policy(r"C:\tools\agy.exe").adapter, Some("antigravity"));
         assert_eq!(
             pty_submit_policy(r"C:\\tools\\codex.exe").adapter,
             Some("codex")

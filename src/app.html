@@ -14,9 +14,14 @@
       html, body {
         height: 100%;
         overflow: hidden;
-        background: #0b213e;
+        background: #0c0b0a;
+      }
+      html[data-accent="sky"],
+      html[data-accent="sky"] body {
+        background: #090a0c;
       }
     </style>
+    <script src="%sveltekit.assets%/accent-boot.js"></script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

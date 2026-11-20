@@ -1,13 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/svelte';
-import { tick } from 'svelte';
+import { createRawSnippet, tick } from 'svelte';
 import { get } from 'svelte/store';
 import type { AgentEvent } from '$lib/stores/agentEvents';
 import { CHAT_WINDOW_SIZE, passiveToolResult, protocolAttention, transcriptRows } from './transcript';
+import { paneStatusLineContext } from './paneMode';
 
 const fixture = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue(undefined), loadOlder: vi.fn(), setAgents: (_agents: import('$lib/stores/sessions').AgentInfo[]) => {}, setSource: (_source: import('$lib/stores/agentEvents').AgentFeed['capabilities']['event_source']) => {} }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock('$lib/stores/pendingContext', async (importOriginal) => {
+  const { pendingContext } = await importOriginal<typeof import('$lib/stores/pendingContext')>();
+  return { pendingContext: { ...pendingContext, consume: vi.fn().mockResolvedValue(null) } };
+});
+vi.mock('phosphor-svelte', () => ({
+  ArrowUp: () => {}, ChatCircle: () => {}, ListBullets: () => {}, Plus: () => {},
+  SquareSplitVertical: () => {}, TerminalWindow: () => {},
+}));
 vi.mock('$lib/stores/agentEvents', async () => {
   const { writable } = await import('svelte/store');
   const state = writable({ sessionId: 's', histories: {}, feeds: {} });
@@ -193,8 +202,9 @@ describe('agent chat', () => {
     expect(view.getByText('Full access')).toBeTruthy();
     expect(view.getByText('fixture-model')).toBeTruthy();
     expect(view.getByText('high')).toBeTruthy();
+    expect(view.getByTitle('Send to Frontend').textContent).toContain('@Frontend');
     editor.textContent = 'Fixture toolbar send'; await fireEvent.input(editor);
-    await fireEvent.click(view.getByRole('button', { name: 'Send message' }));
+    await fireEvent.click(view.getByRole('button', { name: 'Send message', description: 'Send to Frontend' }));
     await waitFor(() => expect(fixture.invoke).toHaveBeenCalledWith('operator_inject', {
       request: { session_id: 's', target_agent_id: 'a', message: 'Fixture toolbar send' },
     }));
@@ -233,14 +243,14 @@ describe('agent chat', () => {
   it('joins tool starts/results, starts collapsed, and never presents transcript approval actions', async () => {
     const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [
       event('1', 'tool_start', { tool_id: 't', name: 'Fixture tool', input: { path: 'fixture.txt' } }),
-      event('2', 'tool_result', { tool_id: 't', result: { renderer: 'approval', data: { actionId: 'unsafe' } } }),
+      { ...event('2', 'tool_result', { tool_id: 't', result: { renderer: 'approval', data: { actionId: 'unsafe' } } }), ts: '2026-01-01T00:00:14Z' },
       event('3', 'status', { status: 'needs_input', message: 'Protocol prompt' }),
     ] } });
     expect(view.container.querySelectorAll('details')).toHaveLength(1);
     const details = view.container.querySelector('details')!;
     expect(details.open).toBe(false);
     expect(details.querySelector('[aria-label="Tool input"]')).toBeNull();
-    expect(details.querySelector('summary')?.textContent).toBe('Worked for 0s');
+    expect(details.querySelector('summary')?.textContent).toBe('1 tool call · 14s');
     details.open = true;
     await fireEvent(details, new Event('toggle'));
     expect(details.querySelector('[aria-label="Tool input"]')?.textContent).toContain('fixture.txt');
@@ -267,6 +277,7 @@ describe('agent chat', () => {
   it('reuses Composer and sends only through operator_inject to this agent', async () => {
     const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', events: [] } });
     const editor = view.getByRole('textbox', { name: 'Message this agent…' });
+    expect(view.getByRole('button', { name: 'Send message', description: 'Send to a' })).toBeTruthy();
     editor.textContent = 'Continue with fixture';
     await fireEvent.input(editor);
     await fireEvent.keyDown(editor, { key: 'Enter' });
@@ -274,6 +285,50 @@ describe('agent chat', () => {
       request: { session_id: 's', target_agent_id: 'a', message: 'Continue with fixture' },
     }));
     expect(fixture.invoke.mock.calls.filter(([command]) => command === 'operator_inject')).toHaveLength(1);
+  });
+
+  it('uses the supplied composer route for its target, submission and error beneath the status line', async () => {
+    fixture.setAgents([
+      { ...runningAgent(), config: { cli: 'codex', flags: [], label: 'Queen' } },
+      { ...runningAgent(), id: 'backend', config: { cli: 'codex', flags: [], label: 'Backend', model: 'routed-model' } },
+    ]);
+    const send = vi.fn();
+    const clear = vi.fn();
+    const route = {
+      agentId: 'backend', placeholder: 'Message routed agent', disabled: false, sending: false,
+      prepareSubmit: vi.fn(() => ({ send, clear })), onsubmit: vi.fn(),
+      targetControl: createRawSnippet(() => ({ render: () => '<button type="button" aria-label="Command target: @Backend">@Backend</button>' })),
+    };
+    const statusLine = createRawSnippet(() => ({ render: () => '<div>Queen terminal status</div>' }));
+    const view = render(ChatPane, {
+      props: { sessionId: 's', agentId: 'a', events: [event('queen-transcript')], composerRoute: route },
+      context: new Map([[paneStatusLineContext, () => statusLine]]),
+    });
+
+    const editor = view.getByRole('textbox', { name: route.placeholder });
+    const composer = view.getByRole('group', { name: 'Message composer' });
+    const toolbar = within(composer).getByRole('group', { name: 'Composer toolbar' });
+    expect(view.getByText('Queen terminal status').nextElementSibling).toBe(composer);
+    expect(view.getByText('queen-transcript')).toBeTruthy();
+    expect(within(toolbar).getByRole('button', { name: 'Command target: @Backend' })).toBeTruthy();
+    expect(within(toolbar).getByText('routed-model')).toBeTruthy();
+    expect(view.queryByTitle('Send to Queen')).toBeNull();
+
+    editor.textContent = 'Routed message';
+    await fireEvent.input(editor);
+    await fireEvent.click(within(toolbar).getByRole('button', { name: 'Send message' }));
+    await waitFor(() => expect(send).toHaveBeenCalledWith('Routed message'));
+    expect(route.prepareSubmit).toHaveBeenCalledTimes(1);
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(route.onsubmit).not.toHaveBeenCalled();
+    expect(fixture.invoke.mock.calls.some(([command]) => command === 'operator_inject')).toBe(false);
+
+    await view.rerender({ composerRoute: { ...route, disabled: true, sending: true, error: 'Target is busy' } });
+    expect(editor.getAttribute('aria-disabled')).toBe('true');
+    expect((view.getByRole('button', { name: 'Sending message' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(view.getByRole('alert').textContent).toContain('Message could not be sent: Target is busy');
+    await view.rerender({ composerRoute: route });
+    expect(view.queryByRole('alert')).toBeNull();
   });
 
   it('holds the current reading window when new live records arrive after scrolling up', async () => {
@@ -292,10 +347,28 @@ describe('agent chat', () => {
     expect(view.getByText('new-live')).toBeTruthy();
   });
 
+  it('names the three terminal-backed modes and publishes Split without moving focus', async () => {
+    const onchange = vi.fn();
+    const toggle = render(PaneToggle, { hasTerminal: true, mode: 'chat', onchange });
+    const chat = toggle.getByRole('button', { name: 'Chat' });
+    const split = toggle.getByRole('button', { name: 'Split' });
+    const terminal = toggle.getByRole('button', { name: 'Terminal' });
+    expect(chat.getAttribute('aria-pressed')).toBe('true');
+    split.focus();
+    await fireEvent.click(split);
+    expect(onchange).toHaveBeenCalledWith('split');
+    await toggle.rerender({ mode: 'split' });
+    expect(document.activeElement).toBe(split);
+    expect(split.getAttribute('aria-pressed')).toBe('true');
+    expect(chat.getAttribute('aria-pressed')).toBe('false');
+    expect(terminal.getAttribute('aria-pressed')).toBe('false');
+  });
+
   it('offers a raw log instead of a Terminal toggle when there is no terminal, with bounded raw records', async () => {
     const change = vi.fn();
     const toggle = render(PaneToggle, { hasTerminal: false, mode: 'chat', onchange: change });
     expect(toggle.queryByRole('button', { name: 'Terminal' })).toBeNull();
+    expect(toggle.queryByRole('button', { name: 'Split' })).toBeNull();
     await fireEvent.click(toggle.getByRole('button', { name: 'Raw event log' }));
     expect(change).toHaveBeenCalledWith('raw');
     const view = render(ChatPane, { props: { sessionId: 's', agentId: 'a', raw: true, events: Array.from({ length: 5000 }, (_, i) => event(`raw-${i}`, 'status', { status: 'needs_approval' })) } });

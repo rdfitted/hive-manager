@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render } from '@testing-library/svelte';
+import { cleanup, render } from '@testing-library/svelte';
 
 const mounts = vi.hoisted(() => ({ status: vi.fn(), plan: vi.fn(), graph: vi.fn() }));
 vi.mock('../StatusPanel.svelte', () => ({ default: mounts.status }));
@@ -9,12 +9,13 @@ vi.mock('../workgraph/WorkGraphView.svelte', () => ({ default: mounts.graph }));
 import OverviewTab from './OverviewTab.svelte';
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
-it('composes Status, Plan and Graph through section controls', async () => {
+it('renders Status, Plan and Graph from the single inspector selection', async () => {
   const view = render(OverviewTab);
   expect(mounts.status).toHaveBeenCalled();
-  await fireEvent.click(view.getByRole('button', { name: 'Plan' }));
+  await view.rerender({ tab: 'plan' });
   expect(mounts.plan).toHaveBeenCalled();
-  await fireEvent.click(view.getByRole('button', { name: 'Graph' }));
+  await view.rerender({ tab: 'graph' });
   expect(mounts.graph).toHaveBeenCalled();
+  expect(view.queryByRole('group', { name: 'Overview sections' })).toBeNull();
   expect(view.queryByRole('tablist')).toBeNull();
 });

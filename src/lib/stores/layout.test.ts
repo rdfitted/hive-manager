@@ -56,13 +56,14 @@ describe('layout panel state', () => {
 
   it.each([
     ['status', 'overview'],
-    ['plan', 'overview'],
-    ['graph', 'overview'],
-    ['logs', 'activity'],
+    ['plan', 'plan'],
+    ['graph', 'graph'],
+    ['logs', 'logs'],
     ['chat', 'activity'],
-    ['timeline', 'activity'],
+    ['timeline', 'timeline'],
     ['review', 'changes'],
-    ['files', 'changes'],
+    ['files', 'files'],
+    ['artifacts', 'artifacts'],
     ['unknown-tab', 'overview'],
   ])('G-tab-migration: loads saved %s as %s', (rightTab, expected) => {
     const storage = createStorage({
