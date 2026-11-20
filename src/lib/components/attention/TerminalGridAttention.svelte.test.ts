@@ -125,6 +125,40 @@ function publishModeFeed(hasTerminal: boolean) {
 }
 
 describe('attention across pane modes (real Terminal, renderer doubles)', () => {
+  it('shows the Queen Focus chat after worker selection through the input and the pane picker', async () => {
+    vi.stubGlobal('innerWidth', 800);
+    publishModeFeed(false);
+    layout.setSessionViewMode('grid');
+    layout.setMaximizedTerminalId('codex');
+    const onSelect = vi.fn();
+    const view = render(TerminalGrid, { session: stageRoster, focusedAgentId: 'codex', onSelect });
+    layout.setSessionViewMode('focus');
+    await tick();
+    const picker = view.getByRole('combobox', { name: 'Focused terminal' }) as HTMLSelectElement;
+    const queen = view.container.querySelector<HTMLElement>('.queen-column')!;
+    const chat = queen.querySelector<HTMLElement>('.chat-pane')!;
+    const assertQueenVisible = () => {
+      expect(picker.value).toBe('claude');
+      expect(queen.closest('.terminal-grid')?.classList.contains('queen-only')).toBe(true);
+      expect(queen.classList.contains('hidden-by-maximize')).toBe(false);
+      expect(queen.closest('[hidden], [inert]')).toBeNull();
+      expect(chat.closest('[hidden], [inert], [aria-hidden="true"]')).toBeNull();
+      expect(within(queen).getByRole('region', { name: 'Agent chat' })).toBe(chat);
+    };
+
+    expect(picker.value).toBe('codex');
+    expect(queen.classList.contains('hidden-by-maximize')).toBe(true);
+    await view.rerender({ focusedAgentId: 'claude' });
+    assertQueenVisible();
+
+    await view.rerender({ focusedAgentId: 'codex' });
+    expect(queen.classList.contains('hidden-by-maximize')).toBe(true);
+    await fireEvent.change(picker, { target: { value: 'claude' } });
+    expect(onSelect).toHaveBeenLastCalledWith('claude');
+    await view.rerender({ focusedAgentId: 'claude' });
+    assertQueenVisible();
+  });
+
   it('shows Chat, Split and Terminal for the Queen and worker and keeps the parsed line when the worker collapses', async () => {
     layout.setSessionViewMode('grid');
     publishModeFeed(true);

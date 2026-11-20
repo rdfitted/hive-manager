@@ -259,8 +259,22 @@ async function resumeActionState(pane, button, expected, viewport) {
     const box = node.getBoundingClientRect();
     return node.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
   });
-  return { passed: paneExists && status === 'Completed' && (expected ? count === 1 && enabled && contained && hit : count === 0),
-    details: { paneExists, status, count, enabled, contained, hit, buttonBox, paneBox, expected } };
+  const iconOnly = hit ? await resumeIconState(button) : null;
+  return { passed: paneExists && status === 'Completed' && (expected ? enabled && iconOnly?.passed === true : count === 0),
+    details: { paneExists, status, count, enabled, contained, hit, iconOnly, buttonBox, paneBox, expected } };
+}
+
+async function resumeIconState(button) {
+  const glyph = await button.locator('svg').evaluateAll(nodes => nodes.some(node => {
+    for (let current = node; current && current.tagName !== 'BUTTON'; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (style.visibility !== 'visible' || Number(style.opacity) === 0) return false;
+    }
+    const box = node.getBoundingClientRect(), shape = node.getBBox();
+    return box.width > 0 && box.height > 0 && shape.width > 0 && shape.height > 0;
+  }));
+  const { visibleText } = await visibleTargetState(button);
+  return { passed: glyph && !visibleText.trim(), glyph, visibleText };
 }
 export async function diagnoseReview({ page, manifest, report, out }) {
   const session = manifest.sessions.find(item => item.id === manifest.screens.review.sessionId);
@@ -338,6 +352,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       await scrollColumn(pane);
     }
     const button = pane.getByRole('button', { name: `Resume ${agent.label}`, exact: true });
+    if (expected && await button.count() === 1) await button.scrollIntoViewIfNeeded();
     const name = `resume-${expected ? 'available' : 'unavailable'}-${mode.toLowerCase()}-${viewport.width}`;
     const context = { screen: mode.toLowerCase(), viewport: `${viewport.width}x${viewport.height}`, agentId: agent.id };
     const measure = () => resumeActionState(pane, button, expected, viewport);
@@ -570,6 +585,15 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     await viewMode(page, 'Focus');
     await page.locator(`.tree-row[data-agent-id=${JSON.stringify(manifest.screens.focus.agentId)}]`).click();
     const focused = paneFor(page, normal);
+    if (viewport.width === 800) {
+      const picker = page.getByRole('combobox', { name: 'Focused terminal', exact: true });
+      const reviewAgent = session.agents.find(agent => agent.id === manifest.screens.review.agentId);
+      await focused.waitFor({ state: 'visible' });
+      await picker.selectOption(reviewAgent.id);
+      await paneFor(page, reviewAgent).waitFor({ state: 'visible' });
+      await picker.selectOption(normal.id);
+      await focused.waitFor({ state: 'visible' });
+    }
     await showChat(focused);
     await focused.locator('[aria-label="Markdown table"] table').first().waitFor();
     await focused.locator('[aria-label="Markdown table"] table').first().scrollIntoViewIfNeeded();

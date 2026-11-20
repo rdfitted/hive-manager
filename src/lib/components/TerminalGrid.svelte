@@ -182,11 +182,6 @@
   const panes = $derived([...queenPanes, ...workerPanes]);
   let maximizedTerminalId = $derived($layout.maximizedTerminalId);
   let focusMode = $derived($layout.sessionViewMode === 'focus');
-  let focusedPaneId = $derived(
-    scratchPanes.some((pane) => pane.id === focusedScratchId) ? focusedScratchId
-      : agents.some((agent) => agent.id === focusedAgentId) ? focusedAgentId
-      : agentPanes[0]?.id ?? scratchPanes[0]?.id ?? null
-  );
   // The maximize id is global; only honour it when it names one of this grid's panes,
   // so a pooled grid never collapses because another session maximized something.
   let gridMaximizedId = $derived(
@@ -196,9 +191,16 @@
   );
   // Focus reuses the maximize geometry, never the global maximize state or a filtered
   // pane list. Hidden panes retain their Terminal instances and live scrollback.
-  let localMaximizedId = $derived(focusMode ? focusedPaneId : gridMaximizedId);
-  const fullStage = $derived(localMaximizedId !== null);
-  const queenFullStage = $derived(queenPanes.some(pane => pane.id === localMaximizedId));
+  function displayedPaneId() {
+    if (!focusMode) return gridMaximizedId;
+    const scratchId = focusedScratchId;
+    if (scratchPanes.some(pane => pane.id === scratchId)) return scratchId;
+    const agentId = focusedAgentId;
+    if (agents.some(agent => agent.id === agentId)) return agentId;
+    return agentPanes[0]?.id ?? scratchPanes[0]?.id ?? null;
+  }
+  const fullStage = $derived(displayedPaneId() !== null);
+  const queenFullStage = $derived(queenPanes.some(pane => pane.id === displayedPaneId()));
 
   $effect.pre(() => {
     if (fullStage) {
@@ -312,7 +314,7 @@
   }
 
   function isPaneFocused(pane: TerminalPane) {
-    if (focusMode) return pane.id === localMaximizedId;
+    if (focusMode) return pane.id === displayedPaneId();
     return pane.kind === 'scratch'
       ? pane.id === focusedScratchId
       : focusedScratchId === null && pane.id === focusedAgentId;
@@ -329,7 +331,7 @@
       focusMode ||
       !visible ||
       event.key !== 'Escape' ||
-      !localMaximizedId ||
+      !displayedPaneId() ||
       event.defaultPrevented ||
       document.querySelector('[aria-modal="true"]') !== null
     ) return;
@@ -461,7 +463,7 @@
         <span class="sr-only">Focused terminal</span>
         <select
           class="lattice-input"
-          value={localMaximizedId ?? ''}
+          value={displayedPaneId() ?? ''}
           onchange={(event) => {
             const pane = panes.find((candidate) => candidate.id === event.currentTarget.value);
             if (pane) focusPane(pane);
@@ -552,7 +554,7 @@
       {@const quiet = pane.kind === 'agent' && !showAttention && isQuiet(pane.agent)}
       {@const collapsible = pane.kind === 'agent' && !queen && !gridComposer && !fullStage && !showAttention}
       {@const collapsed = collapsible && (collapseOverrides[pane.id] ?? quiet)}
-      {@const eclipsed = fullStage && pane.id !== localMaximizedId}
+      {@const eclipsed = fullStage && pane.id !== displayedPaneId()}
       {@const paneVisible = visible && !eclipsed && !collapsed}
       {@const gridAttention = !focusMode && visible && showAttention && pane.kind === 'agent'
         && (!queen || chatEligible || startupExitCode(pane.agent) !== null || !!$flushState[flushKey(session.id, pane.id)])}
@@ -561,7 +563,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
       <div
         class={`terminal-item lattice-panel${focused ? ' lattice-panel--active' : ''}`}
-        class:maximized={pane.id === localMaximizedId}
+        class:maximized={pane.id === displayedPaneId()}
         class:hidden-by-maximize={eclipsed}
         class:queen-column={queen}
         class:attention-column={!focusMode && showAttention}
@@ -665,11 +667,11 @@
               <button
                 type="button"
                 class="pane-control lattice-btn lattice-btn--ghost lattice-btn--icon"
-                aria-label={pane.id === localMaximizedId ? `Restore ${pane.title}` : `Maximize ${pane.title}`}
-                title={pane.id === localMaximizedId ? 'Restore terminal (Esc)' : 'Maximize terminal'}
+                aria-label={pane.id === displayedPaneId() ? `Restore ${pane.title}` : `Maximize ${pane.title}`}
+                title={pane.id === displayedPaneId() ? 'Restore terminal (Esc)' : 'Maximize terminal'}
                 onclick={(event) => toggleMaximized(event, pane)}
               >
-                {#if pane.id === localMaximizedId}
+                {#if pane.id === displayedPaneId()}
                   <ArrowsIn size={13} weight="light" />
                 {:else}
                   <ArrowsOut size={13} weight="light" />
@@ -678,7 +680,7 @@
             {/if}
           </div>
         </div>
-        {#if focusMode && visible && pane.kind === 'agent' && (pane.id === localMaximizedId || chatEligible || startupExitCode(pane.agent) !== null)}
+        {#if focusMode && visible && pane.kind === 'agent' && (pane.id === displayedPaneId() || chatEligible || startupExitCode(pane.agent) !== null)}
           <div class="focused-agent-info">
             <AgentActivityLine agentId={pane.id} />
             <AttentionCard sessionId={session.id} agent={pane.agent} {hasTerminal} {flushState} chatAvailable={chatEligible}
@@ -709,7 +711,7 @@
                     isAgent={pane.kind === 'agent'}
                     isFocused={paneVisible && focused && terminalInputEnabled && (!chatAvailable || terminalFocusId === pane.id)}
                     isVisible={paneVisible}
-                    layoutRevision={localMaximizedId}
+                    layoutRevision={displayedPaneId()}
                     onLastLine={pane.kind === 'agent' ? (line) => { lastLines[pane.id] = line; } : undefined}
                     onReady={pane.kind === 'scratch' ? () => markTerminalReady(pane.id) : undefined}
                     onStatusChange={pane.kind === 'scratch' ? (status) => handlePaneStatus(pane, status) : undefined}
