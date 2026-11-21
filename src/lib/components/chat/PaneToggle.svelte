@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { ChatCircle, ListBullets, SquareSplitVertical, TerminalWindow } from 'phosphor-svelte';
   import IconButton from '../ui/IconButton.svelte';
   import type { PaneMode } from './paneMode';
 
@@ -12,15 +11,20 @@
 </script>
 
 <div class="pane-toggle lattice-forced-colors-boundary" role="group" aria-label="Agent pane">
-  <IconButton type="button" label="Chat" tooltip="Chat" icon={ChatCircle} size="sm" pressed={mode === 'chat'} onclick={(event) => select(event, 'chat')} />
+  <IconButton type="button" label="Chat" tooltip="Chat" icon="chat" size="xs" pressed={mode === 'chat'} onclick={(event) => select(event, 'chat')} />
   {#if hasTerminal}
-    <IconButton type="button" label="Split" tooltip="Chat with terminal below" icon={SquareSplitVertical} size="sm" pressed={mode === 'split'} onclick={(event) => select(event, 'split')} />
-    <IconButton type="button" label="Terminal" tooltip="Terminal" icon={TerminalWindow} size="sm" pressed={mode === 'terminal'} onclick={(event) => select(event, 'terminal')} />
+    <IconButton type="button" label="Split" tooltip="Chat with terminal below" icon="split" size="xs" pressed={mode === 'split'} onclick={(event) => select(event, 'split')} />
+    <IconButton type="button" label="Terminal" tooltip="Terminal" icon="term" size="xs" pressed={mode === 'terminal'} onclick={(event) => select(event, 'terminal')} />
   {:else}
-    <IconButton type="button" label="Raw event log" tooltip="Raw event log" icon={ListBullets} size="sm" pressed={mode === 'raw'} onclick={(event) => select(event, 'raw')} />
+    <IconButton type="button" label="Raw event log" tooltip="Raw event log" icon="log" size="xs" pressed={mode === 'raw'} onclick={(event) => select(event, 'raw')} />
   {/if}
 </div>
 
 <style>
-  .pane-toggle { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: var(--space-1); border-radius: var(--radius-full); background: var(--track); }
+  /* Chat, Split and Terminal share one track; the pressed view takes the strong glass. */
+  .pane-toggle { display: inline-flex; flex: none; padding: 2px; border-radius: var(--control-radius); background: var(--wash-strong); }
+  .pane-toggle :global(.lattice-icon-button) { width: 32px; height: 22px; border-radius: 8px; color: var(--ink-dim); }
+  .pane-toggle :global(.lattice-icon-button:hover:not(:disabled)) { background: transparent; color: var(--ink); }
+  .pane-toggle :global(.lattice-icon-button[aria-pressed='true']) { border-color: transparent; background: var(--glass-strong); color: var(--ink); }
+  @media (forced-colors: active) { .pane-toggle :global(.lattice-icon-button[aria-pressed='true']) { border-color: Highlight; } }
 </style>

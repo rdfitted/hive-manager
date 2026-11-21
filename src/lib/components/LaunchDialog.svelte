@@ -714,7 +714,7 @@
     {#if presentation === 'inline'}
       <div data-launch-owned class="launch-lockup">
         <span data-launch-owned aria-hidden="true"><HiveMark title="Hive" size={58} /></span>
-        <h1 data-launch-owned id="launch-dialog-title" class="launch-title">Hive Manager</h1>
+        <h1 data-launch-owned id="launch-dialog-title" class="launch-title">Hive<span data-launch-owned class="launch-title-rest">{' '}Manager</span></h1>
       </div>
     {:else}
       <h2 data-launch-owned id="launch-dialog-title">Launch New Session</h2>

@@ -199,64 +199,71 @@
 </div>
 
 <style>
-    .session-overview {
-        display: flex;
-        flex-direction: column;
-        height: 100%;
-        background: var(--canvas);
-        color: var(--text-primary);
-    }
+  .session-overview {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      color: var(--ink);
+  }
 
-    main {
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-    }
+  main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-3);
+      min-height: 0;
+  }
 
-    .session-not-found {
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        background: var(--canvas);
-        color: var(--text-primary);
-        text-align: center;
-        padding: 2rem;
-    }
+  .session-not-found {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--ink);
+      text-align: center;
+      padding: 2rem;
+  }
 
-    .session-not-found h2 {
-        color: var(--status-error);
-        margin-bottom: 1rem;
-    }
+  .session-not-found h2 {
+      color: var(--status-error);
+      margin-bottom: 1rem;
+  }
 
-    .session-not-found p {
-        color: var(--text-muted);
-        margin-bottom: 0.5rem;
-    }
+  .session-not-found p {
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+  }
 
-    .session-ops-band { flex: 0 0 auto; min-width: 0; }
+  .session-ops-band { flex: 0 0 auto; min-width: 0; }
 
-    .terminal-section {
-        flex: 1;
-        min-height: 0;
-        display: flex;
-        flex-direction: column;
-    }
+  /* The stage is not a card: panes sit straight on the canvas. */
+  .terminal-section {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      padding: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+  }
 
-    .terminal-wrapper {
-        flex: 1;
-        overflow: hidden;
-        position: relative;
-    }
+  .terminal-wrapper {
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+  }
 
-    .terminal-panel {
-        height: 100%;
-    }
+  .terminal-panel {
+      height: 100%;
+  }
 
-    .terminal-panel.hidden {
-        display: none;
-    }
+  .terminal-panel.hidden {
+      display: none;
+  }
 
+  @media (forced-colors: active) {
+      .terminal-section { border: 0 !important; }
+  }
 </style>

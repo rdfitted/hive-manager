@@ -36,6 +36,8 @@ export interface LayoutState {
   agentsCollapsed: boolean;
   maximizedTerminalId: string | null;
   sessionViewMode: 'focus' | 'grid';
+  /** The designed default composition this layout has adopted. */
+  composition: number;
 }
 
 const STORAGE_KEY = 'hive-manager-layout';
@@ -45,19 +47,28 @@ export const LEFT_WIDTH_MAX = 420;
 export const RIGHT_WIDTH_MIN = 260;
 export const RIGHT_WIDTH_MAX = 560;
 export const COLLAPSED_PANEL_WIDTH = 0;
-export const SESSION_RAIL_WIDTH = 56;
+// 20px window inset plus the 56px glass rail.
+export const SESSION_RAIL_WIDTH = 76;
+
+/**
+ * Bump when the designed resting view changes. A layout saved under an older
+ * composition adopts the new one once; later choices persist as usual.
+ * 2 (0.73.1): the stage with the session rail and a closed inspector.
+ */
+export const LAYOUT_COMPOSITION = 2;
 
 const defaultLayout: LayoutState = {
-  leftCollapsed: false,
+  leftCollapsed: true,
   leftWidth: 250,
-  rightCollapsed: false,
+  rightCollapsed: true,
   rightWidth: 320,
   rightTab: 'overview',
   sessionsCollapsed: false,
   recentCollapsed: true,
   agentsCollapsed: false,
   maximizedTerminalId: null,
-  sessionViewMode: 'focus',
+  sessionViewMode: 'grid',
+  composition: LAYOUT_COMPOSITION,
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -70,10 +81,13 @@ function loadInitial(): LayoutState {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (!stored) return defaultLayout;
     const parsed = JSON.parse(stored) as Partial<LayoutState>;
+    const adopt = parsed.composition !== LAYOUT_COMPOSITION;
     return {
       ...defaultLayout,
       ...parsed,
-      sessionViewMode: parsed.sessionViewMode === 'grid' ? 'grid' : 'focus',
+      ...(adopt ? { leftCollapsed: true, rightCollapsed: true } : {}),
+      sessionViewMode: !adopt && parsed.sessionViewMode === 'focus' ? 'focus' : 'grid',
+      composition: LAYOUT_COMPOSITION,
       rightTab: migrateRightTab(parsed.rightTab),
       leftWidth: clamp(parsed.leftWidth ?? defaultLayout.leftWidth, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX),
       rightWidth: clamp(parsed.rightWidth ?? defaultLayout.rightWidth, RIGHT_WIDTH_MIN, RIGHT_WIDTH_MAX),

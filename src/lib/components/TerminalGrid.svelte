@@ -1,17 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onDestroy, tick, untrack } from 'svelte';
-  import {
-    ArrowsIn,
-    ArrowsOut,
-    ArrowUp,
-    Check,
-    Circle,
-    Hourglass,
-    Play,
-    Plus,
-    X,
-  } from 'phosphor-svelte';
+  import { Play, Plus, X } from 'phosphor-svelte';
 
   import { layout } from '$lib/stores/layout';
   import { agentEvents } from '$lib/stores/agentEvents';
@@ -37,6 +27,7 @@
   import TerminalStatusLine from './chat/TerminalStatusLine.svelte';
   import type { PaneMode } from './chat/paneMode';
   import { protocolAttention } from './chat/transcript';
+  import { toolbarFacts } from './composer/toolbarFacts';
   import CommandBar, { type GridComposerRoute } from './opswall/CommandBar.svelte';
 
   interface Props {
@@ -457,52 +448,6 @@
 <svelte:window onkeydown={restoreMaximizedOnEscape} />
 
 <div class="terminal-workspace" bind:this={workspace}>
-  <div class="terminal-toolbar">
-    {#if focusMode && panes.length > 0}
-      <label class="pane-picker">
-        <span class="sr-only">Focused terminal</span>
-        <select
-          class="lattice-input"
-          value={displayedPaneId() ?? ''}
-          onchange={(event) => {
-            const pane = panes.find((candidate) => candidate.id === event.currentTarget.value);
-            if (pane) focusPane(pane);
-          }}
-        >
-          {#each panes as pane (pane.id)}
-            <option value={pane.id}>{pane.title}{pane.kind === 'scratch' ? ' (scratch)' : ''}</option>
-          {/each}
-        </select>
-      </label>
-    {:else}
-      <span class="toolbar-label">Terminals</span>
-    {/if}
-    <div class="scratch-controls">
-      <label class="shell-picker">
-        <span class="sr-only">Scratch terminal shell</span>
-        <select class="lattice-input" bind:value={selectedShell} disabled={!scratchSessionAvailable || openingScratch}>
-          {#if isWindows}
-            <option value="powershell">PowerShell</option>
-            <option value="cmd">Command Prompt</option>
-          {:else}
-            <option value="login">Login Shell</option>
-          {/if}
-        </select>
-      </label>
-      <IconButton
-        type="button"
-        class="open-terminal-button"
-        label={openingScratch ? 'Opening…' : 'Open Terminal'}
-        tooltip={openingScratch ? 'Opening…' : 'Open Terminal'}
-        icon={Plus}
-        size="sm"
-        aria-busy={openingScratch}
-        disabled={!scratchSessionAvailable || openingScratch}
-        onclick={openScratchTerminal}
-      />
-    </div>
-  </div>
-
   {#if scratchError}
     <div class="scratch-error status-badge status-error" role="alert">Could not update scratch terminal: {scratchError}</div>
   {/if}
@@ -518,6 +463,54 @@
       {#each queenPanes as pane (pane.id)}
         {@render paneCard(pane)}
       {/each}
+    </div>
+    <!-- The stack head sits above the workers, so the Queen keeps the full stage height. -->
+    <div class="terminal-toolbar">
+      {#if focusMode && panes.length > 0}
+        <label class="pane-picker">
+          <span class="sr-only">Focused terminal</span>
+          <select
+            class="lattice-input"
+            value={displayedPaneId() ?? ''}
+            onchange={(event) => {
+              const pane = panes.find((candidate) => candidate.id === event.currentTarget.value);
+              if (pane) focusPane(pane);
+            }}
+          >
+            {#each panes as pane (pane.id)}
+              <option value={pane.id}>{pane.title}{pane.kind === 'scratch' ? ' (scratch)' : ''}</option>
+            {/each}
+          </select>
+        </label>
+      {:else if workerPanes.length > 0}
+        <span class="toolbar-label">Workers <small>{workerPanes.length}</small></span>
+      {:else}
+        <span class="toolbar-label">Terminals</span>
+      {/if}
+      <div class="scratch-controls">
+        <label class="shell-picker">
+          <span class="sr-only">Scratch terminal shell</span>
+          <select class="lattice-input" bind:value={selectedShell} disabled={!scratchSessionAvailable || openingScratch}>
+            {#if isWindows}
+              <option value="powershell">PowerShell</option>
+              <option value="cmd">Command Prompt</option>
+            {:else}
+              <option value="login">Login Shell</option>
+            {/if}
+          </select>
+        </label>
+        <IconButton
+          type="button"
+          class="open-terminal-button"
+          label={openingScratch ? 'Opening…' : 'Open Terminal'}
+          tooltip={openingScratch ? 'Opening…' : 'Open Terminal'}
+          icon={Plus}
+          size="sm"
+          aria-busy={openingScratch}
+          disabled={!scratchSessionAvailable || openingScratch}
+          onclick={openScratchTerminal}
+        />
+      </div>
     </div>
     <div class="worker-viewport lattice-scroll-content" bind:this={workerViewport} hidden={workerPanes.length === 0 || queenFullStage}>
       {#each workerPanes as pane (pane.id)}
@@ -555,6 +548,7 @@
       {@const collapsible = pane.kind === 'agent' && !queen && !gridComposer && !fullStage && !showAttention}
       {@const collapsed = collapsible && (collapseOverrides[pane.id] ?? quiet)}
       {@const eclipsed = fullStage && pane.id !== displayedPaneId()}
+      {@const footTools = !focusMode && pane.kind === 'agent' && !queen && !collapsed}
       {@const paneVisible = visible && !eclipsed && !collapsed}
       {@const gridAttention = !focusMode && visible && showAttention && pane.kind === 'agent'
         && (!queen || chatEligible || startupExitCode(pane.agent) !== null || !!$flushState[flushKey(session.id, pane.id)])}
@@ -569,6 +563,7 @@
         class:attention-column={!focusMode && showAttention}
         class:quiet-column={!focusMode && quiet}
         class:collapsed
+        class:tall-card={pane.kind === 'scratch' || (footTools && (mode !== 'chat' || showAttention))}
         class:resource-match={!focusMode && resourceFilter !== null && pane.kind === 'agent' && (resourceFilter === 'attention' ? attentionSeats.has(pane.id) : resourceFilter === 'stale' ? staleSeats.has(pane.id) : serdeEnumVariantName(pane.agent.status) === 'WaitingForInput')}
         data-agent-id={pane.kind === 'agent' ? pane.id : undefined}
         inert={eclipsed}
@@ -581,6 +576,11 @@
           class="terminal-header"
           style:--session-color={session.color || 'transparent'}
         >
+          {#if pane.kind === 'agent'}
+            {@const dotStatus = serdeEnumVariantName(pane.agent.status)}
+            <span class="pane-dot" aria-hidden="true"
+              data-tone={showAttention ? 'wait' : dotStatus === 'Error' ? 'err' : dotStatus === 'Running' ? 'run' : dotStatus === 'Completed' ? 'ok' : 'idle'}></span>
+          {/if}
           <button
             type="button"
             class="terminal-pane-focus lattice-btn lattice-btn--ghost"
@@ -592,56 +592,46 @@
           >
             <span class="role-label" title={pane.title}>{pane.title}</span>
           </button>
+          {#if pane.kind === 'agent'}
+            {@const facts = toolbarFacts(pane.agent, feed?.capabilities.event_source)}
+            <span class="cli-badge">{pane.agent.config?.cli || 'unknown'}{#if facts.model}{' · '}{facts.model}{/if}{#if facts.effort}{' · '}{facts.effort}{/if}</span>
+          {:else}
+            <span class="cli-badge">{pane.shell}</span>
+            <span class="cwd-label" title={`${pane.cwd} · opened ${pane.createdAt}`}>{pane.cwd}</span>
+          {/if}
           {#if !focusMode && visible && pane.kind === 'agent'}
-            <span class="pane-activity">
-              {#if queen}
-                <AgentActivityLine agentId={pane.id} compact />
-              {:else}
-                <TerminalStatusLine sessionId={session.id} agentId={pane.id} line={lastLines[pane.id]} compact />
-              {/if}
-            </span>
-            {#if showAttention}<span class="attention-chip">Needs attention</span>{/if}
+            {#if !footTools}
+              <span class="pane-activity">
+                {#if queen}
+                  <AgentActivityLine agentId={pane.id} compact />
+                {:else}
+                  <TerminalStatusLine sessionId={session.id} agentId={pane.id} line={lastLines[pane.id]} compact />
+                {/if}
+              </span>
+            {/if}
             {#if deliveryLabel(pane.agent)}<span class="delivery-chip" role="status">{deliveryLabel(pane.agent)}</span>{/if}
           {/if}
           <div class="terminal-meta">
             {#if pane.kind === 'agent'}
               {@const status = serdeEnumVariantName(pane.agent.status)}
-              {@const waiting = typeof pane.agent.status === 'object' && 'WaitingForInput' in pane.agent.status}
               {@const failed = status === 'Error'}
               {@const stopped = typeof pane.agent.status === 'object' && 'WaitingForInput' in pane.agent.status && pane.agent.status.WaitingForInput === 'stopped_by_operator'}
               {@const blockedResume = resumeBlockedReason(session, pane.id)}
               {@const resumableStatus = status === 'Completed' || failed || stopped}
               {#if resumableStatus && blockedResume}
-                <span class="resume-blocked">{blockedResume}</span>
+                <span class="resume-blocked" title={blockedResume}>{blockedResume}</span>
               {:else if resumableStatus && pane.agent.provider_session_id}
                 <IconButton type="button" label={`Resume ${pane.title}`}
                   tooltip={resumingAgents[pane.id] ? 'Resuming…' : 'Resume'}
-                  icon={Play} size="sm" disabled={resumingAgents[pane.id]} aria-busy={resumingAgents[pane.id] ?? false}
+                  icon={Play} size="xs" disabled={resumingAgents[pane.id]} aria-busy={resumingAgents[pane.id] ?? false}
                   onmousedown={(event) => event.preventDefault()}
                   onclick={(event) => resumeAgent(event, pane.id)} />
               {/if}
               {#if resumeErrors[pane.id]}<span role="alert">{resumeErrors[pane.id]}</span>{/if}
-              {#if chatAvailable && !collapsed}<PaneToggle {hasTerminal} {mode} onchange={(next) => changePaneMode(pane.id, next)} />{/if}
-              <span class="cli-badge">{pane.agent.config?.cli || 'unknown'}</span>
+              {#if !focusMode && visible && showAttention}<span class="attention-chip">Needs attention</span>{/if}
               <span class="pane-status-text">{status ?? 'Unknown'}</span>
-              <span
-                class={`status-indicator status-badge ${waiting ? 'status-warning lattice-motion-status-pulse' : failed ? 'status-error pulse-error' : status === 'Running' ? 'status-running' : status === 'Completed' ? 'status-success' : 'status-queued'}`}
-              >
-                {#if status === 'Running'}
-                  █
-                {:else if waiting}
-                  <Hourglass size={10} weight="light" />
-                {:else if status === 'Completed'}
-                  <Check size={10} weight="light" />
-                {:else if failed}
-                  <X size={10} weight="light" />
-                {:else}
-                  <Circle size={10} weight="light" />
-                {/if}
-              </span>
+              {#if chatAvailable && !collapsed && !footTools}<PaneToggle {hasTerminal} {mode} onchange={(next) => changePaneMode(pane.id, next)} />{/if}
             {:else}
-              <span class="cli-badge">{pane.shell}</span>
-              <span class="cwd-label" title={`${pane.cwd} · opened ${pane.createdAt}`}>{pane.cwd}</span>
               <button
                 type="button"
                 class="pane-control lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon"
@@ -654,29 +644,13 @@
               </button>
             {/if}
             {#if !focusMode}
-              {#if pane.kind === 'agent' && !queen}
-                <IconButton label={`Message ${pane.title}`} tooltip="Message worker" icon={ArrowUp} size="sm"
-                  onclick={(event) => messageWorker(event, pane)} />
-              {/if}
+              {#if !footTools}{@render paneTools(pane)}{/if}
               {#if collapsible}
-                <IconButton label={`${collapsed ? 'Expand' : 'Collapse'} ${pane.title}`}
-                  tooltip={collapsed ? 'Expand worker' : 'Collapse worker'} icon={collapsed ? ArrowsOut : ArrowsIn}
-                  size="sm" aria-expanded={!collapsed} aria-controls={`pane-body-${pane.id}`}
+                <IconButton class="pane-chevron" label={`${collapsed ? 'Expand' : 'Collapse'} ${pane.title}`}
+                  tooltip={collapsed ? 'Expand worker' : 'Collapse worker'} icon="chevron"
+                  size="xs" aria-expanded={!collapsed} aria-controls={`pane-body-${pane.id}`}
                   onclick={(event) => { event.stopPropagation(); collapseOverrides[pane.id] = !collapsed; }} />
               {/if}
-              <button
-                type="button"
-                class="pane-control lattice-btn lattice-btn--ghost lattice-btn--icon"
-                aria-label={pane.id === displayedPaneId() ? `Restore ${pane.title}` : `Maximize ${pane.title}`}
-                title={pane.id === displayedPaneId() ? 'Restore terminal (Esc)' : 'Maximize terminal'}
-                onclick={(event) => toggleMaximized(event, pane)}
-              >
-                {#if pane.id === displayedPaneId()}
-                  <ArrowsIn size={13} weight="light" />
-                {:else}
-                  <ArrowsOut size={13} weight="light" />
-                {/if}
-              </button>
             {/if}
           </div>
         </div>
@@ -751,7 +725,29 @@
             {/snippet}
           </AgentPaneBody>
         </div>
+        {#if footTools && pane.kind === 'agent'}
+          <div class="worker-foot">
+            <span class="pane-activity tty">
+              {#if visible}
+                <TerminalStatusLine sessionId={session.id} agentId={pane.id} line={lastLines[pane.id]} compact />
+              {/if}
+            </span>
+            {#if chatAvailable}<PaneToggle {hasTerminal} {mode} onchange={(next) => changePaneMode(pane.id, next)} />{/if}
+            {@render paneTools(pane)}
+          </div>
+        {/if}
       </div>
+{/snippet}
+
+{#snippet paneTools(pane: TerminalPane)}
+  {@const shown = pane.id === displayedPaneId()}
+  {#if pane.kind === 'agent' && !isQueen(pane)}
+    <IconButton label={`Message ${pane.title}`} tooltip="Message this worker" icon="chat" size="xs"
+      onclick={(event) => messageWorker(event, pane)} />
+  {/if}
+  <IconButton class="pane-control" label={shown ? `Restore ${pane.title}` : `Maximize ${pane.title}`}
+    tooltip={shown ? 'Restore pane' : 'Open full pane'} shortcut={shown ? 'Esc' : undefined}
+    icon={shown ? 'restore' : 'open'} size="xs" onclick={(event) => toggleMaximized(event, pane)} />
 {/snippet}
 
 <style>
@@ -764,94 +760,90 @@
     min-width: 0;
   }
 
-  .terminal-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 6px 4px 8px;
-  }
-
-  .toolbar-label {
-    color: var(--text-muted);
-    font-size: 10px;
-    font-weight: 700;
-  }
-
-  .scratch-controls {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .shell-picker :global(.lattice-input), .pane-picker :global(.lattice-input) {
-    height: 28px;
-    padding: 0 24px 0 8px;
-    font-size: 10px;
-  }
-
-  .pane-picker {
-    min-width: 0;
-  }
-
-  .pane-picker select {
-    max-width: 100%;
-    text-overflow: ellipsis;
-  }
-
-  .focused-agent-info {
-    flex: 0 0 auto;
-    min-width: 0;
-    padding: var(--space-2) var(--space-3);
-  }
-
-  /* Share the content's grid cell so this bounded overlay never shrinks the composer. */
-  .agent-info {
-    grid-area: 1 / 1;
-    align-self: start;
-    z-index: 1;
-    min-width: 0;
-    min-height: 0;
-    max-height: min(7rem, 35%);
-    overflow: hidden auto;
-    overflow-wrap: anywhere;
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface);
-  }
-
-  .agent-info :global(.attention) { padding: var(--space-2); }
-
-  .shell-picker select:disabled {
-    opacity: 0.5;
-  }
-
-  .scratch-error {
-    margin: 0 4px 6px;
-    font-size: 10px;
-  }
-
+  /* Stage: the Queen holds the left column for the full height; the stack head
+     and the y-scrolling worker stack share the right column. */
   .terminal-grid {
     display: grid;
     flex: 1;
     grid-template-columns: minmax(0, 1.42fr) minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr);
-    grid-template-areas: "queen workers";
-    gap: 12px;
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas: "queen head" "queen workers";
+    gap: 8px 12px;
     width: 100%;
     min-width: 0;
     min-height: 0;
-    padding: 4px;
     overflow: clip;
   }
 
   .terminal-grid.queen-only {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "queen";
+    grid-template-areas: "head" "queen";
   }
   .terminal-grid.workers-only {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "workers";
+    grid-template-areas: "head" "workers";
   }
+  .terminal-grid.empty {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "head" "empty";
+  }
+
+  .terminal-toolbar {
+    grid-area: head;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+    min-height: 32px;
+    padding-left: 4px;
+  }
+
+  .toolbar-label {
+    display: inline-flex;
+    align-items: baseline;
+    flex: none;
+    gap: 10px;
+    color: var(--ink);
+    font: 500 18px/1 var(--font-display);
+  }
+  .toolbar-label small {
+    color: var(--ink-dim);
+    font: 11.5px/1 var(--font-body);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* In a narrow column the shell picker gives way before the stage can overflow. */
+  .scratch-controls {
+    display: flex;
+    align-items: center;
+    flex: 0 1 auto;
+    gap: 4px;
+    min-width: 0;
+    margin-left: auto;
+  }
+  .shell-picker { flex: 0 1 auto; min-width: 0; }
+  .shell-picker select { width: 100%; min-width: 0; text-overflow: ellipsis; }
+
+  .shell-picker :global(.lattice-input), .pane-picker :global(.lattice-input) {
+    height: 26px;
+    min-height: 26px;
+    padding: 0 22px 0 10px;
+    border-color: var(--line-strong);
+    border-radius: 13px;
+    background-color: transparent;
+    color: var(--ink-muted);
+    font-size: 11.5px;
+  }
+  .shell-picker :global(.lattice-input:hover:enabled), .pane-picker :global(.lattice-input:hover:enabled) { border-color: var(--border-control); color: var(--ink); }
+  .pane-picker :global(.lattice-input) { color: var(--ink); }
+
+  .pane-picker { min-width: 0; }
+  .pane-picker select { max-width: 100%; text-overflow: ellipsis; }
+  .shell-picker select:disabled { opacity: 0.5; }
+
+  .scratch-error { margin: 0 0 8px; font-size: var(--text-small); }
+
   .queen-area,
   .worker-viewport {
     display: flex;
@@ -868,121 +860,183 @@
   }
   .queen-area[hidden], .worker-viewport[hidden] { display: none; }
   .queen-area > .terminal-item { flex: 1; }
-  .worker-viewport > .terminal-item { flex: 0 0 clamp(10rem, 55%, 22rem); }
+  /* A worker card is a summary: a few lines of chat, one terminal line, a foot. */
+  .worker-viewport > .terminal-item { flex: 0 0 clamp(11rem, 30%, 14.5rem); }
+  .worker-viewport > .tall-card { flex-basis: clamp(15rem, 48%, 22rem); }
   .worker-viewport > .collapsed { flex-basis: auto; }
   .worker-viewport > .attention-column { order: -1; }
   .has-maximized > .worker-viewport { overflow: clip; }
   .has-maximized .terminal-item.maximized { flex: 1; }
   .terminal-item.hidden-by-maximize { display: none; }
   .terminal-item.resource-match { outline: 2px solid var(--accent); outline-offset: -2px; }
-  @media (forced-colors: active) {
-    .terminal-item.resource-match { outline-color: Highlight; }
-  }
-  .delivery-chip { color: var(--text-muted); font-size: var(--text-micro); }
-  .resume-blocked { max-width: 18rem; color: var(--status-warning); font-size: var(--text-micro); overflow-wrap: anywhere; }
-  .attention-chip { color: var(--status-warning); font-size: var(--text-micro); }
 
-  .terminal-grid.empty {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
+  /* Panes are wells on the canvas with a hairline, not raised cards. */
   .terminal-item {
     display: flex;
     flex-direction: column;
     padding: 0;
     overflow: hidden;
-    background: var(--surface);
+    background: var(--well);
+    border: 1px solid var(--line);
     border-radius: var(--radius-lg);
-    box-shadow: var(--depth-1);
-    transition: box-shadow var(--motion-ui);
+    box-shadow: none;
+    transition: border-color var(--motion-ui), box-shadow var(--motion-ui);
     min-width: 0;
     min-height: 0;
+  }
+  .terminal-item:global(.lattice-panel--active) {
+    background: var(--well);
+    border-color: var(--line-strong);
+  }
+  .terminal-item.attention-column {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent-bg);
   }
 
   .terminal-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    flex: none;
     flex-wrap: wrap;
     min-width: 0;
-    gap: 8px;
-    padding: 6px 10px;
-    background: var(--toolbar);
-    box-shadow: var(--edge-seam);
+    min-height: 36px;
+    gap: 0 9px;
+    padding: 0 8px 0 13px;
     user-select: none;
   }
+  .queen-column > .terminal-header {
+    min-height: 44px;
+    column-gap: 10px;
+    padding: 0 10px 0 16px;
+  }
+
+  .pane-dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ink-dim);
+  }
+  .pane-dot[data-tone='run'] { background: var(--tone-info); box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-info) 18%, transparent); }
+  .pane-dot[data-tone='ok'] { background: var(--tone-ok); }
+  .pane-dot[data-tone='wait'] { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+  .pane-dot[data-tone='err'] { background: var(--tone-err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone-err) 18%, transparent); }
+
+  .terminal-pane-focus {
+    display: flex;
+    flex: 0 1 auto;
+    min-width: 0;
+    min-height: 28px;
+    padding: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+  }
+  .terminal-pane-focus:hover { background: transparent; }
 
   .role-label {
-    flex: 1;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: var(--ink);
+    font: 500 15px/1.25 var(--font-display);
+  }
+  .queen-column .role-label { font-size: 20px; }
+
+  .cli-badge {
+    flex: 0 1000 auto;
+    min-width: 0;
+    overflow: hidden;
+    padding-top: 2px;
+    color: var(--ink-dim);
     font-size: 11px;
-    font-weight: 600;
-    color: var(--text-primary);
+    text-overflow: ellipsis;
+    text-transform: lowercase;
+    white-space: nowrap;
+  }
+  .queen-column .cli-badge { font-size: 11.5px; }
+
+  .pane-activity {
+    flex: 1 1000 0;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .terminal-meta {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
+    flex: 0 1 auto;
     min-width: 0;
-    gap: 6px;
+    min-height: 28px;
+    gap: 4px;
+    margin-left: auto;
   }
+  .terminal-meta :global(.pane-toggle) { margin-inline: 4px 2px; }
 
-  .pane-activity {
-    flex: 1 1 40%;
-    min-width: 0;
-    overflow: hidden;
+  .pane-status-text {
+    padding-inline: 2px 4px;
+    color: var(--ink-muted);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
+  .attention-chip {
+    padding-inline: 2px 4px;
+    color: var(--accent);
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  /* The attention card states the reason; the head keeps one state word. */
+  .attention-chip + .pane-status-text { display: none; }
+  .delivery-chip { color: var(--ink-muted); font-size: 11px; white-space: nowrap; }
+  /* One line in the head; the tooltip carries the whole reason. */
+  .resume-blocked { flex: 0 1 12rem; min-width: 3rem; overflow: hidden; color: var(--status-warning); font-size: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; }
 
-  .terminal-pane-focus {
-    display: flex;
-    flex: 1 1 45%;
-    min-width: 0;
-    padding: 0;
-    color: inherit;
-    text-align: left;
-  }
+  .terminal-header :global(.pane-chevron .glyph) { transition: transform var(--motion-ui); }
+  .terminal-header :global(.pane-chevron[aria-expanded='true'] .glyph) { transform: rotate(90deg); }
 
   .pane-control {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
+    min-height: 24px;
     padding: 0;
-  }
-
-  .cli-badge {
-    font-size: var(--text-micro);
-    padding: 1px 4px;
-    background: var(--surface-raised);
-    border-radius: var(--radius-sm);
-    color: var(--text-muted);
-    text-transform: lowercase;
+    flex-basis: 24px;
   }
 
   .cwd-label {
+    flex: 0 1000 auto;
     max-width: 180px;
     overflow: hidden;
-    color: var(--text-muted);
+    color: var(--ink-dim);
     font-family: var(--font-mono);
     font-size: var(--text-micro);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .status-indicator.status-badge {
-    gap: 0;
-    min-width: 18px;
-    min-height: 18px;
-    justify-content: center;
-    padding: 1px 3px;
-    font-size: 10px;
+  .focused-agent-info {
+    flex: 0 0 auto;
+    min-width: 0;
+    padding: 0 var(--space-4) var(--space-2);
+  }
+
+  /* Share the content's grid cell so this bounded overlay never shrinks the composer. */
+  .agent-info {
+    grid-area: 1 / 1;
+    align-self: start;
+    z-index: 1;
+    min-width: 0;
+    min-height: 0;
+    max-height: min(7rem, 35%);
+    overflow: hidden auto;
+    overflow-wrap: anywhere;
+    padding: 0 0 var(--space-1);
+    background: var(--well);
   }
 
   .terminal-container {
@@ -1012,15 +1066,38 @@
   }
   .worker-chat-attention > .agent-info { align-self: stretch; max-height: none; }
   .worker-chat-attention > :global(.agent-pane-body) { grid-area: 2 / 1; }
-  .pane-status-text { font-size: var(--text-small); color: var(--text-muted); }
+
+  /* One live terminal line and the card's controls. */
+  .worker-foot {
+    display: flex;
+    align-items: center;
+    flex: none;
+    min-width: 0;
+    gap: 4px;
+    padding: 0 8px 9px 13px;
+  }
+  .worker-foot .tty {
+    display: flex;
+    align-items: center;
+    flex: 1 1 0;
+    height: 28px;
+    margin-right: 4px;
+    padding: 0 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgb(0 0 0 / .55);
+  }
+  .worker-foot .tty :global(.terminal-status-line) { flex: 1; }
 
   .empty-state {
+    grid-area: empty;
+    place-self: center;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 4px;
-    color: var(--text-muted);
-    font-size: 11px;
+    color: var(--ink-muted);
+    font-size: var(--text-small);
     text-align: center;
   }
 
@@ -1033,5 +1110,13 @@
     overflow: hidden;
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
+  }
+
+  @media (forced-colors: active) {
+    .terminal-item.resource-match { outline-color: Highlight; }
+    .terminal-item.attention-column { border-color: Highlight !important; box-shadow: none; }
+    .pane-dot { background: CanvasText; box-shadow: none; forced-color-adjust: none; }
+    .pane-dot[data-tone='wait'], .pane-dot[data-tone='err'] { background: Highlight; }
+    .worker-foot .tty { border-color: CanvasText; background: Canvas; }
   }
 </style>

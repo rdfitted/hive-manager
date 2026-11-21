@@ -47,7 +47,13 @@
 {/if}
 
 <style>
-  .attention { padding: var(--space-3) var(--space-4); background: var(--surface); border-radius: var(--radius-md); box-shadow: var(--depth-1); }
-  .reason { margin: 0 0 var(--space-2); color: var(--text-primary); font-size: var(--text-small); }
+  /* The card that owns this notice carries the accent edge; the notice stays plain. */
+  .attention { padding: 2px 13px 8px; }
+  .reason { margin: 0 0 var(--space-2); color: var(--ink); font-size: 13px; line-height: 1.5; }
   .actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+  .actions button { min-height: 24px; padding: 0 11px; border-radius: 12px; font-size: 11.5px; }
+  .actions .lattice-btn--secondary { --lattice-btn-ring: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .actions .lattice-btn--secondary:hover:enabled { --lattice-btn-ring: var(--accent); background: var(--accent); }
+  .actions .lattice-btn--ghost { box-shadow: inset 0 0 0 1px var(--line-strong); color: var(--ink); }
+  .attention p[role='alert'] { margin: var(--space-2) 0 0; color: var(--status-error); font-size: var(--text-small); }
 </style>

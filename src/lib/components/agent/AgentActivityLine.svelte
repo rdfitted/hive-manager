@@ -16,8 +16,8 @@
 </span>
 
 <style>
-  .activity-line { display: flex; gap: 4px; min-width: 0; color: var(--text-muted); font-size: 12px; }
-  .activity-line.compact { font-size: 11px; }
+  .activity-line { display: flex; gap: 4px; min-width: 0; color: var(--ink-muted); font-size: 12px; }
+  .activity-line.compact { font-size: 11.5px; }
   .summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .relative { flex-shrink: 0; white-space: nowrap; }
+  .relative { flex-shrink: 0; color: var(--ink-dim); white-space: nowrap; }
 </style>

@@ -184,19 +184,28 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 8px;
+    padding: 5px 6px;
     cursor: pointer;
     border-radius: var(--radius-md);
     transition: background-color var(--motion-ui);
   }
 
   .tree-row:hover {
-    background: var(--surface-raised);
+    background: var(--wash-strong);
   }
 
   .tree-row.selected {
-    background: var(--accent-tint);
-    color: var(--accent);
+    background: var(--glass-strong);
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+  }
+
+  /* The disclosure is a small glyph, not a full control-height button. */
+  .tree-row > button.lattice-btn--icon {
+    width: 20px;
+    height: 20px;
+    min-height: 20px;
+    flex-basis: 20px;
+    margin-left: -4px;
   }
 
   .tree-row:focus-visible {
@@ -209,13 +218,14 @@
   }
 
   .chevron-spacer {
-    width: 16px;
+    width: 4px;
     flex-shrink: 0;
   }
 
   .agent-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
   .identity { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-  .status-label { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+  /* The name keeps its width; the status word gives way first. */
+  .status-label { flex: 0 1000 auto; min-width: 0; overflow: hidden; color: var(--ink-dim); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
   .dependencies { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 5px; margin-top: 3px; font-size: 11px; }
   .dependency-label { color: var(--text-muted); }
   .dependency-ref, .dependency-text { max-width: 100%; overflow-wrap: anywhere; }
@@ -224,16 +234,16 @@
   .dependency-ref:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 
   .label {
+    flex: 0 1 auto;
+    min-width: 2.5rem;
     font-size: 13px;
-    color: var(--text-primary);
+    color: var(--ink);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
-  .tree-row.selected .label { color: var(--accent); }
-
-  .attention-badge { font-size: 10px; padding: 2px 5px; min-height: 22px; flex-shrink: 0; }
+  .tree-row .attention-badge { --lattice-btn-ring: transparent; min-height: 20px; padding: 0 8px; flex-shrink: 0; border-radius: 10px; background: var(--accent-bg); color: var(--accent); font-size: 10.5px; font-weight: 600; }
 
   .status-dot { width: 7px; height: 7px; border: 1px solid currentColor; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 

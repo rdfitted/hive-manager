@@ -76,7 +76,7 @@
     <span class="message-target" id={targetId} title={`Send to ${targetLabel}`}><span class="visually-hidden">Send to </span><span aria-hidden="true">@</span>{targetLabel}</span>
   {/if}
   <button bind:this={addButton} type="button" class="toolbar-button add-button" aria-label="Add mention or command" title="Add mention or command" aria-haspopup="menu" aria-expanded={menuOpen} disabled={sending} onmousedown={(event) => event.preventDefault()} onclick={toggleMenu} onkeydown={addKeydown}>
-    <Plus size={18} aria-hidden="true" />
+    <Plus size={14} aria-hidden="true" />
   </button>
   {#if accessLabel}<span class="access-label">{accessLabel}</span>{/if}
   <div class="model-facts">
@@ -84,7 +84,7 @@
     {#if effort}<span class="effort">{effort}</span>{/if}
   </div>
   <button type="button" class="toolbar-button send-button" aria-label={sending ? 'Sending message' : 'Send message'} title={sending ? 'Sending message' : 'Send message'} aria-describedby={targetLabel ? targetId : undefined} aria-busy={sending} disabled={!controls.canSend || sending} onmousedown={(event) => event.preventDefault()} onclick={send}>
-    <ArrowUp size={18} weight="bold" aria-hidden="true" />
+    <ArrowUp size={14} weight="bold" aria-hidden="true" />
   </button>
 </div>
 
@@ -98,24 +98,25 @@
 {/if}
 
 <style>
-  .toolbar { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-  .message-target { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-muted); font-size: var(--text-small); }
+  .toolbar { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  /* The target is the one accent chip in the composer. */
+  .message-target { display: inline-flex; align-items: center; min-width: 0; height: 24px; padding: 0 10px; overflow: hidden; border-radius: 12px; background: var(--accent-bg); color: var(--accent); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
   .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .toolbar-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 32px; height: 32px; padding: 0; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: var(--text-primary); cursor: pointer; }
-  .toolbar-button:hover:enabled { background: var(--surface-overlay); }
+  .toolbar-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: var(--radius-full); background: transparent; color: var(--ink-muted); cursor: pointer; transition: background-color var(--motion-ui), color var(--motion-ui); }
+  .toolbar-button:hover:enabled { background: var(--wash-strong); color: var(--ink); }
   .toolbar-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .toolbar-button:disabled { opacity: 0.45; cursor: default; }
-  .access-label { color: var(--status-warning); font-size: var(--text-small); }
-  .model-facts { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: baseline; gap: var(--space-1) var(--space-2); margin-left: auto; min-width: 0; font-family: var(--font-body); font-size: var(--text-small); }
-  .model { overflow-wrap: anywhere; color: var(--text-primary); }
-  .effort { color: var(--text-muted); }
-  .send-button { background: var(--accent); color: var(--on-accent); }
-  .send-button:hover:enabled { background: var(--accent); }
+  .access-label { color: var(--status-warning); font-size: 11px; white-space: nowrap; }
+  .model-facts { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: baseline; gap: 0 var(--space-2); margin-left: auto; min-width: 0; font: 11px/1.3 var(--font-mono); }
+  .model { overflow-wrap: anywhere; color: var(--ink-muted); }
+  .effort { color: var(--ink-dim); }
+  .send-button, .send-button:hover:enabled { background: var(--accent); color: var(--accent-ink); }
   .add-menu { position: fixed; z-index: 200; pointer-events: auto; transform: translateY(-100%); display: flex; flex-direction: column; min-width: 160px; padding: var(--space-1); box-shadow: var(--elev-3); }
   @media (forced-colors: active) {
     .toolbar-button, .add-menu { border: 1px solid ButtonText; }
     .toolbar-button:disabled { color: GrayText; opacity: 1; }
     .toolbar-button:focus-visible { outline-color: Highlight; }
     .send-button { background: ButtonFace; color: ButtonText; }
+    .message-target { border: 1px solid CanvasText; }
   }
 </style>

@@ -14,6 +14,15 @@
   --line: rgba(255, 236, 210, .1);
   --line-strong: rgba(255, 236, 210, .2);
   --ink-muted: #b0a698;
+  /* Warm the shared UI ink and control boundary; contrast is tested per accent. */
+  --ink: #f2ece3;
+  --ink-dim: #8f8578;
+  --text-muted: #b0a698;
+  --border-control: #7d7468;
+  --chat-text: #f2ece3;
+  --chat-text-meta: #b0a698;
+  --state-queued: #b0a698;
+  --state-canceled: #a39a8d;
 }
 
 :root[data-accent="sky"] {
@@ -32,4 +41,12 @@
   --line: rgba(214, 230, 255, .1);
   --line-strong: rgba(214, 230, 255, .2);
   --ink-muted: #a5aebb;
+  --ink: #eef1f5;
+  --ink-dim: #7f8896;
+  --text-muted: #a5aebb;
+  --border-control: #6c7582;
+  --chat-text: #eef1f5;
+  --chat-text-meta: #a5aebb;
+  --state-queued: #a5aebb;
+  --state-canceled: #98a1ae;
 }

@@ -41,30 +41,50 @@
 </nav>
 
 <style>
+  /* Floating glass rail: one tile per session, four cells for its first agents. */
   .sidebar-rail {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: var(--space-2);
+    width: 56px;
     min-height: 0;
-    max-height: 100%;
+    max-height: calc(100% - var(--space-4));
     overflow-y: auto;
-    margin: var(--space-1);
-    padding: var(--space-2) var(--space-1);
+    margin: var(--space-1) 0 0 20px;
+    padding: var(--space-2) 0;
     background: var(--surface);
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius-lg);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-glass);
+    box-shadow: var(--glass-shadow);
   }
-  .session-tile { display: grid; grid-template-columns: repeat(2, var(--space-1)); gap: var(--space-1); }
-  .session-tile-dot { height: var(--space-1); background: var(--border-control); border-radius: var(--radius-full); }
-  .session-tile-dot[data-state='running'] { background: var(--status-running); }
-  .session-tile-dot[data-state='attention'] { background: var(--status-warning); }
-  .session-tile-dot[data-state='completed'] { background: var(--status-success); }
-  .session-tile-dot[data-state='failed'] { background: var(--status-error); }
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .sidebar-rail {
+      background: var(--glass);
+      -webkit-backdrop-filter: var(--glass-blur);
+      backdrop-filter: var(--glass-blur);
+    }
+  }
+  .sidebar-rail :global(.lattice-icon-button) {
+    width: 40px;
+    height: 40px;
+    border-color: var(--line);
+    border-radius: 9px;
+    background: var(--well);
+  }
+  .sidebar-rail :global(.lattice-icon-button:hover:not(:disabled)) { border-color: var(--line-strong); background: var(--well); }
+  .sidebar-rail :global(.lattice-icon-button[aria-pressed='true']) { border-color: var(--ink); background: var(--well); }
+  .sidebar-rail :global(.lattice-icon-button:last-child) { border-style: dashed; border-color: var(--line-strong); background: transparent; }
+  .session-tile { display: grid; grid-template: 1fr 1fr / 1fr 1fr; gap: 2px; width: 30px; height: 30px; }
+  .session-tile-dot { border-radius: 2px; background: color-mix(in srgb, var(--ink) 12%, transparent); }
+  .session-tile-dot[data-state='running'] { background: var(--tone-info); }
+  .session-tile-dot[data-state='attention'] { background: var(--accent); }
+  .session-tile-dot[data-state='completed'] { background: var(--tone-ok); opacity: .7; }
+  .session-tile-dot[data-state='failed'], .session-tile-dot[data-state='error'] { background: var(--tone-err); }
 
   @media (forced-colors: active) {
-    .sidebar-rail { border-color: CanvasText; }
-    .session-tile-dot { background: ButtonText; forced-color-adjust: none; }
+    .sidebar-rail { border-color: CanvasText; background: Canvas; -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+    .session-tile-dot { background: ButtonText; forced-color-adjust: none; opacity: 1; }
     .session-tile-dot[data-state='empty'] { background: GrayText; }
     .session-tile-dot[data-state='attention'] { background: Highlight; }
   }

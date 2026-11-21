@@ -66,11 +66,11 @@
 
 <div class="ops-chrome" class:band>
   {#if lanes.length}
-    <div class="activity-lanes lattice-scroll-content" role="group" aria-label="Agent activity">
+    <div class="activity-lanes" role="group" aria-label="Agent activity" style:--lanes={lanes.length}>
       {#each lanes as agent (agent.id)}
         {@const latest = agent.marks[0]}
         <button type="button" class="activity-lane lattice-btn lattice-btn--ghost"
-          onclick={() => onselect(agent.id)} title={latest?.text} aria-label={`Reveal ${agent.label}`}>
+          onclick={() => onselect(agent.id)} title={latest ? `${agent.label} · ${latest.text}` : agent.label} aria-label={`Reveal ${agent.label}`}>
           <strong>{agent.label}</strong>
           <span class="activity-track" class:hot={attention.has(agent.id)} aria-hidden="true">
             {#each agent.marks as mark (mark.id)}
@@ -81,22 +81,76 @@
       {/each}
     </div>
   {/if}
-  <ResourceStrip attention={attention.size} {waiting} stale={stale.size} {phase} {filter} {onfilter}
-    metrics={band ? { agents: session.agents.length, running, elapsed, nodes, files } : undefined} />
-  <EventTicker {items} {onselect} />
+  {#if band}
+    <ResourceStrip attention={attention.size} {waiting} stale={stale.size} {phase} {filter} {onfilter}
+      metrics={{ agents: session.agents.length, running, elapsed, nodes, files }}>
+      <EventTicker {items} {onselect} />
+    </ResourceStrip>
+  {:else}
+    <ResourceStrip attention={attention.size} {waiting} stale={stale.size} {phase} {filter} {onfilter} />
+    <EventTicker {items} {onselect} />
+  {/if}
 </div>
 
 <style>
   .ops-chrome { flex: 0 0 auto; min-width: 0; padding: 0 var(--space-1) var(--space-1); }
-  .ops-chrome.band { padding: var(--space-2) var(--space-3); background: var(--chrome); border-top: 1px solid var(--line); }
-  .activity-lanes { display: grid; max-height: 6rem; overflow: auto; }
-  .activity-lane { display: grid; grid-template-columns: minmax(4rem, 9rem) minmax(0, 1fr); gap: var(--space-2); justify-items: start; min-height: 1.5rem; padding: 0 var(--space-2); }
-  .activity-lane strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-size: var(--text-micro); }
-  .activity-track { position: relative; width: 100%; height: var(--space-2); background: var(--surface-raised); border: 1px solid var(--line); border-radius: var(--radius-sm); }
-  .activity-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--status-running); }
-  .activity-track.hot .activity-mark { background: var(--accent); }
+  /* Glass band under the stage. It never sits over a live terminal. */
+  .ops-chrome.band {
+    display: grid;
+    gap: 6px;
+    padding: 9px 14px 8px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-glass);
+    box-shadow: 0 10px 30px rgb(0 0 0 / .35);
+  }
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .ops-chrome.band {
+      background: var(--glass);
+      -webkit-backdrop-filter: var(--glass-blur);
+      backdrop-filter: var(--glass-blur);
+    }
+  }
+  /* One thin lane per agent; the bright rule on the right is now. */
+  .activity-lanes {
+    position: relative;
+    display: grid;
+    grid-auto-rows: minmax(2px, 1fr);
+    gap: 2px;
+    height: clamp(24px, calc(var(--lanes, 4) * 6px), 42px);
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+  .activity-lanes::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 98.4%;
+    width: 2px;
+    background: var(--ink);
+    pointer-events: none;
+  }
+  .ops-chrome .activity-lane {
+    position: relative;
+    display: block;
+    width: 100%;
+    min-height: 0;
+    padding: 0;
+    border-radius: 0;
+    background: rgb(255 255 255 / .025);
+  }
+  .ops-chrome .activity-lane:hover { background: var(--wash-strong); }
+  .ops-chrome .activity-lane:focus-visible { outline-offset: -2px; }
+  .activity-lane strong { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .activity-track { position: absolute; inset: 0; }
+  .activity-mark { position: absolute; top: 0; bottom: 0; width: 1.4%; min-width: 4px; border-radius: 1px; background: var(--tone-info); opacity: .85; }
+  .activity-track.hot .activity-mark { background: var(--accent); opacity: 1; }
   @media (forced-colors: active) {
-    .ops-chrome.band, .activity-track { border-color: CanvasText; }
-    .activity-mark, .activity-track.hot .activity-mark { background: Highlight; forced-color-adjust: none; }
+    .ops-chrome.band { border-color: CanvasText; background: Canvas; -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; }
+    .activity-lanes { border-color: CanvasText; }
+    .activity-lanes::after { background: CanvasText; }
+    .activity-mark, .activity-track.hot .activity-mark { background: Highlight; forced-color-adjust: none; opacity: 1; }
   }
 </style>

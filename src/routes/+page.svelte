@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, untrack, tick } from 'svelte';
   import LaunchDialog from '$lib/components/LaunchDialog.svelte';
+  import RecentHives from '$lib/components/launch/RecentHives.svelte';
   import RightPanel from '$lib/components/RightPanel.svelte';
   import ShortcutsOverlay from '$lib/components/ShortcutsOverlay.svelte';
   import UpdateChecker from '$lib/components/UpdateChecker.svelte';
@@ -215,6 +216,7 @@
         on:launchDebate={(event) => launch.launchDebate(event.detail)}
       />
       {#if landingVisible}
+        <RecentHives sessions={$sessions.sessions} onopen={(id) => { launch.close(); sessions.setActiveSession(id); }} />
         <div class="landing-links">
           <button type="button" class="open-recent lattice-btn lattice-btn--ghost" onclick={() => shell.requestStartAction('recent')}>Open recent</button>
           <p class="cta hint">Press <strong>{shortcutLabel('/')}</strong> for keyboard shortcuts</p>
@@ -256,42 +258,52 @@
     flex-direction: column;
     align-items: center;
     justify-content: safe center;
-    gap: var(--space-4);
+    gap: var(--space-5);
     min-height: 0;
-    padding: calc(var(--space-6) + var(--space-2));
+    padding: var(--space-5) calc(var(--space-6) + var(--space-2)) var(--space-6);
     overflow-y: auto;
   }
 
   .landing-links {
-    width: min(100%, calc(var(--space-7) * 10));
-    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-4);
+    width: min(100%, 41.25rem);
   }
 
   .open-recent {
+    min-height: 28px;
+    padding: 0 13px;
+    border-radius: 14px;
     font-size: var(--text-small);
-    color: var(--text-muted);
+    color: var(--ink-muted);
   }
 
   .cta {
     margin: 0;
     font-size: var(--text-base);
-    color: var(--text-muted);
+    color: var(--ink-muted);
   }
 
   .cta strong {
-    color: var(--accent);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-weight: 500;
   }
 
   .cta.hint {
-    margin-top: var(--space-2);
-    font-size: var(--text-small);
-    color: var(--text-disabled);
+    font-size: 11.5px;
+    color: var(--ink-dim);
   }
 
+  /* Stage insets follow the mockup: 16px from the rail, 20px from the window edge. */
   .terminal-area {
     flex: 1;
     position: relative;
-    padding: var(--space-4);
+    min-height: 0;
+    padding: var(--space-1) 20px var(--space-5) var(--space-4);
     overflow: hidden;
   }
 

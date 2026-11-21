@@ -29,32 +29,38 @@
 {/if}
 
 <style>
+  /* A dot leads; the word stays beside it so the state never depends on colour or hover. */
   .session-state {
     display: inline-flex;
     align-items: center;
-    gap: var(--space-1);
+    flex: none;
+    gap: 7px;
+    padding: 4px 2px;
+    color: var(--ink-dim);
+    font-size: 11px;
     white-space: nowrap;
   }
   .session-state-dot {
     flex: none;
-    width: var(--space-2);
-    height: var(--space-2);
+    width: 7px;
+    height: 7px;
     border: 1px solid var(--state-color);
     border-radius: var(--radius-full);
     background: var(--state-color);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--state-color) 18%, transparent);
   }
   .worktree-chip {
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
     min-width: 0;
-    color: var(--ink-muted);
-    font-family: var(--font-mono);
+    color: var(--ink-dim);
+    font: 11px/1 var(--font-mono);
   }
   .worktree-chip :global(svg) { flex: none; pointer-events: none; }
   .worktree-label { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
   @media (forced-colors: active) {
-    .session-state-dot { border-color: CanvasText; }
+    .session-state-dot { border-color: CanvasText; box-shadow: none; }
   }
 </style>

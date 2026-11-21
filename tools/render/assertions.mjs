@@ -10,6 +10,11 @@ const composer = '.composer-wrap[aria-label="Message composer"]';
 const queenComposer = '.terminal-panel:not(.hidden) .queen-column .chat-composer';
 const chatSelector = '.chat-pane[aria-label="Agent chat"]';
 const chatWellByAccent = { honey: 'rgb(6, 5, 4)', sky: 'rgb(4, 5, 6)' };
+// 0.73.1: cream chat ink, an accent Queen card and a glass operator bubble per accent.
+const chatInkByAccent = {
+  honey: { body: 'rgb(242, 236, 227)', accent: 'rgb(229, 185, 124)', tint: 'rgba(229, 185, 124, 0.14)', bubble: 'rgba(36, 32, 27, 0.72)' },
+  sky: { body: 'rgb(238, 241, 245)', accent: 'rgb(92, 193, 255)', tint: 'rgba(92, 193, 255, 0.14)', bubble: 'rgba(28, 33, 41, 0.72)' },
+};
 // Existing shipped selectors, inventoried read-only; no component test hooks added.
 export function paneFor(page, agent) {
   return page.locator('.terminal-panel:not(.hidden) .terminal-item').filter({ has: page.locator(`button[aria-label=${JSON.stringify(`Focus ${agent.label}`)}]`) });
@@ -577,7 +582,9 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
       await page.route('**/agent-feeds', hold);
       try {
         await selectSession(page, session, report);
-        const terminal = page.locator('.terminal-panel:not(.hidden) .xterm-helper-textarea').first();
+        // Grid is the default view: before the roster arrives the Queen pane is already in
+        // Chat with its terminal inert, so take a pane whose terminal is the live layer.
+        const terminal = page.locator('.terminal-panel:not(.hidden) .terminal-container:not([hidden]) .terminal-layer:not([inert]) .xterm-helper-textarea').first();
         await terminal.waitFor({ state: 'attached' });
         await proveTerminalFocus({ page, target: page.locator('.session-button').filter({ hasText: session.name }).first(), terminal, prove });
       } finally { release(); await page.unroute('**/agent-feeds', hold); }
@@ -877,6 +884,7 @@ export async function runChatContrastAssertions({ page, session, manifest, repor
       await body.scrollIntoViewIfNeeded();
       const accent = await page.locator('html').getAttribute('data-accent') ?? 'honey';
       const chatWell = chatWellByAccent[accent];
+      const ink = chatInkByAccent[accent];
       const sample = locator => locator.evaluate(node => {
         const css = getComputedStyle(node);
         return { color: css.color, background: css.backgroundColor, font: css.fontSize, line: css.lineHeight,
@@ -886,18 +894,19 @@ export async function runChatContrastAssertions({ page, session, manifest, repor
       });
       const cases = [
         ['well', chat, css => css.background === chatWell, { 'background-color': 'rgb(244,247,251)' }],
-        ['body', body, css => css.color === 'rgb(244, 247, 251)', { color: 'rgb(7,22,40)' }],
-        ['meta', meta, css => css.color === 'rgb(201, 213, 228)', { color: 'rgb(7,22,40)' }],
+        ['body', body, css => css.color === ink.body, { color: 'rgb(7,22,40)' }],
+        ['meta', meta, css => css.color === ink.accent, { color: 'rgb(7,22,40)' }],
         ['font', body, css => css.font === '13.5px' && Math.abs(parseFloat(css.line) - 20.925) < .01, { 'font-size': '12px' }],
         ['line', body, css => Math.abs(parseFloat(css.line) - 20.925) < .01, { 'line-height': '1' }],
-        ['queen', queen, css => css.text.includes(manifest.chat.queenDirective) && css.background === 'rgba(193, 66, 196, 0.1)' && css.border === 'rgb(193, 66, 196)' && css.outline && css.label === 'Queen', { 'border-top-width': '0px' }],
+        // The card edge is the accent mixed to 55% alpha; Chromium serialises that as color(srgb … / 0.55).
+        ['queen', queen, css => css.text.includes(manifest.chat.queenDirective) && css.background === ink.tint && /\/ 0\.55\)$/.test(css.border) && css.outline && css.label === 'Queen', { 'border-top-width': '0px' }],
         ['warn', chat.locator('.message[aria-label="Agent error"]'), css => css.background === 'rgba(236, 221, 165, 0.1)' && css.border === 'rgb(236, 221, 165)' && css.outline && css.label === 'Error', { 'border-top-width': '0px' }],
-        ['operator', operator, css => css.text.includes(manifest.chat.operatorMessage) && css.background === chatWell && css.borderWidth === '1px' && parseFloat(css.radius) > 0, { 'border-left-width': '0px' }],
+        ['operator', operator, css => css.text.includes(manifest.chat.operatorMessage) && css.background === ink.bubble && css.borderWidth === '1px' && parseFloat(css.radius) > 0, { 'border-left-width': '0px' }],
       ];
       for (const [part, locator, accepts, mutation] of cases) {
         await locator.scrollIntoViewIfNeeded();
         const measure = async () => {
-          const details = { ...await sample(locator), accent, expectedChatWell: chatWell };
+          const details = { ...await sample(locator), accent, expectedChatWell: chatWell, expectedInk: ink };
           return { passed: await locator.isVisible() && accepts(details), details };
         };
         const name = `chat-${part}-${mode.toLowerCase()}-${viewport.width}`;

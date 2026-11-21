@@ -23,6 +23,7 @@ import TitleBar from './TitleBar.svelte';
 import TitleBarDialog from './TitleBarDialog.test.svelte';
 import sessionHeaderSource from '../session/SessionHeader.svelte?raw';
 import { layout } from '$lib/stores/layout';
+import { shell } from '$lib/stores/shell';
 import { ui } from '$lib/stores/ui';
 
 beforeEach(() => {
@@ -41,7 +42,7 @@ describe('TitleBar', () => {
     const view = render(TitleBar);
     const header = within(view.getByRole('banner'));
     expect(header.getByRole('img', { name: 'Hive' })).toBeTruthy();
-    expect(header.getByText('Hive Manager').classList.contains('brand-wordmark')).toBe(true);
+    expect(header.getByText('Hive', { selector: 'span' }).classList.contains('brand-wordmark')).toBe(true);
     expect(header.getByText('example').classList.contains('session-name')).toBe(true);
     expect(view.getByText('Queen')).toBeTruthy();
     for (const [label, action] of [
@@ -91,6 +92,35 @@ describe('TitleBar', () => {
     } finally {
       active.set(original);
     }
+  });
+
+  it('opens the inspector on Changes or Activity, shows the agent crumb only in Focus, and starts a new hive', async () => {
+    const view = render(TitleBar);
+    const changes = view.getByRole('button', { name: 'Show changes' });
+    const activity = view.getByRole('button', { name: 'Show activity' });
+    if (!get(layout).rightCollapsed) layout.toggleRight();
+    await tick();
+    expect([changes, activity].map(button => button.getAttribute('aria-pressed'))).toEqual(['false', 'false']);
+
+    await fireEvent.click(changes);
+    expect(get(layout)).toMatchObject({ rightTab: 'changes', rightCollapsed: false });
+    expect([changes, activity].map(button => button.getAttribute('aria-pressed'))).toEqual(['true', 'false']);
+    await fireEvent.click(activity);
+    expect(get(layout)).toMatchObject({ rightTab: 'activity', rightCollapsed: false });
+    await fireEvent.click(activity);
+    expect(get(layout).rightCollapsed).toBe(true);
+    expect(activity.getAttribute('aria-pressed')).toBe('false');
+
+    // The stage names every pane itself; the crumb belongs to the one-pane Focus view.
+    expect(view.getByText('Queen')).toBeTruthy();
+    layout.setSessionViewMode('grid');
+    await tick();
+    expect(view.queryByText('Queen')).toBeNull();
+
+    const before = get(shell).startAction?.id ?? 0;
+    await fireEvent.click(view.getByRole('button', { name: 'New hive' }));
+    expect(get(shell).startAction).toMatchObject({ action: 'hive' });
+    expect(get(shell).startAction!.id).toBeGreaterThan(before);
   });
 
   it('keeps drag targets on passive surfaces and off every interactive descendant', () => {

@@ -1,7 +1,7 @@
 /* Match only DOM authored by the launch views. Component descendants keep their own styles.
    One specific ownership attribute per selector mirrors Svelte's scoped-style specificity. */
 .launch-inline[data-launch-owned] {
-    width: min(100%, calc(var(--space-7) * 10));
+    width: min(100%, 41.25rem);
     min-width: 0;
   }
 .launch-content[data-launch-owned] {
@@ -12,12 +12,23 @@
     align-items: center;
     justify-content: center;
     gap: var(--space-4);
-    margin-bottom: var(--space-6);
+    margin-bottom: 10px;
   }
 .launch-title[data-launch-owned] {
     margin: 0;
-    font: 600 clamp(2rem, 6vw, 4.25rem)/1 var(--font-display);
-    color: var(--text-primary);
+    font: 600 clamp(2.5rem, 7vw, 4.25rem)/1 var(--font-display);
+    letter-spacing: .03em;
+    color: var(--ink);
+  }
+/* The lockup shows the wordmark; the full product name stays in the heading. */
+.launch-title-rest[data-launch-owned] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 .dialog-content.lattice-modal.launch-dialog[data-launch-owned] {
     border-radius: var(--control-radius);

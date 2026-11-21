@@ -59,7 +59,8 @@
   }
   h1 {
     margin: 0;
-    font-family: var(--font-body);
+    font-family: var(--font-display);
+    font-weight: 500;
     font-size: var(--text-h1);
     font-weight: 700;
   }

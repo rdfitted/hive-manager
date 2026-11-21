@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { Minus, Square, SidebarSimple, MagnifyingGlass, X } from 'phosphor-svelte';
+  import { GitDiff, Minus, Plus, Pulse, Square, SidebarSimple, MagnifyingGlass, X } from 'phosphor-svelte';
+  import { shell } from '$lib/stores/shell';
   import { activeSession, serdeEnumVariantName, sessionDisplayName } from '$lib/stores/sessions';
   import { ui } from '$lib/stores/ui';
   import { layout } from '$lib/stores/layout';
@@ -27,6 +28,8 @@
   ].filter(Boolean).join('\n'));
   const sidebarLabel = $derived(`${$layout.leftCollapsed ? 'Expand' : 'Collapse'} sidebar`);
   const panelLabel = $derived(`${$layout.rightCollapsed ? 'Expand' : 'Collapse'} panel`);
+  const focusView = $derived($layout.sessionViewMode === 'focus');
+  const inspectorTab = $derived($layout.rightCollapsed ? null : $layout.rightTab);
 
   onMount(() => {
     const syncModal = () => {
@@ -97,13 +100,13 @@
       onclick={() => layout.toggleLeft()} aria-expanded={!$layout.leftCollapsed} />
   </div>
   <div class="breadcrumb" data-tauri-drag-region data-window-chrome>
-    <div class="brand-mark" data-tauri-drag-region data-window-chrome><HiveMark title="Hive" size={20} /></div>
-    <span class="brand-wordmark" data-tauri-drag-region data-window-chrome>Hive Manager</span>
+    <div class="brand-mark" data-tauri-drag-region data-window-chrome><HiveMark title="Hive" size={22} /></div>
+    <span class="brand-wordmark" data-tauri-drag-region data-window-chrome>Hive</span>
     {#if $activeSession}
       <span class="session-name" title={sessionDetails ?? undefined} data-tauri-drag-region data-window-chrome>{sessionLabel}</span>
       <SessionHeader session={$activeSession} />
     {/if}
-    {#if focusedAgent}
+    {#if focusedAgent && focusView}
       <span class="separator" data-tauri-drag-region data-window-chrome>/</span>
       <span class="agent-name" data-tauri-drag-region data-window-chrome>{focusedAgent.config.label || focusedAgent.id}</span>
     {/if}
@@ -111,6 +114,10 @@
   <div class="shell-actions" inert={modalOpen}>
     {#if $activeSession}
       <ViewModeSwitch />
+      <IconButton icon={GitDiff} size="sm" label="Show changes" tooltip="Changes"
+        pressed={inspectorTab === 'changes'} onclick={() => layout.activateRightTab('changes')} />
+      <IconButton icon={Pulse} size="sm" label="Show activity" tooltip="Activity"
+        pressed={inspectorTab === 'activity'} onclick={() => layout.activateRightTab('activity')} />
       <PreviewControl />
       <IconButton id="title-bar-panel-toggle" class="panel-toggle" icon={SidebarSimple} size="sm"
         label={`${panelLabel} (${shortcutLabel('J')})`} tooltip={panelLabel} shortcut={shortcutLabel('J')}
@@ -119,6 +126,9 @@
     <IconButton icon={MagnifyingGlass} size="sm"
       label={`Open command palette (${shortcutLabel('Shift+P')})`} tooltip="Open command palette"
       shortcut={shortcutLabel('Shift+P')} onclick={openPalette} />
+    <span class="actions-sep" aria-hidden="true"></span>
+    <IconButton icon={Plus} size="sm" variant="primary" label="New hive" tooltip="New hive"
+      onclick={() => shell.requestStartAction('hive')} />
   </div>
   {#if chrome === 'custom-controls'}
     <div class="window-controls" data-tauri-drag-region data-window-chrome>
@@ -131,16 +141,16 @@
 {#if windowError}<p class="window-error" role="status">{windowError}</p>{/if}
 
 <style>
+  /* Type on the canvas: no chrome slab and no rule under the header. */
   .title-bar {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     flex: 0 0 var(--toolbar-height);
     height: var(--toolbar-height);
     min-width: 0;
-    padding-left: var(--sidebar-inset);
-    background: var(--chrome);
-    border-bottom: 1px solid var(--line);
+    padding-left: var(--space-3);
+    background: transparent;
     color: var(--ink-muted);
     user-select: none;
   }
@@ -155,33 +165,34 @@
   .shell-actions {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
     pointer-events: none;
   }
 
   .shell-actions:not([inert]) :global(button) { pointer-events: auto; }
   .shell-actions[inert] { opacity: 0.5; }
   .shell-actions :global(svg), :global(.window-control svg) { pointer-events: none; }
+  .actions-sep { width: 1px; height: 16px; margin: 0 4px; background: var(--line-strong); }
   .brand-mark :global(svg) { pointer-events: none; }
   .brand-mark { display: flex; }
-  .brand-wordmark { flex: none; white-space: nowrap; color: var(--text-primary); font-family: var(--font-display); font-size: var(--text-h3); font-weight: 600; }
+  .brand-wordmark { flex: none; white-space: nowrap; color: var(--ink); font: 600 22px/1 var(--font-display); letter-spacing: .02em; }
   .breadcrumb :global([data-window-chrome]) { pointer-events: auto; }
   :global(.panel-toggle svg) { transform: scaleX(-1); }
-  .breadcrumb { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; align-self: stretch; font-size: var(--text-small); }
+  .breadcrumb { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; align-self: stretch; padding-left: 2px; font-size: var(--text-small); }
   .session-name, .agent-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .session-name { color: var(--ink-muted); font-family: var(--font-display); font-size: var(--text-base); font-style: italic; }
-  .agent-name { color: var(--ink-muted); }
-  .separator { color: var(--ink-muted); }
+  .session-name { padding-top: 3px; color: var(--ink-muted); font: italic 16px/1.2 var(--font-display); }
+  .agent-name { color: var(--ink-dim); }
+  .separator { color: var(--ink-dim); }
   .traffic-light-space { flex: 0 0 68px; align-self: stretch; }
-  .window-controls { display: flex; height: 100%; }
+  .window-controls { display: flex; height: 100%; margin-left: 4px; }
   .window-controls :global(button) { pointer-events: auto; }
-  .window-controls :global(.window-control) { display: grid; place-items: center; width: 44px; height: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--text-primary); }
-  .window-controls :global(.window-control:hover) { background: var(--toolbar-control); }
+  .window-controls :global(.window-control) { display: grid; place-items: center; width: 44px; height: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--ink-muted); }
+  .window-controls :global(.window-control:hover) { background: var(--wash-strong); color: var(--ink); }
   .window-controls :global(.close-window:hover) { background: var(--danger-tint); color: var(--status-error); }
   .window-controls :global(.window-control) { transition: background-color var(--motion-ui), color var(--motion-ui); }
   .window-controls :global(.window-control:focus-visible) { outline: 2px solid var(--focus); outline-offset: -2px; }
   .window-error { position: fixed; top: var(--toolbar-height); right: 8px; z-index: 113; margin: 0; padding: 8px; background: var(--surface-overlay); color: var(--text-primary); }
 
   @media (max-width: 900px) { .agent-name, .separator { display: none; } }
-  @media (forced-colors: active) { .title-bar { border-bottom-color: CanvasText; } .window-controls :global(.window-control:hover) { background: Highlight; color: HighlightText; } }
+  @media (forced-colors: active) { .title-bar { border-bottom: 1px solid CanvasText; } .actions-sep { background: CanvasText; } .window-controls :global(.window-control:hover) { background: Highlight; color: HighlightText; } }
 </style>

@@ -66,10 +66,10 @@ function rgbLuminance(channels: number[]): number {
   return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
 }
 
-function tintContrast(foreground: string, tint: number[], palette: typeof tokens): number {
+function tintContrast(foreground: string, tint: number[], palette: typeof tokens, alpha = 0.10): number {
   const well = resolveToken('--chat-well', palette);
   const composite = tint.map((channel, index) =>
-    channel * 0.10 + parseInt(well.slice(1 + index * 2, 3 + index * 2), 16) * 0.90);
+    channel * alpha + parseInt(well.slice(1 + index * 2, 3 + index * 2), 16) * (1 - alpha));
   const a = luminance(foreground, palette), b = rgbLuminance(composite);
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 }
@@ -87,11 +87,26 @@ describe.each(palettes)('$name G60 chat text contrast', ({ name, tokens: palette
   it('keeps chat metadata readable on the well', () => {
     expect(contrast('--chat-text-meta', '--chat-well', palette)).toBeGreaterThanOrEqual(4.5);
   });
+  // The Queen card is the accent at the --accent-bg alpha (.14) over the well.
+  const queenTint = () => {
+    const accent = resolveToken('--accent', palette);
+    expect(palette['--accent-bg']).toMatch(/,\s*\.14\)$/);
+    return [1, 3, 5].map(offset => parseInt(accent.slice(offset, offset + 2), 16));
+  };
   it('keeps chat body readable on the composited Queen tint', () => {
-    expect(tintContrast('--chat-text', [193, 66, 196], palette)).toBeGreaterThanOrEqual(4.5);
+    expect(tintContrast('--chat-text', queenTint(), palette, 0.14)).toBeGreaterThanOrEqual(4.5);
   });
   it('keeps chat metadata readable on the composited Queen tint', () => {
-    expect(tintContrast('--chat-text-meta', [193, 66, 196], palette)).toBeGreaterThanOrEqual(4.5);
+    expect(tintContrast('--chat-text-meta', queenTint(), palette, 0.14)).toBeGreaterThanOrEqual(4.5);
+  });
+  it('keeps the accent Queen label readable on the composited Queen tint', () => {
+    expect(tintContrast('--accent', queenTint(), palette, 0.14)).toBeGreaterThanOrEqual(4.5);
+  });
+  it('keeps dim metadata readable on the well, the canvas and both glass fills', () => {
+    for (const surface of ['--chat-well', '--canvas', '--surface', '--surface-raised']) {
+      expect(contrast('--ink-dim', surface, palette), surface).toBeGreaterThanOrEqual(4.5);
+    }
+    expect(contrast('--ink', '--chat-well', palette)).toBeGreaterThanOrEqual(7);
   });
   it('keeps chat body readable on the composited warning tint', () => {
     expect(tintContrast('--chat-text', [236, 221, 165], palette)).toBeGreaterThanOrEqual(4.5);
