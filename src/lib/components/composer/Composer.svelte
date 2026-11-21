@@ -475,7 +475,7 @@
   }
 
   .composer-wrap:focus-within {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent);
   }
 
   .composer-toolbar {

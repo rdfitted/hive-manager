@@ -190,9 +190,9 @@
   /* On the landing the question reads as the line under the lockup. */
   .landing .task-label { margin: 0 0 26px; color: var(--ink-muted); font: italic 19px/1.4 var(--font-display); text-align: center; }
   .composer-input { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-shell); background: var(--input); }
-  .composer-input:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .composer-input:focus-within { border-color: var(--accent); }
   .landing .composer-input { gap: 10px; padding: 16px 16px 12px; border-color: var(--line); border-radius: var(--radius-glass); background: var(--sheen), var(--surface); box-shadow: var(--glass-shadow); transition: border-color var(--motion-ui); }
-  .landing .composer-input:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .landing .composer-input:focus-within { border-color: var(--accent); }
   @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
     .landing .composer-input { background: var(--sheen), var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); }
   }
