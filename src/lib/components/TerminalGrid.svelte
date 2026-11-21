@@ -829,13 +829,13 @@
     height: 26px;
     min-height: 26px;
     padding: 0 22px 0 10px;
-    border-color: var(--line-strong);
+    border-color: var(--line);
     border-radius: 13px;
     background-color: transparent;
     color: var(--ink-muted);
     font-size: 11.5px;
   }
-  .shell-picker :global(.lattice-input:hover:enabled), .pane-picker :global(.lattice-input:hover:enabled) { border-color: var(--border-control); color: var(--ink); }
+  .shell-picker :global(.lattice-input:hover:enabled), .pane-picker :global(.lattice-input:hover:enabled) { border-color: var(--line-strong); color: var(--ink); }
   .pane-picker :global(.lattice-input) { color: var(--ink); }
 
   .pane-picker { min-width: 0; }
@@ -889,7 +889,7 @@
     border-color: var(--line-strong);
   }
   .terminal-item.attention-column {
-    border-color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
     box-shadow: inset 0 0 0 1px var(--accent-bg);
   }
 

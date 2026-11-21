@@ -53,7 +53,7 @@
   .resource-strip .resource-tile { min-height: 20px; padding: 0 6px; margin-inline: -6px 0; border-radius: 10px; color: var(--ink-muted); font-size: 10.5px; }
   .resource-strip .resource-tile:hover:enabled { background: var(--wash-strong); color: var(--ink); }
   .resource-strip .resource-tile.hot { color: var(--accent); font-weight: 600; }
-  .resource-strip .resource-tile[aria-pressed='true'] { background: var(--glass-strong); box-shadow: inset 0 0 0 1px var(--line-strong); color: var(--ink); }
+  .resource-strip .resource-tile[aria-pressed='true'] { background: var(--glass-strong); box-shadow: inset 0 0 0 1px var(--line); color: var(--ink); }
   .resource-strip .resource-tile.hot[aria-pressed='true'] { color: var(--accent); }
   .metric { color: var(--ink-muted); }
   .strip-middle { flex: 1 1 16rem; min-width: 0; }

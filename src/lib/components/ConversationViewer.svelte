@@ -366,7 +366,7 @@
     background: var(--surface);
     color: var(--status-error);
     font-size: 12px;
-    box-shadow: inset 0 0 0 1px var(--status-error);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 32%, transparent);
   }
 
 </style>

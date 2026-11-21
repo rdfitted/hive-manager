@@ -47,13 +47,14 @@
 }
 
 .lattice-btn--secondary {
-  --lattice-btn-ring: var(--border-control);
+  --lattice-btn-ring: var(--edge-control);
   background-color: var(--surface-raised);
+  background-image: var(--sheen);
   color: var(--text-primary);
 }
 
 .lattice-btn--secondary:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
-  --lattice-btn-ring: var(--accent-chrome);
+  --lattice-btn-ring: var(--edge-control-hover);
   background-color: var(--surface-overlay);
 }
 
@@ -69,7 +70,7 @@
 .lattice-btn--danger {
   --lattice-btn-tone: var(--status-error);
   --lattice-btn-tone-rgb: var(--rgb-error);
-  --lattice-btn-ring: var(--status-error);
+  --lattice-btn-ring: color-mix(in srgb, var(--status-error) 32%, transparent);
   color: var(--status-error);
   background-color: var(--danger-tint);
 }
@@ -93,7 +94,7 @@
 .lattice-btn--success {
   --lattice-btn-tone: var(--status-success);
   --lattice-btn-tone-rgb: var(--rgb-success);
-  --lattice-btn-ring: var(--status-success);
+  --lattice-btn-ring: color-mix(in srgb, var(--status-success) 32%, transparent);
   color: var(--status-success);
   background-color: rgba(var(--rgb-success), 0.1);
 }
@@ -106,7 +107,7 @@
 .lattice-btn--warning {
   --lattice-btn-tone: var(--status-warning);
   --lattice-btn-tone-rgb: var(--rgb-warning);
-  --lattice-btn-ring: var(--status-warning);
+  --lattice-btn-ring: color-mix(in srgb, var(--status-warning) 32%, transparent);
   color: var(--status-warning);
   background-color: rgba(var(--rgb-warning), 0.1);
 }
@@ -130,7 +131,7 @@
 
 .lattice-btn.lattice-btn--dashed {
   --lattice-btn-ring: transparent;
-  border: 1px dashed var(--border-control);
+  border: 1px dashed var(--edge-control-hover);
   background-color: transparent;
 }
 
@@ -206,18 +207,20 @@
 
 .lattice-btn--card {
   align-items: flex-start;
-  --lattice-btn-ring: var(--border-control);
+  --lattice-btn-ring: var(--edge-control);
   padding: var(--space-4);
   background-color: var(--chrome);
+  background-image: var(--sheen);
 }
 
 .lattice-btn--card:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
-  --lattice-btn-ring: var(--accent-chrome);
+  --lattice-btn-ring: var(--edge-control-hover);
   background-color: var(--surface-overlay);
 }
 
 .lattice-btn--chip {
-  --lattice-btn-ring: var(--border-control);
+  --lattice-btn-ring: var(--edge-control);
+  background-color: var(--fill-control);
   padding: calc(2px + 1px) calc(var(--space-2) + 1px);
   border-radius: var(--radius-full);
   color: var(--text-muted);
@@ -227,7 +230,7 @@
 
 .lattice-btn--chip:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   color: var(--text-primary);
-  --lattice-btn-ring: var(--accent-chrome);
+  --lattice-btn-ring: var(--edge-control-hover);
 }
 
 .lattice-btn--menu-item.lattice-btn--compact,
@@ -274,7 +277,7 @@
 
 /* Labels and role-controls can share selection/focus without button layout. */
 .lattice-selectable {
-  border: 1px solid var(--border-control);
+  border: 1px solid var(--edge-control);
   border-radius: var(--control-radius);
   cursor: pointer;
   transition:
@@ -286,7 +289,7 @@
 }
 
 .lattice-selectable:hover:where(:not(:disabled):not(:has(:disabled)):not([aria-disabled="true"]):not([aria-busy="true"])) {
-  border-color: var(--accent-chrome);
+  border-color: var(--edge-control-hover);
 }
 
 .lattice-selectable.lattice-selectable--selected,
@@ -294,7 +297,7 @@
 .lattice-selectable[aria-selected="true"],
 .lattice-selectable[aria-checked="true"] {
   color: var(--accent);
-  border-color: var(--border-control);
+  border-color: transparent;
   background-color: var(--accent-tint);
   box-shadow: none;
 }
@@ -310,7 +313,7 @@
   box-sizing: border-box;
   background-color: var(--input);
   color: var(--text-primary);
-  border: 1px solid var(--border-control);
+  border: 1px solid var(--edge-control);
   border-radius: var(--control-radius);
   padding: var(--space-2);
   transition:

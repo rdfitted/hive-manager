@@ -328,7 +328,7 @@
     /* Full-width semantic error banner intentionally remains state-tinted. */
     background: color-mix(in srgb, var(--status-error) 15%, transparent);
     color: var(--status-error);
-    box-shadow: inset 0 0 0 1px var(--status-error);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 32%, transparent);
     border-radius: var(--radius-sm);
     font-size: 13px;
   }

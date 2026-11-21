@@ -175,11 +175,29 @@ describe('shared control boundary styles', () => {
     ['.lattice-btn--secondary', '--lattice-btn-ring'],
     ['.lattice-btn--card', '--lattice-btn-ring'],
     ['.lattice-btn--chip', '--lattice-btn-ring'],
-  ])('uses the control role for the unfocused %s boundary', (selector, property) => {
+  ])('keeps the unfocused %s boundary a soft hairline', (selector, property) => {
     const controls = readFileSync('src/lib/styles/globals/controls.css', 'utf8');
     const rule = controls.split('}').filter((block) => block.includes(`${selector} {`))
       .map((block) => block.slice(block.indexOf(`${selector} {`))).join('\n');
-    expect(rule).toContain(`${property}: ${property === 'border' ? '1px solid ' : ''}var(--border-control);`);
+    expect(rule).toContain(`${property}: ${property === 'border' ? '1px solid ' : ''}var(--edge-control);`);
+    expect(rule).not.toContain('var(--border-control)');
+  });
+});
+
+describe('soft control edges', () => {
+  // Resting controls part from their surface by tone; the 3:1 boundary is the
+  // focus outline, which the role-contrast suite checks on every surface.
+  it('aliases the resting and hover edge to the translucent hairlines', () => {
+    expect(tokens['--edge-control']).toBe('var(--line)');
+    expect(tokens['--edge-control-hover']).toBe('var(--line-strong)');
+  });
+  it.each(palettes)('keeps the $name hairlines translucent', ({ tokens: palette }) => {
+    expect(palette['--line']).toMatch(/,\s*\.1\)$/);
+    expect(palette['--line-strong']).toMatch(/,\s*\.2\)$/);
+  });
+  it('keeps the keyboard focus outline on shared controls', () => {
+    const controls = readFileSync('src/lib/styles/globals/controls.css', 'utf8');
+    expect(controls).toMatch(/\.lattice-input:focus-visible,[^{]*\{\s*outline: 2px solid var\(--focus\);/);
   });
 });
 

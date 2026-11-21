@@ -594,7 +594,7 @@
     border-radius: var(--radius-md);
     font-size: 12px;
     margin-top: 12px;
-    box-shadow: inset 0 0 0 1px var(--status-error);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 32%, transparent);
   }
 
   /* Raw content display (for plans in progress) */

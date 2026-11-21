@@ -606,7 +606,7 @@
     gap: 5px;
     flex: 0 0 auto;
     padding: 2px 6px;
-    box-shadow: inset 0 0 0 1px currentColor;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 30%, transparent);
     border-radius: var(--radius-full);
     font-size: 9px;
     font-weight: 600;

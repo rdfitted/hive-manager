@@ -147,7 +147,7 @@
   .review-view { overflow: auto; padding: 12px; color: var(--text-primary); font-size: var(--text-small); }
   .pickers, label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   .pickers { gap: 10px; }
-  select, textarea, input { max-width: 100%; color: var(--text-primary); background: var(--input); border: 1px solid var(--border-control); border-radius: var(--radius-md); padding: 6px; font: inherit; }
+  select, textarea, input { max-width: 100%; color: var(--text-primary); background: var(--input); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 6px; font: inherit; }
   textarea { resize: vertical; min-height: 52px; }
   .muted, .base { color: var(--text-muted); }
   .base, pre, summary { overflow-wrap: anywhere; }

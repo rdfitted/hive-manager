@@ -54,6 +54,6 @@
   .actions button { min-height: 24px; padding: 0 11px; border-radius: 12px; font-size: 11.5px; }
   .actions .lattice-btn--secondary { --lattice-btn-ring: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 600; }
   .actions .lattice-btn--secondary:hover:enabled { --lattice-btn-ring: var(--accent); background: var(--accent); }
-  .actions .lattice-btn--ghost { box-shadow: inset 0 0 0 1px var(--line-strong); color: var(--ink); }
+  .actions .lattice-btn--ghost { box-shadow: inset 0 0 0 1px var(--line); color: var(--ink); }
   .attention p[role='alert'] { margin: var(--space-2) 0 0; color: var(--status-error); font-size: var(--text-small); }
 </style>

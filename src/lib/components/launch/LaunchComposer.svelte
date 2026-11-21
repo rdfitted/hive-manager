@@ -189,12 +189,12 @@
   .task-label { color: var(--text-primary); font-size: var(--text-base); }
   /* On the landing the question reads as the line under the lockup. */
   .landing .task-label { margin: 0 0 26px; color: var(--ink-muted); font: italic 19px/1.4 var(--font-display); text-align: center; }
-  .composer-input { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; padding: var(--space-3); border: 1px solid var(--border-control); border-radius: var(--radius-shell); background: var(--input); }
-  .composer-input:focus-within { border-color: var(--accent); }
-  .landing .composer-input { gap: 10px; padding: 16px 16px 12px; border-color: var(--line); border-radius: var(--radius-glass); background: var(--surface); box-shadow: var(--glass-shadow); transition: border-color var(--motion-ui); }
-  .landing .composer-input:focus-within { border-color: var(--accent); }
+  .composer-input { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-shell); background: var(--input); }
+  .composer-input:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .landing .composer-input { gap: 10px; padding: 16px 16px 12px; border-color: var(--line); border-radius: var(--radius-glass); background: var(--sheen), var(--surface); box-shadow: var(--glass-shadow); transition: border-color var(--motion-ui); }
+  .landing .composer-input:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
   @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-    .landing .composer-input { background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); }
+    .landing .composer-input { background: var(--sheen), var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); }
   }
   textarea { display: block; box-sizing: border-box; width: 100%; min-height: 12rem; resize: vertical; line-height: 1.6; padding: 0; border: 0; border-radius: 0; background: transparent; }
   .landing textarea { min-height: 4.75rem; color: var(--ink); font-size: 15px; line-height: 1.5; }
@@ -227,7 +227,7 @@
     transition: background-color var(--motion-ui), color var(--motion-ui), border-color var(--motion-ui);
   }
   .mode-pill:hover span { color: var(--ink); }
-  .mode-pill input:checked + span { background: var(--glass-strong); color: var(--ink); border-color: var(--line-strong); font-weight: 600; }
+  .mode-pill input:checked + span { background: var(--glass-strong); color: var(--ink); border-color: var(--line); font-weight: 600; }
   .mode-pill input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 2px; }
   .mode-pill input:disabled + span { opacity: .55; cursor: default; }
   /* Landing: modes lead under a hairline; the setup reads as one quiet line. */

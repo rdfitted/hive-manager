@@ -4,7 +4,7 @@
 
 .lattice-tooltip {
   background-color: var(--surface-overlay);
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   box-shadow: var(--depth-2);
   border-radius: var(--radius-md);
   font-family: var(--font-body);

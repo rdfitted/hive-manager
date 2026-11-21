@@ -99,14 +99,14 @@
     display: grid;
     gap: 6px;
     padding: 9px 14px 8px;
-    background: var(--surface);
+    background: var(--sheen), var(--surface);
     border: 1px solid var(--line);
     border-radius: var(--radius-glass);
     box-shadow: 0 10px 30px rgb(0 0 0 / .35);
   }
   @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
     .ops-chrome.band {
-      background: var(--glass);
+      background: var(--sheen), var(--glass);
       -webkit-backdrop-filter: var(--glass-blur);
       backdrop-filter: var(--glass-blur);
     }

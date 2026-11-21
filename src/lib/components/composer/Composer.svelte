@@ -467,7 +467,7 @@
     position: relative;
     flex: 1;
     min-width: 0;
-    border: 1px solid var(--border-control);
+    border: 1px solid var(--line);
     border-radius: var(--radius-shell);
     background: var(--wash);
     padding: 10px 10px 8px 12px;
@@ -475,7 +475,7 @@
   }
 
   .composer-wrap:focus-within {
-    border-color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
 
   .composer-toolbar {

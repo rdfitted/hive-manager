@@ -196,7 +196,7 @@
 
   .tree-row.selected {
     background: var(--glass-strong);
-    box-shadow: inset 0 0 0 1px var(--line-strong);
+    box-shadow: inset 0 0 0 1px var(--line);
   }
 
   /* The disclosure is a small glyph, not a full control-height button. */
@@ -229,7 +229,7 @@
   .dependencies { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 5px; margin-top: 3px; font-size: 11px; }
   .dependency-label { color: var(--text-muted); }
   .dependency-ref, .dependency-text { max-width: 100%; overflow-wrap: anywhere; }
-  .dependency-ref { font: inherit; color: var(--text-primary); border: 1px solid var(--border-control); border-radius: var(--control-radius); padding: 1px 5px; background: var(--surface); cursor: pointer; text-align: left; }
+  .dependency-ref { font: inherit; color: var(--text-primary); border: 1px solid var(--line); border-radius: var(--control-radius); padding: 1px 5px; background: var(--surface); cursor: pointer; text-align: left; }
   .dependency-ref:hover { text-decoration: underline; }
   .dependency-ref:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 

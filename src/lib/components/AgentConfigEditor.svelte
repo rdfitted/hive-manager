@@ -514,7 +514,7 @@
     gap: 5px;
     max-width: 70%;
     padding: 2px 7px;
-    box-shadow: inset 0 0 0 1px currentColor;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 30%, transparent);
     border-radius: var(--radius-full);
     font-size: 10px;
     font-weight: 600;
