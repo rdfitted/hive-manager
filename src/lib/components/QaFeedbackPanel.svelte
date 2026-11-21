@@ -266,7 +266,7 @@
 
   .verdict-comparison.disagreement,
   .criterion-item.disagreement {
-    box-shadow: inset 0 0 0 1px var(--status-warning);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-warning) 32%, transparent);
   }
 
   .verdict-card {

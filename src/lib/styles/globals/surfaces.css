@@ -4,6 +4,7 @@
 
 .lattice-panel {
   background-color: var(--surface);
+  background-image: var(--sheen);
   padding: var(--space-4);
   border-radius: var(--radius-lg);
   box-shadow: var(--depth-1);
@@ -23,10 +24,12 @@
   border: 0;
   box-shadow: none !important;
   background-color: transparent !important;
+  background-image: none;
 }
 
 .lattice-modal {
   background-color: var(--surface-overlay);
+  background-image: var(--sheen);
   border: 0;
   padding: var(--space-4);
   border-radius: var(--radius-lg);

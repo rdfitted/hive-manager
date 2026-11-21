@@ -134,6 +134,12 @@
   --tone-ok: #a8d5a2;
   --tone-err: #ffaaa0;
   --tone-info: #9fc3e6;
+  /* Soft boundaries: containers part by tone and a faint top-down sheen; a
+     control's edge is a hairline that firms up on hover, never a contrast ring. */
+  --edge-control: var(--line);
+  --edge-control-hover: var(--line-strong);
+  --fill-control: var(--wash);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, .045), rgba(255, 255, 255, 0) 62%);
   --glass-blur: blur(18px) saturate(1.2);
   --glass-shadow: 0 18px 50px rgba(0, 0, 0, .45);
   --radius-glass: 14px;

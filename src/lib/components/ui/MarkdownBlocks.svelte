@@ -70,7 +70,7 @@
   li > ul, li > ol { margin-bottom: 0; }
   li::marker { color: var(--text-muted); }
   blockquote { margin: 1em 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--surface-raised); color: var(--text-muted); white-space: pre-wrap; }
-  hr { margin: var(--space-4) 0; border: 0; height: 1px; background: var(--border); }
+  hr { margin: var(--space-4) 0; border: 0; height: 1px; background: var(--line); }
   .code-block { min-width: 0; margin: 1em 0; border-radius: var(--radius-md); background: var(--input); }
   .language { display: block; padding: var(--space-1) var(--space-3) 0; color: var(--text-muted); font: var(--text-micro) var(--font-mono); }
   pre { box-sizing: border-box; max-width: 100%; margin: 0; padding: var(--space-3); overflow: auto; white-space: pre; overflow-wrap: normal; font: var(--text-small)/1.55 var(--font-mono); }

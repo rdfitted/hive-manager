@@ -413,7 +413,7 @@
     height: 34px;
     padding: 0 var(--space-3);
     color: var(--text-muted);
-    box-shadow: inset 0 0 0 1px var(--border-control);
+    box-shadow: inset 0 0 0 1px var(--line);
   }
 
   .search-field:focus-within {

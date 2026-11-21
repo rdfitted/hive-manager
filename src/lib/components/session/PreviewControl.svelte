@@ -356,7 +356,7 @@
         z-index: 1;
         max-width: calc(100vw - 2 * var(--space-2));
         padding: var(--space-3);
-        border: 1px solid var(--line-strong);
+        border: 1px solid var(--line);
         border-radius: var(--radius-lg);
         background: var(--surface-overlay);
         box-shadow: var(--elev-2);

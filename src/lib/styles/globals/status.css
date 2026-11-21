@@ -17,38 +17,32 @@
 
 .status-success {
   color: var(--status-success);
-  border-color: rgba(var(--rgb-success), 0.4);
   background-color: rgba(var(--rgb-success), 0.1);
 }
 
 .status-running {
   color: var(--status-running);
-  border-color: rgba(var(--rgb-running), 0.4);
   background-color: rgba(var(--rgb-running), 0.1);
 }
 
 .status-warning {
   color: var(--status-warning);
-  border-color: rgba(var(--rgb-warning), 0.4);
   background-color: rgba(var(--rgb-warning), 0.1);
 }
 
 .status-error {
   color: var(--status-error);
-  border-color: rgba(var(--rgb-error), 0.4);
   background-color: rgba(var(--rgb-error), 0.1);
 }
 
 .status-blocked {
   color: var(--text-primary);
-  border-color: var(--status-blocked);
   background-color: rgba(var(--rgb-blocked), 0.15);
 }
 
 .status-queued {
   color: var(--state-queued);
-  border-color: var(--border);
-  background-color: transparent;
+  background-color: var(--fill-control);
 }
 
 .status-canceled {

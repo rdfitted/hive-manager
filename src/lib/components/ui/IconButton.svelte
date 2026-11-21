@@ -88,7 +88,7 @@
 
   .lattice-icon-button[data-variant='ghost'][aria-pressed='true'] {
     background: var(--glass-strong);
-    border-color: var(--line-strong);
+    border-color: var(--line);
     color: var(--ink);
   }
 

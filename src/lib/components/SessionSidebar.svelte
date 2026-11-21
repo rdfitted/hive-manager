@@ -706,7 +706,7 @@
     overflow: hidden;
     flex: 1;
     margin: var(--space-1) 0 var(--space-5) var(--space-3);
-    background: var(--surface);
+    background: var(--sheen), var(--surface);
     border: 1px solid var(--line);
     border-radius: var(--radius-glass);
     box-shadow: 0 10px 30px rgb(0 0 0 / .35);
@@ -714,7 +714,7 @@
 
   @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
     .sidebar-drawer {
-      background: var(--glass);
+      background: var(--sheen), var(--glass);
       -webkit-backdrop-filter: var(--glass-blur);
       backdrop-filter: var(--glass-blur);
     }
@@ -738,7 +738,7 @@
   .destination[aria-current="page"] { background: var(--accent-tint); color: var(--accent); }
   .sidebar-toggle { margin-left: auto; flex-shrink: 0; }
   .project-heading { margin: 12px 8px 4px; font-size: 12px; font-weight: 600; color: var(--text-muted); overflow-wrap: anywhere; }
-  .session-color { display: inline-block; width: 7px; height: 7px; border: 1px solid var(--border); border-radius: 50%; flex-shrink: 0; }
+  .session-color { display: inline-block; width: 7px; height: 7px; border: 1px solid var(--line); border-radius: 50%; flex-shrink: 0; }
 
   .sidebar-content {
     flex: 1;

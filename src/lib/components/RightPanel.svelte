@@ -104,7 +104,7 @@
     min-width: 0;
     flex-direction: column;
     margin: var(--space-1) var(--space-4) var(--space-5) 0;
-    background: var(--surface);
+    background: var(--sheen), var(--surface);
     border: 1px solid var(--line);
     border-radius: var(--radius-glass);
     box-shadow: 0 10px 30px rgb(0 0 0 / .35);
@@ -112,7 +112,7 @@
   }
   @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
     .panel-drawer {
-      background: var(--glass);
+      background: var(--sheen), var(--glass);
       -webkit-backdrop-filter: var(--glass-blur);
       backdrop-filter: var(--glass-blur);
     }
@@ -128,7 +128,7 @@
     padding: 14px 14px 10px 18px;
   }
   .panel-title { grid-area: title; margin: 0; overflow: hidden; color: var(--ink); font: 500 24px/1.1 var(--font-display); text-overflow: ellipsis; white-space: nowrap; }
-  .panel-header > :global(.lattice-icon-button) { grid-area: close; border-color: var(--line-strong); background: rgb(0 0 0 / .3); }
+  .panel-header > :global(.lattice-icon-button) { grid-area: close; border-color: var(--line); background: rgb(0 0 0 / .3); }
   .panel-tabs { grid-area: tabs; display: flex; flex-wrap: wrap; min-width: 0; gap: 2px; margin-left: -6px; }
   .tab-content { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
   .panel-footer { padding: 6px 12px; border-top: 1px solid var(--line); }

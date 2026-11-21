@@ -53,14 +53,14 @@
     overflow-y: auto;
     margin: var(--space-1) 0 0 20px;
     padding: var(--space-2) 0;
-    background: var(--surface);
+    background: var(--sheen), var(--surface);
     border: 1px solid var(--line);
     border-radius: var(--radius-glass);
     box-shadow: var(--glass-shadow);
   }
   @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
     .sidebar-rail {
-      background: var(--glass);
+      background: var(--sheen), var(--glass);
       -webkit-backdrop-filter: var(--glass-blur);
       backdrop-filter: var(--glass-blur);
     }
@@ -73,7 +73,7 @@
     background: var(--well);
   }
   .sidebar-rail :global(.lattice-icon-button:hover:not(:disabled)) { border-color: var(--line-strong); background: var(--well); }
-  .sidebar-rail :global(.lattice-icon-button[aria-pressed='true']) { border-color: var(--ink); background: var(--well); }
+  .sidebar-rail :global(.lattice-icon-button[aria-pressed='true']) { border-color: var(--line-strong); background: var(--glass-strong); }
   .sidebar-rail :global(.lattice-icon-button:last-child) { border-style: dashed; border-color: var(--line-strong); background: transparent; }
   .session-tile { display: grid; grid-template: 1fr 1fr / 1fr 1fr; gap: 2px; width: 30px; height: 30px; }
   .session-tile-dot { border-radius: 2px; background: color-mix(in srgb, var(--ink) 12%, transparent); }

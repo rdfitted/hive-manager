@@ -43,6 +43,6 @@
 
 <style>
   .html-preview { padding: 0 var(--space-3) var(--space-3); }
-  iframe { display: block; box-sizing: border-box; width: 100%; height: 24rem; margin-top: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+  iframe { display: block; box-sizing: border-box; width: 100%; height: 24rem; margin-top: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
   @media (forced-colors: active) { iframe { border-color: CanvasText; } }
 </style>

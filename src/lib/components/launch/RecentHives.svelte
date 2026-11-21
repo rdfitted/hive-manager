@@ -61,8 +61,8 @@
   ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 13rem)); justify-content: center; gap: 18px; margin: 0; padding: 0; list-style: none; }
   .recent-card { display: grid; width: 100%; padding: 0; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
   .recent-card:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
-  .thumb { display: grid; grid-template-columns: 1.4fr 1fr; gap: 5px; height: 112px; padding: 7px; border: 1px solid var(--line-strong); border-radius: var(--control-radius); background: var(--well); transition: border-color var(--motion-ui); }
-  .recent-card:hover .thumb { border-color: var(--border-control); }
+  .thumb { display: grid; grid-template-columns: 1.4fr 1fr; gap: 5px; height: 112px; padding: 7px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--well); transition: border-color var(--motion-ui); }
+  .recent-card:hover .thumb { border-color: var(--line-strong); }
   .thumb > span { display: grid; gap: 5px; }
   /* Each cell is tinted by its agent's state, like the rail tiles; no edge stripes. */
   .thumb i { border-radius: 4px; background: color-mix(in srgb, var(--ink) 6%, transparent); }
