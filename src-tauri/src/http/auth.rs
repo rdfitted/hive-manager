@@ -892,6 +892,7 @@ curl -s http://localhost:18800/api/x");
             "curl -sv http://localhost:18800/api/x",
             "curl --verbose http://localhost:18800/api/x",
             "curl --trace-ascii - http://localhost:18800/api/x",
+            "curl --trace - http://localhost:18800/api/x",
         ] {
             assert_eq!(authorize_api_commands(source), source, "{source}");
         }
