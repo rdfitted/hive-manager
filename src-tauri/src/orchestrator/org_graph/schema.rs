@@ -99,12 +99,16 @@ pub struct AuthorityScope {
 }
 
 /// How much spawner context may cross into a role's composed prompt.
+///
+/// The default is `Artifact`: a role that does not declare a boundary sees the
+/// task and the artifact under work, never the spawner's conversation. A role
+/// that genuinely needs the spawner's narrative must declare `full` itself.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextBoundary {
     None,
-    Artifact,
     #[default]
+    Artifact,
     Full,
 }
 

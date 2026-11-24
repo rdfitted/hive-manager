@@ -8955,8 +8955,11 @@ Log each iteration to `{session_root_prompt}/coordination.log`:
             .map_err(|e| format!("Failed to create prompts directory: {}", e))?;
 
         let file_path = prompts_dir.join(filename);
-        std::fs::write(&file_path, content)
-            .map_err(|e| format!("Failed to write prompt file: {}", e))?;
+        std::fs::write(
+            &file_path,
+            crate::http::auth::authorize_api_commands(content),
+        )
+        .map_err(|e| format!("Failed to write prompt file: {}", e))?;
 
         Ok(file_path)
     }
@@ -8977,7 +8980,11 @@ Log each iteration to `{session_root_prompt}/coordination.log`:
         })?;
 
         let file_path = prompts_dir.join(filename);
-        std::fs::write(&file_path, content).map_err(|e| {
+        std::fs::write(
+            &file_path,
+            crate::http::auth::authorize_api_commands(content),
+        )
+        .map_err(|e| {
             format!(
                 "Failed to write prompt file for worker {}: {}",
                 worker_index, e
@@ -9079,7 +9086,13 @@ Log each iteration to `{session_root_prompt}/coordination.log`:
             .map_err(|e| format!("Failed to create tools directory: {}", e))?;
 
         let file_path = tools_dir.join(filename);
-        std::fs::write(&file_path, Self::api_commands_for_cli(executor_cli, content))
+        std::fs::write(
+            &file_path,
+            crate::http::auth::authorize_api_commands(&Self::api_commands_for_cli(
+                executor_cli,
+                content,
+            )),
+        )
             .map_err(|e| format!("Failed to write tool file: {}", e))?;
 
         Ok(file_path)

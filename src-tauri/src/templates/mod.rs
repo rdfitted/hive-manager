@@ -699,6 +699,7 @@ REQUIRED_FIXES:
 For a typed contract, submit the same complete criterion set in the HTTP body:
 `"criteria":[{"number":1,"result":"pass","evidence":"<observation>","evidence_refs":["<worker/report reference>"]}]`.
 Use `"pass"`, `"fail"`, `{"scored":6}`, `{"measured":82.5}`, or `"blocked"` for `result`.
+`evidence_refs` is mandatory on a PASS: every criterion must cite at least one QA-worker report reference (for example `qa-worker-2#3`) or artifact, and the server rejects a PASS whose criteria have an empty `evidence_refs` with 400. FAIL and BLOCKED may leave it empty, but cite what you have.
 For an untyped contract, omit `criteria` and send the bare verdict body.
 
 ## QA State Machine HTTP Surface
@@ -714,7 +715,7 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 - `verdict`: Required. Either `"PASS"` or `"FAIL"`.
 - `commit_sha`: Optional. Include if your QA work produced a commit.
 - `rationale`: Optional. Brief explanation for the verdict.
-- `criteria`: Required for a typed contract and omitted for an untyped contract. Include every numbered criterion exactly once.
+- `criteria`: Required for a typed contract and omitted for an untyped contract. Include every numbered criterion exactly once. On a PASS, every criterion's `evidence_refs` must be non-empty or the POST fails with 400.
 
 ### Override Endpoints (Operator Use)
 These are destructive overrides and require an explicit confirmation body.
@@ -885,7 +886,7 @@ For applicable surfaces, you MUST use your native browser tools directly. Do NOT
 ## Completion Protocol (MANDATORY)
 
 1. Prepare the final criterion-numbered evidence described below.
-2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section.
+2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section. Label each criterion's evidence with the reference `qa-worker-{{qa_worker_index}}#<criterion number>` so the Evaluator can cite it in `evidence_refs`; a PASS verdict that cites no evidence is rejected.
 3. Send this completed heartbeat exactly as shown:
    ```bash
    {{qa_worker_completed_heartbeat}}
@@ -958,7 +959,7 @@ Before long-running checks and between major test steps, emit:
 ## Completion Protocol (MANDATORY)
 
 1. Prepare the final criterion-numbered evidence described below.
-2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section.
+2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section. Label each criterion's evidence with the reference `qa-worker-{{qa_worker_index}}#<criterion number>` so the Evaluator can cite it in `evidence_refs`; a PASS verdict that cites no evidence is rejected.
 3. Send this completed heartbeat exactly as shown:
    ```bash
    {{qa_worker_completed_heartbeat}}
@@ -1042,7 +1043,7 @@ Before long-running checks and between major test steps, emit:
 ## Completion Protocol (MANDATORY)
 
 1. Prepare the final criterion-numbered evidence described below.
-2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section.
+2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section. Label each criterion's evidence with the reference `qa-worker-{{qa_worker_index}}#<criterion number>` so the Evaluator can cite it in `evidence_refs`; a PASS verdict that cites no evidence is rejected.
 3. Send this completed heartbeat exactly as shown:
    ```bash
    {{qa_worker_completed_heartbeat}}
@@ -1121,7 +1122,7 @@ Before long-running checks and between attacks, emit:
 ## Completion Protocol (MANDATORY)
 
 1. Prepare the final criterion-numbered evidence described below.
-2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section.
+2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section. Label each criterion's evidence with the reference `qa-worker-{{qa_worker_index}}#<criterion number>` so the Evaluator can cite it in `evidence_refs`; a PASS verdict that cites no evidence is rejected.
 3. Send this completed heartbeat exactly as shown:
    ```bash
    {{qa_worker_completed_heartbeat}}

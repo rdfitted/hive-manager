@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod error;
 pub mod handlers;
 pub mod routes;
@@ -48,8 +49,15 @@ use std::sync::Arc;
 
 #[cfg_attr(test, allow(dead_code))]
 pub async fn serve(state: Arc<AppState>, port: u16) -> Result<(), std::io::Error> {
+    let base_dir = state.storage.base_dir().clone();
     let app = create_router(state);
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    // Publish the token only once this launch owns the port, so a second
+    // instance that fails to bind cannot overwrite the live token.
+    match auth::persist_api_token(&base_dir, auth::api_token()) {
+        Ok(path) => tracing::info!("HTTP API token written to {}", path.display()),
+        Err(error) => tracing::error!("Failed to write the HTTP API token file: {error}"),
+    }
     axum::serve(listener, app).await
 }

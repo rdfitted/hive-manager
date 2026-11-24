@@ -15,7 +15,7 @@ use axum::{
     Router,
 };
 use std::sync::Arc;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowOrigin, Any, CorsLayer};
 
 const ALLOWED_BROWSER_ORIGINS: &[&str] = &[
     "tauri://localhost",
@@ -42,15 +42,30 @@ async fn reject_disallowed_browser_origin(request: Request<Body>, next: Next) ->
     next.run(request).await
 }
 
+/// The production router: every `/api/*` route requires the per-launch bearer
+/// token (see `http::auth`).
 pub fn create_router(state: Arc<AppState>) -> Router {
+    build_router(state, true)
+}
+
+/// Route-level tests exercise handlers without the bearer gate; the gate has
+/// its own tests against `create_router`.
+#[cfg(test)]
+pub fn create_unauthenticated_router(state: Arc<AppState>) -> Router {
+    build_router(state, false)
+}
+
+fn build_router(state: Arc<AppState>, require_api_token: bool) -> Router {
+    // `Access-Control-Allow-Headers: *` does not cover `Authorization`, so the
+    // requested headers are mirrored instead.
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _| {
             is_allowed_browser_origin(origin)
         }))
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(AllowHeaders::mirror_request());
 
-    Router::new()
+    let routes = Router::new()
         .route("/health", get(health::health_check))
         .route("/api/sessions/{id}/agent-feeds", get(agent_events::get_agent_feeds))
         .route("/api/sessions/{id}/agents/{aid}/events", get(agent_events::get_agent_events))
@@ -313,7 +328,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/sessions/{id}/inject/evaluator",
             post(inject::evaluator_inject),
-        )
+        );
+    // Layer order (outermost first): Origin gate -> CORS (answers preflights and
+    // decorates 401s) -> bearer gate -> handlers.
+    let routes = if require_api_token {
+        routes.layer(middleware::from_fn(crate::http::auth::require_api_token))
+    } else {
+        routes
+    };
+    routes
         .layer(cors)
         .layer(middleware::from_fn(reject_disallowed_browser_origin))
         .with_state(state)

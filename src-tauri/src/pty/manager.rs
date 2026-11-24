@@ -686,6 +686,10 @@ impl PtyManager {
         })?;
         let token = Self::new_heartbeat_token();
         identity.push(("HIVE_AGENT_TOKEN".into(), token.clone()));
+        identity.push((
+            crate::http::auth::API_TOKEN_ENV.into(),
+            crate::http::auth::api_token().into(),
+        ));
         let options = crate::transport::codex::CodexOptions::from_pty(
             command,
             args,
@@ -755,6 +759,10 @@ impl PtyManager {
         })?;
         let token = Self::new_heartbeat_token();
         identity.push(("HIVE_AGENT_TOKEN".into(), token.clone()));
+        identity.push((
+            crate::http::auth::API_TOKEN_ENV.into(),
+            crate::http::auth::api_token().into(),
+        ));
         let options = crate::transport::claude::ClaudeOptions::from_pty(
             command,
             args,
@@ -1029,6 +1037,10 @@ impl PtyManager {
         });
         if let Some((_, _, token)) = &credential {
             identity_env.push(("HIVE_AGENT_TOKEN".to_string(), token.clone()));
+            identity_env.push((
+                crate::http::auth::API_TOKEN_ENV.to_string(),
+                crate::http::auth::api_token().to_string(),
+            ));
         }
         // Fail at the constructor boundary without changing the shared PTY stub.
         #[cfg(test)]

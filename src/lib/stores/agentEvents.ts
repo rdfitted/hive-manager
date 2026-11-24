@@ -1,5 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { apiUrl } from '$lib/config';
+import { authorizedStreamUrl } from '$lib/apiAuth';
 
 export interface AgentEvent {
   agent_id: string;
@@ -127,7 +128,7 @@ export function createAgentEventsStore() {
     }));
     const url = new URL(apiUrl(`/api/sessions/${encodeURIComponent(sid)}/agent-events/stream`));
     url.searchParams.set('cursors', checkpoint(cursors));
-    const stream = new EventSource(url.toString());
+    const stream = new EventSource(authorizedStreamUrl(url.toString()));
     source = stream;
     const active = () => run === generation && source === stream;
     stream.onopen = () => { if (active()) state.update((s) => ({ ...s, connected: true, error: null })); };

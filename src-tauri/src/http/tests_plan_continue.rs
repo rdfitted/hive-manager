@@ -19,7 +19,7 @@ use crate::actions::{Action, ActionContext, ActionError, ActionRegistry, Caller}
 use crate::coordination::{InjectionManager, QueueManager, StateManager};
 use crate::domain::HiveExecutionPolicy;
 use crate::events::EventBus;
-use crate::http::routes::create_router;
+use crate::http::routes::create_unauthenticated_router as create_router;
 use crate::http::state::AppState;
 use crate::pty::{AgentConfig, AgentRole, PtyManager};
 use crate::session::{AuthStrategy, Session, SessionController, SessionState, SessionType};

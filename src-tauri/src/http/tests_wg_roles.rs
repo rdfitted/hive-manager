@@ -17,7 +17,7 @@ use crate::cli::{CliBehavior, CliRegistry};
 use crate::coordination::{HierarchyNode, InjectionManager, QueueManager, StateManager};
 use crate::domain::{HiveExecutionPolicy, WorkspaceStrategy};
 use crate::events::EventBus;
-use crate::http::routes::create_router;
+use crate::http::routes::create_unauthenticated_router as create_router;
 use crate::http::state::AppState;
 use crate::orchestrator::org_graph::composition::{
     compose_context, lint_role_knowledge_hubs, render_composed_context,

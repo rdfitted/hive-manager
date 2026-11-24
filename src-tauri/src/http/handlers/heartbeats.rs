@@ -141,7 +141,11 @@ async fn heartbeat_security_event(
 /// Snapshot under the short manager lock; hash untrusted text on the blocking pool.
 pub(super) async fn contains_credential_text(state: &AppState, values: Vec<String>) -> Result<bool, ApiError> {
     let matcher = state.pty_manager.read().heartbeat_credential_matcher();
-    tokio::task::spawn_blocking(move || values.iter().any(|value| matcher.contains(value)))
+    // The launch-wide API token is a credential too; never persist it in a payload.
+    let api_token = crate::http::auth::api_token();
+    tokio::task::spawn_blocking(move || {
+        values.iter().any(|value| matcher.contains(value) || value.contains(api_token))
+    })
         .await.map_err(|_| ApiError::internal("Credential scan unavailable"))
 }
 
@@ -2333,7 +2337,7 @@ mod tests {
         let token = fixture.state.pty_manager.read().mint_heartbeat_token_for_test(WORKER_ID, SESSION_ID, false);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let app = crate::http::routes::create_router(Arc::clone(&fixture.state));
+        let app = crate::http::routes::create_unauthenticated_router(Arc::clone(&fixture.state));
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let injected = vec![("HIVE_SESSION_ID".to_string(), SESSION_ID.to_string()),
             ("HIVE_AGENT_ID".to_string(), WORKER_ID.to_string()), ("HIVE_AGENT_TOKEN".to_string(), token),
