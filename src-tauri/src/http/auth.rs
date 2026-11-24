@@ -252,6 +252,19 @@ fn is_local_api_url(url: &str) -> bool {
         && path.starts_with("/api/")
 }
 
+/// The part of a segment that belongs to the curl command itself: everything
+/// before the first shell separator (`&&`, `||`, `;`, `|`). Line continuations
+/// (`\` + newline) stay inside the command. A separator inside a quoted URL
+/// would cut early, which only ever drops the header (fails closed).
+fn command_portion(segment: &str) -> &str {
+    let cut = ["&&", "||", ";", "|"]
+        .iter()
+        .filter_map(|separator| segment.find(separator))
+        .min()
+        .unwrap_or(segment.len());
+    &segment[..cut]
+}
+
 /// An invocation gets the token only if it requests at least one URL and every
 /// URL it requests is the local API; any external URL in the same invocation
 /// fails closed (no header, so the local call gets an explicit 401).
@@ -321,7 +334,8 @@ pub fn authorize_api_commands(content: &str) -> String {
                 }
                 segment.push_str(&text[from..to.max(from)]);
             }
-            if targets_local_api(&segment) && !segment.contains("Authorization: Bearer") {
+            let segment = command_portion(&segment);
+            if targets_local_api(segment) && !segment.contains("Authorization: Bearer") {
                 inserts.push((line, position));
             }
         }
@@ -496,6 +510,26 @@ curl -s https://example.com/a \\\n  -o out && curl -s \\\n  http://127.0.0.1:188
         assert!(is_local_api_url("http://localhost:41234/api/x?y=1"));
         assert!(!is_local_api_url("http://localhost/api/x"));
         assert!(!is_local_api_url("http://localhost:18800/health"));
+    }
+
+    #[test]
+    fn shell_separators_end_an_invocation() {
+        let header = "-H \"Authorization: Bearer $HIVE_API_TOKEN\"";
+        // A local URL in a later command never authorizes an external curl.
+        for source in [
+            "curl https://example.com/config && echo http://localhost:18800/api/sessions",
+            "curl https://example.com/config; echo http://localhost:18800/api/sessions",
+            "curl https://example.com/config | tee http://localhost:18800/api/x",
+            "curl https://example.com/config || echo http://127.0.0.1:18800/api/x",
+        ] {
+            assert_eq!(authorize_api_commands(source), source, "{source}");
+        }
+        // A local curl keeps its header when a later command names another URL.
+        let rendered = authorize_api_commands(
+            "curl -s http://localhost:18800/api/sessions | jq . && echo https://example.com",
+        );
+        assert!(rendered.starts_with(&format!("curl {header} -s http://localhost:18800/api/sessions | jq .")));
+        assert_eq!(rendered.matches(header).count(), 1);
     }
 
     #[test]

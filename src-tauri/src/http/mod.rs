@@ -61,29 +61,123 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> Result<(), std::io::Error
 
 /// Write this launch's token file, retrying transient failures. If it still
 /// fails, remove the previous launch's file so file-based callers see "no
-/// token" rather than a stale one; the API keeps serving for callers that get
-/// the token from the environment (agents) or the Tauri command (frontend).
+/// token" rather than a stale one. If even removal fails (for example a
+/// read-only data directory), nothing in this process can change the file; the
+/// error names the path so the operator can fix it. The API keeps serving
+/// either way for callers that get the token from the environment (agents) or
+/// the Tauri command (frontend).
 #[cfg_attr(test, allow(dead_code))]
 async fn publish_api_token(base_dir: &std::path::Path) {
-    const ATTEMPTS: u64 = 3;
-    for attempt in 1..=ATTEMPTS {
-        match auth::persist_api_token(base_dir, auth::api_token()) {
-            Ok(path) => {
-                tracing::info!("HTTP API token written to {}", path.display());
-                return;
-            }
+    let outcome = publish_api_token_with(base_dir, std::time::Duration::from_millis(250), |dir| {
+        auth::persist_api_token(dir, auth::api_token())
+    })
+    .await;
+    match outcome {
+        TokenPublication::Written(path) => {
+            tracing::info!("HTTP API token written to {}", path.display())
+        }
+        TokenPublication::StaleRemoved(error) => tracing::error!(
+            "Failed to write the HTTP API token file ({error}); removed the previous launch's \
+             file. File-based API callers will get 401 until the next launch."
+        ),
+        TokenPublication::StaleKept { write, remove, path } => tracing::error!(
+            "Failed to write the HTTP API token file ({write}) and to remove the stale one at {} \
+             ({remove}). File-based API callers will get 401; fix the directory permissions \
+             and relaunch.",
+            path.display()
+        ),
+    }
+}
+
+#[derive(Debug)]
+enum TokenPublication {
+    Written(std::path::PathBuf),
+    StaleRemoved(std::io::Error),
+    StaleKept {
+        write: std::io::Error,
+        remove: std::io::Error,
+        path: std::path::PathBuf,
+    },
+}
+
+async fn publish_api_token_with(
+    base_dir: &std::path::Path,
+    backoff: std::time::Duration,
+    persist: impl Fn(&std::path::Path) -> std::io::Result<std::path::PathBuf>,
+) -> TokenPublication {
+    const ATTEMPTS: u32 = 3;
+    let mut attempt = 1;
+    let write_error = loop {
+        match persist(base_dir) {
+            Ok(path) => return TokenPublication::Written(path),
             Err(error) if attempt < ATTEMPTS => {
                 tracing::warn!("HTTP API token write attempt {attempt} failed: {error}");
-                tokio::time::sleep(std::time::Duration::from_millis(250 * attempt)).await;
+                tokio::time::sleep(backoff * attempt).await;
+                attempt += 1;
             }
-            Err(error) => {
-                tracing::error!("Failed to write the HTTP API token file: {error}");
-                if let Err(remove) = std::fs::remove_file(auth::api_token_path(base_dir)) {
-                    if remove.kind() != std::io::ErrorKind::NotFound {
-                        tracing::error!("Failed to remove the stale HTTP API token file: {remove}");
-                    }
-                }
+            Err(error) => break error,
+        }
+    };
+    let path = auth::api_token_path(base_dir);
+    match std::fs::remove_file(&path) {
+        Ok(()) => TokenPublication::StaleRemoved(write_error),
+        Err(remove) if remove.kind() == std::io::ErrorKind::NotFound => {
+            TokenPublication::StaleRemoved(write_error)
+        }
+        Err(remove) => TokenPublication::StaleKept { write: write_error, remove, path },
+    }
+}
+
+#[cfg(test)]
+mod token_publication_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    fn failing() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "synthetic")
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_is_retried() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let calls = Cell::new(0);
+        let outcome = publish_api_token_with(dir.path(), Duration::ZERO, |base| {
+            calls.set(calls.get() + 1);
+            if calls.get() < 3 {
+                Err(failing())
+            } else {
+                auth::persist_api_token(base, "fresh")
             }
+        })
+        .await;
+        assert!(matches!(outcome, TokenPublication::Written(_)), "{outcome:?}");
+        assert_eq!(calls.get(), 3);
+        assert_eq!(std::fs::read_to_string(auth::api_token_path(dir.path())).unwrap(), "fresh");
+    }
+
+    #[tokio::test]
+    async fn a_persistent_failure_removes_the_stale_token() {
+        let dir = tempfile::TempDir::new().unwrap();
+        auth::persist_api_token(dir.path(), "previous-launch").unwrap();
+        let outcome =
+            publish_api_token_with(dir.path(), Duration::ZERO, |_| Err(failing())).await;
+        assert!(matches!(outcome, TokenPublication::StaleRemoved(_)), "{outcome:?}");
+        assert!(!auth::api_token_path(dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn an_unremovable_stale_token_is_reported_with_its_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // A directory at the token path cannot be removed with remove_file.
+        std::fs::create_dir(auth::api_token_path(dir.path())).unwrap();
+        let outcome =
+            publish_api_token_with(dir.path(), Duration::ZERO, |_| Err(failing())).await;
+        match outcome {
+            TokenPublication::StaleKept { path, .. } => {
+                assert_eq!(path, auth::api_token_path(dir.path()))
+            }
+            other => panic!("expected StaleKept, got {other:?}"),
         }
     }
 }
