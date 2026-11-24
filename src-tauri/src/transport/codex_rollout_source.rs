@@ -1396,8 +1396,8 @@ impl CodexRolloutSource {
             source_id,
             truncated: false,
             payload,
+            artifact: None,
         }
-        .normalize()
     }
 
     fn normalize(&mut self, record: &Value) -> Vec<AgentEvent> {

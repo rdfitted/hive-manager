@@ -1,6 +1,8 @@
 {
   "version": 1,
   "_doc": "Repo-owned judgment policy for hive surfaces. Targets below are initial goals from hive-manager#291; promotion requires an operator decision backed by an audit run.",
+  "jev_model": "jev-1.14.0",
+  "_jev_model_doc": "Concrete model judge.py requests. Pinned to the version the latest benchmark resolved (benchmark-history.jsonl 2026-11-23); bump only with a fresh benchmark.",
   "targets": {
     "repeatability": 1.0,
     "agreement_binary": 0.95,

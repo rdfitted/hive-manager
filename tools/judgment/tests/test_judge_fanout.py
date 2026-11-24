@@ -68,6 +68,14 @@ class FanoutTests(unittest.TestCase):
             self.assertEqual(ledger.sha256_of(self.spec), row["question_version"])
             self.assertEqual(("shadow", "none"), (row["mode"], row["routed"]))
 
+    def test_fanout_requests_the_pinned_model(self):
+        tables = json.loads((Path(judge.__file__).parent / "decision-tables.json").read_text(encoding="utf-8"))
+        code, _, send = self.run_ask()
+        self.assertEqual(0, code)
+        sent_model = json.loads(send.call_args.args[0])["model"]
+        self.assertEqual(tables["jev_model"], sent_model)
+        self.assertNotEqual("jev-latest", sent_model)
+
     def test_redaction_once_blocks_every_row(self):
         self.file("state", {"snippet": "Synthetic Secret Name"})
         with patch.object(judge.redaction, "redact", wraps=judge.redaction.redact) as redact:

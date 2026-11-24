@@ -64,6 +64,25 @@ class InputError(ValueError):
     pass
 
 
+PINNED_MODEL = re.compile(r"^jev-\d+\.\d+\.\d+$")
+
+
+def _pinned_model(tables_path: Path) -> str:
+    """The concrete Jev version from decision-tables.json; never an alias.
+
+    A row is only comparable to a benchmark on the same model, so a send with
+    no pinned version (or an alias such as jev-latest) is refused before egress.
+    """
+    try:
+        tables = json.loads(Path(tables_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise InputError("decision tables unreadable; cannot pin jev_model") from exc
+    model = tables.get("jev_model") if isinstance(tables, dict) else None
+    if not isinstance(model, str) or not PINNED_MODEL.fullmatch(model):
+        raise InputError("decision tables must pin jev_model to a concrete version (jev-X.Y.Z)")
+    return model
+
+
 class JudgeParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         _emit(_result("invalid-input", "", error="invalid-input"), 2)
@@ -301,7 +320,7 @@ def _decision(args: argparse.Namespace, ledger_path: Path, *, ask: bool) -> int:
                     )
                 except (ValueError, OSError, UnicodeError, json.JSONDecodeError):
                     dictionary = None
-                payload = {"state": observations, "model": "jev-latest",
+                payload = {"state": observations, "model": _pinned_model(args.tables),
                            "questions": {args.question_id: question}}
                 clean, report = redaction.redact(payload, redact_mode, dictionary)
                 if clean is None or report["blocked"]:
@@ -382,7 +401,7 @@ def _fanout(args: argparse.Namespace, ledger_path: Path) -> int:
         except (ValueError, OSError, UnicodeError, json.JSONDecodeError):
             dictionary = None
         clean, redaction_report = redaction.redact(
-            {"state": observations, "model": "jev-latest", "questions": questions},
+            {"state": observations, "model": _pinned_model(args.tables), "questions": questions},
             redact_mode, dictionary)
         if clean is None or redaction_report["blocked"]:
             status, code, report = "redaction-blocked", 3, redaction_report

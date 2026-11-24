@@ -73,6 +73,11 @@ pub struct AgentEvent {
     pub source_id: Option<String>,
     pub truncated: bool,
     pub payload: Value,
+    /// Set when the journal clipped `payload`: the file name, beside the
+    /// journal, of the artifact holding the payload exactly as it arrived.
+    /// Read it back with `FeedStore::artifact`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
 }
 fn clip(text: &mut String, limit: usize) -> bool {
     if text.len() <= limit {
@@ -86,7 +91,9 @@ fn clip(text: &mut String, limit: usize) -> bool {
     true
 }
 impl AgentEvent {
-    /// The journal repeats this for protocol callers as defense in depth.
+    /// Clip to the wire limits. The journal append is the one place that
+    /// clips before persisting, and it first spills an over-limit payload to
+    /// an artifact so nothing is lost; read paths repeat it as defense in depth.
     pub fn normalize(mut self) -> Self {
         fn cap(value: &mut Value, truncated: &mut bool) {
             match value {

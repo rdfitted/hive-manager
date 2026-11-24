@@ -18,7 +18,7 @@ pub mod acts;
 mod eval;
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -36,7 +36,7 @@ pub const MODE_ENV: &str = "HIVE_ROLE_CONTRACT_CHECK";
 pub const LEDGER_FILE: &str = "role-contracts.jsonl";
 /// Bumped whenever detector patterns or contract semantics change, so ledger
 /// rows from different rule sets are never pooled.
-pub const RULESET_VERSION: &str = "role-contract-rules/v1";
+pub const RULESET_VERSION: &str = "role-contract-rules/v2";
 
 #[cfg(test)]
 pub(crate) static ROLE_CONTRACT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -302,9 +302,18 @@ pub fn check(contract: &ResolvedContract, acts: MessageActs) -> CheckResult {
 }
 
 /// Map and check one message for a role. `None` means the role has no contract.
-pub fn check_message(role_id: &str, text: &str, transport_declares_done: bool) -> Option<CheckResult> {
+/// Cited commits and files must resolve in one of `evidence_roots`.
+pub fn check_message(
+    role_id: &str,
+    text: &str,
+    transport_declares_done: bool,
+    evidence_roots: &[PathBuf],
+) -> Option<CheckResult> {
     let contract = contract_for(role_id)?;
-    Some(check(contract, acts::map_message(text, transport_declares_done)))
+    Some(check(
+        contract,
+        acts::map_message(text, transport_declares_done, evidence_roots),
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,6 +360,8 @@ pub struct Admission<'a> {
     pub channel: Channel,
     pub text: &'a str,
     pub transport_declares_done: bool,
+    /// Checkouts a cited commit or file must resolve in to count as evidence.
+    pub evidence_roots: &'a [PathBuf],
 }
 
 /// Report-only admission: check, log a violation to the judgment ledger, and
@@ -363,6 +374,7 @@ pub fn observe(ledger_path: &Path, admission: Admission<'_>) -> Option<CheckResu
         admission.role_id,
         admission.text,
         admission.transport_declares_done,
+        admission.evidence_roots,
     )?;
     if !result.flagged() {
         return Some(result);
@@ -434,6 +446,7 @@ pub(crate) fn observe_from_state(
     }
     let role_id = role_id_for_session_agent(state, session_id, agent_id)?;
     let ledger_path = ledger_path(state.storage.base_dir());
+    let evidence_roots = session_evidence_roots(state, session_id);
     observe(
         &ledger_path,
         Admission {
@@ -443,6 +456,7 @@ pub(crate) fn observe_from_state(
             channel,
             text,
             transport_declares_done,
+            evidence_roots: &evidence_roots,
         },
     )
 }
@@ -459,6 +473,7 @@ pub(crate) fn observe_fixed_role(
         return None;
     }
     let ledger_path = ledger_path(state.storage.base_dir());
+    let evidence_roots = session_evidence_roots(state, session_id);
     observe(
         &ledger_path,
         Admission {
@@ -468,8 +483,25 @@ pub(crate) fn observe_fixed_role(
             channel,
             text,
             transport_declares_done: false,
+            evidence_roots: &evidence_roots,
         },
     )
+}
+
+/// The session's primary worktree, then its project checkout. Worktrees share
+/// the object store, so any of them resolves a pushed or local commit.
+fn session_evidence_roots(state: &crate::http::state::AppState, session_id: &str) -> Vec<PathBuf> {
+    let Some(session) = state.session_controller.read().get_session(session_id) else {
+        return Vec::new();
+    };
+    let mut roots = Vec::new();
+    if let Some(worktree) = session.worktree_path.as_deref().filter(|path| !path.trim().is_empty()) {
+        roots.push(PathBuf::from(worktree));
+    }
+    if !roots.contains(&session.project_path) {
+        roots.push(session.project_path.clone());
+    }
+    roots
 }
 
 fn role_id_for_session_agent(
@@ -598,6 +630,7 @@ mod tests {
             channel: Channel::Conversation,
             text,
             transport_declares_done: false,
+            evidence_roots: &[],
         };
 
         std::env::remove_var(MODE_ENV);

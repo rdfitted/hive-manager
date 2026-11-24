@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Vendored from ~/.claude/tools/judgment/audit.py; source SHA-256 b417a484ebd5edd9512de53ce5c622aaaf40d875b9ad9f04f5cb41837bf97f06
+# Local patch 2026-11-24: recommend() enforces targets.min_labeled_n; carry upstream.
 """The scorecard — success rates for every judgment surface, one report.
 
 Reads every judgment-ledger/v1 stream (docket, hive, and the wiki retrieval
@@ -509,6 +510,9 @@ def recommend(g: dict, incumbent: dict | None, tables: dict) -> dict:
         return {"action": "DEMOTE", "from": mode, "to": PREV_MODE[mode], "reasons": demote}
 
     # Promotion conditions — all required.
+    labeled_n = g["n_heldout"] + g["n_tune"]
+    if labeled_n < int(t.get("min_labeled_n", 200)):
+        unmet.append(f"labelled n {labeled_n} < {t.get('min_labeled_n', 200)}")
     if g["n_heldout"] < int(t.get("min_heldout_n", 100)):
         unmet.append(f"held-out n {g['n_heldout']} < {t.get('min_heldout_n', 100)}")
     if g["agreement_heldout"] is None or g["agreement_heldout"] < target:
