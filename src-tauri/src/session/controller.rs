@@ -22264,11 +22264,11 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert!(!prompt.contains("one per worker"));
     }
 
-    /// Every local-API curl in rendered prompts must receive the bearer header
-    /// from `authorize_api_commands`, or the agent's call gets 401.
-    fn unauthorized_api_curls(prompt: &str) -> Vec<String> {
-        let rendered = crate::http::auth::authorize_api_commands(prompt);
-        let lines: Vec<&str> = rendered.lines().collect();
+    /// Local-API curl lines in `text` that lack the bearer header. Inspects its
+    /// input as given: callers authorize builder output explicitly, and tool
+    /// docs are checked exactly as written to disk.
+    fn unauthorized_api_curls(text: &str) -> Vec<String> {
+        let lines: Vec<&str> = text.lines().collect();
         let mut missing = Vec::new();
         for (index, line) in lines.iter().enumerate() {
             if !line.contains("localhost:18800/api/") {
@@ -22307,7 +22307,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
                 &policy,
             );
             assert!(prompt.contains("localhost:18800/api/"));
-            let missing = unauthorized_api_curls(&prompt);
+            let missing =
+                unauthorized_api_curls(&crate::http::auth::authorize_api_commands(&prompt));
             assert!(missing.is_empty(), "{cli} queen: {missing:#?}");
         }
         let evaluator = SessionController::build_evaluator_prompt(
@@ -22323,7 +22324,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             Path::new("/repo"),
         );
         assert!(evaluator.contains("localhost:18800/api/"));
-        let missing = unauthorized_api_curls(&evaluator);
+        let missing =
+            unauthorized_api_curls(&crate::http::auth::authorize_api_commands(&evaluator));
         assert!(missing.is_empty(), "evaluator: {missing:#?}");
 
         // Tool docs are authorized when written; read back what agents see.

