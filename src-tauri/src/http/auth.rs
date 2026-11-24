@@ -219,31 +219,6 @@ const PROMPT_AUTH_HEADER: &str = "-H \"Authorization: Bearer $HIVE_API_TOKEN\"";
 
 const PROMPT_AUTH_GUIDANCE: &str = "\nEvery Hive API request must send `Authorization: Bearer $HIVE_API_TOKEN` from your process environment (PowerShell: `$env:HIVE_API_TOKEN`); a request without it gets 401. Add the header to any API call you compose yourself. Never print the token, use verbose curl, or write its value to a file.\n";
 
-/// Every `http://` / `https://` URL in a curl invocation's segment, each cut at
-/// the first character that cannot be part of an unquoted shell URL.
-fn segment_urls(segment: &str) -> Vec<&str> {
-    let mut urls = Vec::new();
-    let mut search = 0;
-    while let Some(found) = segment[search..].find("http") {
-        let start = search + found;
-        let rest = &segment[start..];
-        let after_scheme = if rest.starts_with("http://") {
-            7
-        } else if rest.starts_with("https://") {
-            8
-        } else {
-            search = start + 4;
-            continue;
-        };
-        let length = rest[after_scheme..]
-            .find(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | ')' | '|' | ';' | '&' | '<' | '>'))
-            .map_or(rest.len(), |end| after_scheme + end);
-        urls.push(&rest[..length]);
-        search = start + length.max(after_scheme);
-    }
-    urls
-}
-
 /// A URL is the local Hive API only when its parsed authority is a loopback host
 /// with an explicit numeric port and its path starts with `/api/`. Userinfo
 /// (`localhost:1@evil.com`), look-alike hosts and loopback text inside an
@@ -263,45 +238,6 @@ fn is_local_api_url(url: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1")
         && port.parse::<u16>().is_ok_and(|port| port == api_port())
         && path.starts_with("/api/")
-}
-
-/// Whether text left in a curl command, after its local API URLs are removed,
-/// could still name a destination: another scheme URL, loopback text, or a
-/// scheme-less `host.tld/...` (curl accepts URLs without a scheme). Fails closed:
-/// a false positive only drops the header, so the local call gets a visible 401.
-fn names_another_destination(rest: &str) -> bool {
-    if rest.contains("://") || rest.contains("localhost") || rest.contains("127.0.0.1") {
-        return true;
-    }
-    let bytes = rest.as_bytes();
-    let is_host = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.';
-    let mut index = 0;
-    while index < bytes.len() {
-        if !is_host(bytes[index]) {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        while index < bytes.len() && is_host(bytes[index]) {
-            index += 1;
-        }
-        let word = &rest[start..index];
-        let dotted = word.split('.').filter(|label| !label.is_empty()).count() >= 2
-            && word.contains('.');
-        // `host.tld` immediately followed by a port, path, query or fragment.
-        let mut next = index;
-        if bytes.get(next) == Some(&b':') {
-            next += 1;
-            while next < bytes.len() && bytes[next].is_ascii_digit() {
-                next += 1;
-            }
-        }
-        let followed = matches!(bytes.get(next), Some(b'/' | b'?' | b'#'));
-        if dotted && followed && !word.starts_with('.') {
-            return true;
-        }
-    }
-    false
 }
 
 /// The part of a segment that belongs to the curl command itself: everything
@@ -338,19 +274,161 @@ fn command_portion(segment: &str) -> &str {
     segment
 }
 
-/// An invocation gets the token only if it requests at least one URL and every
-/// URL it requests is the local API; any external URL in the same invocation
-/// fails closed (no header, so the local call gets an explicit 401).
+/// Split a curl command's argument text the way a POSIX shell would: whitespace
+/// separates words, single quotes are literal, double quotes honour `\`
+/// escapes, and `\` + newline is a line continuation. An unterminated quote
+/// (a multi-line `-d '{...` body) yields its partial last word and `true`.
+fn shell_words(text: &str) -> (Vec<String>, bool) {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(other) => current.push(other),
+                        None => {
+                            words.push(current);
+                            return (words, true);
+                        }
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some('\n') => {}
+                            Some(escaped @ ('"' | '\\' | '$' | '`')) => current.push(escaped),
+                            Some(other) => {
+                                current.push('\\');
+                                current.push(other);
+                            }
+                            None => {
+                                words.push(current);
+                                return (words, true);
+                            }
+                        },
+                        Some(other) => current.push(other),
+                        None => {
+                            words.push(current);
+                            return (words, true);
+                        }
+                    }
+                }
+            }
+            '\\' => match chars.next() {
+                Some('\n') | None => {}
+                Some(other) => {
+                    in_word = true;
+                    current.push(other);
+                }
+            },
+            ch if ch.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            other => {
+                in_word = true;
+                current.push(other);
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    (words, false)
+}
+
+/// Short options whose value is the next word (or the rest of the cluster).
+const CURL_SHORT_WITH_VALUE: &str = "AbcdEeFHmorTuwXY";
+/// Long options whose value is the next word (or follows `=`).
+const CURL_LONG_WITH_VALUE: &[&str] = &[
+    "header", "request", "data", "data-raw", "data-binary", "data-urlencode", "data-ascii",
+    "json", "output", "write-out", "user", "user-agent", "referer", "form", "form-string",
+    "cookie", "cookie-jar", "upload-file", "max-time", "connect-timeout", "retry",
+    "retry-delay", "retry-max-time", "cert", "key", "cacert", "range", "limit-rate",
+    "max-filesize", "speed-limit", "speed-time", "expect100-timeout",
+];
+/// Value-less long options seen in Hive prompts and common use.
+const CURL_LONG_FLAGS: &[&str] = &[
+    "silent", "show-error", "fail", "fail-with-body", "location", "include", "insecure",
+    "compressed", "no-buffer", "globoff", "http1.1", "http2", "get", "head", "verbose",
+    "retry-all-errors", "retry-connrefused", "no-progress-meter",
+];
+/// Value-less short options.
+const CURL_SHORT_FLAGS: &str = "fsSLikINvGgZ0123456#";
+
+/// Whether a curl invocation's arguments request only this instance's API.
+/// Every positional argument (and every `--url` value) must be a local API URL,
+/// and there must be at least one. Options that can redirect or add requests
+/// (`-x/--proxy`, `-K/--config`, `--resolve`, `--connect-to`, `--next`, ...)
+/// and any option not listed above fail closed. An unterminated quote is
+/// accepted only as the value of a value-taking option (a multi-line `-d` body
+/// that continues past the block); anywhere else it fails closed.
 fn targets_local_api(segment: &str) -> bool {
-    let urls = segment_urls(segment);
-    if urls.is_empty() || !urls.iter().all(|url| is_local_api_url(url)) {
-        return false;
+    let (words, unterminated) = shell_words(segment);
+    let last = words.len().saturating_sub(1);
+    let mut destinations = 0;
+    let mut words = words.into_iter().enumerate();
+    // Option values are consumed here and never reach the last-word check.
+    let next_value = |words: &mut std::iter::Enumerate<std::vec::IntoIter<String>>| {
+        words.next().map(|(_, word)| word)
+    };
+    while let Some((index, word)) = words.next() {
+        if unterminated && index == last {
+            // The open-quoted last word was not consumed as an option value.
+            return false;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, attached) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (long, None),
+            };
+            if name == "url" {
+                let Some(url) = attached.or_else(|| next_value(&mut words)) else {
+                    return false;
+                };
+                if !is_local_api_url(&url) {
+                    return false;
+                }
+                destinations += 1;
+            } else if CURL_LONG_WITH_VALUE.contains(&name) {
+                if attached.is_none() && next_value(&mut words).is_none() {
+                    return false;
+                }
+            } else if !(CURL_LONG_FLAGS.contains(&name) && attached.is_none()) {
+                return false;
+            }
+        } else if let Some(cluster) = word.strip_prefix('-').filter(|cluster| !cluster.is_empty()) {
+            for (offset, letter) in cluster.char_indices() {
+                if CURL_SHORT_WITH_VALUE.contains(letter) {
+                    let attached = &cluster[offset + letter.len_utf8()..];
+                    if attached.is_empty() && next_value(&mut words).is_none() {
+                        return false;
+                    }
+                    break;
+                }
+                if !CURL_SHORT_FLAGS.contains(letter) {
+                    return false;
+                }
+            }
+        } else {
+            if !is_local_api_url(&word) {
+                return false;
+            }
+            destinations += 1;
+        }
     }
-    let mut rest = segment.to_string();
-    for url in &urls {
-        rest = rest.replacen(url, " ", 1);
-    }
-    !names_another_destination(&rest)
+    destinations > 0
 }
 
 /// Byte offsets just past each `curl`/`curl.exe` executable token in a line.
@@ -612,6 +690,52 @@ curl -s https://example.com/a \\\n  -o out && curl -s \\\n  http://127.0.0.1:188
             "curl -fsS -X POST \"http://localhost:18800/api/sessions/s/heartbeat\" -H \"Content-Type: application/json\" -o /dev/null -w '%{http_code}' --data-binary @-",
         );
         assert!(rendered.contains("Bearer $HIVE_API_TOKEN"), "{rendered}");
+    }
+
+    #[test]
+    fn every_positional_argument_must_be_the_local_api() {
+        for source in [
+            "curl -s http://localhost:18800/api/sessions evil.example",
+            "curl -s 'http://localhost:18800/api/sessions;foo' https://evil.example/",
+            "curl -s http://localhost:18800/api/sessions --url https://evil.example/",
+            "curl -x http://evil.example:8080 http://localhost:18800/api/sessions",
+            "curl --proxy=http://evil.example http://localhost:18800/api/sessions",
+            "curl -K cfg http://localhost:18800/api/sessions",
+            "curl http://localhost:18800/api/a --next https://evil.example/",
+            "curl --unknown-option http://localhost:18800/api/sessions",
+            "curl -s \"$URL\" http://localhost:18800/api/sessions",
+        ] {
+            assert_eq!(authorize_api_commands(source), source, "{source}");
+        }
+        // An open quote is accepted only as an option value.
+        assert_eq!(
+            authorize_api_commands("curl http://localhost:18800/api/x 'evil.example/"),
+            "curl http://localhost:18800/api/x 'evil.example/"
+        );
+        // Option values are not destinations.
+        for source in [
+            "curl -X POST \"http://localhost:18800/api/sessions/s/planners\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"domain\": \"frontend\"",
+            "curl -fsS -X POST \"http://localhost:18800/api/sessions/s/heartbeat\" -H \"Content-Type: application/json\" -H \"X-Hive-Agent-Token: $HIVE_AGENT_TOKEN\" --data-binary @-",
+            "curl -sS -o NUL -w '%{http_code}' -d '{\"a\":\"evil.example/x; y\"}' http://127.0.0.1:18800/api/x",
+            "curl -XPOST --url=http://localhost:18800/api/x",
+            "1. Read the evaluator prompt: `curl -s \"http://localhost:18800/api/sessions/x/evaluators\"`",
+   "   # 1. ui worker
+   curl -X POST \"http://localhost:18800/api/sessions/s/qa-workers\" \
+     -H \"Content-Type: application/json\" \
+     -d '{}'
+",
+        ] {
+            assert!(authorize_api_commands(source).contains("Bearer $HIVE_API_TOKEN"), "{source}");
+        }
+    }
+
+    #[test]
+    fn shell_words_follow_posix_quoting() {
+        assert_eq!(
+            shell_words("-H \"a b\" 'c d' e\\ f \\\n g"),
+            (vec!["-H", "a b", "c d", "e f", "g"].into_iter().map(String::from).collect(), false)
+        );
+        assert_eq!(shell_words("'unterminated"), (vec!["unterminated".to_string()], true));
     }
 
     #[test]
