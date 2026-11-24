@@ -53,6 +53,7 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> Result<(), std::io::Error
     let app = create_router(state);
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    auth::set_api_port(listener.local_addr().map(|bound| bound.port()).unwrap_or(port));
     // Publish the token only once this launch owns the port, so a second
     // instance that fails to bind cannot overwrite the live token.
     publish_api_token(&base_dir).await;
