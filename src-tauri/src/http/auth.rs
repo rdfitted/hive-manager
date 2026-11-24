@@ -305,16 +305,37 @@ fn names_another_destination(rest: &str) -> bool {
 }
 
 /// The part of a segment that belongs to the curl command itself: everything
-/// before the first shell separator (`&&`, `||`, `;`, `|`). Line continuations
-/// (`\` + newline) stay inside the command. A separator inside a quoted URL
-/// would cut early, which only ever drops the header (fails closed).
+/// before the first shell separator (`&&`, `||`, `;`, `|`) that sits outside
+/// single or double quotes. Line continuations (`\` + newline) stay inside the
+/// command. A separator inside a quoted argument (for example
+/// `"http://localhost:18800/api/x;v=1"`) does not end the command, so a later
+/// destination in the same curl stays visible to the destination check.
 fn command_portion(segment: &str) -> &str {
-    let cut = ["&&", "||", ";", "|"]
-        .iter()
-        .filter_map(|separator| segment.find(separator))
-        .min()
-        .unwrap_or(segment.len());
-    &segment[..cut]
+    let bytes = segment.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match quote {
+            Some(open) => {
+                if byte == open {
+                    quote = None;
+                } else if open == b'"' && byte == b'\\' {
+                    index += 1; // skip the escaped byte inside double quotes
+                }
+            }
+            None => match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'\\' => index += 1,
+                b';' | b'|' => return &segment[..index],
+                b'&' if bytes.get(index + 1) == Some(&b'&') => return &segment[..index],
+                _ => {}
+            },
+        }
+        index += 1;
+    }
+    // An unterminated quote keeps the whole segment, which only adds URLs to judge.
+    segment
 }
 
 /// An invocation gets the token only if it requests at least one URL and every
@@ -591,6 +612,23 @@ curl -s https://example.com/a \\\n  -o out && curl -s \\\n  http://127.0.0.1:188
             "curl -fsS -X POST \"http://localhost:18800/api/sessions/s/heartbeat\" -H \"Content-Type: application/json\" -o /dev/null -w '%{http_code}' --data-binary @-",
         );
         assert!(rendered.contains("Bearer $HIVE_API_TOKEN"), "{rendered}");
+    }
+
+    #[test]
+    fn quoted_separators_do_not_hide_a_second_destination() {
+        for source in [
+            "curl \"http://localhost:18800/api/sessions;v=1\" https://example.com/collect",
+            "curl 'http://localhost:18800/api/sessions|x' https://example.com/collect",
+            "curl \"http://localhost:18800/api/a?b=1&&c=2\" evil.example/x",
+            "curl -H \"X: a;b\" http://localhost:18800/api/sessions https://example.com/collect",
+        ] {
+            assert_eq!(authorize_api_commands(source), source, "{source}");
+        }
+        // A quoted separator inside a local-only invocation still authorizes it.
+        let rendered = authorize_api_commands("curl -s \"http://localhost:18800/api/sessions;v=1\" && echo done");
+        assert!(rendered.contains("Bearer $HIVE_API_TOKEN"), "{rendered}");
+        assert_eq!(command_portion("curl \"a;b\" c; d"), "curl \"a;b\" c");
+        assert_eq!(command_portion("curl 'a|b' && d"), "curl 'a|b' ");
     }
 
     #[test]
