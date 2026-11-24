@@ -9,6 +9,8 @@
 //! the act, and evidence markers. Negated, interrogative and third-party
 //! sentences do not count as acts.
 
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -244,7 +246,6 @@ fn evidence_patterns() -> &'static [Regex] {
             pattern(r"\b0\s+failed\b"),
             pattern(r"\bexit(?:ed)?\s+(?:code\s+|status\s+)?0\b"),
             pattern(r"\b(?:cargo|npm|pnpm|yarn|npx|pytest|vitest|go|python)\s+(?:run\s+)?(?:test|check|clippy|vitest|-m\s+unittest)\b"),
-            pattern(r"\b[\w./\\-]+\.(?:rs|ts|tsx|js|svelte|py|md|json|toml|ya?ml|png)(?::\d+(?:-\d+)?)?\b"),
             pattern(r"\b(?:pr|issue)\s*#\d+\b"),
             pattern(r"\bevidence\s*:"),
         ]
@@ -260,11 +261,151 @@ fn is_sha(candidate: &str) -> bool {
     candidate.chars().any(|c| c.is_ascii_digit()) && candidate.chars().any(|c| c.is_ascii_alphabetic())
 }
 
-/// Evidence markers: a commit SHA, test output, a test command, a file
-/// reference, a PR or issue number, or an explicit "evidence:" label.
-pub fn has_evidence(text: &str) -> bool {
-    evidence_patterns().iter().any(|regex| regex.is_match(text))
-        || commit_sha().find_iter(text).any(|found| is_sha(found.as_str()))
+fn file_reference() -> &'static Regex {
+    static FILE: OnceLock<Regex> = OnceLock::new();
+    FILE.get_or_init(|| {
+        pattern(r"(?P<path>[\w./\\:-]*[\w-]\.(?:rs|ts|tsx|js|svelte|py|md|json|toml|ya?ml|png))\b(?::(?P<line>\d+)(?:-\d+)?)?")
+    })
+}
+
+/// Bounds that keep a check cheap: at most this many distinct SHA lookups
+/// (one `git cat-file` per root each) and file probes per message.
+const MAX_SHA_LOOKUPS: usize = 8;
+const MAX_FILE_PROBES: usize = 16;
+/// Files larger than this count as existing without their lines being counted.
+const MAX_LINE_COUNT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Evidence: test output, a test command, a PR or issue number, an explicit
+/// "evidence:" label, or a citation that resolves. A commit SHA counts only
+/// when it names a commit in one of `roots`; a file reference only when the
+/// file exists under one of them (and a cited line is within the file). An
+/// unresolved citation is not evidence, and with no roots nothing resolves.
+pub fn has_evidence(text: &str, roots: &[PathBuf]) -> bool {
+    if evidence_patterns().iter().any(|regex| regex.is_match(text)) {
+        return true;
+    }
+    if roots.is_empty() {
+        return false;
+    }
+    for captures in file_reference().captures_iter(text).take(MAX_FILE_PROBES) {
+        let path = captures.name("path").map_or("", |found| found.as_str());
+        let line = captures.name("line").and_then(|found| found.as_str().parse::<u64>().ok());
+        if roots.iter().any(|root| citation_resolves(root, path, line)) {
+            return true;
+        }
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for found in commit_sha().find_iter(text) {
+        let sha = found.as_str().to_ascii_lowercase();
+        if !is_sha(&sha) || seen.contains(&sha) {
+            continue;
+        }
+        if seen.len() == MAX_SHA_LOOKUPS {
+            break;
+        }
+        if roots.iter().any(|root| commit_resolves(root, &sha)) {
+            return true;
+        }
+        seen.push(sha);
+    }
+    false
+}
+
+/// A path is checked under `root` directly. A bare file name ("queue.rs:88",
+/// the way agents usually cite) is looked up among the checkout's tracked and
+/// untracked-but-not-ignored files, and resolves if any match does.
+fn citation_resolves(root: &Path, cited: &str, line: Option<u64>) -> bool {
+    if cited.contains(['/', '\\']) || Path::new(cited).is_absolute() {
+        return file_resolves(root, cited, line);
+    }
+    bare_name_matches(root, cited)
+        .iter()
+        .any(|relative| file_resolves(root, relative, line))
+}
+
+fn bare_name_matches(root: &Path, name: &str) -> Vec<String> {
+    if !root.is_dir() || name.starts_with(['-', ':']) {
+        return Vec::new();
+    }
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"])
+        .arg(name)
+        .arg(format!("*/{name}"))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    crate::process::hide_std_console_window(&mut command);
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .filter(|path| path.rsplit('/').next().is_some_and(|file| file.eq_ignore_ascii_case(name)))
+        .take(MAX_FILE_PROBES)
+        .map(str::to_string)
+        .collect()
+}
+
+/// A relative path must stay inside `root`; an absolute one must lie under it.
+fn file_resolves(root: &Path, cited: &str, line: Option<u64>) -> bool {
+    let cited_path = Path::new(cited);
+    let candidate = if cited_path.is_absolute() {
+        cited_path.to_path_buf()
+    } else {
+        if cited_path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::Prefix(_)))
+        {
+            return false;
+        }
+        root.join(cited_path)
+    };
+    let (Ok(root), Ok(candidate)) = (root.canonicalize(), candidate.canonicalize()) else {
+        return false;
+    };
+    if !candidate.starts_with(&root) || !candidate.is_file() {
+        return false;
+    }
+    let Some(line) = line else {
+        return true;
+    };
+    if line == 0 {
+        return false;
+    }
+    match std::fs::metadata(&candidate) {
+        Ok(meta) if meta.len() > MAX_LINE_COUNT_BYTES => true,
+        Ok(_) => std::fs::read(&candidate)
+            .map(|bytes| {
+                let breaks = bytes.iter().filter(|&&byte| byte == b'\n').count() as u64;
+                let lines = breaks + u64::from(bytes.last().is_some_and(|&byte| byte != b'\n'));
+                line <= lines
+            })
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// `git cat-file -e <sha>^{commit}` in `root`: windowless, no output kept.
+fn commit_resolves(root: &Path, sha: &str) -> bool {
+    if !root.is_dir() {
+        return false;
+    }
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::process::hide_std_console_window(&mut command);
+    command.status().is_ok_and(|status| status.success())
 }
 
 /// Split into sentences, keeping the terminator so questions are recognisable.
@@ -301,8 +442,9 @@ fn snippet(sentence: &str) -> String {
 }
 
 /// Map a message to its acts. `declares_done` is forced when the transport
-/// itself declares completion (a `completed` heartbeat).
-pub fn map_message(text: &str, transport_declares_done: bool) -> MessageActs {
+/// itself declares completion (a `completed` heartbeat). Cited commits and
+/// files must resolve in one of `evidence_roots` to count as evidence.
+pub fn map_message(text: &str, transport_declares_done: bool, evidence_roots: &[PathBuf]) -> MessageActs {
     let normalized = text.replace(['’', '‘'], "'");
     let mut hits: Vec<ActHit> = Vec::new();
     for (sentence, question) in sentences(&normalized) {
@@ -341,7 +483,7 @@ pub fn map_message(text: &str, transport_declares_done: bool) -> MessageActs {
     }
     hits.sort_by_key(|hit| hit.act);
     MessageActs {
-        has_evidence: has_evidence(&normalized),
+        has_evidence: has_evidence(&normalized, evidence_roots),
         hits,
     }
 }
@@ -351,7 +493,7 @@ mod tests {
     use super::*;
 
     fn acts(text: &str) -> Vec<Act> {
-        map_message(text, false).hits.into_iter().map(|hit| hit.act).collect()
+        map_message(text, false, &[]).hits.into_iter().map(|hit| hit.act).collect()
     }
 
     #[test]
@@ -374,17 +516,59 @@ mod tests {
         assert_eq!(sentences("See inject.rs:812 and 0.67.1 now. Next").len(), 2);
     }
 
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    }
+
     #[test]
     fn evidence_requires_a_real_marker() {
-        assert!(has_evidence("commit 3fa9c1e"));
-        assert!(has_evidence("cargo test --lib: 42 passed"));
-        assert!(!has_evidence("Done, everything works."));
-        assert!(!has_evidence("deadbeef is not a sha without digits"));
+        assert!(has_evidence("cargo test --lib: 42 passed", &[]));
+        assert!(has_evidence("evidence: see the QA log", &[]));
+        assert!(!has_evidence("Done, everything works.", &[repo_root()]));
+        assert!(!has_evidence("deadbeef is not a sha without digits", &[repo_root()]));
+    }
+
+    #[test]
+    fn unresolved_citations_are_not_evidence() {
+        let roots = [repo_root()];
+        // Marker-shaped, but naming no commit and no file in the repo.
+        assert!(!has_evidence("commit 3fa9c1e", &roots));
+        assert!(!has_evidence("Fixed in src/no_such_module_anywhere.rs:12.", &roots));
+        assert!(!has_evidence("See src-tauri/src/lib.rs:999999999.", &roots));
+        assert!(!has_evidence("See src-tauri/src/lib.rs:0.", &roots));
+        assert!(!has_evidence("See ../outside/README.md for it.", &roots));
+        assert!(!has_evidence("Broken at no_such_file_anywhere.rs:3.", &roots));
+        assert!(!has_evidence("See eval.rs:999999.", &roots));
+        // Nothing resolves without a checkout to resolve in.
+        assert!(!has_evidence("See src-tauri/src/lib.rs:1.", &[]));
+    }
+
+    #[test]
+    fn resolving_citations_are_evidence() {
+        let root = repo_root();
+        let roots = std::slice::from_ref(&root);
+        assert!(has_evidence("Done; see src-tauri/src/lib.rs:1.", roots));
+        assert!(has_evidence("Updated tools/role-contracts/README.md", roots));
+        // A bare file name, the way agents usually cite one.
+        assert!(has_evidence("The new test at acts.rs:1 never runs.", roots));
+        let head = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "--short=10", "HEAD"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_default();
+        // A tarball checkout has no history; the file cases above still run.
+        if is_sha(&head) {
+            assert!(has_evidence(&format!("Landed as {head}."), roots));
+        }
     }
 
     #[test]
     fn completed_transport_forces_declares_done() {
-        let mapped = map_message("", true);
+        let mapped = map_message("", true, &[]);
         assert!(mapped.contains(Act::DeclaresDone));
         assert!(!mapped.has_evidence);
     }

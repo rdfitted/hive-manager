@@ -75,6 +75,22 @@ class JudgeTests(unittest.TestCase):
     def _rows(self):
         return list(ledger.read_records([self.ledger]))
 
+    def test_ask_requests_the_pinned_model_from_decision_tables(self):
+        tables = json.loads((ROOT / "decision-tables.json").read_text(encoding="utf-8"))
+        self.assertRegex(tables["jev_model"], r"^jev-\d+\.\d+\.\d+$")
+        self.assertNotEqual("jev-latest", tables["jev_model"])
+        code, _, send = self._run(self._args())
+        self.assertEqual(0, code)
+        self.assertEqual(tables["jev_model"], json.loads(send.call_args.args[0])["model"])
+
+    def test_unpinned_tables_refuse_before_send(self):
+        for value in ({"jev_model": "jev-latest"}, {}):
+            with self.subTest(tables=value):
+                tables = self._file("unpinned-tables.json", value)
+                code, _, send = self._run(["--tables", str(tables), *self._args()])
+                self.assertNotEqual(0, code)
+                send.assert_not_called()
+
     def test_egress_denied_surface_writes_row_without_send(self):
         policy = json.loads(self.policy.read_text(encoding="utf-8"))
         del policy["surfaces"]["hive.qa.criterion"]
@@ -122,7 +138,7 @@ class JudgeTests(unittest.TestCase):
 
     def test_blind_payload_rejects_answer_rationale_severity_verdict_and_measured(self):
         expected = {"state": {"observed": "Synthetic evidence confirms behavior."},
-                    "model": "jev-latest", "questions": {"q1": {
+                    "model": json.loads((ROOT / "decision-tables.json").read_text(encoding="utf-8"))["jev_model"], "questions": {"q1": {
                         "type": "noul", "instructions": "Does the observed evidence satisfy the criterion?",
                         "criteria": {"true": "It does.", "false": "It does not."},
                     }}}

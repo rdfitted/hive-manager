@@ -48,8 +48,8 @@ pub(crate) fn event(
         source_id: id,
         truncated: false,
         payload,
+        artifact: None,
     }
-    .normalize()
 }
 
 pub(crate) fn server_reply(value: &Value) -> Value {

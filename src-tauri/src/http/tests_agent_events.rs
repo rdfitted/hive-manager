@@ -102,6 +102,7 @@ pub(super) fn event(agent: &str, text: &str) -> AgentEvent {
         source_id: Some(text.into()),
         truncated: false,
         payload: json!({"text":text}),
+        artifact: None,
     }
 }
 fn transcript_path(root: &Path, cwd: &Path, id: &str) -> PathBuf {

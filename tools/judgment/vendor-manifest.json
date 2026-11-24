@@ -19,7 +19,7 @@
     "audit.py": {
       "source": "~/.claude/tools/judgment/audit.py",
       "upstream_sha256": "b417a484ebd5edd9512de53ce5c622aaaf40d875b9ad9f04f5cb41837bf97f06",
-      "normalized_sha256": "b1a26623c29a7a69409897eb0d8d4d4db06917e8e036ef6d688c0d8f2fcf22ba"
+      "normalized_sha256": "ae3f0aa73dd7a45a40ca40a1e0f27149b950d91d6f49c4b4b2bb3d410a403a73"
     }
   }
 }

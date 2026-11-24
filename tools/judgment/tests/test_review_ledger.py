@@ -160,7 +160,7 @@ class ReviewLedgerTests(unittest.TestCase):
             self.assertIn("evidence_tier=reviewer-resolved" if index == 4 else "evidence_tier=fixed",
                           outcomes[index]["note"])
             expected_payload = {"state": _blind_observation(self.findings[index]),
-                                "model": "jev-latest", "questions": {
+                                "model": json.loads((ROOT / "decision-tables.json").read_text(encoding="utf-8"))["jev_model"], "questions": {
                                     "review_finding_disposition": json.loads(
                                         self.question.read_text(encoding="utf-8"))}}
             self.assertEqual(judge._json_bytes(expected_payload), sent_bytes[index])

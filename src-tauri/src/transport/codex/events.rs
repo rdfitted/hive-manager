@@ -44,8 +44,8 @@ pub(crate) fn event(
         source_id: source,
         truncated: false,
         payload,
+        artifact: None,
     }
-    .normalize()
 }
 
 pub(crate) fn normalize(

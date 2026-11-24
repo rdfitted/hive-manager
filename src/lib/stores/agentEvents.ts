@@ -10,6 +10,8 @@ export interface AgentEvent {
   source_id: string | null;
   truncated: boolean;
   payload: Record<string, unknown>;
+  /** Set when the journal clipped `payload`: the artifact holding it in full. */
+  artifact?: string;
 }
 
 export interface AgentFeed {

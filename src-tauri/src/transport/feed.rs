@@ -7,6 +7,7 @@ use super::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File, OpenOptions},
@@ -90,6 +91,38 @@ fn validate_existing_file(root: &Path, path: &Path) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// `<agent>.artifacts/` beside `<agent>.jsonl`.
+fn artifact_directory(journal: &Path) -> PathBuf {
+    journal.with_extension("artifacts")
+}
+
+/// Write `payload` to a fresh `<uuid>.json` in the journal's artifact
+/// directory and return the file name. Refuses a symlinked directory.
+fn spill_artifact(root: &Path, journal: &Path, payload: &Value) -> Result<String, String> {
+    let directory = artifact_directory(journal);
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err("Artifact directory must be a real directory".into())
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&directory).map_err(|e| e.to_string())?;
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    let name = format!("{}.json", uuid::Uuid::new_v4());
+    let path = directory.join(&name);
+    let bytes = serde_json::to_vec(payload).map_err(|e| e.to_string())?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(&bytes).map_err(|e| e.to_string())?;
+    contained_file(root, &path)?;
+    Ok(name)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -509,7 +542,8 @@ impl FeedStore {
         agent: &str,
         event: AgentEvent,
     ) -> Result<(), String> {
-        let fingerprint = event_fingerprint(&event);
+        // Fingerprint the journaled (clipped) form: replay reads that form back.
+        let fingerprint = event_fingerprint(&event.clone().normalize());
         if !journal.codex_seen.contains(&fingerprint) {
             self.append(journal, session, agent, event)?;
             journal.codex_seen.insert(fingerprint);
@@ -582,7 +616,16 @@ impl FeedStore {
         }
         journal_directory(&self.sessions_root, session)?;
         validate_existing_file(&self.sessions_root, &journal.path)?;
+        let original = event.payload.clone();
         event = event.normalize();
+        if event.payload != original {
+            // The journal keeps the clipped row; the artifact keeps the payload
+            // exactly as it arrived. A failed spill still journals the row.
+            match spill_artifact(&self.sessions_root, &journal.path, &original) {
+                Ok(name) => event.artifact = Some(name),
+                Err(error) => tracing::warn!(%session, %agent, %error, "Cannot spill clipped event payload"),
+            }
+        }
         event.cursor = Cursor {
             generation: journal.generation.clone(),
             byte_offset: journal.size,
@@ -599,6 +642,19 @@ impl FeedStore {
         journal.size += bytes.len() as u64;
         let _ = self.sender.send((session.into(), event.clone()));
         Ok(event)
+    }
+    /// The full payload of a clipped event, from the artifact its journal row names.
+    pub fn artifact(&self, session: &str, agent: &str, name: &str) -> Result<Value, String> {
+        validate_ids(session, agent)?;
+        let id = name.strip_suffix(".json").ok_or("Invalid artifact name")?;
+        if uuid::Uuid::parse_str(id).map(|parsed| parsed.hyphenated().to_string() != id).unwrap_or(true) {
+            return Err("Invalid artifact name".into());
+        }
+        let directory = journal_directory(&self.sessions_root, session)?;
+        let path = artifact_directory(&directory.join(format!("{agent}.jsonl"))).join(name);
+        validate_existing_file(&self.sessions_root, &path)?;
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
     }
     pub fn append_protocol(
         &self,
@@ -784,6 +840,69 @@ fn read_window(
         scanned_end = offset;
     }
     Ok((events, scanned_end))
+}
+
+#[cfg(test)]
+mod artifact_spill_tests {
+    use super::*;
+    use crate::transport::{AgentEventKind, MAX_TEXT_BYTES};
+
+    #[test]
+    fn a_clipped_event_is_recoverable_byte_for_byte_from_its_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let feeds = FeedStore::new(root.path().into(), None);
+        feeds.use_protocol("session", "worker").unwrap();
+        // 40 KiB of multi-byte text, so clipping lands mid-character.
+        let text: String = "héllo wörld ✓ ".chars().cycle().take(40 * 1024).collect();
+        assert!(text.len() > 40 * 1024 && text.len() > MAX_TEXT_BYTES);
+        let event = AgentEvent {
+            agent_id: "worker".into(),
+            cursor: String::new(),
+            ts: "2026-11-24T00:00:00Z".into(),
+            kind: AgentEventKind::AssistantMessage,
+            source_id: Some("m1".into()),
+            truncated: false,
+            payload: serde_json::json!({"text": text}),
+            artifact: None,
+        };
+        let stored = feeds.append_protocol("session", "worker", event).unwrap();
+        assert!(stored.truncated);
+        assert!(stored.payload["text"].as_str().unwrap().len() <= MAX_TEXT_BYTES);
+        let name = stored.artifact.clone().expect("clipped event names its artifact");
+
+        // The journal row carries the reference and the flag.
+        let page = feeds.history("session", "worker", None, None, 10).unwrap();
+        assert_eq!(page.events.len(), 1);
+        assert!(page.events[0].truncated);
+        assert_eq!(page.events[0].artifact.as_deref(), Some(name.as_str()));
+
+        let full = feeds.artifact("session", "worker", &name).unwrap();
+        assert_eq!(full["text"].as_str().unwrap().as_bytes(), text.as_bytes());
+
+        assert!(feeds.artifact("session", "worker", "../worker.jsonl").is_err());
+        assert!(feeds.artifact("session", "worker", "not-a-uuid.json").is_err());
+    }
+
+    #[test]
+    fn an_event_within_limits_writes_no_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let feeds = FeedStore::new(root.path().into(), None);
+        feeds.use_protocol("session", "worker").unwrap();
+        let event = AgentEvent {
+            agent_id: "worker".into(),
+            cursor: String::new(),
+            ts: "2026-11-24T00:00:00Z".into(),
+            kind: AgentEventKind::AssistantMessage,
+            source_id: None,
+            truncated: false,
+            payload: serde_json::json!({"text": "short"}),
+            artifact: None,
+        };
+        let stored = feeds.append_protocol("session", "worker", event).unwrap();
+        assert!(!stored.truncated && stored.artifact.is_none());
+        let directory = journal_directory(root.path(), "session").unwrap();
+        assert!(!directory.join("worker.artifacts").exists());
+    }
 }
 
 #[cfg(test)]
