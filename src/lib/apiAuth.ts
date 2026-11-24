@@ -19,7 +19,9 @@ export function loadApiToken(): Promise<void> {
       try {
         token = await invoke<string>('get_api_token');
       } catch {
+        // Let the next request retry instead of caching the failure for the page's lifetime.
         token = null;
+        ready = null;
       }
     })();
   }

@@ -2933,7 +2933,7 @@ mod tests {
                     .uri(format!("/api/sessions/{session_id}/qa/verdict"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"verdict":"PASS","criteria":[{"number":99,"result":"pass","evidence":"not in contract"}]}"#,
+                        r#"{"verdict":"PASS","criteria":[{"number":99,"result":"pass","evidence":"not in contract","evidence_refs":["qa-worker-1#99"]}]}"#,
                     ))
                     .unwrap(),
             )
@@ -2943,7 +2943,9 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("99"));
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("Unknown QA criterion numbers"), "{body}");
+        assert!(body.contains("99"));
         assert!(matches!(
             controller.read().get_session(&session_id).unwrap().state,
             SessionState::QaInProgress { .. }

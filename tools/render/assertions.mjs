@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { pngPixels, badgePaint } from './png.mjs';
 import { mutationProver, styleChange, removeNode, textChange, appendNode, offscreenTarget, emptyContents, duplicateIndicators } from './mutations.mjs';
 import { updaterState, classifyUpdater } from './updater.mjs';
@@ -129,9 +130,15 @@ export async function composerGeometry(pane) {
     return { contained: box.width > 0 && box.height > 0 && box.left >= outer.left - 1 && box.top >= outer.top - 1 && box.right <= outer.right + 1 && box.bottom <= outer.bottom + 1, composer: rect(box), pane: rect(outer) };
   });
 }
-async function queenTerminalCapability(session, apiPort) {
+// The isolated instance writes its per-launch API token into its own data dir.
+async function instanceApiToken(root) {
+  const dataDir = path.join(root, process.platform === 'win32' ? 'appdata/hive-manager' : 'home/.config/hive-manager');
+  return (await readFile(path.join(dataDir, 'api-token'), 'utf8')).trim();
+}
+async function queenTerminalCapability(session, apiPort, root) {
   const queen = session.agents.find(agent => agent.role === 'Queen');
-  const response = await fetch(`http://127.0.0.1:${apiPort}/api/sessions/${encodeURIComponent(session.id)}/agent-feeds`, { signal: AbortSignal.timeout(5000) });
+  const headers = { Authorization: `Bearer ${await instanceApiToken(root)}` };
+  const response = await fetch(`http://127.0.0.1:${apiPort}/api/sessions/${encodeURIComponent(session.id)}/agent-feeds`, { headers, signal: AbortSignal.timeout(5000) });
   if (!response.ok) throw new Error(`Cannot read render fixture feed capabilities: HTTP ${response.status}`);
   const roster = await response.json();
   const hasTerminal = roster.agents.find(feed => feed.agent_id === queen.id)?.capabilities.has_terminal;
@@ -617,7 +624,7 @@ export async function runRenderAssertions({ page, manifest, report, assert, out,
     const toggle = page.locator('#title-bar-panel-toggle');
     if (await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
     await viewMode(page, 'Grid');
-    const queenHasTerminal = await queenTerminalCapability(session, report.ports.api);
+    const queenHasTerminal = await queenTerminalCapability(session, report.ports.api, report.root);
     await gridChecks(viewport, 'load', queenHasTerminal);
     if (!settled) {
       console.log('render:check observing the 60-second stall loop and 5-second sweep');

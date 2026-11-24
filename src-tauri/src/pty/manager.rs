@@ -883,8 +883,12 @@ impl PtyManager {
     }
 
     pub(crate) fn heartbeat_credential_matcher(&self) -> HeartbeatCredentialMatcher {
+        // The launch-wide API token has the same 64-hex shape; recognizing it here
+        // makes payload rejection and audit redaction cover it too.
+        let api_token: [u8; 32] = Sha256::digest(crate::http::auth::api_token().as_bytes()).into();
         HeartbeatCredentialMatcher { digests: self.heartbeat_credentials
-            .read().values().map(|credential| credential.digest).collect() }
+            .read().values().map(|credential| credential.digest)
+            .chain(std::iter::once(api_token)).collect() }
     }
 
     #[cfg(test)]

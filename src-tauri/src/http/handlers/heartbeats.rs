@@ -141,11 +141,7 @@ async fn heartbeat_security_event(
 /// Snapshot under the short manager lock; hash untrusted text on the blocking pool.
 pub(super) async fn contains_credential_text(state: &AppState, values: Vec<String>) -> Result<bool, ApiError> {
     let matcher = state.pty_manager.read().heartbeat_credential_matcher();
-    // The launch-wide API token is a credential too; never persist it in a payload.
-    let api_token = crate::http::auth::api_token();
-    tokio::task::spawn_blocking(move || {
-        values.iter().any(|value| matcher.contains(value) || value.contains(api_token))
-    })
+    tokio::task::spawn_blocking(move || values.iter().any(|value| matcher.contains(value)))
         .await.map_err(|_| ApiError::internal("Credential scan unavailable"))
 }
 

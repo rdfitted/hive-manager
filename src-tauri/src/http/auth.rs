@@ -54,18 +54,17 @@ pub fn api_token_path(base_dir: &Path) -> PathBuf {
     base_dir.join(API_TOKEN_FILE)
 }
 
-/// Atomically (re)write the token file: temp file in the same directory,
-/// restrict its ACL, then rename over the previous launch's file.
+/// Atomically (re)write the token file: create a temp file in the same
+/// directory, restrict it to its owner *before* any token bytes are written,
+/// then rename it over the previous launch's file. Fails closed: if the file
+/// cannot be restricted, the token is never written.
 pub fn persist_api_token(base_dir: &Path, token: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(base_dir)?;
     let path = api_token_path(base_dir);
     let mut temp = tempfile::NamedTempFile::new_in(base_dir)?;
+    restrict_to_owner(temp.path())?;
     temp.write_all(token.as_bytes())?;
     temp.flush()?;
-    if let Err(error) = restrict_to_owner(temp.path()) {
-        // Best effort: the storage dir already inherits the user profile's ACL.
-        tracing::warn!("Could not restrict the API token file to its owner: {error}");
-    }
     temp.persist(&path).map_err(|error| error.error)?;
     Ok(path)
 }
@@ -232,10 +231,13 @@ fn curl_executable_ends(line: &str) -> Vec<usize> {
     ends
 }
 
-/// Add the bearer header to every curl command in agent-facing text that
-/// targets the local Hive API. Idempotent: a command block (a line plus its
-/// `\` continuations) that already names `Authorization: Bearer` is left alone.
-/// Appends a one-time guidance note when anything was rewritten.
+/// Add the bearer header to every curl invocation in agent-facing text that
+/// targets the local Hive API. A command block is a line plus its `\`
+/// continuations; within it each invocation is judged by its own segment (from
+/// its executable up to the next curl), so `curl https://example.com && curl
+/// http://localhost:18800/api/...` authorizes only the second. Idempotent: an
+/// invocation whose segment already names `Authorization: Bearer` is left
+/// alone. Appends a one-time guidance note when anything was rewritten.
 pub fn authorize_api_commands(content: &str) -> String {
     let mut lines: Vec<String> = content.split('\n').map(str::to_string).collect();
     let mut injected = false;
@@ -245,15 +247,36 @@ pub fn authorize_api_commands(content: &str) -> String {
         while end + 1 < lines.len() && lines[end].trim_end().ends_with('\\') {
             end += 1;
         }
-        let block = lines[index..=end].join("\n");
-        if targets_local_api(&block) && !block.contains("Authorization: Bearer") {
-            for line in &mut lines[index..=end] {
-                let ends = curl_executable_ends(line);
-                for position in ends.into_iter().rev() {
-                    line.insert_str(position, &format!(" {PROMPT_AUTH_HEADER}"));
-                    injected = true;
+        let invocations: Vec<(usize, usize)> = (index..=end)
+            .flat_map(|line| {
+                curl_executable_ends(&lines[line])
+                    .into_iter()
+                    .map(move |position| (line, position))
+            })
+            .collect();
+        let mut inserts = Vec::new();
+        for (k, &(line, position)) in invocations.iter().enumerate() {
+            let (stop_line, stop_position) = invocations
+                .get(k + 1)
+                .copied()
+                .unwrap_or((end, lines[end].len()));
+            let mut segment = String::new();
+            for current in line..=stop_line {
+                let text = &lines[current];
+                let from = if current == line { position } else { 0 };
+                let to = if current == stop_line { stop_position } else { text.len() };
+                if current != line {
+                    segment.push('\n');
                 }
+                segment.push_str(&text[from..to.max(from)]);
             }
+            if targets_local_api(&segment) && !segment.contains("Authorization: Bearer") {
+                inserts.push((line, position));
+            }
+        }
+        for (line, position) in inserts.into_iter().rev() {
+            lines[line].insert_str(position, &format!(" {PROMPT_AUTH_HEADER}"));
+            injected = true;
         }
         index = end + 1;
     }
@@ -366,6 +389,44 @@ Use `curl` carefully.";
         assert!(rendered.contains("$env:HIVE_API_TOKEN"));
         // Idempotent.
         assert_eq!(authorize_api_commands(&rendered), rendered);
+    }
+
+    #[test]
+    fn external_curl_beside_a_local_one_never_gets_the_token() {
+        let source = "curl -s https://example.com/config && curl -s http://localhost:18800/api/sessions\n\
+curl -s http://localhost:18800/api/sessions && curl -s https://example.com/x\n\
+curl -s https://example.com/a \\\n  -o out && curl -s \\\n  http://127.0.0.1:18800/api/x";
+        let rendered = authorize_api_commands(source);
+        let header = "-H \"Authorization: Bearer $HIVE_API_TOKEN\"";
+        assert!(rendered.contains(&format!(
+            "curl -s https://example.com/config && curl {header} -s http://localhost:18800/api/sessions"
+        )));
+        assert!(rendered.contains(&format!(
+            "curl {header} -s http://localhost:18800/api/sessions && curl -s https://example.com/x"
+        )));
+        assert!(rendered.contains("curl -s https://example.com/a \\"));
+        assert!(rendered.contains(&format!("-o out && curl {header} -s \\")));
+        assert_eq!(rendered.matches(header).count(), 3);
+        assert_eq!(authorize_api_commands(&rendered), rendered);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn persisted_token_has_a_protected_owner_only_dacl() {
+        use std::os::windows::process::CommandExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = persist_api_token(dir.path(), "token").unwrap();
+        // Only the owner-rights ACE remains and nothing is inherited ("(I)").
+        let output = std::process::Command::new("icacls")
+            .arg(&path)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let listing = String::from_utf8_lossy(&output.stdout);
+        assert!(listing.contains("OWNER RIGHTS"), "{listing}");
+        assert!(!listing.contains("(I)"), "{listing}");
     }
 
     #[test]
