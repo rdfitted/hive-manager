@@ -1030,8 +1030,9 @@ pub fn derive_runtime_graph_with_completion_facts(
         update_mutation_outcomes(&mut outcomes, delta);
     }
 
+    let mut terminal_queue_failures = BTreeMap::new();
     for event in events {
-        let kind = match observation_kind(&event.event_type) {
+        let kind = match observation_kind(event) {
             Some(kind) => kind,
             None => continue,
         };
@@ -1048,6 +1049,14 @@ pub fn derive_runtime_graph_with_completion_facts(
             .get("task_id")
             .and_then(|value| value.as_str())
             .map(str::to_string);
+        if let Some(task_id) = task_id.as_ref() {
+            if matches!(event.event_type, EventType::WorkerClaimed | EventType::WorkerReclaimed | EventType::WorkerFinalized) {
+                terminal_queue_failures.remove(task_id);
+                if event.event_type == EventType::WorkerFinalized && kind == RuntimeObservationKind::Failure {
+                    terminal_queue_failures.insert(task_id.clone(), event.timestamp);
+                }
+            }
+        }
         let status = observation_status(kind);
 
         graph.nodes.push(observation_node(
@@ -1235,6 +1244,14 @@ pub fn derive_runtime_graph_with_completion_facts(
         }
     }
 
+    // Explicit declarations cannot upgrade a failed queue finalization in this attempt.
+    for (task_id, failed_at) in terminal_queue_failures {
+        if let Some(outcome) = outcomes.get_mut(&task_id) {
+            outcome.status = RuntimeOutcomeStatus::Failed;
+            outcome.finished_at = Some(failed_at);
+            outcome.completion_evidence = None;
+        }
+    }
     let journal_step_ids: std::collections::BTreeSet<_> =
         journal.iter().map(|entry| entry.step_id.as_str()).collect();
     for entry in journal {
@@ -1382,8 +1399,8 @@ pub fn record_omission(graph: &mut WorkGraph, reason: WorkGraphOmissionReason, e
     }
 }
 
-fn observation_kind(event_type: &EventType) -> Option<RuntimeObservationKind> {
-    match event_type {
+fn observation_kind(event: &Event) -> Option<RuntimeObservationKind> {
+    match event.event_type {
         EventType::WorkerClaimed => Some(RuntimeObservationKind::Claim),
         EventType::WorkerClaimFailed => Some(RuntimeObservationKind::ClaimFailed),
         EventType::AgentLaunched => Some(RuntimeObservationKind::Spawn),
@@ -1391,6 +1408,10 @@ fn observation_kind(event_type: &EventType) -> Option<RuntimeObservationKind> {
         EventType::AgentCompleted => Some(RuntimeObservationKind::Completion),
         EventType::AgentStopped => Some(RuntimeObservationKind::Stop),
         EventType::AgentFailed => Some(RuntimeObservationKind::Failure),
+        EventType::WorkerFinalized if event.payload.get("outcome")
+            .is_some_and(|outcome| outcome.as_str() != Some("completed")) => {
+                Some(RuntimeObservationKind::Failure)
+            }
         EventType::WorkerFinalized => Some(RuntimeObservationKind::Finalization),
         EventType::WorkNodeCompleted => Some(RuntimeObservationKind::Completion),
         EventType::ArtifactUpdated => Some(RuntimeObservationKind::Artifact),

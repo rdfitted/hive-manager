@@ -479,6 +479,12 @@ fn graph_from_live_state(
             .iter_mut()
             .find(|node| node.id == fact.task_id)
         {
+            // A declaration cannot override an unsuccessful terminal queue outcome.
+            if node.status == NodeStatus::Failed
+                && completion_provenance.get(&node.id) == Some(&CompletionProvenance::Queue)
+            {
+                continue;
+            }
             node.status = NodeStatus::Completed;
             completion_provenance.insert(fact.task_id.clone(), CompletionProvenance::Declared);
             completion_source_refs
@@ -859,6 +865,44 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use super::{merge_declared_progress, WorkGraphNodeProgress};
+
+    #[tokio::test]
+    async fn exhausted_heartbeat_and_declaration_cannot_override_queue_failure() {
+        use super::*;
+        use crate::http::tests::setup_test_app_full;
+        use crate::orchestrator::work_graph::completion_ledger::{append_node_completion_facts, NodeCompletionFact};
+        let dir = tempfile::tempdir().unwrap();
+        let (_, _, storage, state) = setup_test_app_full(dir.path().to_path_buf()).await;
+        let mgr = &state.queue_manager;
+        mgr.enqueue_worker("run", "s1", "worker", "backend", "codex", serde_json::json!({}), Some("T0".into())).await.unwrap();
+        let mut dependent = mgr.repo().get_row("run").unwrap().unwrap();
+        dependent.id = "dependent".into(); dependent.worker_id = "dependent-worker".into(); dependent.task_id = Some("T1".into());
+        mgr.repo().enqueue_with_dependencies(&dependent, &["T0".into()]).unwrap();
+        for now in 0..8 {
+            mgr.repo().record_heartbeat("s1", "worker", if now % 2 == 0 { "working" } else { "idle" }, now).unwrap();
+        }
+        assert_eq!(mgr.finalize_no_progress().await.unwrap(), vec!["run"]);
+        let mut rx = state.event_bus.subscribe();
+        assert!(mgr.record_heartbeat("s1", "worker", "completed").await.unwrap());
+        assert!(read_node_completion_facts(&storage.session_dir("s1")).unwrap().is_empty());
+        assert!(rx.try_recv().is_err(), "late heartbeat must publish no success events");
+        let plan = TaskGraph::new(vec![crate::orchestrator::work_graph::WorkNode::new("T0", NodeKind::Task, "prerequisite",
+            NodeContract::default(), BindingRef::Role("backend".into()), NodeStatus::Ready)], vec![]);
+        for declared in [false, true] {
+            if declared {
+                append_node_completion_facts(&storage.session_dir("s1"), &[NodeCompletionFact::new(
+                    "T0", "worker", NodeCompletionProvenance::Heartbeat)]).unwrap();
+            }
+            let (_, live, _, _, provenance, refs, _) = graph_from_live_state(&state, "s1", WorkGraphView::Runtime, plan.clone())
+                .unwrap_or_else(|_| panic!("live work-graph projection failed"));
+            assert_eq!(live.nodes[0].status, NodeStatus::Failed, "declared={declared}");
+            assert_eq!(provenance["T0"], CompletionProvenance::Queue);
+            assert!(!refs.contains_key("T0"));
+            assert!(mgr.repo().try_claim("dependent", 0, 100).unwrap().is_none());
+            assert_eq!(mgr.repo().pending_dependencies("dependent").unwrap(), vec!["T0"]);
+        }
+        assert_eq!(mgr.repo().get_row("run").unwrap().unwrap().last_status.as_deref(), Some("exhausted"));
+    }
 
     #[test]
     fn declared_completion_preserves_observed_queue_progress() {

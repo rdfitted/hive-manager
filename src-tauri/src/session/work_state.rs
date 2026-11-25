@@ -111,7 +111,8 @@ pub fn work_state_since(evidence: &WorkEvidence<'_>, latest_input_at: Option<Dat
                             row.worker_id == evidence.agent_id
                                 && Some((row.assignment_id, row.created_at)) == latest
                         })
-                        .all(|row| row.status == QueueStatus::Finalized)
+                        .all(|row| row.status == QueueStatus::Finalized
+                            && row.last_status.as_deref() == Some("completed"))
                 })
         }
     };
@@ -159,6 +160,26 @@ pub fn verdict_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exhausted_queue_outcome_keeps_fresh_completed_heartbeat_working() {
+        let at = Utc::now();
+        let mut row: QueueRow = serde_json::from_value(serde_json::json!({
+            "id":"r", "task_id":"T1", "session_id":"s", "worker_id":"seat",
+            "role_type":"backend", "cli":"codex", "status":"finalized", "payload":{},
+            "attempts":1, "continuation_count":8, "no_progress_count":0, "last_status":"exhausted",
+            "heartbeat_at":null, "assignment_id":1, "blocked_reason":null, "created_at":1, "updated_at":1
+        })).unwrap();
+        for (last_status, expected) in [("exhausted", WorkState::Working), ("completed", WorkState::Finished)] {
+            row.last_status = Some(last_status.into());
+            assert_eq!(work_state(&WorkEvidence {
+                agent_id: "seat", role: &AgentRole::Worker { index: 1, parent: None },
+                status: &AgentStatus::Running, alive: true, spawned_at: Some(at),
+                heartbeat: Some(("completed", at + chrono::Duration::seconds(1))),
+                heartbeat_is_self: true, queue: Some(std::slice::from_ref(&row)), verdict_at: None,
+            }), expected, "{last_status}");
+        }
+    }
 
     fn check(
         role: &AgentRole,
@@ -324,7 +345,7 @@ mod tests {
         let mut rows = vec![serde_json::from_value::<QueueRow>(serde_json::json!({
             "id":"r", "task_id":"T1", "session_id":"s", "worker_id":"seat",
             "role_type":"backend", "cli":"codex", "status":"finalized", "payload":{},
-            "attempts":1, "continuation_count":0, "no_progress_count":0, "last_status":null,
+            "attempts":1, "continuation_count":0, "no_progress_count":0, "last_status":"completed",
             "heartbeat_at":null, "assignment_id":1, "blocked_reason":null, "created_at":1,
             "updated_at":1
         }))

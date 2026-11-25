@@ -39,7 +39,7 @@ pub const STUCK_CUTOFF_MS: i64 = 90_000;
 
 /// Evidence source for a terminal status in a read-only work-graph projection.
 /// Later evidence layers deliberately use this precedence:
-/// declared > queue > inferred > plan.
+/// declared > queue > inferred > plan, except failed queue outcomes remain authoritative.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionProvenance {
@@ -943,7 +943,14 @@ impl QueueManager {
         };
         if status == "completed" {
             if let Some(row_id) = updated_row_id {
-                let completion = self.repo.get_row(row_id)?.and_then(|row| {
+                // Finalized outcomes are frozen: a late heartbeat only proves liveness.
+                let row = self.repo.get_row(row_id)?;
+                if !row.as_ref().is_some_and(|row| {
+                    row.status == QueueStatus::Finalized && row.last_status.as_deref() == Some("completed")
+                }) {
+                    return Ok(result);
+                }
+                let completion = row.and_then(|row| {
                     let executed_as = row.payload.get("executed_as").and_then(|value| {
                         match serde_json::from_value::<ExecutedAs>(value.clone()) {
                             Ok(executed_as) => Some(executed_as),
@@ -1340,14 +1347,23 @@ impl QueueManager {
     async fn emit_for_row(&self, id: &str, event_type: EventType, severity: Severity) {
         match self.repo.get_row(id) {
             Ok(Some(row)) => {
-                self.emit(
-                    &row.session_id,
-                    &row.worker_id,
-                    row.task_id.as_deref(),
-                    event_type,
-                    severity,
-                )
-                .await
+                let mut payload = serde_json::json!({ "worker_id": row.worker_id, "task_id": row.task_id });
+                if event_type == EventType::WorkerFinalized {
+                    let outcome = if row.status == QueueStatus::Finalized {
+                        row.last_status.as_deref().unwrap_or("unknown")
+                    } else {
+                        row.status.as_tag()
+                    };
+                    payload["outcome"] = serde_json::json!(outcome);
+                }
+                let event = Event {
+                    id: uuid::Uuid::new_v4().to_string(), session_id: row.session_id,
+                    cell_id: None, agent_id: Some(row.worker_id), event_type,
+                    timestamp: Utc::now(), payload, severity,
+                };
+                if let Err(error) = self.event_bus.publish(event).await {
+                    tracing::warn!("Failed to publish queue event: {error}");
+                }
             }
             Ok(None) => {}
             Err(e) => tracing::warn!("Failed to load queue row {id} for event: {e}"),
@@ -1369,6 +1385,53 @@ mod tests {
         repo.ensure_schema().unwrap();
         let event_bus = EventBus::new(dir.path().to_path_buf());
         (dir, QueueManager::new(repo, event_bus))
+    }
+
+    #[tokio::test]
+    async fn exhausted_finalization_replays_as_failure_in_runtime_and_archive() {
+        use crate::coordination::StateManager;
+        use crate::orchestrator::work_graph::{archive::archive_completed_session,
+            runtime::{derive_runtime_graph, RuntimeOutcomeStatus}, BindingRef, NodeContract, NodeKind, WorkNode};
+        for outcome in ["completed", "exhausted", "failed"] {
+            let (dir, mgr) = manager();
+            let plan = TaskGraph::new(vec![WorkNode::new("T0", NodeKind::Task, "prerequisite",
+                NodeContract::default(), BindingRef::Role("backend".into()), NodeStatus::Ready)], vec![]);
+            StateManager::new(dir.path().join("sessions/s1")).write_work_graph(&plan).unwrap();
+            mgr.enqueue_worker("run", "s1", "worker", "backend", "codex", json!({}), Some("T0".into())).await.unwrap();
+            let mut rx = mgr.event_bus.subscribe();
+            if outcome == "completed" {
+                mgr.record_heartbeat("s1", "worker", "completed").await.unwrap();
+            } else if outcome == "exhausted" {
+                for now in 0..MAX_CONTINUATIONS {
+                    mgr.repo.record_heartbeat("s1", "worker", if now % 2 == 0 { "working" } else { "idle" }, now).unwrap();
+                }
+                mgr.finalize_no_progress().await.unwrap();
+            } else {
+                for now in 0..MAX_SPAWN_ATTEMPTS {
+                    let epoch = mgr.repo.try_claim_for_worker("run", Some("worker"), 0, now + 100).unwrap().unwrap();
+                    mgr.release_after_failed_spawn("s1", "worker", "run", epoch).await.unwrap();
+                }
+            }
+            if outcome != "completed" {
+                // Model a later explicit completed_nodes declaration through its ledger and event.
+                let fact = NodeCompletionFact::new("T0", "worker", NodeCompletionProvenance::Heartbeat);
+                append_node_completion_facts(&dir.path().join("sessions/s1"), std::slice::from_ref(&fact)).unwrap();
+                mgr.event_bus.publish(fact.event("s1")).await.unwrap();
+            }
+            let mut events = Vec::new();
+            while let Ok(event) = rx.try_recv() { events.push(event); }
+            let expected = if outcome == "completed" { NodeStatus::Completed } else { NodeStatus::Failed };
+            let replay = derive_runtime_graph(Some(&plan), &events, &[], &[], &[]);
+            let archived = archive_completed_session(dir.path(), None, "s1").unwrap().archive;
+            for (graph, outcomes) in [(&replay.runtime_graph, &replay.outcomes), (&archived.runtime_graph, &archived.outcomes)] {
+                assert_eq!(graph.nodes.iter().find(|node| node.id == "T0").unwrap().status, expected, "{outcome}");
+                let actual = outcomes.iter().find(|row| row.subject_id == "T0").unwrap();
+                if outcome != "completed" {
+                    assert_eq!(actual.status, RuntimeOutcomeStatus::Failed, "{outcome}");
+                    assert_eq!(actual.completion_evidence, None);
+                }
+            }
+        }
     }
 
     #[tokio::test]
