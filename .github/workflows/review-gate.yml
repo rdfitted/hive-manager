@@ -1,0 +1,26 @@
+# Copy to .github/workflows/review-gate.yml in the repository being reviewed.
+# Needs repo secrets ANTHROPIC_API_KEY, OPENAI_API_KEY and GEMINI_API_KEY (docs/install.md).
+name: review-gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+concurrency:
+  group: review-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  gate:
+    if: ${{ !github.event.pull_request.draft }}
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+    uses: rdfitted/review-gate/.github/workflows/review-gate.yml@v1
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
