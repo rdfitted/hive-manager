@@ -45,12 +45,13 @@ jobs:
     env:
       TARGET: ${{ inputs.target || 'staging' }}
     steps:
-      # The pull request head itself, not GitHub's merge commit: the reported sha
-      # must be the commit the gate reviews.
+      # The exact commit of the event: the pull request head rather than GitHub's
+      # merge commit, and the commit a tag named when the run was requested, so a
+      # tag moved afterwards cannot change what is tested.
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Setup Python
@@ -73,7 +74,8 @@ jobs:
       - name: Smoke
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          # Read-only token for the release inventory call. Staging builds PR code and gets none.
+          GITHUB_TOKEN: ${{ inputs.target == 'production' && github.token || '' }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           # The default bash shell exits on the first failure; the summary must still be written.
@@ -85,7 +87,7 @@ jobs:
               exit 2
             fi
             args=(--target production --base-url https://github.com/rdfitted/hive-manager
-                  --expect-tag "$GITHUB_REF_NAME" --expect-sha "$(git rev-parse HEAD)")
+                  --expect-tag "$GITHUB_REF_NAME" --expect-sha "$HEAD_SHA")
           else
             args=(--target staging --base-url . --expect-sha "$HEAD_SHA")
           fi

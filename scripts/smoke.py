@@ -28,6 +28,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -42,10 +43,12 @@ PLATFORMS = ('darwin-aarch64', 'darwin-x86_64', 'windows-x86_64')
 # .github/promotion-gate.yml. Values are never read into output.
 REQUIRED_ENV = {'staging': (), 'production': ()}
 BUDGET_SECONDS = 95  # the contract is "under 2 minutes", cleanup included
+HARD_LIMIT_SECONDS = 115  # a watchdog ends the run here whatever is still blocking
 HTTP_TIMEOUT = 15
 MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_ASSET_BYTES = 300 * 1024 * 1024
 MARKER = '<title>Hive Manager</title>'
+TOKEN_ENV = ('GITHUB_TOKEN', 'GH_TOKEN')  # optional, sent only to api.github.com, never to a child
 
 
 class Failed(Exception):
@@ -96,7 +99,8 @@ def run_tool(args, cwd, deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise CouldNotRun('time budget exhausted')
-    process = subprocess.Popen([executable, *args[1:]], cwd=cwd, **_hidden())
+    environment = {name: value for name, value in os.environ.items() if name not in TOKEN_ENV}
+    process = subprocess.Popen([executable, *args[1:]], cwd=cwd, env=environment, **_hidden())
     try:
         output, _ = process.communicate(timeout=remaining)
     except subprocess.TimeoutExpired:
@@ -141,13 +145,17 @@ def http_get(url, deadline, follow=True, sink=None, headers=None):
         with opener.open(request, timeout=min(HTTP_TIMEOUT, remaining)) as response, \
                 (open(sink, 'wb') if sink else io.BytesIO()) as handle:
             size = 0
-            while chunk := response.read(1 << 16):
+            # read1 returns after one socket read, so the deadline is checked at least
+            # once per socket timeout however slowly the body arrives.
+            while chunk := response.read1(1 << 16):
                 size += len(chunk)
                 if size > limit:
                     raise Failed(f'{url} is larger than {limit} bytes')
                 if time.monotonic() > deadline:
                     raise CouldNotRun('time budget exhausted during a download')
                 handle.write(chunk)
+            if time.monotonic() > deadline:
+                raise CouldNotRun('time budget exhausted during a download')
             return response.status, response.headers, size if sink else handle.getvalue()
     except urllib.error.HTTPError as error:
         if not follow and error.code in (301, 302, 303, 307, 308):
@@ -180,6 +188,8 @@ def parse_ref_advertisement(data):
     Raises ValueError on a truncated or malformed body."""
     refs, offset, flushed = {}, 0, False
     while offset < len(data):
+        if offset + 4 > len(data):
+            raise ValueError('truncated packet header')
         size = int(data[offset:offset + 4].decode('ascii'), 16)
         if size == 0:  # flush packet
             offset, flushed = offset + 4, True
@@ -421,7 +431,7 @@ def production_checks(base_url, deadline, state, workdir):
         location = urllib.parse.urlparse(base_url)
         if location.netloc != 'github.com':
             raise CouldNotRun('the release inventory needs a github.com repository URL')
-        token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
+        token = next((os.environ[name] for name in TOKEN_ENV if os.environ.get(name)), None)
         headers = {'Accept': 'application/vnd.github+json'}
         if token:
             headers['Authorization'] = f'Bearer {token}'
@@ -464,8 +474,8 @@ def place_after(checks, anchors, check):
     checks.insert(index + 1, check)
 
 
-def run_checks(checks, deadline):
-    results = []
+def run_checks(checks, deadline, results=None):
+    results = [] if results is None else results
     for name, check in checks:
         started = time.monotonic()
         entry = {'name': name, 'ok': False}
@@ -495,8 +505,27 @@ def main(argv=None):
     parser.add_argument('--expect-sha', help='also require the reported sha to equal this commit')
     parser.add_argument('--expect-tag', help='production: also require the latest release to be this tag')
     args = parser.parse_args(argv)
-    deadline = time.monotonic() + BUDGET_SECONDS
-    state = {}
+    started = time.monotonic()
+    deadline = started + BUDGET_SECONDS
+    state, results = {}, []
+
+    def report():
+        document = {'target': args.target, 'sha': state.get('sha'), 'checks': results}
+        if state.get('tag'):
+            document['tag'] = state['tag']
+        print(json.dumps(document), flush=True)
+
+    def hard_stop():
+        # Something is blocking past every per-check limit. Report it and leave.
+        results.append({'name': 'time-limit', 'ok': False, 'could_not_run': True,
+                        'detail': f'still running after {HARD_LIMIT_SECONDS} s; stopped',
+                        'ms': round((time.monotonic() - started) * 1000)})
+        report()
+        os._exit(2)
+
+    watchdog = threading.Timer(HARD_LIMIT_SECONDS, hard_stop)
+    watchdog.daemon = True
+    watchdog.start()
     with tempfile.TemporaryDirectory(prefix='smoke-') as temp:
         if args.target == 'production':
             checks = production_checks(args.base_url.rstrip('/'), deadline, state, Path(temp))
@@ -521,11 +550,9 @@ def main(argv=None):
         if args.expect_tag:
             place_after(checks, ('latest-release-tag',),
                         ('tag-matches-expected', expectation(state, 'tag', args.expect_tag)))
-        results = run_checks(checks, deadline)
-    report = {'target': args.target, 'sha': state.get('sha'), 'checks': results}
-    if state.get('tag'):
-        report['tag'] = state['tag']
-    print(json.dumps(report), flush=True)
+        run_checks(checks, deadline, results)
+    watchdog.cancel()
+    report()
     return exit_code(results)
 
 

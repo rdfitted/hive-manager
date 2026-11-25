@@ -90,6 +90,26 @@ class ExitCodeTests(unittest.TestCase):
         self.assertEqual([name for name, _ in checks], ["checkout", "tag-matches-expected"])
 
 
+    def test_children_never_inherit_the_api_token(self):
+        seen = {}
+
+        class Finished:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return b"", None
+
+        def popen(args, **options):
+            seen.update(options["env"])
+            return Finished()
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "t1", "GH_TOKEN": "t2", "SMOKE_KEEP": "yes"}), \
+                patch.object(smoke.subprocess, "Popen", side_effect=popen):
+            smoke.run_tool(["git", "--version"], smoke.ROOT, smoke.time.monotonic() + 30)
+        self.assertEqual(seen.get("SMOKE_KEEP"), "yes")
+        self.assertNotIn("GITHUB_TOKEN", seen)
+        self.assertNotIn("GH_TOKEN", seen)
+
+
 class CouldNotRunTests(unittest.TestCase):
     def test_missing_env_exits_two_and_prints_the_name_only(self):
         secret = "do-not-print-this-value"
@@ -194,7 +214,8 @@ class RefAdvertisementTests(unittest.TestCase):
         self.assertEqual(refs["refs/tags/v1.2.3^{}"], "c" * 40)
 
     def test_rejects_a_truncated_or_malformed_body(self):
-        for bad in (self.BODY[:-4], self.BODY[:-10], self.BODY[:60], b"zzzz", b"0003"):
+        for bad in (self.BODY[:-4], self.BODY[:-3], self.BODY[:-1], self.BODY[:-10], self.BODY[:60],
+                    self.BODY + b"00", b"0", b"zzzz", b"0003"):
             with self.assertRaises(ValueError):
                 smoke.parse_ref_advertisement(bad)
 
