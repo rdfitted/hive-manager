@@ -75,6 +75,8 @@ def _hidden():
         options.update(startupinfo=startup, creationflags=subprocess.CREATE_NO_WINDOW)
     else:
         options.update(start_new_session=True)
+    # No child ever sees the API token.
+    options.update(env={name: value for name, value in os.environ.items() if name not in TOKEN_ENV})
     return options
 
 
@@ -99,8 +101,7 @@ def run_tool(args, cwd, deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise CouldNotRun('time budget exhausted')
-    environment = {name: value for name, value in os.environ.items() if name not in TOKEN_ENV}
-    process = subprocess.Popen([executable, *args[1:]], cwd=cwd, env=environment, **_hidden())
+    process = subprocess.Popen([executable, *args[1:]], cwd=cwd, **_hidden())
     try:
         output, _ = process.communicate(timeout=remaining)
     except subprocess.TimeoutExpired:
@@ -171,13 +172,19 @@ def http_get(url, deadline, follow=True, sink=None, headers=None):
 # --- pure helpers --------------------------------------------------------------
 
 def public_key_id(encoded):
-    """Key ID of a Tauri updater pubkey (base64 of a minisign public key file),
-    printed the way minisign prints it. Shape only; signatures prove the key."""
+    """Key ID of a Tauri updater pubkey, printed the way minisign prints it.
+
+    Parsed the way the shipped updater parses it (tauri-plugin-updater, then
+    minisign-verify PublicKey::decode): base64 of UTF-8 text whose first line is a
+    comment and whose second line is the key. Nothing is trimmed, so a key the app
+    would reject is rejected here even where the release validator is more lenient.
+    Shape only; the signature checks prove the key."""
     try:
-        lines = base64.b64decode(encoded, validate=True).decode('utf-8', errors='replace').strip().splitlines()
-        raw = base64.b64decode(lines[-1], validate=True) if lines else b''
-    except (binascii.Error, ValueError, TypeError):
-        raise Failed('updater pubkey is not base64') from None
+        lines = [line.removesuffix('\r') for line in
+                 base64.b64decode(encoded, validate=True).decode('utf-8').split('\n')]
+        raw = base64.b64decode(lines[1], validate=True)
+    except (binascii.Error, ValueError, TypeError, IndexError):
+        raise Failed('updater pubkey is not base64 text with the key on its second line') from None
     if len(raw) != 42 or raw[:2] != b'Ed':
         raise Failed('updater pubkey is not a minisign Ed25519 key')
     return raw[2:10][::-1].hex().upper()
@@ -448,6 +455,7 @@ def production_checks(base_url, deadline, state, workdir):
 
     def updater_signatures():
         need('downloaded')
+        read_updater_config(ROOT)  # the committed pubkey must parse the way the app parses it
         return verify_signatures(base_url, state['tag'], workdir, ROOT, deadline)
 
     return [('required-env', required_env('production')),
@@ -521,7 +529,7 @@ def main(argv=None):
                         'detail': f'still running after {HARD_LIMIT_SECONDS} s; stopped',
                         'ms': round((time.monotonic() - started) * 1000)})
         report()
-        os._exit(2)
+        os._exit(exit_code(results))  # a failure already recorded still outranks could-not-run
 
     watchdog = threading.Timer(HARD_LIMIT_SECONDS, hard_stop)
     watchdog.daemon = True

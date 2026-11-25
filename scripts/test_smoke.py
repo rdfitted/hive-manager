@@ -189,9 +189,17 @@ class KeyTests(unittest.TestCase):
         public = encoded("untrusted comment: minisign public key\n"
                          + base64.b64encode(b"Ed" + bytes(range(8)) + bytes(32)).decode() + "\n")
         self.assertEqual(smoke.public_key_id(public), "0706050403020100")
+        crlf = encoded("untrusted comment: minisign public key\r\n"
+                       + base64.b64encode(b"Ed" + bytes(range(8)) + bytes(32)).decode() + "\r\n")
+        self.assertEqual(smoke.public_key_id(crlf), "0706050403020100")
 
     def test_rejects_malformed_keys(self):
-        for bad in ("", None, "not base64!", encoded("one line"), encoded("a\n" + base64.b64encode(b"short").decode())):
+        key = base64.b64encode(b"Ed" + bytes(range(8)) + bytes(32)).decode()
+        # The shipped updater reads line two untrimmed: a leading blank line, a bare key
+        # and non-UTF-8 bytes all break updates, so none may pass here.
+        for bad in ("", None, "not base64!", encoded("one line"), encoded("a\n" + base64.b64encode(b"short").decode()),
+                    encoded("\nuntrusted comment: x\n" + key + "\n"), key, encoded("comment\n " + key),
+                    base64.b64encode(b"\xff\xfe\n" + key.encode()).decode()):
             with self.assertRaises(smoke.Failed):
                 smoke.public_key_id(bad)
 
