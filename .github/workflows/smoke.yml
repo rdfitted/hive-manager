@@ -1,0 +1,87 @@
+name: Smoke
+
+# Promotion-gate smoke (.github/promotion-gate.yml, scripts/smoke.py).
+# staging    builds the checked-out ref and runs the fast release checks.
+# production validates the latest published release, read-only. Dispatch it from the
+#            release tag (gh workflow run smoke.yml --ref vX.Y.Z -f target=production)
+#            so the check lands on the released commit and the tag is asserted.
+# This repo emits no deployment_status, and release.yml publishes with GITHUB_TOKEN,
+# which starts no other workflow, so production runs by dispatch.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches:
+      - main
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "staging builds this ref; production validates the latest published release"
+        required: true
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.target || 'staging' }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    # One job named for the target that ran, so a skipped twin can never show a
+    # green smoke/production.
+    name: smoke/${{ inputs.target || 'staging' }}
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TARGET: ${{ inputs.target || 'staging' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+
+      - name: Smoke self-tests
+        run: python -I -m unittest discover -s scripts -p test_smoke.py
+
+      - name: Install dependencies
+        if: env.TARGET == 'staging'
+        run: npm ci
+
+      - name: Smoke
+        shell: bash
+        env:
+          EXPECT_SHA: ${{ github.ref_type == 'tag' && github.sha || '' }}
+        run: |
+          set -uo pipefail
+          if [[ "$TARGET" == production ]]; then
+            args=(--target production --base-url https://github.com/rdfitted/hive-manager)
+            if [[ -n "$EXPECT_SHA" ]]; then args+=(--expect-sha "$EXPECT_SHA"); fi
+          else
+            args=(--target staging --base-url .)
+          fi
+          python scripts/smoke.py "${args[@]}" | tee "$RUNNER_TEMP/smoke.json"
+          code="${PIPESTATUS[0]}"
+          {
+            echo "### smoke/$TARGET (exit $code)"
+            echo '```json'
+            tail -n 1 "$RUNNER_TEMP/smoke.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$code"

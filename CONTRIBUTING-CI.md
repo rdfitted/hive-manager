@@ -35,6 +35,29 @@ existing integration push checks. Do not cancel deployments or release jobs.
 - .github/workflows/render-check.yml / all: active workflow collision; left untouched
 - .github/workflows/rust-tests.yml / cargo-test: credentials, hosted event policy, original conditional, or OS-specific runner
 - .github/workflows/release.yml / all: release/deploy/manual or unmodified hosted workflow
+- .github/workflows/smoke.yml / smoke: installs dependencies and builds the frontend; run scripts/smoke.py on the host for local evidence
+
+## Promotion gate smoke
+
+`.github/promotion-gate.yml` describes how this repo is released and rolled back.
+`scripts/smoke.py` is the smoke it names. It exits 0 on pass, 1 on fail and 2 when
+a check could not be evaluated, and its last stdout line is one JSON object. Exit 2
+is a stop, never a pass.
+
+- `python scripts/smoke.py --target staging --base-url .` checks this checkout after
+  `npm ci`: version sources agree, the updater endpoint and signing key are unchanged
+  from the published release, the release tooling tests pass, and the frontend builds.
+- `python scripts/smoke.py --target production --base-url https://github.com/rdfitted/hive-manager`
+  validates the latest published release with read-only requests: it resolves the
+  release tag to its commit, downloads the updater payloads and verifies every
+  signature in `latest.json` against the committed pubkey.
+
+`.github/workflows/smoke.yml` reports `smoke/staging` on pull requests and pushes to
+`main`. After a release, dispatch it from the tag to get `smoke/production` on the
+released commit: `gh workflow run smoke.yml --ref vX.Y.Z -f target=production`.
+The smoke does not compile the Rust app or launch it. Rust Tests, macOS Tests,
+Render Check and a Release dry run cover that, and a person runs the built app
+before a tag is pushed.
 
 ## Local replay isolation
 
