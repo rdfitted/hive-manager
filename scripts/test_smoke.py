@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,18 +15,32 @@ smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
 
 BASE = "https://github.com/owner/repo"
-KEY_ID = bytes(range(8))
+TAG = "v1.2.3"
 
 
 def encoded(text):
     return base64.b64encode(text.encode()).decode()
 
 
-def manifest(tag="v1.2.3", **changes):
-    entry = {"url": f"{BASE}/releases/download/{tag}/App.tar.gz", "signature": "x"}
+def manifest(**changes):
+    entry = {"url": f"{BASE}/releases/download/{TAG}/App.tar.gz", "signature": "x"}
     platforms = {name: dict(entry) for name in smoke.PLATFORMS}
-    platforms["windows-x86_64"]["url"] = f"{BASE}/releases/download/{tag}/App-setup.exe"
-    return {"version": tag[1:], "platforms": platforms, **changes}
+    platforms["windows-x86_64"]["url"] = f"{BASE}/releases/download/{TAG}/App-setup.exe"
+    return {"version": TAG[1:], "platforms": platforms, **changes}
+
+
+def release(**changes):
+    names = {"App.tar.gz": 30, "App.tar.gz.sig": 4, "App-setup.exe": 20, "App-setup.exe.sig": 4,
+             "App.dmg": 25, "latest.json": 9}
+    assets = [{"name": name, "size": size, "state": "uploaded"} for name, size in names.items()]
+    return {"tag_name": TAG, "draft": False, "prerelease": False, "assets": assets, **changes}
+
+
+SIZES = {"App.tar.gz": 30, "App.tar.gz.sig": 4, "App-setup.exe": 20, "App-setup.exe.sig": 4, "latest.json": 9}
+
+
+def packet(text):
+    return f"{len(text) + 4:04x}{text}".encode()
 
 
 def run_main(*argv):
@@ -58,8 +73,15 @@ class ExitCodeTests(unittest.TestCase):
         results = smoke.run_checks([("late", lambda: "ran")], smoke.time.monotonic() - 1)
         self.assertTrue(results[0]["could_not_run"])
 
+    def test_an_unknown_sha_or_tag_is_never_a_match(self):
+        with self.assertRaises(smoke.CouldNotRun):
+            smoke.expectation({}, "sha", "a" * 40)()
+        with self.assertRaises(smoke.Failed):
+            smoke.expectation({"tag": "v1.2.2"}, "tag", TAG)()
+        self.assertEqual(smoke.expectation({"tag": TAG}, "tag", TAG)(), TAG)
 
-class MissingEnvTests(unittest.TestCase):
+
+class CouldNotRunTests(unittest.TestCase):
     def test_missing_env_exits_two_and_prints_the_name_only(self):
         secret = "do-not-print-this-value"
         with patch.dict(smoke.REQUIRED_ENV, {"staging": ("SMOKE_TEST_ABSENT", "SMOKE_TEST_PRESENT")}), \
@@ -77,60 +99,109 @@ class MissingEnvTests(unittest.TestCase):
         self.assertEqual(report["target"], "staging")
         self.assertIsNone(report["sha"])
 
+    def test_staging_refuses_a_tree_that_is_not_a_clean_commit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            checks = dict(smoke.staging_checks(Path(temp), smoke.time.monotonic() + 30, {}, Path(temp)))
+            with self.assertRaises(smoke.CouldNotRun):
+                checks["checkout-commit"]()
+
+        def dirty(args, cwd, deadline):
+            return (0, "a" * 40 + "\n") if args[1] == "rev-parse" else (0, " M file\n")
+        state = {}
+        with patch.object(smoke, "run_tool", side_effect=dirty):
+            checks = dict(smoke.staging_checks(smoke.ROOT, smoke.time.monotonic() + 30, state, smoke.ROOT))
+            with self.assertRaises(smoke.CouldNotRun):
+                checks["checkout-commit"]()
+        self.assertNotIn("sha", state)
+
 
 class ManifestShapeTests(unittest.TestCase):
     def test_accepts_the_release_shape_and_returns_unique_urls(self):
-        self.assertEqual(smoke.check_manifest_shape(manifest(), BASE, "v1.2.3"), [
-            f"{BASE}/releases/download/v1.2.3/App-setup.exe",
-            f"{BASE}/releases/download/v1.2.3/App.tar.gz"])
+        self.assertEqual(smoke.check_manifest_shape(manifest(), BASE, TAG), [
+            f"{BASE}/releases/download/{TAG}/App-setup.exe",
+            f"{BASE}/releases/download/{TAG}/App.tar.gz"])
 
     def test_rejects_drift(self):
-        other_host = manifest()
-        other_host["platforms"]["windows-x86_64"]["url"] = "https://evil.example/App-setup.exe"
-        traversal = manifest()
-        traversal["platforms"]["windows-x86_64"]["url"] = f"{BASE}/releases/download/v1.2.3/../x.exe"
+        def with_windows_url(url):
+            changed = manifest()
+            changed["platforms"]["windows-x86_64"]["url"] = url
+            return changed
         missing = manifest()
         del missing["platforms"]["darwin-x86_64"]
-        for bad in (manifest(version="9.9.9"), other_host, traversal, missing, [], {"version": "1.2.3"}):
+        prefix = f"{BASE}/releases/download/{TAG}/"
+        for bad in (manifest(version="9.9.9"), missing, [], {"version": TAG[1:]},
+                    with_windows_url("https://evil.example/App-setup.exe"),
+                    with_windows_url(prefix + "../x.exe"), with_windows_url(prefix + ".."),
+                    with_windows_url(prefix + "latest.json")):
             with self.assertRaises(smoke.Failed):
-                smoke.check_manifest_shape(bad, BASE, "v1.2.3")
+                smoke.check_manifest_shape(bad, BASE, TAG)
+
+
+class InventoryTests(unittest.TestCase):
+    def test_accepts_a_complete_published_release(self):
+        self.assertIn("App.dmg", smoke.check_inventory(release(), TAG, SIZES))
+
+    def test_rejects_an_incomplete_or_unpublished_release(self):
+        def without(name):
+            return release(assets=[a for a in release()["assets"] if a["name"] != name])
+
+        def with_asset(name, **changes):
+            return release(assets=[dict(a, **changes) if a["name"] == name else a for a in release()["assets"]])
+        for bad in (release(draft=True), release(prerelease=True), release(tag_name="v1.2.2"), None,
+                    without("App.dmg"), with_asset("App.dmg", size=0), with_asset("App.dmg", state="starter"),
+                    without("App-setup.exe.sig"), without("latest.json"), with_asset("App.tar.gz", size=29),
+                    release(assets=release()["assets"] + [{"name": "Old.dmg", "size": 1, "state": "uploaded"}])):
+            with self.assertRaises(smoke.Failed):
+                smoke.check_inventory(bad, TAG, SIZES)
 
 
 class KeyTests(unittest.TestCase):
-    def test_reads_matching_key_ids_from_pubkey_and_signature(self):
+    def test_prints_the_key_id_the_way_minisign_does(self):
         public = encoded("untrusted comment: minisign public key\n"
-                         + base64.b64encode(b"Ed" + KEY_ID + bytes(32)).decode() + "\n")
-        signature = encoded("untrusted comment: signature\n"
-                            + base64.b64encode(b"ED" + KEY_ID + bytes(64)).decode()
-                            + "\ntrusted comment: file\n" + base64.b64encode(bytes(64)).decode() + "\n")
+                         + base64.b64encode(b"Ed" + bytes(range(8)) + bytes(32)).decode() + "\n")
         self.assertEqual(smoke.public_key_id(public), "0706050403020100")
-        self.assertEqual(smoke.signature_key_id(signature), "0706050403020100")
 
     def test_rejects_malformed_keys(self):
-        for bad in ("", "not base64!", encoded("one line"), encoded("a\n" + base64.b64encode(b"short").decode())):
+        for bad in ("", None, "not base64!", encoded("one line"), encoded("a\n" + base64.b64encode(b"short").decode())):
             with self.assertRaises(smoke.Failed):
                 smoke.public_key_id(bad)
-            with self.assertRaises(smoke.Failed):
-                smoke.signature_key_id(bad)
 
-    def test_committed_config_has_a_readable_pubkey(self):
+    def test_committed_config_points_at_this_repository(self):
         _, updater, key_id = smoke.read_updater_config(smoke.ROOT)
         self.assertRegex(key_id, r"^[0-9A-F]{16}$")
         self.assertEqual(updater["endpoints"], [f"{smoke.RELEASES_URL}/releases/latest/download/latest.json"])
 
 
 class RefAdvertisementTests(unittest.TestCase):
+    BODY = (packet("# service=git-upload-pack\n") + b"0000"
+            + packet("a" * 40 + " HEAD\0multi_ack side-band\n")
+            + packet("b" * 40 + " refs/tags/v1.2.3\n")
+            + packet("c" * 40 + " refs/tags/v1.2.3^{}\n") + b"0000")
+
     def test_reads_plain_and_peeled_tags(self):
-        def packet(text):
-            return f"{len(text) + 4:04x}{text}".encode()
-        body = (packet("# service=git-upload-pack\n") + b"0000"
-                + packet("a" * 40 + " HEAD\0multi_ack side-band\n")
-                + packet("b" * 40 + " refs/tags/v1.2.3\n")
-                + packet("c" * 40 + " refs/tags/v1.2.3^{}\n") + b"0000")
-        refs = smoke.parse_ref_advertisement(body)
+        refs = smoke.parse_ref_advertisement(self.BODY)
         self.assertEqual(refs["HEAD"], "a" * 40)
         self.assertEqual(refs["refs/tags/v1.2.3"], "b" * 40)
         self.assertEqual(refs["refs/tags/v1.2.3^{}"], "c" * 40)
+
+    def test_rejects_a_truncated_or_malformed_body(self):
+        for bad in (self.BODY[:-4], self.BODY[:-10], self.BODY[:60], b"zzzz", b"0003"):
+            with self.assertRaises(ValueError):
+                smoke.parse_ref_advertisement(bad)
+
+
+class HttpTests(unittest.TestCase):
+    def test_refuses_plain_http_and_a_spent_budget(self):
+        with self.assertRaises(smoke.Failed):
+            smoke.http_get("http://github.com/owner/repo", smoke.time.monotonic() + 30)
+        with self.assertRaises(smoke.CouldNotRun):
+            smoke.http_get(BASE, smoke.time.monotonic() - 1)
+
+    def test_a_redirect_away_from_https_is_refused(self):
+        handler = smoke._HttpsRedirect()
+        request = smoke.urllib.request.Request(BASE)
+        with self.assertRaises(smoke.Failed):
+            handler.redirect_request(request, None, 302, "Found", {}, "http://example.com/x")
 
 
 if __name__ == "__main__":

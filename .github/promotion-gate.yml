@@ -17,7 +17,8 @@ deploy:
 smoke:
   command: python scripts/smoke.py   # invoked as: <command> --target staging|production --base-url <url>
   timeout_seconds: 120
-  env: []                            # none. Keep in step with REQUIRED_ENV in scripts/smoke.py
+  env: []                            # none required. Keep in step with REQUIRED_ENV in scripts/smoke.py.
+                                     # GITHUB_TOKEN is optional: it only raises the API rate limit.
 rollback:
   method: republish-previous-release
   notes: >-
@@ -39,4 +40,5 @@ high_risk_paths:                     # a diff touching these hits a hard stop
   - "src-tauri/capabilities/**"      # what the webview may call
   - "src-tauri/permissions/**"
   - "src-tauri/build.rs"
+  - "src/lib/components/UpdateChecker.svelte"  # the in-app update check and install
 human_runtime_check: true            # desktop app: release is a dry run until a person has run the build

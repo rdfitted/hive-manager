@@ -44,17 +44,21 @@ existing integration push checks. Do not cancel deployments or release jobs.
 a check could not be evaluated, and its last stdout line is one JSON object. Exit 2
 is a stop, never a pass.
 
-- `python scripts/smoke.py --target staging --base-url .` checks this checkout after
-  `npm ci`: version sources agree, the updater endpoint and signing key are unchanged
-  from the published release, the release tooling tests pass, and the frontend builds.
+- `python scripts/smoke.py --target staging --base-url .` checks a clean committed
+  checkout after `npm ci`: version sources agree, the updater endpoint is unchanged,
+  the committed pubkey still verifies the published release's signatures, the release
+  tooling tests pass, and the frontend builds.
 - `python scripts/smoke.py --target production --base-url https://github.com/rdfitted/hive-manager`
   validates the latest published release with read-only requests: it resolves the
-  release tag to its commit, downloads the updater payloads and verifies every
+  release tag to its commit, downloads the updater payloads, checks the release is
+  published with every asset including the macOS installer, and verifies every
   signature in `latest.json` against the committed pubkey.
 
-`.github/workflows/smoke.yml` reports `smoke/staging` on pull requests and pushes to
-`main`. After a release, dispatch it from the tag to get `smoke/production` on the
-released commit: `gh workflow run smoke.yml --ref vX.Y.Z -f target=production`.
+`.github/workflows/smoke.yml` reports `smoke/staging` on pull requests (for the head
+commit) and pushes to `main`. After a release, dispatch it from the tag to get
+`smoke/production` on the released commit:
+`gh workflow run smoke.yml --ref vX.Y.Z -f target=production`. It asserts that this
+tag and commit are the latest published release, and stops if dispatched from a branch.
 The smoke does not compile the Rust app or launch it. Rust Tests, macOS Tests,
 Render Check and a Release dry run cover that, and a person runs the built app
 before a tag is pushed.

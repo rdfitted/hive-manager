@@ -3,20 +3,23 @@
     python scripts/smoke.py --target staging    --base-url .
     python scripts/smoke.py --target production --base-url https://github.com/rdfitted/hive-manager
 
-staging     builds the checkout at --base-url (a path; there is no staging deployment)
-            and runs the fast headless release checks against it.
-production  validates the latest published release: read-only GETs, nothing is written.
-            It downloads the two updater payloads (about 36 MB), which adds one to each
-            asset's public download count.
+staging     builds the committed checkout at --base-url (a path; there is no staging
+            deployment) and runs the fast headless release checks against it.
+production  validates the latest published release: GET requests only, nothing is written.
+
+Both download the two published updater payloads (about 36 MB) to verify their
+signatures, which adds one to each asset's public download count.
 
 Exit 0 pass, 1 fail, 2 could not run (missing tool, env or dependency, unreachable,
-out of time). The last stdout line is one JSON object; progress goes to stderr.
+out of time, uncommitted changes). The last stdout line is one JSON object; progress
+goes to stderr. GITHUB_TOKEN is optional and only raises the GitHub API rate limit.
 Contract: the maintainers' promotion-gate practice. Standard library only.
 """
 import argparse
 import base64
 import binascii
 import http.client
+import io
 import json
 import os
 import re
@@ -38,8 +41,9 @@ PLATFORMS = ('darwin-aarch64', 'darwin-x86_64', 'windows-x86_64')
 # NAMES of env vars each target needs. Keep in step with smoke.env in
 # .github/promotion-gate.yml. Values are never read into output.
 REQUIRED_ENV = {'staging': (), 'production': ()}
-BUDGET_SECONDS = 110  # the contract is "under 2 minutes"
-HTTP_TIMEOUT = 30
+BUDGET_SECONDS = 95  # the contract is "under 2 minutes", cleanup included
+HTTP_TIMEOUT = 15
+MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_ASSET_BYTES = 300 * 1024 * 1024
 MARKER = '<title>Hive Manager</title>'
 
@@ -72,13 +76,17 @@ def _hidden():
 
 
 def _kill_tree(process):
-    if os.name == 'nt':
-        subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], **_hidden())
-    else:
-        try:
+    try:
+        if os.name == 'nt':
+            subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], timeout=10, **_hidden())
+        else:
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        process.kill()
+    except OSError:
+        pass
 
 
 def run_tool(args, cwd, deadline):
@@ -93,7 +101,10 @@ def run_tool(args, cwd, deadline):
         output, _ = process.communicate(timeout=remaining)
     except subprocess.TimeoutExpired:
         _kill_tree(process)
-        process.communicate()
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass  # a stray grandchild still holds the pipe; do not wait on it
         raise CouldNotRun(f'{args[0]} did not finish inside the time budget') from None
     return process.returncode, output.decode('utf-8', errors='replace')
 
@@ -105,34 +116,44 @@ def tail(text, lines=15):
 # --- http (GET only) ---------------------------------------------------------
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 
-def http_get(url, deadline, follow=True, sink=None):
-    """Return (status, headers, body). With sink, stream the body to that file."""
+class _HttpsRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.startswith('https://'):
+            raise Failed(f'{req.full_url} redirects away from https')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def http_get(url, deadline, follow=True, sink=None, headers=None):
+    """Return (status, headers, body). With sink, stream to that file and return its size."""
     if not url.startswith('https://'):
         raise Failed(f'refusing a non-https URL: {url}')
-    opener = urllib.request.build_opener() if follow else urllib.request.build_opener(_NoRedirect)
-    request = urllib.request.Request(url, headers={'User-Agent': 'promotion-gate-smoke'})
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CouldNotRun('time budget exhausted')
+    limit = MAX_ASSET_BYTES if sink else MAX_BODY_BYTES
+    opener = urllib.request.build_opener(_HttpsRedirect if follow else _NoRedirect)
+    request = urllib.request.Request(url, headers={'User-Agent': 'promotion-gate-smoke', **(headers or {})})
     try:
-        with opener.open(request, timeout=HTTP_TIMEOUT) as response:
-            if sink is None:
-                return response.status, response.headers, response.read(MAX_ASSET_BYTES)
+        with opener.open(request, timeout=min(HTTP_TIMEOUT, remaining)) as response, \
+                (open(sink, 'wb') if sink else io.BytesIO()) as handle:
             size = 0
-            with open(sink, 'wb') as handle:
-                while chunk := response.read(1 << 20):
-                    size += len(chunk)
-                    if size > MAX_ASSET_BYTES:
-                        raise Failed(f'{url} is larger than {MAX_ASSET_BYTES} bytes')
-                    if time.monotonic() > deadline:
-                        raise CouldNotRun('time budget exhausted during a download')
-                    handle.write(chunk)
-            return response.status, response.headers, size
+            while chunk := response.read(1 << 16):
+                size += len(chunk)
+                if size > limit:
+                    raise Failed(f'{url} is larger than {limit} bytes')
+                if time.monotonic() > deadline:
+                    raise CouldNotRun('time budget exhausted during a download')
+                handle.write(chunk)
+            return response.status, response.headers, size if sink else handle.getvalue()
     except urllib.error.HTTPError as error:
         if not follow and error.code in (301, 302, 303, 307, 308):
             return error.code, error.headers, b''
-        if error.code == 429 or error.code >= 500:
+        limited = error.code in (403, 429) and error.headers.get('x-ratelimit-remaining') == '0'
+        if limited or error.code == 429 or error.code >= 500:
             raise CouldNotRun(f'{url} answered {error.code}') from None
         raise Failed(f'{url} answered {error.code}') from None
     except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
@@ -141,51 +162,37 @@ def http_get(url, deadline, follow=True, sink=None):
 
 # --- pure helpers --------------------------------------------------------------
 
-def _b64(text, what):
+def public_key_id(encoded):
+    """Key ID of a Tauri updater pubkey (base64 of a minisign public key file),
+    printed the way minisign prints it. Shape only; signatures prove the key."""
     try:
-        return base64.b64decode(text, validate=True)
-    except (binascii.Error, ValueError):
-        raise Failed(f'{what} is not base64') from None
-
-
-def _key_id(raw):
-    """Bytes 2-10 of a minisign key or signature, printed the way minisign prints them."""
+        lines = base64.b64decode(encoded, validate=True).decode('utf-8', errors='replace').strip().splitlines()
+        raw = base64.b64decode(lines[-1], validate=True) if lines else b''
+    except (binascii.Error, ValueError, TypeError):
+        raise Failed('updater pubkey is not base64') from None
+    if len(raw) != 42 or raw[:2] != b'Ed':
+        raise Failed('updater pubkey is not a minisign Ed25519 key')
     return raw[2:10][::-1].hex().upper()
 
 
-def public_key_id(encoded):
-    """Key ID of a Tauri updater pubkey (base64 of a minisign public key file)."""
-    lines = _b64(encoded, 'updater pubkey').decode('utf-8', errors='replace').strip().splitlines()
-    raw = _b64(lines[-1], 'updater pubkey body') if lines else b''
-    if len(raw) != 42 or raw[:2] != b'Ed':
-        raise Failed('updater pubkey is not a minisign Ed25519 key')
-    return _key_id(raw)
-
-
-def signature_key_id(encoded):
-    """Key ID that made a latest.json signature (base64 of a minisign signature file)."""
-    lines = _b64(encoded, 'signature').decode('utf-8', errors='replace').strip().splitlines()
-    if len(lines) != 4:
-        raise Failed('signature is not a four-line minisign signature')
-    raw = _b64(lines[1], 'signature body')
-    if len(raw) != 74 or raw[:2] not in (b'Ed', b'ED'):
-        raise Failed('signature is not a minisign Ed25519 signature')
-    return _key_id(raw)
-
-
 def parse_ref_advertisement(data):
-    """Refs from a git smart-HTTP info/refs body (pkt-lines) as {ref: sha}."""
-    refs, offset = {}, 0
-    while offset + 4 <= len(data):
-        size = int(data[offset:offset + 4], 16)
-        if size < 4:  # flush packet
-            offset += 4
+    """Refs from a complete git smart-HTTP info/refs body (pkt-lines) as {ref: sha}.
+    Raises ValueError on a truncated or malformed body."""
+    refs, offset, flushed = {}, 0, False
+    while offset < len(data):
+        size = int(data[offset:offset + 4].decode('ascii'), 16)
+        if size == 0:  # flush packet
+            offset, flushed = offset + 4, True
             continue
+        if size < 4 or offset + size > len(data):
+            raise ValueError('truncated packet')
         line = data[offset + 4:offset + size].split(b'\0')[0].rstrip(b'\n').decode('ascii', 'replace')
-        offset += size
+        offset, flushed = offset + size, False
         sha, _, ref = line.partition(' ')
         if re.fullmatch(r'[0-9a-f]{40}', sha):
             refs[ref] = sha
+    if not flushed:
+        raise ValueError('advertisement does not end with a flush packet')
     return refs
 
 
@@ -204,10 +211,37 @@ def check_manifest_shape(manifest, base_url, tag):
         url = platforms[name].get('url') if isinstance(platforms[name], dict) else None
         if not isinstance(url, str) or not url.startswith(prefix):
             raise Failed(f'{name} URL is not under {prefix}')
-        if not re.fullmatch(r'[A-Za-z0-9._-]+', url[len(prefix):]):
+        asset = url[len(prefix):]
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', asset) or asset == 'latest.json':
             raise Failed(f'{name} URL has an unsafe asset name')
         urls.add(url)
     return sorted(urls)
+
+
+def check_inventory(release, tag, sizes):
+    """The published release holds every file users and the updater fetch.
+    sizes maps each downloaded asset name to the byte count received."""
+    if not isinstance(release, dict) or release.get('tag_name') != tag:
+        raise Failed(f'the release API did not return {tag}')
+    if release.get('draft') or release.get('prerelease'):
+        raise Failed(f'{tag} is a draft or a prerelease')
+    assets = {a['name']: a for a in release.get('assets') or [] if isinstance(a, dict) and isinstance(a.get('name'), str)}
+
+    def uploaded(name):
+        asset = assets.get(name)
+        if not asset or asset.get('state') != 'uploaded' or not asset.get('size'):
+            raise Failed(f'{name} is missing or empty in release {tag}')
+        return asset
+
+    for name, size in sizes.items():
+        if uploaded(name)['size'] != size:
+            raise Failed(f'{name} downloaded {size} bytes, the release lists {assets[name]["size"]}')
+    # The macOS installer is published beside the updater payloads, not in latest.json.
+    installers = [name for name in assets if name.endswith('.dmg')]
+    if len(installers) != 1:
+        raise Failed(f'expected one macOS .dmg installer in {tag}, found {len(installers)}')
+    uploaded(installers[0])
+    return f'{len(assets)} assets, published, installer {installers[0]}'
 
 
 def exit_code(checks):
@@ -216,6 +250,51 @@ def exit_code(checks):
     if any(check.get('could_not_run') for check in checks) or len(checks) < 3:
         return 2
     return 0
+
+
+# --- published release (shared by both targets) ---------------------------------
+
+def resolve_latest_tag(base_url, deadline):
+    status, headers, _ = http_get(f'{base_url}/releases/latest', deadline, follow=False)
+    match = re.fullmatch(re.escape(base_url) + r'/releases/tag/(v\d+\.\d+\.\d+)', headers.get('Location') or '')
+    if not match:
+        raise Failed(f'{base_url}/releases/latest ({status}) does not point at a vX.Y.Z release of this repository')
+    return match.group(1)
+
+
+def download_manifest(base_url, tag, deadline, workdir):
+    """Save latest.json into workdir; return the payload URLs and {name: size}."""
+    _, _, body = http_get(f'{base_url}/releases/latest/download/latest.json', deadline)
+    try:
+        manifest = json.loads(body)
+    except ValueError:
+        raise Failed('latest.json is not JSON') from None
+    urls = check_manifest_shape(manifest, base_url, tag)
+    (workdir / 'latest.json').write_bytes(body)
+    return urls, {'latest.json': len(body)}
+
+
+def download_assets(urls, deadline, workdir):
+    sizes = {}
+    for url in urls:
+        for asset in (url, url + '.sig'):
+            name = asset.rsplit('/', 1)[1]
+            _, _, sizes[name] = http_get(asset, deadline, sink=workdir / name)
+            if not sizes[name]:
+                raise Failed(f'{name} is empty')
+    return sizes
+
+
+def verify_signatures(base_url, tag, workdir, tree, deadline):
+    """Run tree's release validator with tree's pubkey over the downloaded release."""
+    code, output = run_tool(
+        ['node', 'scripts/release/validate-latest.mjs', '--artifacts', str(workdir), '--tag', tag,
+         '--repository', urllib.parse.urlparse(base_url).path.strip('/'),
+         '--manifest', str(workdir / 'latest.json'), '--config', 'src-tauri/tauri.conf.json'],
+        tree, deadline)
+    if code:
+        raise Failed(tail(output, 3))
+    return output.strip()
 
 
 # --- checks ----------------------------------------------------------------------
@@ -238,15 +317,17 @@ def read_updater_config(root):
     return config, updater, public_key_id(updater.get('pubkey', ''))
 
 
-def fetch_latest_manifest(base_url, deadline):
-    _, _, body = http_get(f'{base_url}/releases/latest/download/latest.json', deadline)
-    try:
-        return body, json.loads(body)
-    except ValueError:
-        raise Failed('latest.json is not JSON') from None
+def staging_checks(root, deadline, state, workdir):
+    def checkout_commit():
+        code, output = run_tool(['git', 'rev-parse', 'HEAD'], root, deadline)
+        if code or not re.fullmatch(r'[0-9a-f]{40}', output.strip()):
+            raise CouldNotRun('the checkout has no readable git HEAD')
+        code, changes = run_tool(['git', 'status', '--porcelain'], root, deadline)
+        if code or changes.strip():
+            raise CouldNotRun('uncommitted changes: the sha would not describe what was built')
+        state['sha'] = output.strip()
+        return state['sha']
 
-
-def staging_checks(root, deadline, state):
     def version_sources_agree():
         code, output = run_tool(['node', 'scripts/release/check-version.mjs', '--dry-run'], root, deadline)
         if code:
@@ -260,23 +341,16 @@ def staging_checks(root, deadline, state):
             raise Failed(f'updater endpoints are {updater.get("endpoints")}, expected {expected}')
         if config.get('bundle', {}).get('createUpdaterArtifacts') is not True:
             raise Failed('bundle.createUpdaterArtifacts must be true')
-        state['key_id'] = key_id
         return f'endpoint ok, pubkey id {key_id}'
 
     def updater_key_continuity():
-        # Installed apps only accept updates signed by the key they shipped with.
-        # A pubkey that differs from the published release's signing key strands them.
-        if 'key_id' not in state:
-            raise CouldNotRun('needs updater-config')
-        _, manifest = fetch_latest_manifest(RELEASES_URL, deadline)
-        platforms = manifest.get('platforms') if isinstance(manifest, dict) else None
-        if not isinstance(platforms, dict) or not platforms:
-            raise Failed('published latest.json has no platforms')
-        for name, entry in platforms.items():
-            signed_by = signature_key_id(entry.get('signature', '') if isinstance(entry, dict) else '')
-            if signed_by != state['key_id']:
-                raise Failed(f'published {name} is signed by {signed_by}, this tree trusts {state["key_id"]}')
-        return f'published {manifest.get("version")} is signed by this tree\'s key'
+        # Installed apps only accept updates signed by the key they shipped with. Prove
+        # this tree's pubkey still verifies the published payloads, with real signatures.
+        tag = resolve_latest_tag(RELEASES_URL, deadline)
+        urls, _ = download_manifest(RELEASES_URL, tag, deadline, workdir)
+        download_assets(urls, deadline, workdir)
+        verify_signatures(RELEASES_URL, tag, workdir, root, deadline)
+        return f'published {tag} verifies with this tree\'s pubkey and validator'
 
     def release_tooling_tests():
         code, output = run_tool(['node', '--test', 'scripts/release/release.test.mjs'], root, deadline)
@@ -288,18 +362,19 @@ def staging_checks(root, deadline, state):
     def frontend_build():
         if not (root / 'node_modules/vite').is_dir():
             raise CouldNotRun('dependencies are not installed; run npm ci first')
-        started = time.time()
+        index = root / 'build/index.html'
+        index.unlink(missing_ok=True)  # ignored build output; a stale copy must not count
         code, output = run_tool(['npm', 'run', 'build'], root, deadline)
         if code:
             raise Failed(tail(output))
-        index = root / 'build/index.html'
-        if not index.is_file() or index.stat().st_mtime < started - 2:
-            raise Failed('the build did not write a fresh build/index.html')
+        if not index.is_file():
+            raise Failed('the build did not write build/index.html')
         if MARKER not in index.read_text(encoding='utf-8', errors='replace'):
             raise Failed(f'build/index.html lacks {MARKER}')
         return 'build/index.html written with the app marker'
 
     return [('required-env', required_env('staging')),
+            ('checkout-commit', checkout_commit),
             ('version-sources-agree', version_sources_agree),
             ('updater-config', updater_config),
             ('updater-key-continuity', updater_key_continuity),
@@ -314,28 +389,21 @@ def production_checks(base_url, deadline, state, workdir):
         return state[key]
 
     def latest_release_tag():
-        status, headers, _ = http_get(f'{base_url}/releases/latest', deadline, follow=False)
-        match = re.search(r'/releases/tag/(v\d+\.\d+\.\d+)$', headers.get('Location') or '')
-        if not match:
-            raise Failed(f'{base_url}/releases/latest ({status}) does not point at a vX.Y.Z release')
-        state['tag'] = match.group(1)
+        state['tag'] = resolve_latest_tag(base_url, deadline)
         return state['tag']
 
     def latest_json():
-        tag = need('tag')
-        body, manifest = fetch_latest_manifest(base_url, deadline)
-        state['urls'] = check_manifest_shape(manifest, base_url, tag)
-        (workdir / 'latest.json').write_bytes(body)
-        return f'version {manifest["version"]}, {len(PLATFORMS)} platforms'
+        state['urls'], state['sizes'] = download_manifest(base_url, need('tag'), deadline, workdir)
+        return f'version {state["tag"][1:]}, {len(PLATFORMS)} platforms'
 
     def release_tag_commit():
         tag = need('tag')
         _, _, body = http_get(f'{base_url}.git/info/refs?service=git-upload-pack', deadline)
         try:
             refs = parse_ref_advertisement(body)
-        except ValueError:
-            raise CouldNotRun('the ref advertisement could not be parsed') from None
-        # An annotated tag advertises its commit as the peeled ^{} entry.
+        except ValueError as error:
+            raise CouldNotRun(f'the ref advertisement could not be parsed: {error}') from None
+        # An annotated tag advertises the object it peels to as the ^{} entry.
         sha = refs.get(f'refs/tags/{tag}^{{}}') or refs.get(f'refs/tags/{tag}')
         if not sha:
             raise Failed(f'tag {tag} is not on the remote')
@@ -343,42 +411,52 @@ def production_checks(base_url, deadline, state, workdir):
         return f'{tag} -> {sha}'
 
     def release_assets():
-        count = 0
-        for url in need('urls'):
-            for asset in (url, url + '.sig'):
-                name = urllib.parse.unquote(asset.rsplit('/', 1)[1])
-                _, _, size = http_get(asset, deadline, sink=workdir / name)
-                if not size:
-                    raise Failed(f'{name} is empty')
-                count += 1
+        sizes = download_assets(need('urls'), deadline, workdir)
+        state['sizes'].update(sizes)
         state['downloaded'] = True
-        return f'{count} assets downloaded'
+        return f'{len(sizes)} assets downloaded'
+
+    def release_inventory():
+        need('downloaded')
+        location = urllib.parse.urlparse(base_url)
+        if location.netloc != 'github.com':
+            raise CouldNotRun('the release inventory needs a github.com repository URL')
+        token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
+        headers = {'Accept': 'application/vnd.github+json'}
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
+        # No redirects: the token must not follow one to another host.
+        url = f'https://api.github.com/repos/{location.path.strip("/")}/releases/tags/{state["tag"]}'
+        status, _, body = http_get(url, deadline, follow=False, headers=headers)
+        if status != 200:
+            raise Failed(f'the release API answered {status}')
+        try:
+            release = json.loads(body)
+        except ValueError:
+            raise Failed('the release API did not return JSON') from None
+        return check_inventory(release, state['tag'], state['sizes'])
 
     def updater_signatures():
         need('downloaded')
-        code, output = run_tool(
-            ['node', 'scripts/release/validate-latest.mjs', '--artifacts', str(workdir),
-             '--tag', state['tag'], '--repository', urllib.parse.urlparse(base_url).path.strip('/'),
-             '--manifest', str(workdir / 'latest.json'), '--config', 'src-tauri/tauri.conf.json'],
-            ROOT, deadline)
-        if code:
-            raise Failed(tail(output, 3))
-        return output.strip()
+        return verify_signatures(base_url, state['tag'], workdir, ROOT, deadline)
 
     return [('required-env', required_env('production')),
             ('latest-release-tag', latest_release_tag),
             ('latest-json', latest_json),
             ('release-tag-commit', release_tag_commit),
             ('release-assets', release_assets),
+            ('release-inventory', release_inventory),
             ('updater-signatures', updater_signatures)]
 
 
-def git_head(root, deadline):
-    try:
-        code, output = run_tool(['git', 'rev-parse', 'HEAD'], root, deadline)
-    except CouldNotRun:
-        return None
-    return output.strip() if code == 0 else None
+def expectation(state, key, expected):
+    def check():
+        if not state.get(key):
+            raise CouldNotRun(f'the {key} is unknown')
+        if state[key] != expected:
+            raise Failed(f'{key} is {state[key]}, expected {expected}')
+        return state[key]
+    return check
 
 
 def run_checks(checks, deadline):
@@ -410,6 +488,7 @@ def main(argv=None):
     parser.add_argument('--base-url', required=True,
                         help='staging: path of the checkout to build; production: the repository URL')
     parser.add_argument('--expect-sha', help='also require the reported sha to equal this commit')
+    parser.add_argument('--expect-tag', help='production: also require the latest release to be this tag')
     args = parser.parse_args(argv)
     deadline = time.monotonic() + BUDGET_SECONDS
     state = {}
@@ -425,20 +504,15 @@ def main(argv=None):
             else:
                 root = Path(args.base_url).resolve()
             if root and (root / 'src-tauri/tauri.conf.json').is_file():
-                checks = staging_checks(root, deadline, state)
-                state['sha'] = git_head(root, deadline)
+                checks = staging_checks(root, deadline, state, Path(temp))
             else:
                 def no_checkout():
                     raise CouldNotRun('staging has no deployment: pass the path of a checkout as --base-url')
                 checks = [('checkout', no_checkout)]
+        if args.expect_tag:
+            checks.append(('tag-matches-expected', expectation(state, 'tag', args.expect_tag)))
         if args.expect_sha:
-            def sha_matches_expected():
-                if not state.get('sha'):
-                    raise CouldNotRun('the sha is unknown')
-                if state['sha'] != args.expect_sha:
-                    raise Failed(f'sha is {state["sha"]}, expected {args.expect_sha}')
-                return state['sha']
-            checks.append(('sha-matches-expected', sha_matches_expected))
+            checks.append(('sha-matches-expected', expectation(state, 'sha', args.expect_sha)))
         results = run_checks(checks, deadline)
     report = {'target': args.target, 'sha': state.get('sha'), 'checks': results}
     if state.get('tag'):
