@@ -2024,14 +2024,15 @@ fn checkpoint_projection_and_queue_sql_agree_on_claimability() {
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(queue_repo());
     let manager = QueueManager::new(Arc::clone(&repo), EventBus::new(temp.path().to_path_buf()));
-    repo.enqueue(&queue_row(
+    let mut row = queue_row(
         "run-a",
         "worker-a",
         Some("A"),
         QueueStatus::Finalized,
         1,
-    ))
-    .unwrap();
+    );
+    row.last_status = Some("completed".to_string());
+    repo.enqueue(&row).unwrap();
     repo.enqueue_with_dependencies(
         &queued_row("run-gate", "worker-gate", Some("gate"), 2),
         &["A".to_string()],

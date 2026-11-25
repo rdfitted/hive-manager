@@ -683,16 +683,18 @@ async fn live_view_preserves_unbacked_terminal_status_and_reports_provenance() {
             },
         ])
         .expect("persisted observed principal mapping");
+    let mut row = queue_row(
+        SESSION_ID,
+        "run-queue-completed",
+        "queue-completed",
+        QueueStatus::Finalized,
+        1,
+    );
+    row.last_status = Some("completed".to_string());
     app.state
         .queue_manager
         .repo()
-        .enqueue(&queue_row(
-            SESSION_ID,
-            "run-queue-completed",
-            "queue-completed",
-            QueueStatus::Finalized,
-            1,
-        ))
+        .enqueue(&row)
         .expect("finalized queue evidence");
 
     let (status, body, response) = get(

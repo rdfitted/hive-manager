@@ -1068,7 +1068,7 @@ impl QueueManager {
             now,
         )?;
         for id in &ids {
-            self.emit_for_row(id, EventType::WorkerFinalized, Severity::Info)
+            self.emit_for_row(id, EventType::WorkerFinalized, Severity::Warning)
                 .await;
         }
         Ok(ids)
@@ -1248,7 +1248,10 @@ impl QueueManager {
                 node.status = match row.status {
                     QueueStatus::Queued => NodeStatus::Ready,
                     QueueStatus::Running => NodeStatus::Running,
-                    QueueStatus::Finalized => NodeStatus::Completed,
+                    QueueStatus::Finalized if row.last_status.as_deref() == Some("completed") => {
+                        NodeStatus::Completed
+                    }
+                    QueueStatus::Finalized => NodeStatus::Failed,
                     QueueStatus::Failed => NodeStatus::Failed,
                     QueueStatus::Blocked => NodeStatus::Blocked,
                 };
@@ -1366,6 +1369,43 @@ mod tests {
         repo.ensure_schema().unwrap();
         let event_bus = EventBus::new(dir.path().to_path_buf());
         (dir, QueueManager::new(repo, event_bus))
+    }
+
+    #[tokio::test]
+    async fn finalized_projection_requires_successful_completion() {
+        use crate::orchestrator::work_graph::{BindingRef, NodeContract, NodeKind, WorkNode};
+        let (_dir, mgr) = manager();
+        mgr.enqueue_worker("run", "s1", "worker", "backend", "codex", json!({}), Some("T0".into()))
+            .await.unwrap();
+        let mut row = mgr.repo.get_row("run").unwrap().unwrap();
+        row.status = QueueStatus::Finalized;
+        let graph = TaskGraph::new(vec![WorkNode::new("T0", NodeKind::Task, "prerequisite",
+            NodeContract::default(), BindingRef::Role("backend".into()), NodeStatus::Running)], vec![]);
+        for (last_status, expected) in [(Some("exhausted"), NodeStatus::Failed),
+            (None, NodeStatus::Failed), (Some("working"), NodeStatus::Failed),
+            (Some("idle"), NodeStatus::Failed), (Some("completed"), NodeStatus::Completed)] {
+            row.last_status = last_status.map(str::to_string);
+            let latest = BTreeMap::from([("T0".into(), row.clone())]);
+            assert_eq!(QueueManager::overlay_queue_rows(&graph, &latest).nodes[0].status,
+                expected, "last_status={last_status:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn budget_exhaustion_emits_warning() {
+        let (_dir, mgr) = manager();
+        mgr.enqueue_worker("run", "s1", "worker", "backend", "codex", json!({}), None)
+            .await.unwrap();
+        assert!(mgr.repo.try_claim("run", 0, 1000).unwrap().is_some());
+        for i in 0..MAX_CONTINUATIONS {
+            let status = if i % 2 == 0 { "working" } else { "idle" };
+            assert!(mgr.repo.record_heartbeat("s1", "worker", status, 2000 + i).unwrap());
+        }
+        let mut rx = mgr.event_bus.subscribe();
+        assert_eq!(mgr.finalize_no_progress().await.unwrap(), vec!["run"]);
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.event_type, EventType::WorkerFinalized);
+        assert_eq!(event.severity, Severity::Warning);
     }
 
     #[tokio::test]
