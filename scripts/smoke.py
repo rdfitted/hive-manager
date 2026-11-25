@@ -459,6 +459,11 @@ def expectation(state, key, expected):
     return check
 
 
+def place_after(checks, anchors, check):
+    index = next((i for i, (name, _) in enumerate(checks) if name in anchors), len(checks) - 1)
+    checks.insert(index + 1, check)
+
+
 def run_checks(checks, deadline):
     results = []
     for name, check in checks:
@@ -509,10 +514,13 @@ def main(argv=None):
                 def no_checkout():
                     raise CouldNotRun('staging has no deployment: pass the path of a checkout as --base-url')
                 checks = [('checkout', no_checkout)]
-        if args.expect_tag:
-            checks.append(('tag-matches-expected', expectation(state, 'tag', args.expect_tag)))
+        # Right after the check that learns the value, so a slow later check cannot starve them.
         if args.expect_sha:
-            checks.append(('sha-matches-expected', expectation(state, 'sha', args.expect_sha)))
+            place_after(checks, ('checkout-commit', 'release-tag-commit'),
+                        ('sha-matches-expected', expectation(state, 'sha', args.expect_sha)))
+        if args.expect_tag:
+            place_after(checks, ('latest-release-tag',),
+                        ('tag-matches-expected', expectation(state, 'tag', args.expect_tag)))
         results = run_checks(checks, deadline)
     report = {'target': args.target, 'sha': state.get('sha'), 'checks': results}
     if state.get('tag'):

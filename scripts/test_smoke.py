@@ -81,6 +81,15 @@ class ExitCodeTests(unittest.TestCase):
         self.assertEqual(smoke.expectation({"tag": TAG}, "tag", TAG)(), TAG)
 
 
+    def test_expectations_run_right_after_the_value_is_known(self):
+        checks = [("a", None), ("checkout-commit", None), ("slow", None)]
+        smoke.place_after(checks, ("checkout-commit", "release-tag-commit"), ("sha-matches-expected", None))
+        self.assertEqual([name for name, _ in checks], ["a", "checkout-commit", "sha-matches-expected", "slow"])
+        checks = [("checkout", None)]
+        smoke.place_after(checks, ("latest-release-tag",), ("tag-matches-expected", None))
+        self.assertEqual([name for name, _ in checks], ["checkout", "tag-matches-expected"])
+
+
 class CouldNotRunTests(unittest.TestCase):
     def test_missing_env_exits_two_and_prints_the_name_only(self):
         secret = "do-not-print-this-value"
