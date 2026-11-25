@@ -1496,7 +1496,7 @@ mod tests {
             (
                 "codex",
                 TaskTier::Critical,
-                "gpt-6.2-astra",
+                "gpt-6.2-sol",
                 vec!["-c", "model_reasoning_effort=\"max\""],
             ),
         ];
@@ -1507,6 +1507,28 @@ mod tests {
             assert_eq!(cell.flags, flags);
         }
         assert!(resolved.resolve_tier("droid", TaskTier::Medium).is_none());
+    }
+
+    #[test]
+    fn embedded_default_ladder_pins_codex_critical_to_sol_max_and_excludes_astra() {
+        let project = tempfile::tempdir().unwrap();
+        fs::create_dir(project.path().join(".ai-docs")).unwrap();
+        let resolved = resolve_tier_ladder(project.path(), None);
+
+        let critical = resolved.resolve_tier("codex", TaskTier::Critical).unwrap();
+        assert_eq!(critical.model, "gpt-6.2-sol");
+        assert_eq!(critical.flags, vec!["-c", "model_reasoning_effort=\"max\""]);
+
+        for provider in ["claude", "codex"] {
+            for tier in TIERS {
+                let cell = resolved.resolve_tier(provider, tier).unwrap();
+                assert!(
+                    !cell.model.contains("astra"),
+                    "embedded default {provider}.{tier:?} must not resolve to Astra: {}",
+                    cell.model
+                );
+            }
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@
       "low": "codex-gpt-6-luna-medium",
       "medium": "codex-gpt-6-2-sol-medium",
       "high": "codex-gpt-6-2-sol-xhigh",
-      "critical": "codex-gpt-6-2-astra-max"
+      "critical": "codex-gpt-6-2-sol-max"
     }
   }
 }
