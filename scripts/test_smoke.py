@@ -199,6 +199,8 @@ class KeyTests(unittest.TestCase):
         # and non-UTF-8 bytes all break updates, so none may pass here.
         for bad in ("", None, "not base64!", encoded("one line"), encoded("a\n" + base64.b64encode(b"short").decode()),
                     encoded("\nuntrusted comment: x\n" + key + "\n"), key, encoded("comment\n " + key),
+                    encoded("comment\n" + key + "\r"), encoded("comment\n" + key) + "=",
+                    encoded("comment\n" + key + "="), encoded("comment\r" + key + "\n"),
                     base64.b64encode(b"\xff\xfe\n" + key.encode()).decode()):
             with self.assertRaises(smoke.Failed):
                 smoke.public_key_id(bad)

@@ -171,6 +171,15 @@ def http_get(url, deadline, follow=True, sink=None, headers=None):
 
 # --- pure helpers --------------------------------------------------------------
 
+def _canonical_b64(text):
+    """Decode base64 as strictly as the app's Rust decoders: no stray padding,
+    whitespace or leftover bits. Python's own decoder lets some of those through."""
+    raw = base64.b64decode(text, validate=True)
+    if base64.b64encode(raw).decode('ascii') != text:
+        raise ValueError('not canonical base64')
+    return raw
+
+
 def public_key_id(encoded):
     """Key ID of a Tauri updater pubkey, printed the way minisign prints it.
 
@@ -180,12 +189,13 @@ def public_key_id(encoded):
     would reject is rejected here even where the release validator is more lenient.
     Shape only; the signature checks prove the key."""
     try:
-        lines = [line.removesuffix('\r') for line in
-                 base64.b64decode(encoded, validate=True).decode('utf-8').split('\n')]
-        raw = base64.b64decode(lines[1], validate=True)
+        parts = _canonical_b64(encoded).decode('utf-8').split('\n')
+        # Rust's str::lines: a carriage return is dropped only when a newline follows it.
+        lines = [part.removesuffix('\r') for part in parts[:-1]] + parts[-1:]
+        raw = _canonical_b64(lines[1])
     except (binascii.Error, ValueError, TypeError, IndexError):
         raise Failed('updater pubkey is not base64 text with the key on its second line') from None
-    if len(raw) != 42 or raw[:2] != b'Ed':
+    if len(raw) != 42 or raw[:2] not in (b'Ed', b'ED'):
         raise Failed('updater pubkey is not a minisign Ed25519 key')
     return raw[2:10][::-1].hex().upper()
 
