@@ -3,12 +3,16 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
+import socket
 import subprocess
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+BIND_ERRORS = ('only one usage of each socket address', 'address already in use',
+               'forbidden by its access permissions')
 
 
 def run(args, cwd=ROOT):
@@ -25,6 +29,29 @@ def run(args, cwd=ROOT):
                            + result.stdout.decode('utf-8', errors='replace'))
     return result.stdout
 
+
+def free_port():
+    """Ask the OS for a port unused on every interface (act binds the outbound IP): gates running side by side must not share act's 34567."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(('', 0))
+        return sock.getsockname()[1]
+
+
+def bind_failed(error, port):
+    """True only when act itself reports it cannot bind the artifact port we chose.
+
+    act logs the port on every normal startup ("Start server on http://addr:port"), so the port
+    alone proves nothing. Its listener failure is a fatal log line:
+    time="..." level=fatal msg="listen tcp addr:port: bind: Only one usage of each socket address ..."
+    A fatal log makes act exit, so that line is the last thing it prints: only the final non-empty
+    line is examined. Job output, including a multi-line step name that quotes the message, is
+    never last.
+    """
+    markers = '|'.join(re.escape(marker) for marker in BIND_ERRORS)
+    fatal = re.compile(rf'^time="[^"]*" level=fatal msg="listen tcp \S*:{port}: bind: [^"]*?(?:{markers})',
+                       re.IGNORECASE)
+    lines = [line for line in str(error).splitlines() if line.strip()]
+    return bool(lines) and fatal.match(lines[-1]) is not None
 
 
 def snapshot_checkout(temp, sha, base_sha, base_ref, repository):
@@ -105,14 +132,29 @@ def main():
                        '-P', 'ubuntu-latest=ghcr.io/catthehacker/ubuntu:act-latest',
                        '-P', 'ubuntu-24.04=ghcr.io/catthehacker/ubuntu:act-24.04']
             print(f'Replaying {job["workflow"]}: {job["job"]}', flush=True)
-            output = run(command, cwd=snapshot)
+            # Own artifact-server port per replay; retry once if another process wins the bind race.
+            port, retry = free_port(), None
+            try:
+                output = run(command + ['--artifact-server-port', str(port)], cwd=snapshot)
+            except RuntimeError as error:
+                if not bind_failed(error, port):
+                    raise
+                # Keep the failed attempt's output too: evidence must show a retry happened.
+                first = str(error).encode('utf-8')
+                first_sha = hashlib.sha256(first).hexdigest()
+                first_log = logs / (Path(job['workflow']).name + '-' + job['job'] + '.attempt1-' + first_sha[:12] + '.log')
+                first_log.write_bytes(first)
+                retry = {'failed_attempt_port': port, 'failed_attempt_output_sha256': first_sha,
+                         'failed_attempt_log': str(first_log)}
+                output = run(command + ['--artifact-server-port', str(free_port())], cwd=snapshot)
             # A zero exit with every job skipped is not evidence of a passing gate.
             if b'Job succeeded' not in output:
                 raise RuntimeError('Replay did not report a successful job; no attestation written.')
             log = logs / (Path(job['workflow']).name + '-' + job['job'] + '.log')
             log.write_bytes(output)
             evidence['jobs'].append(dict(job, workflow_sha256=hashlib.sha256(workflow.read_bytes()).hexdigest(),
-                                         output_sha256=hashlib.sha256(output).hexdigest(), log=str(log)))
+                                         output_sha256=hashlib.sha256(output).hexdigest(), log=str(log),
+                                         **(retry or {})))
         if run(['git', 'rev-parse', 'HEAD']).decode().strip() != sha or run(['git', 'status', '--porcelain']).strip():
             raise SystemExit('The checkout changed during replay; no attestation written.')
         latest = json.loads(run(['gh', 'api', f'repos/{config["repository"]}/pulls/{args.pr}']))
