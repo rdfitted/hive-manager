@@ -67,6 +67,34 @@ jobs:
       - name: Smoke self-tests
         run: python -I -m unittest discover -s scripts -p test_smoke.py
 
+      # The smoke self-tests above run against the change's own script (they test it); the smoke RUN below
+      # must not (Ryan, 2026-11-26): this run
+      # executes the base/integration branch's scripts/smoke.py, checked out whole, moved OUTSIDE
+      # the workspace and run with `python -I` (nothing in the checked-out ref, such as a sibling
+      # module or a symlink, can run in its place). Runs of main/staging use that branch's own copy.
+      - name: Fetch the base branch's smoke.py
+        if: github.event_name == 'pull_request' || (github.ref != 'refs/heads/main' && github.ref != 'refs/heads/staging')
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: refs/heads/${{ github.event_name == 'pull_request' && github.base_ref || 'main' }}
+          path: _smoke_base_${{ github.run_id }}
+          persist-credentials: false
+
+      - name: Replace scripts/smoke.py with the base copy
+        if: github.event_name == 'pull_request' || (github.ref != 'refs/heads/main' && github.ref != 'refs/heads/staging')
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="_smoke_base_${GITHUB_RUN_ID}"
+          test -d "$base/scripts" && test ! -L "$base/scripts"
+          test -f "$base/scripts/smoke.py" && test ! -L "$base/scripts/smoke.py"
+          test -d scripts && test ! -L scripts
+          rm -f scripts/smoke.py
+          cp "$base/scripts/smoke.py" scripts/smoke.py
+          rm -rf "$base"
+          test -f scripts/smoke.py && test ! -L scripts/smoke.py
+          echo "SMOKE_BASE_PY=scripts/smoke.py" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         if: env.TARGET == 'staging'
         run: npm ci
@@ -91,7 +119,7 @@ jobs:
           else
             args=(--target staging --base-url . --expect-sha "$HEAD_SHA")
           fi
-          python scripts/smoke.py "${args[@]}" | tee "$RUNNER_TEMP/smoke.json"
+          python -I "${SMOKE_BASE_PY:-scripts/smoke.py}" "${args[@]}" | tee "$RUNNER_TEMP/smoke.json"
           code="${PIPESTATUS[0]}"
           {
             echo "### smoke/$TARGET (exit $code)"
