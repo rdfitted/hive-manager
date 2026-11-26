@@ -443,6 +443,7 @@ pub struct PtyManager {
     retired_output: RwLock<HashMap<String, Arc<Mutex<super::output_ring::OutputRing>>>>,
     /// Actual spawn arguments, retained after close for transcript attribution.
     spawn_cwds: RwLock<HashMap<String, String>>,
+    pty_sizes: RwLock<HashMap<String, (u16, u16)>>, // #466: screen models match the PTY
     transports: RwLock<Option<Arc<crate::transport::TransportRegistry>>>,
     agent_transports: RwLock<HashMap<String, crate::domain::agent_transport::AgentTransports>>,
     starting_transports: RwLock<HashMap<String, Arc<dyn crate::transport::AgentTransport>>>,
@@ -480,6 +481,7 @@ impl PtyManager {
             instances: Arc::new(RwLock::new(HashMap::new())),
             retired_output: RwLock::new(HashMap::new()),
             spawn_cwds: RwLock::new(HashMap::new()),
+            pty_sizes: RwLock::new(HashMap::new()),
             transports: RwLock::new(None),
             agent_transports: RwLock::new(HashMap::new()),
             starting_transports: RwLock::new(HashMap::new()),
@@ -1016,14 +1018,18 @@ impl PtyManager {
             }
         };
 
-        // Isolation flags go in front so the CLI's trailing positional prompt stays last.
+        let trust_flags = crate::cli::folder_trust::spawn_trust_args(command, cwd, &store_dir, args); // #466
+        // Isolation and trust flags go in front so the CLI's trailing positional prompt stays last.
         let effective_args: Vec<&str> = isolation_flags
             .iter()
+            .chain(&trust_flags)
             .map(String::as_str)
             .chain(args.iter().copied())
             .collect();
 
         let mut identity_env = agent_identity_env(&id, &role);
+        identity_env.extend(crate::adapters::agy_spawn_env(command)); // no windowed updater
+
         let credential = identity_env.first().map(|(_, session_id)| {
             (session_id.clone(), matches!(&role, AgentRole::Queen), Self::new_heartbeat_token())
         });
@@ -1066,6 +1072,7 @@ impl PtyManager {
             sessions.insert(id.clone(), Arc::clone(&session));
             self.instances.write().insert(id.clone(), instance);
             self.record_spawn_cwd(&id, cwd);
+            self.pty_sizes.write().insert(id.clone(), (cols, rows));
         }
 
         // Start the output reader thread.
@@ -1241,7 +1248,19 @@ impl PtyManager {
         if crate::instance::is_isolated() && !sessions.contains_key(id) { return Ok(()); }
         let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
         tracing::debug!("Resizing PTY {} to {}x{}", id, cols, rows);
-        session.resize(cols, rows)
+        session.resize(cols, rows)?;
+        self.pty_sizes.write().insert(id.to_string(), (cols, rows));
+        Ok(())
+    }
+
+    /// The PTY's size as last spawned or resized (#466).
+    pub fn pty_size(&self, id: &str) -> Option<(u16, u16)> { self.pty_sizes.read().get(id).copied() }
+
+    /// A live PTY's output from absolute `offset` on; see `OutputRing::since` (#466).
+    pub fn output_since(&self, id: &str, offset: u64) -> Option<super::output_ring::OutputSnapshot> {
+        let ring = self.sessions.read().get(id).map(|session| session.output_history())?;
+        let since = ring.lock().since(offset);
+        Some(since)
     }
 
     /// Identity of the current runtime, including a protocol seat still starting.

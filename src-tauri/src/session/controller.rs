@@ -1073,6 +1073,8 @@ pub struct SessionController {
     retirement_completions: RwLock<HashMap<(String, String), (Uuid, u64)>>,
     /// Runtime-only input boundaries; stable seat IDs must never transfer them to a respawn.
     latest_inputs: RwLock<HashMap<(String, String), (Uuid, DateTime<Utc>)>>,
+    /// Folder-trust prompt guards, one per agent spawn (#466).
+    trust_guards: RwLock<HashMap<(String, String), (Uuid, crate::pty::trust_prompt::TrustPromptGuard)>>,
 }
 
 // Explicitly implement Send + Sync
@@ -1207,6 +1209,9 @@ fn cell_type_for_id(cell_id: &str) -> &'static str {
         "hive"
     }
 }
+
+#[path = "trust_sweep.rs"]
+mod trust_sweep;
 
 fn agent_cell_id(session: &Session, agent: &AgentInfo) -> String {
     match &session.session_type {
@@ -1364,6 +1369,7 @@ impl SessionController {
             heartbeat_marks: RwLock::new(HashSet::new()),
             retirement_completions: RwLock::new(HashMap::new()),
             latest_inputs: RwLock::new(HashMap::new()),
+            trust_guards: RwLock::new(HashMap::new()),
         }
     }
 

@@ -1,5 +1,6 @@
 // CLI registry module - infrastructure for future CLI management features
 pub mod agent_store;
+pub mod folder_trust;
 pub(crate) mod env_path;
 pub mod health;
 mod registry;

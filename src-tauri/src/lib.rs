@@ -318,7 +318,8 @@ pub fn run() {
                 }
             });
 
-            // Desktop-only, like stall detection above. Probes each live seat's exit status.
+            // Desktop-only, like stall detection above. Probes each live seat's exit status
+            // and watches fresh spawns for a folder-trust prompt.
             let dead_seat_controller = session_controller.clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -333,6 +334,8 @@ pub fn run() {
                         .collect();
                     for session_id in &session_ids {
                         controller.sweep_dead_startup_seats(session_id);
+                        // #466: answer or surface a folder-trust prompt on a fresh spawn.
+                        controller.sweep_trust_prompts(session_id);
                     }
                 }
             });

@@ -2,6 +2,8 @@ mod manager;
 #[cfg(windows)]
 mod conpty_windows;
 pub mod output_ring;
+pub mod screen;
+pub mod trust_prompt;
 #[cfg(not(test))]
 mod session;
 #[cfg(test)]

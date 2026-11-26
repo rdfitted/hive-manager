@@ -12,6 +12,15 @@ pub struct EventEmitter {
     bus: Arc<EventBus>,
 }
 
+/// The payload of a trust-prompt event (#466). `action` is `accepted`, `cleared` or
+/// `escalated`; `reason` says why it escalated.
+pub struct TrustPromptEvent<'a> {
+    pub adapter: &'a str,
+    pub path: &'a str,
+    pub action: &'a str,
+    pub reason: Option<&'a str>,
+}
+
 impl EventEmitter {
     pub fn new(bus: Arc<EventBus>) -> Self {
         Self { bus }
@@ -123,6 +132,24 @@ impl EventEmitter {
     ) -> Result<(), String> {
         self.emit(session_id, Some(cell_id), Some(agent_id), EventType::AgentWaitingInput, Severity::Warning, json!({
             "prompt": prompt,
+        })).await
+    }
+
+    /// A folder-trust prompt on an agent's terminal (#466): what Hive Manager did about it.
+    pub async fn emit_agent_trust_prompt(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+        agent_id: &str,
+        prompt: &TrustPromptEvent<'_>,
+    ) -> Result<(), String> {
+        let severity = if prompt.action == "escalated" { Severity::Warning } else { Severity::Info };
+        self.emit(session_id, Some(cell_id), Some(agent_id), EventType::AgentWaitingInput, severity, json!({
+            "prompt": "trust_prompt",
+            "adapter": prompt.adapter,
+            "path": prompt.path,
+            "action": prompt.action,
+            "reason": prompt.reason,
         })).await
     }
 

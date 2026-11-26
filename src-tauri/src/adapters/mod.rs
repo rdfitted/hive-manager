@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub use antigravity::AntigravityAdapter;
+pub use antigravity::{agy_spawn_env, AntigravityAdapter, AGY_DISABLE_AUTO_UPDATE_ENV};
 pub use claude_code::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;
 pub use cursor::CursorAdapter;

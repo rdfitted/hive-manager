@@ -107,6 +107,23 @@ impl OutputRing {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
+    /// The output from absolute `offset` on, for a reader continuing the stream it has
+    /// parsed so far. If part of that output was evicted, this is [`Self::snapshot`]
+    /// instead, and `offset_start` past `offset` tells the reader to start over.
+    pub fn since(&self, offset: u64) -> OutputSnapshot {
+        let retained_start = self.total - self.buf.len() as u64;
+        if offset < retained_start {
+            return self.snapshot();
+        }
+        let offset = offset.min(self.total);
+        let skip = (offset - retained_start) as usize;
+        OutputSnapshot {
+            offset_start: offset,
+            offset_end: self.total,
+            data: self.buf.iter().skip(skip).copied().collect(),
+        }
+    }
+
     /// Everything retained, trimmed to a boundary a terminal parser can start from.
     pub fn snapshot(&self) -> OutputSnapshot {
         let (front, back) = self.buf.as_slices();
@@ -288,5 +305,19 @@ mod tests {
             ring.snapshot(),
             OutputSnapshot { offset_start: 0, offset_end: 0, data: Vec::new() }
         );
+    }
+
+    #[test]
+    fn since_continues_a_reader_and_falls_back_to_a_snapshot_after_eviction() {
+        let mut ring = OutputRing::new(MIN_REPLAY_CAPACITY);
+        ring.record(b"hello ");
+        ring.record(b"world");
+        assert_eq!(ring.since(6), OutputSnapshot { offset_start: 6, offset_end: 11, data: b"world".to_vec() });
+        assert_eq!(ring.since(11).data, b"");
+        assert_eq!(ring.since(99), OutputSnapshot { offset_start: 11, offset_end: 11, data: Vec::new() });
+        ring.record(&vec![b'x'; MIN_REPLAY_CAPACITY]);
+        let evicted = ring.since(6);
+        assert_eq!(evicted, ring.snapshot(), "evicted output restarts from the retained history");
+        assert!(evicted.offset_start > 6);
     }
 }
