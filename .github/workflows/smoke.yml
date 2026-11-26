@@ -1,0 +1,102 @@
+name: Smoke
+
+# Promotion-gate smoke (.github/promotion-gate.yml, scripts/smoke.py).
+# staging    builds the pull request head (or the pushed commit) and runs the fast
+#            release checks.
+# production validates the latest published release, read-only. It only runs from the
+#            release tag (gh workflow run smoke.yml --ref vX.Y.Z -f target=production),
+#            so the check lands on the released commit and asserts that this tag and
+#            commit are what is published. Dispatched from a branch it stops.
+# This repo emits no deployment_status, and release.yml publishes with GITHUB_TOKEN,
+# which starts no other workflow, so production runs by dispatch.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches:
+      - main
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "staging builds this ref; production validates the latest published release"
+        required: true
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.target || 'staging' }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    # One job named for the target that ran, so a skipped twin can never show a
+    # green smoke/production. A job skipped for a draft keeps this unevaluated
+    # name: nothing is reported as smoke/staging until the smoke has run.
+    name: smoke/${{ inputs.target || 'staging' }}
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TARGET: ${{ inputs.target || 'staging' }}
+    steps:
+      # The exact commit of the event: the pull request head rather than GitHub's
+      # merge commit, and the commit a tag named when the run was requested, so a
+      # tag moved afterwards cannot change what is tested.
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+
+      - name: Smoke self-tests
+        run: python -I -m unittest discover -s scripts -p test_smoke.py
+
+      - name: Install dependencies
+        if: env.TARGET == 'staging'
+        run: npm ci
+
+      - name: Smoke
+        shell: bash
+        env:
+          # Read-only token for the release inventory call. Staging builds PR code and gets none.
+          GITHUB_TOKEN: ${{ inputs.target == 'production' && github.token || '' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # The default bash shell exits on the first failure; the summary must still be written.
+          set +e
+          set -uo pipefail
+          if [[ "$TARGET" == production ]]; then
+            if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+              echo "::error::smoke/production runs from a release tag: gh workflow run smoke.yml --ref vX.Y.Z -f target=production"
+              exit 2
+            fi
+            args=(--target production --base-url https://github.com/rdfitted/hive-manager
+                  --expect-tag "$GITHUB_REF_NAME" --expect-sha "$HEAD_SHA")
+          else
+            args=(--target staging --base-url . --expect-sha "$HEAD_SHA")
+          fi
+          python scripts/smoke.py "${args[@]}" | tee "$RUNNER_TEMP/smoke.json"
+          code="${PIPESTATUS[0]}"
+          {
+            echo "### smoke/$TARGET (exit $code)"
+            echo '```json'
+            tail -n 1 "$RUNNER_TEMP/smoke.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$code"

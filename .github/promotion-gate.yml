@@ -1,0 +1,44 @@
+# Promotion gate manifest, per the maintainers' promotion-gate practice.
+# Hive Manager is a desktop app: nothing is deployed, a version tag is released.
+version: 1
+integration_branch: main             # no staging branch; Gate 1 and Gate 2 are one merge to main
+production_branch: main
+deploy:
+  platform: tauri-release            # .github/workflows/release.yml, started by pushing a vX.Y.Z tag
+  staging_url: null                  # no staging deployment; smoke --target staging takes a checkout path (.)
+  production_url: https://github.com/rdfitted/hive-manager
+  # Installers and signatures: <production_url>/releases/download/vX.Y.Z/
+  # Updater manifest the installed apps poll (plugins.updater.endpoints in src-tauri/tauri.conf.json):
+  #   <production_url>/releases/latest/download/latest.json
+  deployed_sha:
+    # <production_url>/releases/latest redirects to /releases/tag/vX.Y.Z; that tag's commit is
+    # what shipped. scripts/smoke.py --target production reports it as "sha".
+    how: release-tag
+smoke:
+  command: python scripts/smoke.py   # invoked as: <command> --target staging|production --base-url <url>
+  timeout_seconds: 120
+  env: []                            # none required. Keep in step with REQUIRED_ENV in scripts/smoke.py.
+                                     # GITHUB_TOKEN is optional: it only raises the API rate limit.
+rollback:
+  method: republish-previous-release
+  notes: >-
+    gh release edit vPREVIOUS --repo rdfitted/hive-manager --latest
+    points /releases/latest and latest.json back at the previous release, so new
+    downloads and update checks stop offering the bad version. It does not downgrade:
+    the updater only moves to a higher version, so installs that already took the bad
+    release need a roll-forward release with a higher version. Never delete or
+    re-upload a published release; release.yml refuses to modify one.
+high_risk_paths:                     # a diff touching these hits a hard stop
+  - ".github/workflows/**"           # every workflow can reach the updater signing secrets
+  - ".github/promotion-gate.yml"
+  - "scripts/release/**"             # assembles and validates latest.json
+  - "scripts/smoke.py"
+  - "scripts/check.py"               # local gate evidence
+  - "scripts/local-gate.json"
+  - "src-tauri/tauri.conf.json"      # updater endpoint and pubkey, CSP, bundle targets, identifier
+  - "src-tauri/tauri.*.conf.json"
+  - "src-tauri/capabilities/**"      # what the webview may call
+  - "src-tauri/permissions/**"
+  - "src-tauri/build.rs"
+  - "src/lib/components/UpdateChecker.svelte"  # the in-app update check and install
+human_runtime_check: true            # desktop app: release is a dry run until a person has run the build

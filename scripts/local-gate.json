@@ -29,6 +29,11 @@
     {
       "workflow": ".github/workflows/release.yml",
       "reason": "release/deploy/manual or unmodified hosted workflow"
+    },
+    {
+      "workflow": ".github/workflows/smoke.yml",
+      "job": "smoke",
+      "reason": "installs dependencies and builds the frontend; run scripts/smoke.py on the host for local evidence"
     }
   ]
 }
