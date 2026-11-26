@@ -38,7 +38,8 @@ jobs:
     # One job named for the target that ran, so a skipped twin can never show a
     # green smoke/production. A job skipped for a draft keeps this unevaluated
     # name: nothing is reported as smoke/staging until the smoke has run.
-    name: smoke/${{ inputs.target || 'staging' }}
+    # A push run uses the branch's own script; its check name differs from the pull_request run (base copy).
+    name: smoke/${{ inputs.target || (github.event_name == 'push' && 'staging (push)') || 'staging' }}
     if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -67,8 +68,11 @@ jobs:
       - name: Smoke self-tests
         run: python -I -m unittest discover -s scripts -p test_smoke.py
 
-      # The smoke self-tests above run against the change's own script (they test it); the smoke RUN below
-      # must not (Ryan, 2026-11-26): this run
+      - name: Install dependencies
+        if: env.TARGET == 'staging'
+        run: npm ci
+
+      # The smoke script is never taken from the change under test (Ryan, 2026-11-26): this run
       # executes the base/integration branch's scripts/smoke.py, checked out whole, moved OUTSIDE
       # the workspace and run with `python -I` (nothing in the checked-out ref, such as a sibling
       # module or a symlink, can run in its place). Runs of main/staging use that branch's own copy.
@@ -93,11 +97,9 @@ jobs:
           cp "$base/scripts/smoke.py" scripts/smoke.py
           rm -rf "$base"
           test -f scripts/smoke.py && test ! -L scripts/smoke.py
+          git update-index --skip-worktree scripts/smoke.py
           echo "SMOKE_BASE_PY=scripts/smoke.py" >> "$GITHUB_ENV"
-
-      - name: Install dependencies
-        if: env.TARGET == 'staging'
-        run: npm ci
+          echo "SMOKE_BASE_DIR=." >> "$GITHUB_ENV"
 
       - name: Smoke
         shell: bash
