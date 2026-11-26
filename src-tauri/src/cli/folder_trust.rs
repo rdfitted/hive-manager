@@ -19,10 +19,11 @@
 //! no per-process trust override, so it is left to detection (`pty::trust_prompt`), which
 //! surfaces it rather than answering. Cursor runs inside WSL and was not captured.
 //!
-//! Only a Hive-managed worktree is pre-trusted: a linked git worktree at
-//! `<project>/.hive-manager/worktrees/<session>/<name>`, which Hive Manager created for
-//! this agent. Any other folder, such as the operator's own project checkout a Queen
-//! starts in, keeps the CLI's own consent prompt.
+//! Only the seat's own Hive-managed worktree is pre-trusted: a linked git worktree at
+//! `<project>/.hive-manager/worktrees/<session>/<name>` where `<session>` is the agent's
+//! session and the worktree's git metadata points back into that same `<project>`.
+//! Any other folder, such as the operator's own project checkout a Queen starts in,
+//! keeps the CLI's own consent prompt.
 //!
 //! Everything here is best-effort. A path the override cannot carry safely, or a failed
 //! settings write, yields no flags, and the spawn falls back to detection.
@@ -36,8 +37,8 @@ pub const AGY_TRUST_SETTINGS_FILE: &str = "agy-trust-settings.json";
 ///
 /// `existing_args` are the arguments the caller already built; an operator who passes
 /// their own `--settings` (agy) or `projects` override (codex) keeps it untouched.
-pub fn trust_args(command: &str, cwd: &Path, store_dir: &Path, existing_args: &[&str]) -> Vec<String> {
-    if !is_managed_worktree(cwd) {
+pub fn trust_args(command: &str, cwd: &Path, session_id: &str, store_dir: &Path, existing_args: &[&str]) -> Vec<String> {
+    if managed_worktree_project(cwd, session_id).is_none() {
         return Vec::new();
     }
     match cli_stem(command).as_deref() {
@@ -47,9 +48,14 @@ pub fn trust_args(command: &str, cwd: &Path, store_dir: &Path, existing_args: &[
     }
 }
 
-/// [`trust_args`] at the PTY spawn choke point, where the working directory is optional.
-pub fn spawn_trust_args(command: &str, cwd: Option<&str>, store_dir: &Path, args: &[&str]) -> Vec<String> {
-    cwd.map(|cwd| trust_args(command, Path::new(cwd), store_dir, args)).unwrap_or_default()
+/// [`trust_args`] at the PTY spawn choke point. The session is the agent id's UUID
+/// prefix (`<session>-<seat>`); an id without one gets no pre-trust.
+pub fn spawn_trust_args(command: &str, agent_id: &str, cwd: Option<&str>, store_dir: &Path, args: &[&str]) -> Vec<String> {
+    let session = agent_id.get(..36).filter(|id| uuid::Uuid::parse_str(id).is_ok() && agent_id[36..].starts_with('-'));
+    match (cwd, session) {
+        (Some(cwd), Some(session)) => trust_args(command, Path::new(cwd), session, store_dir, args),
+        _ => Vec::new(),
+    }
 }
 
 fn cli_stem(command: &str) -> Option<String> {
@@ -59,11 +65,21 @@ fn cli_stem(command: &str) -> Option<String> {
         .map(|stem| stem.to_ascii_lowercase())
 }
 
+/// Whether the operator's own arguments already decide folder trust for this CLI: a
+/// codex `projects` override or an agy `--settings`. Hive Manager then neither
+/// pre-trusts nor answers the prompt.
+pub fn operator_sets_trust(command: &str, args: &[&str]) -> bool {
+    match cli_stem(command).as_deref() {
+        Some("codex") => args
+            .windows(2)
+            .any(|pair| matches!(pair[0], "-c" | "--config") && pair[1].trim_start().starts_with("projects")),
+        Some("agy") | Some("antigravity") => args.iter().any(|arg| *arg == "--settings" || arg.starts_with("--settings=")),
+        _ => false,
+    }
+}
+
 fn codex_trust_args(cwd: &Path, existing_args: &[&str]) -> Vec<String> {
-    let overridden = existing_args
-        .windows(2)
-        .any(|pair| matches!(pair[0], "-c" | "--config") && pair[1].trim_start().starts_with("projects"));
-    if overridden {
+    if operator_sets_trust("codex", existing_args) {
         return Vec::new();
     }
     let mut keys = vec![cwd.to_path_buf()];
@@ -87,7 +103,7 @@ fn codex_trust_args(cwd: &Path, existing_args: &[&str]) -> Vec<String> {
 }
 
 fn agy_trust_args(cwd: &Path, store_dir: &Path, existing_args: &[&str]) -> Vec<String> {
-    if existing_args.iter().any(|arg| *arg == "--settings" || arg.starts_with("--settings=")) {
+    if operator_sets_trust("agy", existing_args) {
         return Vec::new();
     }
     let cwd = cwd.to_string_lossy();
@@ -113,15 +129,22 @@ fn agy_trust_args(cwd: &Path, store_dir: &Path, existing_args: &[&str]) -> Vec<S
     vec!["--settings".to_string(), settings.to_string_lossy().into_owned()]
 }
 
-/// Whether `cwd` is a worktree Hive Manager created for an agent: a linked git worktree
-/// (its `.git` is a file) at `.hive-manager/worktrees/<session>/<name>`.
-pub fn is_managed_worktree(cwd: &Path) -> bool {
+/// The project a worktree belongs to, when `cwd` is a worktree Hive Manager made for a
+/// seat of `session_id`: `<project>/.hive-manager/worktrees/<session_id>/<name>`, whose
+/// `.git` is a file and whose git metadata names `<project>` as its main checkout.
+/// Path shape alone is never enough: the metadata must agree with the path.
+pub fn managed_worktree_project(cwd: &Path, session_id: &str) -> Option<PathBuf> {
     let parts: Vec<&std::ffi::OsStr> = cwd.components().map(|part| part.as_os_str()).collect();
-    let shaped = parts.len() >= 4 && {
-        let tail = &parts[parts.len() - 4..];
-        tail[0] == ".hive-manager" && tail[1] == "worktrees"
-    };
-    shaped && std::fs::metadata(cwd.join(".git")).is_ok_and(|meta| meta.is_file())
+    let tail = parts.get(parts.len().checked_sub(4)?..)?;
+    if tail[0] != ".hive-manager" || tail[1] != "worktrees" || tail[2] != session_id {
+        return None;
+    }
+    if !std::fs::metadata(cwd.join(".git")).is_ok_and(|meta| meta.is_file()) {
+        return None;
+    }
+    let project = lexical_normalize(cwd).ancestors().nth(4)?.to_path_buf();
+    let root = git_repo_root(cwd)?;
+    (normalize_path(&root.to_string_lossy()) == normalize_path(&project.to_string_lossy())).then_some(project)
 }
 
 /// Paths the override can carry: no quote that would end a TOML literal string, no
@@ -230,23 +253,45 @@ mod tests {
     }
 
     #[test]
-    fn only_a_hive_managed_linked_worktree_counts() {
+    fn only_the_seats_own_managed_worktree_counts() {
         let (temp, repo, worktree) = managed();
-        assert!(is_managed_worktree(&worktree));
+        let project = managed_worktree_project(&worktree, "s1").unwrap();
+        assert_eq!(normalize_path(&project.to_string_lossy()), normalize_path(&repo.to_string_lossy()));
+        // Another session's worktree is not this seat's.
+        assert!(managed_worktree_project(&worktree, "s2").is_none());
         // The operator's own checkout (where a Queen may start) is not managed.
         std::fs::create_dir_all(repo.join(".git")).unwrap();
-        assert!(!is_managed_worktree(&repo));
+        assert!(managed_worktree_project(&repo, "s1").is_none());
         // The right shape without a linked `.git` file is not managed either.
         let bare = temp.path().join("x").join(".hive-manager").join("worktrees").join("s1").join("worker-2");
         std::fs::create_dir_all(&bare).unwrap();
-        assert!(!is_managed_worktree(&bare));
-        assert!(!is_managed_worktree(&worktree.join("nested")));
+        assert!(managed_worktree_project(&bare, "s1").is_none());
+        assert!(managed_worktree_project(&worktree.join("nested"), "s1").is_none());
+        // The right shape whose git metadata points at some other repository.
+        let (_, elsewhere) = managed_worktree_fixture(temp.path(), "other", "s1", "worker-3");
+        let planted = repo.join(".hive-manager").join("worktrees").join("s1").join("worker-3");
+        std::fs::create_dir_all(&planted).unwrap();
+        std::fs::copy(elsewhere.join(".git"), planted.join(".git")).unwrap();
+        assert!(managed_worktree_project(&planted, "s1").is_none(), "metadata must agree with the path");
+    }
+
+    #[test]
+    fn spawn_trust_needs_the_session_in_the_agent_id() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let session = "00000000-0000-4000-8000-000000000466";
+        let (_repo, worktree) = managed_worktree_fixture(temp.path(), "repo", session, "worker-1");
+        let cwd = worktree.to_string_lossy().into_owned();
+        let store = temp.path().join("store");
+        assert_eq!(spawn_trust_args("codex", &format!("{session}-worker-1"), Some(&cwd), &store, &[]).len(), 2);
+        assert!(spawn_trust_args("codex", "scratch:terminal", Some(&cwd), &store, &[]).is_empty());
+        assert!(spawn_trust_args("codex", "00000000-0000-4000-8000-000000000999-worker-1", Some(&cwd), &store, &[]).is_empty());
+        assert!(spawn_trust_args("codex", &format!("{session}-worker-1"), None, &store, &[]).is_empty());
     }
 
     #[test]
     fn codex_override_trusts_worktree_and_repo_root_in_one_argument() {
         let (_temp, repo, worktree) = managed();
-        let args = trust_args("codex", &worktree, Path::new("unused"), &[]);
+        let args = trust_args("codex", &worktree, "s1", Path::new("unused"), &[]);
         assert_eq!(args.len(), 2);
         assert_eq!(args[0], "-c");
         let value = &args[1];
@@ -261,14 +306,14 @@ mod tests {
         let (_temp, repo, _worktree) = managed();
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         for cli in ["codex", "agy"] {
-            assert!(trust_args(cli, &repo, &repo.join("store"), &[]).is_empty(), "{cli} on the project checkout");
+            assert!(trust_args(cli, &repo, "s1", &repo.join("store"), &[]).is_empty(), "{cli} on the project checkout");
         }
     }
 
     #[test]
     fn codex_override_steps_aside_for_an_operator_projects_flag_and_unsafe_paths() {
         let (_temp, _repo, worktree) = managed();
-        assert!(trust_args("codex", &worktree, Path::new("s"), &["-c", "projects.x.trust_level=untrusted"]).is_empty());
+        assert!(trust_args("codex", &worktree, "s1", Path::new("s"), &["-c", "projects.x.trust_level=untrusted"]).is_empty());
         assert!(!is_safe_override_path(r"D:\it's"));
         assert!(!is_safe_override_path(r"D:\100%done"));
         for path in [r"D:\R&D\wt", r"D:\a|b", r"D:\a<b", r"D:\a>b", r"D:\x (1)\wt"] {
@@ -281,27 +326,27 @@ mod tests {
     #[test]
     fn codex_is_recognised_through_a_windows_executable_path() {
         let (_temp, _repo, worktree) = managed();
-        assert_eq!(trust_args(r"C:\bin\codex.exe", &worktree, Path::new("s"), &[]).len(), 2);
+        assert_eq!(trust_args(r"C:\bin\codex.exe", &worktree, "s1", Path::new("s"), &[]).len(), 2);
     }
 
     #[test]
     fn agy_overlay_names_only_the_worktree_and_lives_in_the_agent_store() {
         let (temp, _repo, cwd) = managed();
         let store = temp.path().join("store");
-        let args = trust_args("agy", &cwd, &store, &["--model", "m"]);
+        let args = trust_args("agy", &cwd, "s1", &store, &["--model", "m"]);
         assert_eq!(args[0], "--settings");
         assert_eq!(PathBuf::from(&args[1]), store.join(AGY_TRUST_SETTINGS_FILE));
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&args[1]).unwrap()).unwrap();
         assert_eq!(written, serde_json::json!({ "trustedWorkspaces": [cwd.to_string_lossy()] }));
-        assert!(trust_args("agy", &cwd, &store, &["--settings", "mine.json"]).is_empty());
+        assert!(trust_args("agy", &cwd, "s1", &store, &["--settings", "mine.json"]).is_empty());
     }
 
     #[test]
     fn other_clis_get_nothing() {
         let (_temp, _repo, worktree) = managed();
         for cli in ["claude", "wsl", "cursor"] {
-            assert!(trust_args(cli, &worktree, Path::new("/s"), &[]).is_empty(), "{cli}");
+            assert!(trust_args(cli, &worktree, "s1", Path::new("/s"), &[]).is_empty(), "{cli}");
         }
     }
 

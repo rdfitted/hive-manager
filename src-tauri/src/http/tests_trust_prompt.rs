@@ -55,6 +55,7 @@ fn hive(clis: &[&str]) -> Hive {
     ids.extend((1..=clis.len() as u8).map(worker));
     let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
     let mut session = make_test_session_with_agents(SESSION, "fixture", &id_refs);
+    session.project_path = temp.path().join("project");
     session.agents[0].role = AgentRole::Queen;
     for (agent, cli) in session.agents[1..].iter_mut().zip(clis) {
         agent.config.cli = cli.to_string();
@@ -297,4 +298,59 @@ fn agy_variable_never_becomes_a_heartbeat_identity() {
     }
     manager.create_session(worker(1), AgentRole::Worker { index: 1, parent: None }, "agy", &[], None, 80, 24).unwrap();
     assert!(manager.has_heartbeat_credential_for_test(&worker(1)), "an identified seat still gets one");
+}
+
+#[tokio::test]
+async fn a_managed_worktree_of_another_project_is_not_this_seats() {
+    let h = hive(&["antigravity"]);
+    let (_, foreign) = managed_worktree_fixture(h.temp.path(), "other-project", SESSION, "worker-1");
+    let cwd = foreign.to_string_lossy().into_owned();
+    h.spawn(1, "antigravity", &cwd);
+    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]));
+    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "escalated", Some("not_a_managed_worktree"))]);
+    assert_eq!(enters(&h.state, &worker(1)), 0);
+}
+
+#[test]
+fn the_accept_is_refused_once_other_input_has_reached_the_terminal() {
+    let manager = crate::pty::PtyManager::new();
+    manager.create_session(worker(7), AgentRole::Worker { index: 7, parent: None }, "agy", &[], None, 80, 24).unwrap();
+    let (instance, revision) = manager.input_fence(&worker(7)).unwrap();
+    manager.write(&worker(7), b"x").unwrap();
+    assert!(manager.write_instance_at_revision(&worker(7), instance, revision, b"\r").is_err(), "the operator typed first");
+    let (instance, revision) = manager.input_fence(&worker(7)).unwrap();
+    manager.write_instance_at_revision(&worker(7), instance, revision, b"\r").unwrap();
+    assert_eq!(manager.write_records_for_test(&worker(7)).unwrap().last().map(Vec::as_slice), Some(b"\r".as_slice()));
+}
+
+#[tokio::test]
+async fn an_operator_trust_override_keeps_the_prompt_theirs() {
+    let h = hive(&["antigravity"]);
+    let cwd = h.worktree("worker-1");
+    {
+        let pty = h.state.pty_manager.read();
+        pty.create_session(worker(1), AgentRole::Worker { index: 1, parent: None }, "agy",
+            &["--settings", "operator.json"], Some(&cwd), 200, 50).unwrap();
+    }
+    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]));
+    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "escalated", Some("operator_trust_override"))]);
+    assert_eq!(enters(&h.state, &worker(1)), 0);
+}
+
+#[tokio::test]
+async fn a_seat_still_starting_stays_starting_when_its_prompt_goes() {
+    let h = hive(&["claude"]);
+    {
+        let controller = h.state.session_controller.read();
+        let mut session = controller.get_session(SESSION).unwrap();
+        session.agents[1].status = AgentStatus::Starting;
+        controller.insert_test_session(session);
+    }
+    let cwd = h.worktree("worker-1");
+    h.spawn(1, "claude", &cwd);
+    output(&h.state, &worker(1), &retarget(CLAUDE_PROMPT, &[(CLAUDE_CWD, &cwd)]));
+    assert_eq!(sweep(&h.state, Instant::now())[0].1, "escalated");
+    output(&h.state, &worker(1), b"\x1b[2J\x1b[H");
+    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "cleared", None)]);
+    assert_eq!(status(&h.state, &worker(1)), AgentStatus::Starting, "a gone dialog is not proof of a start");
 }

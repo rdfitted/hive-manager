@@ -14,7 +14,10 @@
 use std::time::Instant;
 
 use super::*;
-use crate::pty::trust_prompt::{GuardAction, TrustCli, TrustPrompt, TrustPromptGuard, ACCEPT_KEYS, TRUST_PROMPT_STATUS};
+use crate::cli::folder_trust::{managed_worktree_project, normalize_path};
+use crate::pty::trust_prompt::{
+    Escalation, GuardAction, Refusal, TrustCli, TrustPrompt, TrustPromptGuard, ACCEPT_KEYS, TRUST_PROMPT_STATUS,
+};
 
 /// Grid used when a PTY's size was never recorded (it is recorded at every spawn).
 const FALLBACK_SIZE: (u16, u16) = (120, 40);
@@ -35,6 +38,20 @@ impl SessionController {
     /// Runs on the desktop's five-second monitoring sweep beside dead-seat detection.
     pub fn sweep_trust_prompts(&self, session_id: &str) -> Vec<TrustPromptOutcome> {
         self.sweep_trust_prompts_at(session_id, Instant::now())
+    }
+
+    /// Sweep every session that is not finished, including ones waiting on fusion
+    /// variants or debate rounds, whose agents may be the ones stopped on a prompt; drop
+    /// the guards of the rest.
+    pub fn sweep_live_trust_prompts(&self) -> Vec<TrustPromptOutcome> {
+        let live: Vec<String> = self
+            .list_sessions()
+            .iter()
+            .filter(|session| !session.state.is_terminal())
+            .map(|session| session.id.clone())
+            .collect();
+        self.prune_trust_guards(&live);
+        live.iter().flat_map(|session_id| self.sweep_trust_prompts(session_id)).collect()
     }
 
     /// Drop the guards of sessions that are no longer swept, with their screens.
@@ -58,21 +75,23 @@ impl SessionController {
             let Some(cli) = TrustCli::from_cli(&agent.config.cli) else {
                 continue;
             };
-            if let Some((instance, action)) = self.observe_trust_prompt(session_id, &agent.id, cli, now) {
+            if let Some((instance, action)) = self.observe_trust_prompt(&session, &agent.id, cli, now) {
                 outcomes.push(self.report_trust_prompt(&session, agent, instance, cli, action));
             }
         }
         outcomes
     }
 
-    fn observe_trust_prompt(&self, session_id: &str, agent_id: &str, cli: TrustCli, now: Instant) -> Option<(Uuid, GuardAction)> {
+    fn observe_trust_prompt(&self, session: &Session, agent_id: &str, cli: TrustCli, now: Instant) -> Option<(Uuid, GuardAction)> {
         let manager = self.pty_manager.read();
         if manager.protocol_agent(agent_id).is_some() {
             return None;
         }
-        let instance = manager.instance_id(agent_id)?;
+        // Taken before the output is read: an Enter is only sent if nothing else reached
+        // the terminal since, and never while other input is in flight.
+        let (instance, revision) = manager.input_fence(agent_id)?;
         let mut guards = self.trust_guards.write();
-        let key = (session_id.to_string(), agent_id.to_string());
+        let key = (session.id.clone(), agent_id.to_string());
         if guards.get(&key).is_none_or(|(seen, _)| *seen != instance) {
             // Measure the watch window from the spawn, not from the first sweep.
             let age = manager
@@ -81,22 +100,32 @@ impl SessionController {
                 .unwrap_or_default();
             let started = now.checked_sub(age).unwrap_or(now);
             let (cols, rows) = manager.pty_size(agent_id).unwrap_or(FALLBACK_SIZE);
-            let guard = TrustPromptGuard::new(cli, manager.spawn_cwd(agent_id), cols, rows, started);
+            let authority = if manager.operator_sets_trust(agent_id) {
+                Err(Refusal::OperatorOverride)
+            } else {
+                seat_worktree(session, manager.spawn_cwd(agent_id)).ok_or(Refusal::NotManagedWorktree)
+            };
+            let guard = TrustPromptGuard::new(cli, authority, cols, rows, started);
             guards.insert(key.clone(), (instance, guard));
         }
         let guard = &mut guards.get_mut(&key)?.1;
         if !guard.is_active(now) {
+            guard.finish(); // release the screen; the instance marker stays
             return None;
         }
         let snapshot = manager.output_since(agent_id, instance, guard.fed_to())?;
         let (cols, rows) = manager.pty_size(agent_id).unwrap_or(FALLBACK_SIZE);
         let mut action = guard.observe(&snapshot, cols, rows, now)?;
         if matches!(action, GuardAction::Accept(_)) {
-            let written = manager.write_instance(agent_id, instance, ACCEPT_KEYS);
-            if let Err(error) = &written {
-                tracing::warn!(agent = %agent_id, %error, "could not answer a folder-trust prompt");
-            }
-            if let Some(escalated) = guard.accept_written(written.is_ok()) {
+            let failure = match manager.write_instance_at_revision(agent_id, instance, revision, ACCEPT_KEYS) {
+                Ok(()) => None,
+                Err(error) => {
+                    tracing::warn!(agent = %agent_id, %error, "did not answer a folder-trust prompt");
+                    let moved = manager.input_fence(agent_id).is_none_or(|fence| fence != (instance, revision));
+                    Some(if moved { Escalation::OperatorInput } else { Escalation::WriteFailed })
+                }
+            };
+            if let Some(escalated) = guard.accept_written(failure) {
                 action = escalated;
             }
         }
@@ -134,8 +163,8 @@ impl SessionController {
     }
 
     /// Set the trust-prompt status for the agent's current instance, remembering what it
-    /// replaced, or (when `cleared`) put that back. Only the status this sweep set is ever
-    /// undone; anything newer wins. Returns the new status when the roster changed.
+    /// replaced, or (when `cleared`) put exactly that back. Only the status this sweep set
+    /// is ever undone; anything newer wins. Returns the new status when the roster changed.
     fn set_trust_prompt_status(&self, session_id: &str, agent_id: &str, instance: Uuid, cleared: bool) -> Option<AgentStatus> {
         let waiting = AgentStatus::WaitingForInput(TRUST_PROMPT_STATUS.to_string());
         let key = (session_id.to_string(), agent_id.to_string());
@@ -153,8 +182,9 @@ impl SessionController {
                 if live.status != waiting {
                     return None;
                 }
-                // A seat still `Starting` when the prompt came up has started by now.
-                before.filter(|status| *status != AgentStatus::Starting).unwrap_or(AgentStatus::Running)
+                // Exactly what it was: a gone dialog does not prove the CLI started (it may
+                // have exited on "No"), so `Starting` stays `Starting`.
+                before.unwrap_or(AgentStatus::Running)
             } else {
                 if live.status == waiting {
                     return None;
@@ -204,4 +234,12 @@ impl SessionController {
             }
         });
     }
+}
+
+/// The agent's spawn folder when it is this seat's own managed worktree: made for this
+/// session, inside the session's recorded project, with git metadata that agrees.
+fn seat_worktree(session: &Session, cwd: Option<String>) -> Option<String> {
+    let cwd = cwd?;
+    let project = managed_worktree_project(std::path::Path::new(&cwd), &session.id)?;
+    (normalize_path(&project.to_string_lossy()) == normalize_path(&session.project_path.to_string_lossy())).then_some(cwd)
 }

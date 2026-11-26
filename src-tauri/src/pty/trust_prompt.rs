@@ -22,6 +22,18 @@ use super::output_ring::OutputSnapshot;
 use super::screen::Screen;
 use crate::cli::folder_trust::{git_repo_root, normalize_path};
 
+/// Turns of new output that must follow a grid reset before an absent prompt counts as
+/// gone, unless the output clears the whole screen first.
+const REBUILD_TURNS: u8 = 2;
+
+/// Whether `bytes` redraw the whole screen from blank: erase display, full reset, or a
+/// switch into the alternate screen.
+fn clears_screen(bytes: &[u8]) -> bool {
+    [b"\x1b[2J".as_slice(), b"\x1b[3J", b"\x1bc", b"\x1b[?1049h", b"\x1b[?47h"]
+        .iter()
+        .any(|needle| bytes.windows(needle.len()).any(|window| window == *needle))
+}
+
 /// The status reason set while a trust prompt is on screen.
 pub const TRUST_PROMPT_STATUS: &str = "trust_prompt";
 
@@ -208,6 +220,8 @@ pub enum Refusal {
     UnreadRepoRoot,
     /// Claude Code's trust decision is always the operator's.
     OperatorDecides,
+    /// The operator's own launch arguments set folder trust for this spawn.
+    OperatorOverride,
     /// The highlighted option is not the trust choice.
     DefaultIsNotTrust,
 }
@@ -220,6 +234,7 @@ impl Refusal {
             Self::ForeignRepoRoot => "foreign_repo_root",
             Self::UnreadRepoRoot => "repo_root_unreadable",
             Self::OperatorDecides => "operator_decides",
+            Self::OperatorOverride => "operator_trust_override",
             Self::DefaultIsNotTrust => "default_is_not_trust",
         }
     }
@@ -259,6 +274,8 @@ pub enum Escalation {
     Unchanged,
     /// The accept keystroke could not be written.
     WriteFailed,
+    /// Other input reached the terminal after the prompt was read, so the Enter was held.
+    OperatorInput,
 }
 
 impl Escalation {
@@ -267,6 +284,7 @@ impl Escalation {
             Self::Reappeared => "reappeared",
             Self::Unchanged => "screen_unchanged",
             Self::WriteFailed => "write_failed",
+            Self::OperatorInput => "operator_input",
         }
     }
 }
@@ -298,27 +316,30 @@ enum GuardState {
 #[derive(Debug, Clone)]
 pub struct TrustPromptGuard {
     cli: TrustCli,
-    /// The worktree this guard may answer for: set only for a Hive-managed worktree.
-    authorized_cwd: Option<String>,
+    /// The worktree this guard may answer for, or why it may answer for none.
+    authority: Result<String, Refusal>,
     started: Instant,
     screen: Screen,
     fed_to: Option<u64>,
+    /// Turns of new output still owed after the grid was thrown away (resize or
+    /// eviction) before it counts as a whole new frame. While non-zero, a prompt is
+    /// never reported cleared.
+    rebuilding: u8,
     state: GuardState,
 }
 
 impl TrustPromptGuard {
-    /// `cwd` is the agent's spawn folder. The guard answers prompts only when it is a
-    /// Hive-managed worktree (`cli::folder_trust::is_managed_worktree`); anywhere else
-    /// a prompt is surfaced to the operator.
-    pub fn new(cli: TrustCli, cwd: Option<String>, cols: u16, rows: u16, started: Instant) -> Self {
-        let authorized_cwd =
-            cwd.filter(|cwd| crate::cli::folder_trust::is_managed_worktree(std::path::Path::new(cwd)));
+    /// `authority` is the seat's own managed worktree, already verified by the caller
+    /// against the session (`cli::folder_trust::managed_worktree_project`), or the reason
+    /// it has none; then every prompt is surfaced with that reason.
+    pub fn new(cli: TrustCli, authority: Result<String, Refusal>, cols: u16, rows: u16, started: Instant) -> Self {
         Self {
             cli,
-            authorized_cwd,
+            authority,
             started,
             screen: Screen::new(cols, rows),
             fed_to: None,
+            rebuilding: 0,
             state: GuardState::Watching,
         }
     }
@@ -345,9 +366,23 @@ impl TrustPromptGuard {
             self.finish();
             return None;
         }
-        self.feed(snapshot, cols, rows);
+        let (reset, new) = self.feed(snapshot, cols, rows);
         let lines = self.screen.lines();
         let shown = detect(self.cli, &lines);
+        // A thrown-away grid cannot prove that a prompt went away. It is whole again when
+        // the prompt shows, when new output clears the full screen, or after
+        // REBUILD_TURNS further turns that each drew something.
+        if reset {
+            self.rebuilding = REBUILD_TURNS + 1;
+        }
+        if shown.is_some() || (!reset && clears_screen(&new)) {
+            self.rebuilding = 0;
+        } else if self.rebuilding > 0 && !new.is_empty() {
+            self.rebuilding -= 1;
+        }
+        if shown.is_none() && self.rebuilding > 0 {
+            return None;
+        }
         let (next, action) = match std::mem::replace(&mut self.state, GuardState::Done) {
             GuardState::Watching => match shown {
                 None => (GuardState::Watching, None),
@@ -383,9 +418,9 @@ impl TrustPromptGuard {
     }
 
     fn first_sight(&self, prompt: TrustPrompt, lines: Vec<String>, now: Instant) -> (GuardState, Option<GuardAction>) {
-        let verdict = match self.authorized_cwd.as_deref() {
-            Some(cwd) => check(&prompt, cwd),
-            None => Err(Refusal::NotManagedWorktree),
+        let verdict = match &self.authority {
+            Ok(cwd) => check(&prompt, cwd),
+            Err(refusal) => Err(*refusal),
         };
         match verdict {
             Ok(()) => (
@@ -396,45 +431,47 @@ impl TrustPromptGuard {
         }
     }
 
-    /// Record the outcome of writing the accept keys. A failed write is escalated.
-    pub fn accept_written(&mut self, ok: bool) -> Option<GuardAction> {
-        if ok {
-            return None;
-        }
+    /// Record the outcome of writing the accept keys: `None` when it was written, else
+    /// why it was not. Anything but a write is escalated and never retried.
+    pub fn accept_written(&mut self, failure: Option<Escalation>) -> Option<GuardAction> {
+        let failure = failure?;
         let GuardState::Accepted { prompt, .. } = &self.state else {
             return None;
         };
         let prompt = prompt.clone();
         self.state = GuardState::Surfaced { prompt: prompt.clone() };
-        Some(GuardAction::Escalated(prompt, Escalation::WriteFailed))
+        Some(GuardAction::Escalated(prompt, failure))
     }
 
     /// Stop for good and release the screen; only the spawn marker stays behind.
-    fn finish(&mut self) {
+    pub fn finish(&mut self) {
         self.state = GuardState::Done;
         self.screen = Screen::new(1, 1);
     }
 
-    fn feed(&mut self, snapshot: &OutputSnapshot, cols: u16, rows: u16) {
+    /// Returns whether the grid was thrown away and started again, and the new bytes drawn.
+    fn feed(&mut self, snapshot: &OutputSnapshot, cols: u16, rows: u16) -> (bool, Vec<u8>) {
         // A resize makes ConPTY repaint the whole viewport, so a fresh grid at the new
-        // size is filled again by the next frame.
-        if self.screen.size() != (cols, rows) {
+        // size is filled again by the following frames.
+        let mut reset = self.screen.size() != (cols, rows);
+        if reset {
             self.screen = Screen::new(cols, rows);
         }
         let from = match self.fed_to {
             // Output we never saw was evicted: start again from what is retained.
             Some(fed) if fed < snapshot.offset_start => {
                 self.screen = Screen::new(cols, rows);
+                reset = true;
                 snapshot.offset_start
             }
             Some(fed) => fed,
             None => snapshot.offset_start,
         };
         let skip = from.saturating_sub(snapshot.offset_start) as usize;
-        if let Some(new) = snapshot.data.get(skip..) {
-            self.screen.feed(new);
-        }
+        let new = snapshot.data.get(skip..).unwrap_or_default();
+        self.screen.feed(new);
         self.fed_to = Some(snapshot.offset_end.max(from));
+        (reset, new.to_vec())
     }
 }
 
@@ -510,7 +547,7 @@ pub(crate) mod tests {
     }
 
     fn guard(cli: TrustCli, cwd: &str, t0: Instant) -> TrustPromptGuard {
-        TrustPromptGuard::new(cli, Some(cwd.into()), 120, 40, t0)
+        TrustPromptGuard::new(cli, Ok(cwd.into()), 120, 40, t0)
     }
 
     #[test]
@@ -566,7 +603,7 @@ pub(crate) mod tests {
 
         let shown = guard.observe(&ring(prompt), 120, 40, t0 + Duration::from_secs(1));
         assert!(matches!(&shown, Some(GuardAction::Accept(p)) if normalize_path(&p.folder) == normalize_path(cwd)), "{shown:?}");
-        assert_eq!(guard.accept_written(true), None);
+        assert_eq!(guard.accept_written(None), None);
         // The same screen again before any reply is not a second accept.
         assert_eq!(guard.observe(&ring(prompt), 120, 40, t0 + Duration::from_secs(2)), None);
 
@@ -605,7 +642,7 @@ pub(crate) mod tests {
 
     fn refused(cli: TrustCli, cwd: Option<&str>, prompt: &[u8]) -> Option<Refusal> {
         let t0 = Instant::now();
-        let mut guard = TrustPromptGuard::new(cli, cwd.map(String::from), 120, 40, t0);
+        let mut guard = TrustPromptGuard::new(cli, cwd.map(String::from).ok_or(Refusal::NotManagedWorktree), 120, 40, t0);
         match guard.observe(&ring(prompt), 120, 40, t0) {
             Some(GuardAction::Refused(_, refusal)) => Some(refusal),
             other => panic!("expected a refusal, got {other:?}"),
@@ -615,8 +652,8 @@ pub(crate) mod tests {
     #[test]
     fn prompts_are_only_answered_inside_a_managed_worktree_for_that_worktree() {
         let m = managed();
-        // The captured scratch folder is not a managed worktree (a Queen on a checkout).
-        assert_eq!(refused(TrustCli::Antigravity, Some(AGY_CWD), AGY_PROMPT), Some(Refusal::NotManagedWorktree));
+        // No verified seat worktree (a Queen on a checkout): every prompt is surfaced,
+        // even one naming the agent's own folder.
         assert_eq!(refused(TrustCli::Antigravity, None, AGY_PROMPT), Some(Refusal::NotManagedWorktree));
         // A managed worker whose prompt names some other folder.
         assert_eq!(refused(TrustCli::Antigravity, Some(&m.cwd), AGY_PROMPT), Some(Refusal::ForeignPath));
@@ -647,7 +684,7 @@ pub(crate) mod tests {
     #[test]
     fn a_surfaced_prompt_clears_once_the_operator_answers_it() {
         let t0 = Instant::now();
-        let mut guard = guard(TrustCli::Antigravity, AGY_CWD, t0);
+        let mut guard = TrustPromptGuard::new(TrustCli::Antigravity, Err(Refusal::NotManagedWorktree), 120, 40, t0);
         assert!(matches!(guard.observe(&ring(AGY_PROMPT), 120, 40, t0), Some(GuardAction::Refused(..))));
         assert_eq!(guard.observe(&ring(AGY_PROMPT), 120, 40, t0 + Duration::from_secs(30)), None, "surfaced once");
         let answered = concat(AGY_PROMPT, AGY_AFTER);
@@ -677,7 +714,7 @@ pub(crate) mod tests {
 
         let mut failed = guard(TrustCli::Antigravity, &m.cwd, t0);
         assert!(matches!(failed.observe(&ring(&prompt), 120, 40, t0), Some(GuardAction::Accept(_))));
-        assert!(matches!(failed.accept_written(false), Some(GuardAction::Escalated(_, Escalation::WriteFailed))));
+        assert!(matches!(failed.accept_written(Some(Escalation::WriteFailed)), Some(GuardAction::Escalated(_, Escalation::WriteFailed))));
         assert_eq!(failed.observe(&ring(&prompt), 120, 40, t0 + Duration::from_secs(1)), None);
     }
 
@@ -693,11 +730,33 @@ pub(crate) mod tests {
         assert!(matches!(guard.observe(&rest, 120, 40, t0), Some(GuardAction::Accept(_))), "incremental feed sees the prompt");
 
         // Output before 1500 was evicted unseen: the guard restarts from what is left.
-        let mut late = TrustPromptGuard::new(TrustCli::Antigravity, Some(m.cwd.clone()), 120, 40, t0);
+        let mut late = TrustPromptGuard::new(TrustCli::Antigravity, Ok(m.cwd.clone()), 120, 40, t0);
         let _ = late.observe(&ring(&prompt[..1000]), 120, 40, t0);
         let evicted = OutputSnapshot { offset_start: 1500, offset_end: prompt.len() as u64, data: prompt[1500..].to_vec() };
         let _ = late.observe(&evicted, 120, 40, t0);
         assert_eq!(late.fed_to(), prompt.len() as u64);
+    }
+
+    #[test]
+    fn a_resize_without_a_repaint_never_clears_a_pending_prompt() {
+        let t0 = Instant::now();
+        let mut guard = TrustPromptGuard::new(TrustCli::Antigravity, Err(Refusal::NotManagedWorktree), 120, 40, t0);
+        assert!(matches!(guard.observe(&ring(AGY_PROMPT), 120, 40, t0), Some(GuardAction::Refused(..))));
+        let len = AGY_PROMPT.len() as u64;
+        let nothing = OutputSnapshot { offset_start: len, offset_end: len, data: Vec::new() };
+        assert_eq!(guard.observe(&nothing, 100, 30, t0), None, "resized, nothing repainted yet");
+        assert_eq!(guard.observe(&nothing, 100, 30, t0), None, "still nothing new");
+        let partial = OutputSnapshot { offset_start: len, offset_end: len + 7, data: b"\x1b[1;1Hx".to_vec() };
+        assert_eq!(guard.observe(&partial, 100, 30, t0), None, "a partial repaint cannot clear it");
+        assert!(guard.is_active(t0));
+        // The repaint brings the prompt back: it was never gone.
+        let repaint = OutputSnapshot { offset_start: len + 7, offset_end: len * 2 + 7, data: AGY_PROMPT.to_vec() };
+        assert_eq!(guard.observe(&repaint, 100, 30, t0), None);
+        assert!(guard.is_active(t0));
+        // A later full-screen redraw without the prompt is a real answer.
+        let at = len * 2 + 7;
+        let answered = OutputSnapshot { offset_start: at, offset_end: at + 12, data: b"\x1b[2J\x1b[Hdone".to_vec() };
+        assert!(matches!(guard.observe(&answered, 100, 30, t0), Some(GuardAction::Cleared(_))));
     }
 
     #[test]
