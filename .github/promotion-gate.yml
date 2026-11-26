@@ -35,7 +35,7 @@ high_risk_paths:                     # a diff touching these hits a hard stop
   - "scripts/check.py"               # local gate evidence
   - "scripts/local-gate.json"
   # version-only edits to src-tauri/tauri.conf.json are release bumps, not high-risk; any other change to that
-  # file is (parent ruling 2026-11-26)
+  # file is (Ryan, 2026-11-26)
   - "src-tauri/tauri.conf.json"      # updater endpoint and pubkey, CSP, bundle targets, identifier
   - "src-tauri/tauri.*.conf.json"
   - "src-tauri/capabilities/**"      # what the webview may call
