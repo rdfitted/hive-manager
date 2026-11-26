@@ -34,6 +34,8 @@ high_risk_paths:                     # a diff touching these hits a hard stop
   - "scripts/release/**"             # assembles and validates latest.json
   - "scripts/check.py"               # local gate evidence
   - "scripts/local-gate.json"
+  # version-only edits (version fields in tauri.conf.json / Cargo.toml / package.json) are release bumps, not
+  # high-risk; any other change is (parent ruling 2026-11-26, pending Ryan's confirmation)
   - "src-tauri/tauri.conf.json"      # updater endpoint and pubkey, CSP, bundle targets, identifier
   - "src-tauri/tauri.*.conf.json"
   - "src-tauri/capabilities/**"      # what the webview may call
