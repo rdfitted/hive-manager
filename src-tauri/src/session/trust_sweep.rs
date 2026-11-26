@@ -90,6 +90,13 @@ impl SessionController {
         // Taken before the output is read: an Enter is only sent if nothing else reached
         // the terminal since, and never while other input is in flight.
         let (instance, revision) = manager.input_fence(agent_id)?;
+        if !manager.is_alive(agent_id) {
+            // Exit handling owns a dead seat; its last frame is no prompt to act on.
+            if let Some((_, guard)) = self.trust_guards.write().get_mut(&(session.id.clone(), agent_id.to_string())) {
+                guard.finish();
+            }
+            return None;
+        }
         let mut guards = self.trust_guards.write();
         let key = (session.id.clone(), agent_id.to_string());
         if guards.get(&key).is_none_or(|(seen, _)| *seen != instance) {
@@ -117,12 +124,18 @@ impl SessionController {
         let (cols, rows) = manager.pty_size(agent_id).unwrap_or(FALLBACK_SIZE);
         let mut action = guard.observe(&snapshot, cols, rows, now)?;
         if matches!(action, GuardAction::Accept(_)) {
-            let failure = match manager.write_instance_at_revision(agent_id, instance, revision, ACCEPT_KEYS) {
+            // A trust dialog gates startup, before any input. Once anything has been typed
+            // or injected into this PTY, a matching screen is the operator's to answer.
+            let failure = if revision != 0 {
+                Some(Escalation::OperatorInput)
+            } else {
+                match manager.write_instance_at_revision(agent_id, instance, revision, ACCEPT_KEYS) {
                 Ok(()) => None,
                 Err(error) => {
                     tracing::warn!(agent = %agent_id, %error, "did not answer a folder-trust prompt");
                     let moved = manager.input_fence(agent_id).is_none_or(|fence| fence != (instance, revision));
                     Some(if moved { Escalation::OperatorInput } else { Escalation::WriteFailed })
+                }
                 }
             };
             if let Some(escalated) = guard.accept_written(failure) {

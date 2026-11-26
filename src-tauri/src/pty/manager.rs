@@ -1073,7 +1073,7 @@ impl PtyManager {
             sessions.insert(id.clone(), Arc::clone(&session));
             self.instances.write().insert(id.clone(), instance);
             self.record_spawn_cwd(&id, cwd);
-            self.record_trust_spawn(&id, command, args, (cols, rows));
+            self.record_trust_spawn(&id, command, args, cwd, (cols, rows));
         }
 
         // Start the output reader thread.

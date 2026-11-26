@@ -354,3 +354,26 @@ async fn a_seat_still_starting_stays_starting_when_its_prompt_goes() {
     assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "cleared", None)]);
     assert_eq!(status(&h.state, &worker(1)), AgentStatus::Starting, "a gone dialog is not proof of a start");
 }
+
+#[tokio::test]
+async fn a_pty_that_already_had_input_is_never_answered() {
+    let h = hive(&["antigravity"]);
+    let cwd = h.worktree("worker-1");
+    h.spawn(1, "antigravity", &cwd);
+    h.state.pty_manager.read().write(&worker(1), b"x").unwrap();
+    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]));
+    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "escalated", Some("operator_input"))]);
+    assert_eq!(enters(&h.state, &worker(1)), 0);
+}
+
+#[tokio::test]
+async fn an_exited_pty_is_left_to_exit_handling() {
+    let h = hive(&["antigravity"]);
+    let cwd = h.worktree("worker-1");
+    h.state.pty_manager.read().create_session(worker(1), AgentRole::Worker { index: 1, parent: None }, "agy",
+        &["--stub-clean-exit"], Some(&cwd), 200, 50).unwrap();
+    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]));
+    assert!(!h.state.pty_manager.read().is_alive(&worker(1)), "the stub exited");
+    assert!(sweep(&h.state, Instant::now()).is_empty());
+    assert_eq!(enters(&h.state, &worker(1)), 0);
+}

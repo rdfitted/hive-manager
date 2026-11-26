@@ -69,17 +69,66 @@ fn cli_stem(command: &str) -> Option<String> {
 /// codex `projects` override or an agy `--settings`. Hive Manager then neither
 /// pre-trusts nor answers the prompt.
 pub fn operator_sets_trust(command: &str, args: &[&str]) -> bool {
+    let sets_projects = |value: &str| value.trim_start().starts_with("projects");
     match cli_stem(command).as_deref() {
-        Some("codex") => args
-            .windows(2)
-            .any(|pair| matches!(pair[0], "-c" | "--config") && pair[1].trim_start().starts_with("projects")),
+        Some("codex") => {
+            args.windows(2).any(|pair| matches!(pair[0], "-c" | "--config") && sets_projects(pair[1]))
+                || args.iter().any(|arg| {
+                    let attached = arg.strip_prefix("--config=").or_else(|| arg.strip_prefix("-c=")).or_else(|| arg.strip_prefix("-c"));
+                    attached.is_some_and(sets_projects)
+                })
+        }
         Some("agy") | Some("antigravity") => args.iter().any(|arg| *arg == "--settings" || arg.starts_with("--settings=")),
         _ => false,
     }
 }
 
+/// [`operator_sets_trust`], or a codex project the operator marked
+/// `trust_level = "untrusted"` in their own `config.toml` for this worktree or its root.
+pub fn operator_decides_trust(command: &str, args: &[&str], cwd: Option<&Path>) -> bool {
+    if operator_sets_trust(command, args) {
+        return true;
+    }
+    let (Some("codex"), Some(cwd)) = (cli_stem(command).as_deref(), cwd) else {
+        return false;
+    };
+    let mut paths = vec![cwd.to_path_buf()];
+    paths.extend(git_repo_root(cwd));
+    codex_config_text().is_some_and(|config| codex_marks_untrusted(&config, &paths))
+}
+
+fn codex_config_text() -> Option<String> {
+    let home = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|home| PathBuf::from(home).join(".codex"))
+    })?;
+    std::fs::read_to_string(home.join("config.toml")).ok()
+}
+
+/// Whether `config` has a `[projects.'<path>']` (or `"<path>"`) section for any of
+/// `paths` whose `trust_level` is `untrusted`. A line scan, not a TOML parser: it reads
+/// the section form codex itself writes.
+fn codex_marks_untrusted(config: &str, paths: &[PathBuf]) -> bool {
+    let wanted: Vec<String> = paths.iter().map(|path| normalize_path(&path.to_string_lossy())).collect();
+    let mut in_match = false;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            let key = line
+                .strip_prefix("[projects.")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .map(|key| key.trim_matches(|c| c == '\'' || c == '"'));
+            in_match = key.is_some_and(|key| wanted.contains(&normalize_path(&key.replace("\\\\", "\\"))));
+        } else if in_match {
+            let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            if compact == "trust_level=\"untrusted\"" || compact == "trust_level='untrusted'" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn codex_trust_args(cwd: &Path, existing_args: &[&str]) -> Vec<String> {
-    if operator_sets_trust("codex", existing_args) {
+    if operator_decides_trust("codex", existing_args, Some(cwd)) {
         return Vec::new();
     }
     let mut keys = vec![cwd.to_path_buf()];
@@ -320,6 +369,34 @@ mod tests {
             assert!(!is_safe_override_path(path), "{path}");
         }
         assert!(is_safe_override_path(r"D:\Code Projects\x"));
+    }
+
+    #[test]
+    fn every_codex_config_spelling_counts_as_an_operator_override() {
+        for args in [
+            vec!["-c", "projects={}"],
+            vec!["--config", "projects.x.trust_level=untrusted"],
+            vec!["--config=projects.x.trust_level=untrusted"],
+            vec!["-c=projects={}"],
+            vec!["-cprojects={}"],
+        ] {
+            assert!(operator_sets_trust("codex", &args), "{args:?}");
+        }
+        assert!(!operator_sets_trust("codex", &["-c", "model=x", "--config=sqlite_home=y"]));
+        assert!(operator_sets_trust("agy", &["--settings=x.json"]));
+    }
+
+    #[test]
+    fn an_operators_untrusted_codex_project_is_left_alone() {
+        let (_temp, repo, worktree) = managed();
+        let config = format!(
+            "model = \"x\"\n\n[projects.'{}']\ntrust_level = \"untrusted\"\n\n[projects.'D:\\other']\ntrust_level = \"trusted\"\n",
+            repo.display()
+        );
+        assert!(codex_marks_untrusted(&config, &[worktree.clone(), repo.clone()]));
+        assert!(!codex_marks_untrusted(&config, &[worktree.clone()]), "only the root was marked");
+        let trusted = config.replace("\"untrusted\"", "\"trusted\"");
+        assert!(!codex_marks_untrusted(&trusted, &[repo]));
     }
 
     #[cfg(windows)]

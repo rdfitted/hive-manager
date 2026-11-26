@@ -4,10 +4,11 @@ use super::{PtyError, PtyManager};
 use crate::pty::output_ring::OutputSnapshot;
 
 impl PtyManager {
-    pub(super) fn record_trust_spawn(&self, id: &str, command: &str, args: &[&str], size: (u16, u16)) {
+    pub(super) fn record_trust_spawn(&self, id: &str, command: &str, args: &[&str], cwd: Option<&str>, size: (u16, u16)) {
         self.pty_sizes.write().insert(id.to_string(), size);
+        let decided = crate::cli::folder_trust::operator_decides_trust(command, args, cwd.map(std::path::Path::new));
         let mut opt_outs = self.trust_opt_outs.write();
-        if crate::cli::folder_trust::operator_sets_trust(command, args) {
+        if decided {
             opt_outs.insert(id.to_string());
         } else {
             opt_outs.remove(id);

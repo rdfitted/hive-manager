@@ -269,11 +269,11 @@ impl Screen {
                 self.col = (arg(1, 1) - 1).min(last_col);
             }
             b'A' => self.row = self.row.saturating_sub(arg(0, 1)),
-            b'B' | b'e' => self.row = (self.row + arg(0, 1)).min(last_row),
-            b'C' | b'a' => self.col = (self.col + arg(0, 1)).min(last_col),
+            b'B' | b'e' => self.row = self.row.saturating_add(arg(0, 1)).min(last_row),
+            b'C' | b'a' => self.col = self.col.saturating_add(arg(0, 1)).min(last_col),
             b'D' => self.col = self.col.saturating_sub(arg(0, 1)),
             b'E' => {
-                self.row = (self.row + arg(0, 1)).min(last_row);
+                self.row = self.row.saturating_add(arg(0, 1)).min(last_row);
                 self.col = 0;
             }
             b'F' => {
@@ -284,7 +284,7 @@ impl Screen {
             b'd' => self.row = (arg(0, 1) - 1).min(last_row),
             b'J' => self.erase_display(params.first().copied().unwrap_or(0)),
             b'K' => self.erase_line(params.first().copied().unwrap_or(0)),
-            b'X' => self.erase_in_row(self.row, self.col, self.col + arg(0, 1)),
+            b'X' => self.erase_in_row(self.row, self.col, self.col.saturating_add(arg(0, 1))),
             b'P' => {
                 let n = arg(0, 1).min(self.cols - self.col);
                 let line = &mut self.grid[self.row];
@@ -347,7 +347,9 @@ impl Screen {
                 }
                 self.erase_in_row(self.row, 0, self.col + 1);
             }
-            _ => self.clear_all(),
+            2 => self.clear_all(),
+            // 3 erases saved scrollback only; the visible grid stays as it is.
+            _ => {}
         }
     }
 
@@ -455,6 +457,18 @@ mod tests {
         assert_eq!(lines[0], "new");
         let lines = render(10, 2, b"old\x1b[2J\x1b[Hnew");
         assert_eq!(lines[0], "new");
+    }
+
+    #[test]
+    fn huge_parameters_saturate_instead_of_overflowing() {
+        let lines = render(10, 3, b"\x1b[18446744073709551615Bx\x1b[18446744073709551615C\x1b[18446744073709551615X\x1b[18446744073709551615E");
+        assert_eq!(lines[2].trim(), "x");
+    }
+
+    #[test]
+    fn scrollback_erase_keeps_the_visible_rows() {
+        let lines = render(10, 2, b"kept\x1b[3J");
+        assert_eq!(lines[0], "kept");
     }
 
     #[test]
