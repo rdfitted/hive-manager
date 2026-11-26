@@ -1075,6 +1075,8 @@ pub struct SessionController {
     latest_inputs: RwLock<HashMap<(String, String), (Uuid, DateTime<Utc>)>>,
     /// Folder-trust prompt guards, one per agent spawn (#466).
     trust_guards: RwLock<HashMap<(String, String), (Uuid, crate::pty::trust_prompt::TrustPromptGuard)>>,
+    /// The status a trust prompt replaced, put back when the prompt goes (#466).
+    trust_prior_status: RwLock<HashMap<(String, String), (Uuid, AgentStatus)>>,
 }
 
 // Explicitly implement Send + Sync
@@ -1370,6 +1372,7 @@ impl SessionController {
             retirement_completions: RwLock::new(HashMap::new()),
             latest_inputs: RwLock::new(HashMap::new()),
             trust_guards: RwLock::new(HashMap::new()),
+            trust_prior_status: RwLock::new(HashMap::new()),
         }
     }
 

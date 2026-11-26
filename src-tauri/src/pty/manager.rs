@@ -1028,14 +1028,13 @@ impl PtyManager {
             .collect();
 
         let mut identity_env = agent_identity_env(&id, &role);
-        identity_env.extend(crate::adapters::agy_spawn_env(command)); // no windowed updater
-
         let credential = identity_env.first().map(|(_, session_id)| {
             (session_id.clone(), matches!(&role, AgentRole::Queen), Self::new_heartbeat_token())
         });
         if let Some((_, _, token)) = &credential {
             identity_env.push(("HIVE_AGENT_TOKEN".to_string(), token.clone()));
         }
+        identity_env.extend(crate::adapters::agy_spawn_env(command)); // after the credential
         // Fail at the constructor boundary without changing the shared PTY stub.
         #[cfg(test)]
         if args.contains(&"--stub-create-fails") {
@@ -1248,17 +1247,18 @@ impl PtyManager {
         if crate::instance::is_isolated() && !sessions.contains_key(id) { return Ok(()); }
         let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
         tracing::debug!("Resizing PTY {} to {}x{}", id, cols, rows);
-        session.resize(cols, rows)?;
-        self.pty_sizes.write().insert(id.to_string(), (cols, rows));
-        Ok(())
+        session.resize(cols, rows).map(|()| { self.pty_sizes.write().insert(id.to_string(), (cols, rows)); })
     }
 
     /// The PTY's size as last spawned or resized (#466).
     pub fn pty_size(&self, id: &str) -> Option<(u16, u16)> { self.pty_sizes.read().get(id).copied() }
 
-    /// A live PTY's output from absolute `offset` on; see `OutputRing::since` (#466).
-    pub fn output_since(&self, id: &str, offset: u64) -> Option<super::output_ring::OutputSnapshot> {
-        let ring = self.sessions.read().get(id).map(|session| session.output_history())?;
+    /// `id`'s output from `offset` on (`OutputRing::since`), only while `instance` runs it (#466).
+    pub fn output_since(&self, id: &str, instance: uuid::Uuid, offset: u64) -> Option<super::output_ring::OutputSnapshot> {
+        let sessions = self.sessions.read(); // sessions before instances, as in create_session
+        self.instances.read().get(id).filter(|current| current.id == instance)?;
+        let ring = sessions.get(id)?.output_history();
+        drop(sessions);
         let since = ring.lock().since(offset);
         Some(since)
     }
@@ -1361,6 +1361,7 @@ impl PtyManager {
             {
                 sessions.remove(id);
                 self.heartbeat_credentials.write().remove(id);
+                self.pty_sizes.write().remove(id);
             }
         }
         self.heartbeat_credentials.write().remove(id);

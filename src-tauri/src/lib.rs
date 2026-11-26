@@ -332,6 +332,7 @@ pub fn run() {
                         .filter(|session| session.state.is_monitorable())
                         .map(|session| session.id.clone())
                         .collect();
+                    controller.prune_trust_guards(&session_ids);
                     for session_id in &session_ids {
                         controller.sweep_dead_startup_seats(session_id);
                         // #466: answer or surface a folder-trust prompt on a fresh spawn.

@@ -19,6 +19,11 @@
 //! no per-process trust override, so it is left to detection (`pty::trust_prompt`), which
 //! surfaces it rather than answering. Cursor runs inside WSL and was not captured.
 //!
+//! Only a Hive-managed worktree is pre-trusted: a linked git worktree at
+//! `<project>/.hive-manager/worktrees/<session>/<name>`, which Hive Manager created for
+//! this agent. Any other folder, such as the operator's own project checkout a Queen
+//! starts in, keeps the CLI's own consent prompt.
+//!
 //! Everything here is best-effort. A path the override cannot carry safely, or a failed
 //! settings write, yields no flags, and the spawn falls back to detection.
 
@@ -32,6 +37,9 @@ pub const AGY_TRUST_SETTINGS_FILE: &str = "agy-trust-settings.json";
 /// `existing_args` are the arguments the caller already built; an operator who passes
 /// their own `--settings` (agy) or `projects` override (codex) keeps it untouched.
 pub fn trust_args(command: &str, cwd: &Path, store_dir: &Path, existing_args: &[&str]) -> Vec<String> {
+    if !is_managed_worktree(cwd) {
+        return Vec::new();
+    }
     match cli_stem(command).as_deref() {
         Some("codex") => codex_trust_args(cwd, existing_args),
         Some("agy") | Some("antigravity") => agy_trust_args(cwd, store_dir, existing_args),
@@ -88,8 +96,12 @@ fn agy_trust_args(cwd: &Path, store_dir: &Path, existing_args: &[&str]) -> Vec<S
         return Vec::new();
     }
     let body = serde_json::json!({ "trustedWorkspaces": [cwd] });
-    let written = super::agent_store::ensure_store_dir(store_dir)
-        .and_then(|()| std::fs::write(&settings, body.to_string()));
+    // Atomic, so agy never reads a half-written overlay while a same-id respawn rewrites it.
+    let written = super::agent_store::ensure_store_dir(store_dir).and_then(|()| {
+        let mut temp = tempfile::NamedTempFile::new_in(store_dir)?;
+        std::io::Write::write_all(&mut temp, body.to_string().as_bytes())?;
+        temp.persist(&settings).map(|_| ()).map_err(|error| error.error)
+    });
     if let Err(error) = written {
         tracing::warn!(
             settings = %settings.display(),
@@ -101,11 +113,25 @@ fn agy_trust_args(cwd: &Path, store_dir: &Path, existing_args: &[&str]) -> Vec<S
     vec!["--settings".to_string(), settings.to_string_lossy().into_owned()]
 }
 
+/// Whether `cwd` is a worktree Hive Manager created for an agent: a linked git worktree
+/// (its `.git` is a file) at `.hive-manager/worktrees/<session>/<name>`.
+pub fn is_managed_worktree(cwd: &Path) -> bool {
+    let parts: Vec<&std::ffi::OsStr> = cwd.components().map(|part| part.as_os_str()).collect();
+    let shaped = parts.len() >= 4 && {
+        let tail = &parts[parts.len() - 4..];
+        tail[0] == ".hive-manager" && tail[1] == "worktrees"
+    };
+    shaped && std::fs::metadata(cwd.join(".git")).is_ok_and(|meta| meta.is_file())
+}
+
 /// Paths the override can carry: no quote that would end a TOML literal string, no
-/// batch-file metacharacter, and no control character.
+/// cmd.exe metacharacter (the Windows batch writer quotes only on a space, `"`, `&` or
+/// `|`), and no control character. Anything else is left to detection.
 fn is_safe_override_path(path: &str) -> bool {
     !path.is_empty()
-        && !path.chars().any(|c| matches!(c, '\'' | '"' | '%' | '!' | '^' | '\r' | '\n') || c.is_control())
+        && !path.chars().any(|c| {
+            matches!(c, '\'' | '"' | '%' | '!' | '^' | '&' | '|' | '<' | '>' | '(' | ')') || c.is_control()
+        })
 }
 
 /// The repository root a working tree belongs to: the tree itself for a normal clone,
@@ -170,35 +196,56 @@ pub fn normalize_path(path: &str) -> String {
     }
 }
 
+/// Lay out a Hive-managed linked worktree under `root`, as a hive creates one:
+/// `<root>/<project>/.hive-manager/worktrees/<session>/<name>` with a `.git` file
+/// pointing into the main checkout. Returns `(project, worktree)`.
+#[cfg(test)]
+pub(crate) fn managed_worktree_fixture(root: &Path, project: &str, session: &str, name: &str) -> (PathBuf, PathBuf) {
+    let repo = root.join(project);
+    let worktree = repo.join(".hive-manager").join("worktrees").join(session).join(name);
+    let admin = repo.join(".git").join("worktrees").join(name);
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+    std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+    (repo, worktree)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn linked_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    fn managed() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = temp.path().join("repo");
-        let worktree = temp.path().join("repo-wt");
-        let admin = repo.join(".git").join("worktrees").join("repo-wt");
-        std::fs::create_dir_all(&admin).unwrap();
-        std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
-        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let (repo, worktree) = managed_worktree_fixture(temp.path(), "repo", "s1", "worker-1");
         (temp, repo, worktree)
     }
 
     #[test]
     fn linked_worktree_resolves_to_its_main_checkout() {
-        let (_temp, repo, worktree) = linked_worktree();
+        let (_temp, repo, worktree) = managed();
         assert_eq!(normalize_path(&git_repo_root(&worktree).unwrap().to_string_lossy()),
-            normalize_path(&repo.to_string_lossy()));
-        assert_eq!(normalize_path(&git_repo_root(&repo).unwrap().to_string_lossy()),
             normalize_path(&repo.to_string_lossy()));
         assert!(git_repo_root(&repo.join("missing")).is_none());
     }
 
     #[test]
+    fn only_a_hive_managed_linked_worktree_counts() {
+        let (temp, repo, worktree) = managed();
+        assert!(is_managed_worktree(&worktree));
+        // The operator's own checkout (where a Queen may start) is not managed.
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        assert!(!is_managed_worktree(&repo));
+        // The right shape without a linked `.git` file is not managed either.
+        let bare = temp.path().join("x").join(".hive-manager").join("worktrees").join("s1").join("worker-2");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert!(!is_managed_worktree(&bare));
+        assert!(!is_managed_worktree(&worktree.join("nested")));
+    }
+
+    #[test]
     fn codex_override_trusts_worktree_and_repo_root_in_one_argument() {
-        let (_temp, repo, worktree) = linked_worktree();
+        let (_temp, repo, worktree) = managed();
         let args = trust_args("codex", &worktree, Path::new("unused"), &[]);
         assert_eq!(args.len(), 2);
         assert_eq!(args[0], "-c");
@@ -210,20 +257,37 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_pre_trusted_outside_a_managed_worktree() {
+        let (_temp, repo, _worktree) = managed();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        for cli in ["codex", "agy"] {
+            assert!(trust_args(cli, &repo, &repo.join("store"), &[]).is_empty(), "{cli} on the project checkout");
+        }
+    }
+
+    #[test]
     fn codex_override_steps_aside_for_an_operator_projects_flag_and_unsafe_paths() {
-        let cwd = Path::new(r"D:\Code Projects\x");
-        assert!(trust_args("codex", cwd, Path::new("s"), &["-c", "projects.x.trust_level=untrusted"]).is_empty());
-        assert!(trust_args("codex.exe", Path::new(r"D:\it's"), Path::new("s"), &[]).is_empty());
-        assert!(trust_args("codex", Path::new(r"D:\100%done"), Path::new("s"), &[]).is_empty());
-        let plain = trust_args(r"C:\bin\codex.exe", cwd, Path::new("s"), &[]);
-        assert_eq!(plain[1], r"projects={'D:\Code Projects\x'={trust_level='trusted'}}");
+        let (_temp, _repo, worktree) = managed();
+        assert!(trust_args("codex", &worktree, Path::new("s"), &["-c", "projects.x.trust_level=untrusted"]).is_empty());
+        assert!(!is_safe_override_path(r"D:\it's"));
+        assert!(!is_safe_override_path(r"D:\100%done"));
+        for path in [r"D:\R&D\wt", r"D:\a|b", r"D:\a<b", r"D:\a>b", r"D:\x (1)\wt"] {
+            assert!(!is_safe_override_path(path), "{path}");
+        }
+        assert!(is_safe_override_path(r"D:\Code Projects\x"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_is_recognised_through_a_windows_executable_path() {
+        let (_temp, _repo, worktree) = managed();
+        assert_eq!(trust_args(r"C:\bin\codex.exe", &worktree, Path::new("s"), &[]).len(), 2);
     }
 
     #[test]
     fn agy_overlay_names_only_the_worktree_and_lives_in_the_agent_store() {
-        let temp = tempfile::TempDir::new().unwrap();
+        let (temp, _repo, cwd) = managed();
         let store = temp.path().join("store");
-        let cwd = temp.path().join("worker-1");
         let args = trust_args("agy", &cwd, &store, &["--model", "m"]);
         assert_eq!(args[0], "--settings");
         assert_eq!(PathBuf::from(&args[1]), store.join(AGY_TRUST_SETTINGS_FILE));
@@ -235,17 +299,21 @@ mod tests {
 
     #[test]
     fn other_clis_get_nothing() {
+        let (_temp, _repo, worktree) = managed();
         for cli in ["claude", "wsl", "cursor"] {
-            assert!(trust_args(cli, Path::new("/w"), Path::new("/s"), &[]).is_empty(), "{cli}");
+            assert!(trust_args(cli, &worktree, Path::new("/s"), &[]).is_empty(), "{cli}");
         }
     }
 
     #[test]
-    fn printed_paths_compare_across_case_prefix_and_separators() {
+    fn printed_paths_compare_across_prefix_separators_and_trailing_slash() {
         assert_eq!(normalize_path(r"\\?\D:\Code Projects\hive\"), normalize_path("D:/Code Projects/hive"));
-        if cfg!(windows) {
-            assert_eq!(normalize_path(r"d:\hm\repo"), normalize_path(r"D:\HM\Repo"));
-        }
         assert_ne!(normalize_path(r"D:\a\worker-1"), normalize_path(r"D:\a\worker-2"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn printed_paths_compare_case_insensitively_on_windows() {
+        assert_eq!(normalize_path(r"d:\hm\repo"), normalize_path(r"D:\HM\Repo"));
     }
 }

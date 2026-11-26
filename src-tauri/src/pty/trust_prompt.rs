@@ -79,24 +79,38 @@ pub struct TrustPrompt {
     pub trust_highlighted: bool,
 }
 
+/// Longest span, in rows, a dialog may take from its first line to its footer. The
+/// captured dialogs take 8-13 rows; text scattered further apart is not one dialog.
+pub const DIALOG_SPAN: usize = 24;
+
 /// Read a trust prompt from rendered screen lines, if one is showing.
+///
+/// Every line of the captured dialog must appear in order, from its title to its key
+/// hint footer, within [`DIALOG_SPAN`] rows. Loose copies of the same words elsewhere
+/// on the screen (scrollback, a file the agent printed) do not make a dialog.
 pub fn detect(cli: TrustCli, lines: &[String]) -> Option<TrustPrompt> {
     match cli {
         // agy 1.5.18:
         //   Accessing workspace:
         //   D:\...\worker-1
         //   Do you trust the contents of this project?
+        //   Antigravity CLI requires permission to read, edit, and execute files here.
         //   > Yes, I trust this folder
         //     No, exit
+        //     ↑/↓ Navigate · enter Confirm
         TrustCli::Antigravity => {
-            find(lines, |l| l == "Do you trust the contents of this project?")?;
-            let folder = block_after(lines, |l| l == "Accessing workspace:")?;
-            let yes = find(lines, |l| l.ends_with("Yes, I trust this folder"))?;
+            let at = ordered(lines, &[
+                &|l| l == "Accessing workspace:",
+                &|l| l == "Do you trust the contents of this project?",
+                &|l| l.ends_with("Yes, I trust this folder"),
+                &|l| l.ends_with("No, exit"),
+                &|l| l.contains("Navigate") && l.ends_with("enter Confirm"),
+            ])?;
             Some(TrustPrompt {
                 cli,
-                folder,
+                folder: block_between(lines, at[0], at[1])?,
                 repo_root: None,
-                trust_highlighted: lines[yes].trim() == "> Yes, I trust this folder",
+                trust_highlighted: lines[at[2]].trim() == "> Yes, I trust this folder",
             })
         }
         // codex-cli 0.171.0:
@@ -107,16 +121,21 @@ pub fn detect(cli: TrustCli, lines: &[String]) -> Option<TrustPrompt> {
         //   Trust this folder? Codex can read, edit, and run files here, ...
         //   › 1. Trust and continue
         //     2. Back to Agent Command Center
+        //     enter continue · esc back
         TrustCli::Codex => {
-            find(lines, |l| l.starts_with("Trust this folder? Codex can read, edit, and run files here"))?;
-            let folder = block_after(lines, |l| l == "Folder access")?;
-            let repo_root = block_after(lines, |l| l.ends_with("Trusting will apply to the repository root:"));
-            let trust = find(lines, |l| l.ends_with("1. Trust and continue"))?;
+            let at = ordered(lines, &[
+                &|l| l == "Folder access",
+                &|l| l.starts_with("Trust this folder? Codex can read, edit, and run files here"),
+                &|l| l.ends_with("1. Trust and continue"),
+                &|l| l.starts_with("2. "),
+                &|l| l.starts_with("enter continue"),
+            ])?;
+            let note = (at[0]..at[1]).find(|&i| lines[i].trim().ends_with("Trusting will apply to the repository root:"));
             Some(TrustPrompt {
                 cli,
-                folder,
-                repo_root,
-                trust_highlighted: lines[trust].trim() == "› 1. Trust and continue",
+                folder: block_between(lines, at[0], note.unwrap_or(at[1]))?,
+                repo_root: note.and_then(|note| block_between(lines, note, at[1])),
+                trust_highlighted: lines[at[2]].trim() == "› 1. Trust and continue",
             })
         }
         // Claude Code 2.1.332:
@@ -125,29 +144,48 @@ pub fn detect(cli: TrustCli, lines: &[String]) -> Option<TrustPrompt> {
         //   Quick safety check: Is this a project you created or one you trust? ...
         //   ❯ No, exit
         //     Yes, I trust this folder
+        //   Enter to confirm · Esc to cancel
         TrustCli::Claude => {
-            find(lines, |l| l.contains("Is this a project you created or one you trust?"))?;
-            let folder = block_after(lines, |l| l == "Accessing workspace:")?;
-            let yes = find(lines, |l| l.ends_with("Yes, I trust this folder"))?;
+            let at = ordered(lines, &[
+                &|l| l == "Accessing workspace:",
+                &|l| l.contains("Is this a project you created or one you trust?"),
+                &|l| l.ends_with("No, exit"),
+                &|l| l.ends_with("Yes, I trust this folder"),
+                &|l| l.starts_with("Enter to confirm"),
+            ])?;
             Some(TrustPrompt {
                 cli,
-                folder,
+                folder: block_between(lines, at[0], at[1])?,
                 repo_root: None,
-                trust_highlighted: lines[yes].trim() == "❯ Yes, I trust this folder",
+                trust_highlighted: lines[at[3]].trim() == "❯ Yes, I trust this folder",
             })
         }
     }
 }
 
-fn find(lines: &[String], matches: impl Fn(&str) -> bool) -> Option<usize> {
-    lines.iter().position(|line| matches(line.trim()))
+type LineTest<'a> = &'a dyn Fn(&str) -> bool;
+
+/// Row indexes of `steps` matched in order, each after the last, within [`DIALOG_SPAN`].
+/// Tries each match of the first step, bottom-most first, so the live dialog wins over
+/// an older copy higher up.
+fn ordered(lines: &[String], steps: &[LineTest<'_>]) -> Option<Vec<usize>> {
+    let (first, rest) = steps.split_first()?;
+    let starts: Vec<usize> = (0..lines.len()).filter(|&i| first(lines[i].trim())).collect();
+    starts.into_iter().rev().find_map(|start| {
+        let end = (start + DIALOG_SPAN + 1).min(lines.len());
+        let mut at = vec![start];
+        for step in rest {
+            let from = *at.last()? + 1;
+            at.push((from..end).find(|&i| step(lines[i].trim()))?);
+        }
+        Some(at)
+    })
 }
 
-/// The text after an anchor line up to the next blank line, joined, so a long path the
-/// CLI wrapped onto two rows reads back as one.
-fn block_after(lines: &[String], anchor: impl Fn(&str) -> bool) -> Option<String> {
-    let start = find(lines, anchor)? + 1;
-    let block: String = lines[start..]
+/// The non-blank text between two dialog rows, joined, so a long path the CLI wrapped
+/// onto two rows reads back as one. Only the first paragraph counts.
+fn block_between(lines: &[String], after: usize, before: usize) -> Option<String> {
+    let block: String = lines[after + 1..before]
         .iter()
         .map(|line| line.trim())
         .skip_while(|line| line.is_empty())
@@ -159,34 +197,50 @@ fn block_after(lines: &[String], anchor: impl Fn(&str) -> bool) -> Option<String
 /// Why a prompt is not answered automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
+    /// The agent's folder is not a Hive-managed worktree, so its trust stays the
+    /// operator's decision (a Queen on the project checkout, a shared-cell worker).
+    NotManagedWorktree,
     /// The prompt names a folder other than the worker's worktree.
     ForeignPath,
     /// Codex would apply the trust to a repository root that is not the worktree's own.
     ForeignRepoRoot,
-    /// The highlighted option is not the trust choice (Claude Code defaults to "No").
+    /// Codex's repository root could not be read off the screen.
+    UnreadRepoRoot,
+    /// Claude Code's trust decision is always the operator's.
+    OperatorDecides,
+    /// The highlighted option is not the trust choice.
     DefaultIsNotTrust,
 }
 
 impl Refusal {
     pub fn reason(self) -> &'static str {
         match self {
+            Self::NotManagedWorktree => "not_a_managed_worktree",
             Self::ForeignPath => "foreign_path",
             Self::ForeignRepoRoot => "foreign_repo_root",
+            Self::UnreadRepoRoot => "repo_root_unreadable",
+            Self::OperatorDecides => "operator_decides",
             Self::DefaultIsNotTrust => "default_is_not_trust",
         }
     }
 }
 
-/// Whether `prompt` may be answered for a worker whose worktree is `cwd`.
+/// Whether `prompt` may be answered for a worker whose managed worktree is `cwd`.
 pub fn check(prompt: &TrustPrompt, cwd: &str) -> Result<(), Refusal> {
+    if prompt.cli == TrustCli::Claude {
+        return Err(Refusal::OperatorDecides);
+    }
     if normalize_path(&prompt.folder) != normalize_path(cwd) {
         return Err(Refusal::ForeignPath);
     }
-    if let Some(root) = &prompt.repo_root {
-        let root = normalize_path(root);
-        let own = git_repo_root(std::path::Path::new(cwd))
-            .map(|own| normalize_path(&own.to_string_lossy()));
-        if root != normalize_path(cwd) && own.as_deref() != Some(root.as_str()) {
+    if prompt.cli == TrustCli::Codex {
+        // Codex saves the decision at the repository root, so the root must be read and
+        // must be this worktree's own main checkout. A linked worktree always shows it.
+        let Some(root) = &prompt.repo_root else {
+            return Err(Refusal::UnreadRepoRoot);
+        };
+        let own = git_repo_root(std::path::Path::new(cwd)).map(|own| normalize_path(&own.to_string_lossy()));
+        if own.as_deref() != Some(normalize_path(root).as_str()) {
             return Err(Refusal::ForeignRepoRoot);
         }
     }
@@ -224,7 +278,7 @@ pub enum GuardAction {
     Accept(TrustPrompt),
     /// The prompt is up but must not be answered: surface it.
     Refused(TrustPrompt, Refusal),
-    /// The accepted prompt is gone.
+    /// The prompt is gone, after an accept or after the operator answered it.
     Cleared(TrustPrompt),
     /// The accepted prompt did not go away: surface it.
     Escalated(TrustPrompt, Escalation),
@@ -234,6 +288,8 @@ pub enum GuardAction {
 enum GuardState {
     Watching,
     Accepted { prompt: TrustPrompt, at_screen: Vec<String>, at: Instant },
+    /// Handed to the operator. Never writes again; reports once when the prompt goes.
+    Surfaced { prompt: TrustPrompt },
     Done,
 }
 
@@ -242,7 +298,8 @@ enum GuardState {
 #[derive(Debug, Clone)]
 pub struct TrustPromptGuard {
     cli: TrustCli,
-    cwd: Option<String>,
+    /// The worktree this guard may answer for: set only for a Hive-managed worktree.
+    authorized_cwd: Option<String>,
     started: Instant,
     screen: Screen,
     fed_to: Option<u64>,
@@ -250,10 +307,15 @@ pub struct TrustPromptGuard {
 }
 
 impl TrustPromptGuard {
+    /// `cwd` is the agent's spawn folder. The guard answers prompts only when it is a
+    /// Hive-managed worktree (`cli::folder_trust::is_managed_worktree`); anywhere else
+    /// a prompt is surfaced to the operator.
     pub fn new(cli: TrustCli, cwd: Option<String>, cols: u16, rows: u16, started: Instant) -> Self {
+        let authorized_cwd =
+            cwd.filter(|cwd| crate::cli::folder_trust::is_managed_worktree(std::path::Path::new(cwd)));
         Self {
             cli,
-            cwd,
+            authorized_cwd,
             started,
             screen: Screen::new(cols, rows),
             fed_to: None,
@@ -267,7 +329,7 @@ impl TrustPromptGuard {
         match self.state {
             GuardState::Done => false,
             GuardState::Watching => now.duration_since(self.started) < WATCH_WINDOW,
-            GuardState::Accepted { .. } => true,
+            GuardState::Accepted { .. } | GuardState::Surfaced { .. } => true,
         }
     }
 
@@ -280,47 +342,57 @@ impl TrustPromptGuard {
     /// current size, and decide what to do.
     pub fn observe(&mut self, snapshot: &OutputSnapshot, cols: u16, rows: u16, now: Instant) -> Option<GuardAction> {
         if !self.is_active(now) {
-            if matches!(self.state, GuardState::Watching) {
-                self.state = GuardState::Done;
-            }
+            self.finish();
             return None;
         }
         self.feed(snapshot, cols, rows);
         let lines = self.screen.lines();
         let shown = detect(self.cli, &lines);
-        match std::mem::replace(&mut self.state, GuardState::Done) {
-            GuardState::Watching => {
-                let Some(prompt) = shown else {
-                    self.state = GuardState::Watching;
-                    return None;
-                };
-                let Some(cwd) = self.cwd.as_deref() else {
-                    return Some(GuardAction::Refused(prompt, Refusal::ForeignPath));
-                };
-                match check(&prompt, cwd) {
-                    Ok(()) => {
-                        self.state = GuardState::Accepted { prompt: prompt.clone(), at_screen: lines, at: now };
-                        Some(GuardAction::Accept(prompt))
-                    }
-                    Err(refusal) => Some(GuardAction::Refused(prompt, refusal)),
-                }
-            }
+        let (next, action) = match std::mem::replace(&mut self.state, GuardState::Done) {
+            GuardState::Watching => match shown {
+                None => (GuardState::Watching, None),
+                Some(prompt) => self.first_sight(prompt, lines, now),
+            },
             GuardState::Accepted { prompt, at_screen, at } => {
                 let waited = now.duration_since(at);
-                if shown.is_none() {
-                    return Some(GuardAction::Cleared(prompt));
-                }
-                if lines == at_screen {
-                    if waited >= UNCHANGED_LIMIT {
-                        return Some(GuardAction::Escalated(prompt, Escalation::Unchanged));
+                match shown {
+                    None => (GuardState::Done, Some(GuardAction::Cleared(prompt))),
+                    Some(_) if lines == at_screen && waited < UNCHANGED_LIMIT => {
+                        (GuardState::Accepted { prompt, at_screen, at }, None)
                     }
-                } else if waited >= REAPPEAR_GRACE {
-                    return Some(GuardAction::Escalated(prompt, Escalation::Reappeared));
+                    Some(_) if lines != at_screen && waited < REAPPEAR_GRACE => {
+                        (GuardState::Accepted { prompt, at_screen, at }, None)
+                    }
+                    Some(_) => {
+                        let why = if lines == at_screen { Escalation::Unchanged } else { Escalation::Reappeared };
+                        (GuardState::Surfaced { prompt: prompt.clone() }, Some(GuardAction::Escalated(prompt, why)))
+                    }
                 }
-                self.state = GuardState::Accepted { prompt, at_screen, at };
-                None
             }
-            GuardState::Done => None,
+            GuardState::Surfaced { prompt } => match shown {
+                None => (GuardState::Done, Some(GuardAction::Cleared(prompt))),
+                Some(_) => (GuardState::Surfaced { prompt }, None),
+            },
+            GuardState::Done => (GuardState::Done, None),
+        };
+        self.state = next;
+        if matches!(self.state, GuardState::Done) {
+            self.finish();
+        }
+        action
+    }
+
+    fn first_sight(&self, prompt: TrustPrompt, lines: Vec<String>, now: Instant) -> (GuardState, Option<GuardAction>) {
+        let verdict = match self.authorized_cwd.as_deref() {
+            Some(cwd) => check(&prompt, cwd),
+            None => Err(Refusal::NotManagedWorktree),
+        };
+        match verdict {
+            Ok(()) => (
+                GuardState::Accepted { prompt: prompt.clone(), at_screen: lines, at: now },
+                Some(GuardAction::Accept(prompt)),
+            ),
+            Err(refusal) => (GuardState::Surfaced { prompt: prompt.clone() }, Some(GuardAction::Refused(prompt, refusal))),
         }
     }
 
@@ -329,13 +401,18 @@ impl TrustPromptGuard {
         if ok {
             return None;
         }
-        match std::mem::replace(&mut self.state, GuardState::Done) {
-            GuardState::Accepted { prompt, .. } => Some(GuardAction::Escalated(prompt, Escalation::WriteFailed)),
-            other => {
-                self.state = other;
-                None
-            }
-        }
+        let GuardState::Accepted { prompt, .. } = &self.state else {
+            return None;
+        };
+        let prompt = prompt.clone();
+        self.state = GuardState::Surfaced { prompt: prompt.clone() };
+        Some(GuardAction::Escalated(prompt, Escalation::WriteFailed))
+    }
+
+    /// Stop for good and release the screen; only the spawn marker stays behind.
+    fn finish(&mut self) {
+        self.state = GuardState::Done;
+        self.screen = Screen::new(1, 1);
     }
 
     fn feed(&mut self, snapshot: &OutputSnapshot, cols: u16, rows: u16) {
@@ -362,22 +439,62 @@ impl TrustPromptGuard {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::cli::folder_trust::managed_worktree_fixture;
 
-    const AGY_PROMPT: &[u8] = include_bytes!("trust_prompt_fixtures/agy-1.5.18-prompt.bin");
-    const AGY_AFTER: &[u8] = include_bytes!("trust_prompt_fixtures/agy-1.5.18-after-accept.bin");
-    const CODEX_PROMPT: &[u8] = include_bytes!("trust_prompt_fixtures/codex-0.171.0-prompt.bin");
-    const CODEX_AFTER: &[u8] = include_bytes!("trust_prompt_fixtures/codex-0.171.0-after-accept.bin");
-    const CLAUDE_PROMPT: &[u8] = include_bytes!("trust_prompt_fixtures/claude-2.1.332-prompt.bin");
+    pub(crate) const AGY_PROMPT: &[u8] = include_bytes!("trust_prompt_fixtures/agy-1.5.18-prompt.bin");
+    pub(crate) const AGY_AFTER: &[u8] = include_bytes!("trust_prompt_fixtures/agy-1.5.18-after-accept.bin");
+    pub(crate) const CODEX_PROMPT: &[u8] = include_bytes!("trust_prompt_fixtures/codex-0.171.0-prompt.bin");
+    pub(crate) const CODEX_AFTER: &[u8] = include_bytes!("trust_prompt_fixtures/codex-0.171.0-after-accept.bin");
+    pub(crate) const CLAUDE_PROMPT: &[u8] = include_bytes!("trust_prompt_fixtures/claude-2.1.332-prompt.bin");
 
-    // The fixtures were captured at 120x40 in these scratch worktrees.
-    const AGY_CWD: &str = r"D:\hm466-scratch\repo-agy-acc2";
-    const CODEX_CWD: &str = r"D:\hm466-scratch\repo-codex2-acc";
-    const CODEX_ROOT: &str = r"d:\hm466-scratch\repo-codex2";
-    const CLAUDE_CWD: &str = r"D:\hm466-scratch\repo-claude-wt1";
+    // The scratch worktrees the fixtures were captured in, at 120x40.
+    pub(crate) const AGY_CWD: &str = r"D:\hm466-scratch\repo-agy-acc2";
+    pub(crate) const CODEX_CWD: &str = r"D:\hm466-scratch\repo-codex2-acc";
+    pub(crate) const CODEX_ROOT: &str = r"d:\hm466-scratch\repo-codex2";
+    pub(crate) const CLAUDE_CWD: &str = r"D:\hm466-scratch\repo-claude-wt1";
 
-    fn screen(bytes: &[u8]) -> Vec<String> {
+    /// A captured prompt with each `(captured path, replacement)` swapped in, so it names
+    /// a managed worktree that exists for the test. Each captured path is one contiguous
+    /// run of bytes in its fixture.
+    pub(crate) fn retarget(capture: &[u8], swaps: &[(&str, &str)]) -> Vec<u8> {
+        let mut text = String::from_utf8(capture.to_vec()).unwrap();
+        for (from, to) in swaps {
+            assert_eq!(text.matches(from).count(), 1, "{from} must appear once");
+            text = text.replace(from, to);
+        }
+        text.into_bytes()
+    }
+
+    /// A captured prompt re-drawn as one clean frame from its rendered rows, with each
+    /// swap applied to the text. Codex diff-renders its rows (it skips cells that already
+    /// hold the right character), so its bytes cannot be patched in place.
+    pub(crate) fn reframe(capture: &[u8], swaps: &[(&str, &str)]) -> Vec<u8> {
+        let mut frame = b"[2J".to_vec();
+        for (row, line) in screen(capture).iter().enumerate() {
+            let mut line = line.clone();
+            for (from, to) in swaps {
+                line = line.replace(from, to);
+            }
+            frame.extend(format!("[{};1H{line}", row + 1).into_bytes());
+        }
+        frame
+    }
+
+    struct Managed {
+        _temp: tempfile::TempDir,
+        repo: String,
+        cwd: String,
+    }
+
+    fn managed() -> Managed {
+        let temp = tempfile::TempDir::new().unwrap();
+        let (repo, cwd) = managed_worktree_fixture(temp.path(), "project", "s1", "worker-1");
+        Managed { _temp: temp, repo: repo.to_string_lossy().into(), cwd: cwd.to_string_lossy().into() }
+    }
+
+    pub(crate) fn screen(bytes: &[u8]) -> Vec<String> {
         let mut screen = Screen::new(120, 40);
         screen.feed(bytes);
         screen.lines()
@@ -392,12 +509,8 @@ mod tests {
         [a, b].concat()
     }
 
-    /// The codex capture with its repository root swapped for `root`, so a test never
-    /// depends on whether the scratch repository still exists on this disk.
-    fn codex_prompt_with_root(root: &str) -> Vec<u8> {
-        let text = String::from_utf8(CODEX_PROMPT.to_vec()).unwrap();
-        assert_eq!(text.matches(CODEX_ROOT).count(), 1);
-        text.replace(CODEX_ROOT, root).into_bytes()
+    fn guard(cli: TrustCli, cwd: &str, t0: Instant) -> TrustPromptGuard {
+        TrustPromptGuard::new(cli, Some(cwd.into()), 120, 40, t0)
     }
 
     #[test]
@@ -424,19 +537,31 @@ mod tests {
     }
 
     #[test]
-    fn prompts_are_specific_to_their_cli_and_plain_output_is_not_a_prompt() {
+    fn prompts_are_specific_to_their_cli_and_loose_text_is_not_a_dialog() {
         assert_eq!(detect(TrustCli::Codex, &screen(AGY_PROMPT)), None);
         assert_eq!(detect(TrustCli::Antigravity, &screen(CODEX_PROMPT)), None);
-        assert_eq!(detect(TrustCli::Codex, &screen(b"Trust this folder?\r\n")), None);
+        // The dialog's words without its order and footer: an agent printing a file.
+        let printed = b"Do you trust the contents of this project?\r\nAccessing workspace:\r\nD:\\w\r\n> Yes, I trust this folder\r\n";
+        assert_eq!(detect(TrustCli::Antigravity, &screen(printed)), None);
+        // The same dialog lines spread over more than one dialog's height.
+        let spread = [b"Accessing workspace:\r\nD:\\w\r\n".as_slice(), &b"\r\n".repeat(DIALOG_SPAN),
+            b"Do you trust the contents of this project?\r\n> Yes, I trust this folder\r\n  No, exit\r\n  Navigate - enter Confirm\r\n"].concat();
+        assert_eq!(detect(TrustCli::Antigravity, &screen(&spread)), None);
         assert_eq!(TrustCli::from_cli("agy"), Some(TrustCli::Antigravity));
-        assert_eq!(TrustCli::from_cli(r"C:\bin\codex.exe"), Some(TrustCli::Codex));
+        assert_eq!(TrustCli::from_cli("codex"), Some(TrustCli::Codex));
         assert_eq!(TrustCli::from_cli("cursor"), None);
     }
 
-    /// Walks a guard through a captured prompt and the CLI's real response to Enter.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_executable_path_names_its_cli() {
+        assert_eq!(TrustCli::from_cli(r"C:\bin\codex.exe"), Some(TrustCli::Codex));
+    }
+
+    /// Walks a guard through a prompt and the CLI's real response to Enter.
     fn accept_flow(cli: TrustCli, cwd: &str, prompt: &[u8], after: &[u8]) {
         let t0 = Instant::now();
-        let mut guard = TrustPromptGuard::new(cli, Some(cwd.into()), 120, 40, t0);
+        let mut guard = guard(cli, cwd, t0);
         assert_eq!(guard.observe(&ring(&prompt[..prompt.len() / 3]), 120, 40, t0), None, "partial frame");
 
         let shown = guard.observe(&ring(prompt), 120, 40, t0 + Duration::from_secs(1));
@@ -454,113 +579,131 @@ mod tests {
     }
 
     #[test]
-    fn agy_prompt_is_detected_accepted_once_and_cleared() {
-        accept_flow(TrustCli::Antigravity, AGY_CWD, AGY_PROMPT, AGY_AFTER);
+    fn agy_prompt_for_a_managed_worktree_is_accepted_once_and_cleared() {
+        let m = managed();
+        accept_flow(TrustCli::Antigravity, &m.cwd, &retarget(AGY_PROMPT, &[(AGY_CWD, &m.cwd)]), AGY_AFTER);
     }
 
     #[test]
-    fn codex_prompt_is_detected_accepted_once_and_cleared() {
-        let t0 = Instant::now();
-        let mut guard = TrustPromptGuard::new(TrustCli::Codex, Some(CODEX_CWD.into()), 120, 40, t0);
-        // A root that is not the worktree's own repository is refused...
-        let foreign = codex_prompt_with_root(r"d:\hm466-fixture\not-this-repo");
-        let refused = guard.observe(&ring(&foreign), 120, 40, t0);
-        assert!(matches!(refused, Some(GuardAction::Refused(_, Refusal::ForeignRepoRoot))), "{refused:?}");
-        // ...and one that is the worktree's own is accepted. On disk that is the main
-        // checkout (see `codex_repo_root_must_be_the_worktrees_own_main_checkout`).
-        accept_flow(TrustCli::Codex, CODEX_CWD, &codex_prompt_with_root(CODEX_CWD), CODEX_AFTER);
+    fn codex_prompt_for_a_managed_worktree_and_its_own_root_is_accepted_once_and_cleared() {
+        let m = managed();
+        let prompt = reframe(CODEX_PROMPT, &[(CODEX_CWD, &m.cwd), (CODEX_ROOT, &m.repo)]);
+        assert_eq!(detect(TrustCli::Codex, &screen(&prompt)).map(|p| p.folder), Some(m.cwd.clone()));
+        accept_flow(TrustCli::Codex, &m.cwd, &prompt, CODEX_AFTER);
     }
 
     #[test]
-    fn codex_repo_root_must_be_the_worktrees_own_main_checkout() {
-        // A linked worktree on disk, as a hive lays one out.
-        let temp = tempfile::TempDir::new().unwrap();
-        let repo = temp.path().join("repo");
-        let worktree = repo.join(".hive-manager").join("worktrees").join("s1").join("worker-1");
-        let admin = repo.join(".git").join("worktrees").join("worker-1");
-        std::fs::create_dir_all(&admin).unwrap();
-        std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
-        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
-        let cwd = worktree.to_string_lossy().into_owned();
-        let shown = |root: &std::path::Path| TrustPrompt {
-            cli: TrustCli::Codex,
-            folder: cwd.clone(),
-            repo_root: Some(root.to_string_lossy().into_owned()),
-            trust_highlighted: true,
+    fn codex_root_must_be_read_and_be_the_worktrees_own() {
+        let m = managed();
+        let shown = |root: Option<&str>| TrustPrompt {
+            cli: TrustCli::Codex, folder: m.cwd.clone(), repo_root: root.map(String::from), trust_highlighted: true,
         };
-        assert_eq!(check(&shown(&repo), &cwd), Ok(()));
-        let other = temp.path().join("other-repo");
-        assert_eq!(check(&shown(&other), &cwd), Err(Refusal::ForeignRepoRoot));
+        assert_eq!(check(&shown(Some(&m.repo)), &m.cwd), Ok(()));
+        assert_eq!(check(&shown(Some(r"D:\elsewhere\repo")), &m.cwd), Err(Refusal::ForeignRepoRoot));
+        assert_eq!(check(&shown(None), &m.cwd), Err(Refusal::UnreadRepoRoot), "an unreadable root is never assumed");
     }
 
-    #[test]
-    fn a_prompt_naming_a_foreign_path_is_never_accepted() {
-        for (cli, prompt) in [(TrustCli::Antigravity, AGY_PROMPT), (TrustCli::Codex, CODEX_PROMPT)] {
-            let t0 = Instant::now();
-            let mut guard = TrustPromptGuard::new(cli, Some(r"D:\hm466-scratch\someone-else".into()), 120, 40, t0);
-            let action = guard.observe(&ring(prompt), 120, 40, t0);
-            assert!(matches!(action, Some(GuardAction::Refused(_, Refusal::ForeignPath))), "{cli:?}: {action:?}");
-            assert!(!guard.is_active(t0), "refused once, then surfaced, never retried");
-        }
-        let mut no_cwd = TrustPromptGuard::new(TrustCli::Antigravity, None, 120, 40, Instant::now());
-        assert!(matches!(no_cwd.observe(&ring(AGY_PROMPT), 120, 40, Instant::now()),
-            Some(GuardAction::Refused(_, Refusal::ForeignPath))));
-    }
-
-    #[test]
-    fn claude_prompt_defaulting_to_no_is_surfaced_not_answered() {
-        let mut guard = TrustPromptGuard::new(TrustCli::Claude, Some(CLAUDE_CWD.into()), 120, 40, Instant::now());
-        let action = guard.observe(&ring(CLAUDE_PROMPT), 120, 40, Instant::now());
-        assert!(matches!(action, Some(GuardAction::Refused(_, Refusal::DefaultIsNotTrust))), "{action:?}");
-    }
-
-    #[test]
-    fn an_accept_that_changes_nothing_or_brings_the_prompt_back_is_escalated() {
+    fn refused(cli: TrustCli, cwd: Option<&str>, prompt: &[u8]) -> Option<Refusal> {
         let t0 = Instant::now();
-        let mut silent = TrustPromptGuard::new(TrustCli::Antigravity, Some(AGY_CWD.into()), 120, 40, t0);
-        assert!(matches!(silent.observe(&ring(AGY_PROMPT), 120, 40, t0), Some(GuardAction::Accept(_))));
-        assert_eq!(silent.observe(&ring(AGY_PROMPT), 120, 40, t0 + Duration::from_secs(5)), None, "still waiting");
-        let action = silent.observe(&ring(AGY_PROMPT), 120, 40, t0 + UNCHANGED_LIMIT);
-        assert!(matches!(action, Some(GuardAction::Escalated(_, Escalation::Unchanged))), "{action:?}");
-        assert!(!silent.is_active(t0 + UNCHANGED_LIMIT));
+        let mut guard = TrustPromptGuard::new(cli, cwd.map(String::from), 120, 40, t0);
+        match guard.observe(&ring(prompt), 120, 40, t0) {
+            Some(GuardAction::Refused(_, refusal)) => Some(refusal),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
 
-        let mut back = TrustPromptGuard::new(TrustCli::Antigravity, Some(AGY_CWD.into()), 120, 40, t0);
-        assert!(matches!(back.observe(&ring(AGY_PROMPT), 120, 40, t0), Some(GuardAction::Accept(_))));
+    #[test]
+    fn prompts_are_only_answered_inside_a_managed_worktree_for_that_worktree() {
+        let m = managed();
+        // The captured scratch folder is not a managed worktree (a Queen on a checkout).
+        assert_eq!(refused(TrustCli::Antigravity, Some(AGY_CWD), AGY_PROMPT), Some(Refusal::NotManagedWorktree));
+        assert_eq!(refused(TrustCli::Antigravity, None, AGY_PROMPT), Some(Refusal::NotManagedWorktree));
+        // A managed worker whose prompt names some other folder.
+        assert_eq!(refused(TrustCli::Antigravity, Some(&m.cwd), AGY_PROMPT), Some(Refusal::ForeignPath));
+        assert_eq!(refused(TrustCli::Codex, Some(&m.cwd), CODEX_PROMPT), Some(Refusal::ForeignPath));
+        let other_root = reframe(CODEX_PROMPT, &[(CODEX_CWD, &m.cwd), (CODEX_ROOT, r"d:\hm466-fixture\not-this-repo")]);
+        assert_eq!(refused(TrustCli::Codex, Some(&m.cwd), &other_root), Some(Refusal::ForeignRepoRoot));
+    }
+
+    #[test]
+    fn claude_is_never_answered_even_with_yes_selected() {
+        let m = managed();
+        let prompt = retarget(CLAUDE_PROMPT, &[(CLAUDE_CWD, &m.cwd)]);
+        assert_eq!(refused(TrustCli::Claude, Some(&m.cwd), &prompt), Some(Refusal::OperatorDecides));
+        // The operator moved the selector to Yes; it is still their Enter to press.
+        let mut lines = screen(&prompt);
+        for line in &mut lines {
+            *line = match line.trim() {
+                "❯ No, exit" => "  No, exit".into(),
+                "Yes, I trust this folder" => "❯ Yes, I trust this folder".into(),
+                _ => line.clone(),
+            };
+        }
+        let yes = detect(TrustCli::Claude, &lines).unwrap();
+        assert!(yes.trust_highlighted);
+        assert_eq!(check(&yes, &m.cwd), Err(Refusal::OperatorDecides));
+    }
+
+    #[test]
+    fn a_surfaced_prompt_clears_once_the_operator_answers_it() {
+        let t0 = Instant::now();
+        let mut guard = guard(TrustCli::Antigravity, AGY_CWD, t0);
+        assert!(matches!(guard.observe(&ring(AGY_PROMPT), 120, 40, t0), Some(GuardAction::Refused(..))));
+        assert_eq!(guard.observe(&ring(AGY_PROMPT), 120, 40, t0 + Duration::from_secs(30)), None, "surfaced once");
+        let answered = concat(AGY_PROMPT, AGY_AFTER);
+        assert!(matches!(guard.observe(&ring(&answered), 120, 40, t0 + Duration::from_secs(40)), Some(GuardAction::Cleared(_))));
+        assert!(!guard.is_active(t0 + Duration::from_secs(41)));
+    }
+
+    #[test]
+    fn an_accept_that_changes_nothing_or_brings_the_prompt_back_is_escalated_once() {
+        let m = managed();
+        let prompt = retarget(AGY_PROMPT, &[(AGY_CWD, &m.cwd)]);
+        let t0 = Instant::now();
+        let mut silent = guard(TrustCli::Antigravity, &m.cwd, t0);
+        assert!(matches!(silent.observe(&ring(&prompt), 120, 40, t0), Some(GuardAction::Accept(_))));
+        assert_eq!(silent.observe(&ring(&prompt), 120, 40, t0 + Duration::from_secs(5)), None, "still waiting");
+        let action = silent.observe(&ring(&prompt), 120, 40, t0 + UNCHANGED_LIMIT);
+        assert!(matches!(action, Some(GuardAction::Escalated(_, Escalation::Unchanged))), "{action:?}");
+        assert_eq!(silent.observe(&ring(&prompt), 120, 40, t0 + UNCHANGED_LIMIT * 3), None, "escalated once, no retry");
+
+        let mut back = guard(TrustCli::Antigravity, &m.cwd, t0);
+        assert!(matches!(back.observe(&ring(&prompt), 120, 40, t0), Some(GuardAction::Accept(_))));
         // The CLI drew something new, yet the prompt is still up.
-        let redrawn = concat(AGY_PROMPT, b"\x1b[30;1Hstill asking");
+        let redrawn = concat(&prompt, b"\x1b[30;1Hstill asking");
         assert_eq!(back.observe(&ring(&redrawn), 120, 40, t0 + Duration::from_secs(1)), None, "inside the grace");
         let action = back.observe(&ring(&redrawn), 120, 40, t0 + REAPPEAR_GRACE);
         assert!(matches!(action, Some(GuardAction::Escalated(_, Escalation::Reappeared))), "{action:?}");
 
-        let mut failed = TrustPromptGuard::new(TrustCli::Antigravity, Some(AGY_CWD.into()), 120, 40, t0);
-        assert!(matches!(failed.observe(&ring(AGY_PROMPT), 120, 40, t0), Some(GuardAction::Accept(_))));
+        let mut failed = guard(TrustCli::Antigravity, &m.cwd, t0);
+        assert!(matches!(failed.observe(&ring(&prompt), 120, 40, t0), Some(GuardAction::Accept(_))));
         assert!(matches!(failed.accept_written(false), Some(GuardAction::Escalated(_, Escalation::WriteFailed))));
+        assert_eq!(failed.observe(&ring(&prompt), 120, 40, t0 + Duration::from_secs(1)), None);
     }
 
     #[test]
     fn guard_reads_only_new_output_and_recovers_from_eviction() {
+        let m = managed();
+        let prompt = retarget(AGY_PROMPT, &[(AGY_CWD, &m.cwd)]);
         let t0 = Instant::now();
-        let mut guard = TrustPromptGuard::new(TrustCli::Antigravity, Some(AGY_CWD.into()), 120, 40, t0);
-        let head = &AGY_PROMPT[..1000];
-        assert_eq!(guard.observe(&ring(head), 120, 40, t0), None);
+        let mut guard = guard(TrustCli::Antigravity, &m.cwd, t0);
+        assert_eq!(guard.observe(&ring(&prompt[..1000]), 120, 40, t0), None);
         assert_eq!(guard.fed_to(), 1000);
-        // The ring evicted everything before 1500: the guard restarts from what is left,
-        // which here is a partial frame, and waits for the next full one.
-        let evicted = OutputSnapshot { offset_start: 1500, offset_end: AGY_PROMPT.len() as u64, data: AGY_PROMPT[1500..].to_vec() };
-        let _ = guard.observe(&evicted, 120, 40, t0);
-        assert_eq!(guard.fed_to(), AGY_PROMPT.len() as u64);
-        let mut fresh = TrustPromptGuard::new(TrustCli::Antigravity, Some(AGY_CWD.into()), 120, 40, t0);
-        let start = ring(&AGY_PROMPT[..1000]);
-        assert_eq!(fresh.observe(&start, 120, 40, t0), None);
-        let rest = OutputSnapshot { offset_start: 0, offset_end: AGY_PROMPT.len() as u64, data: AGY_PROMPT.to_vec() };
-        assert!(matches!(fresh.observe(&rest, 120, 40, t0), Some(GuardAction::Accept(_))), "incremental feed sees the prompt");
+        let rest = OutputSnapshot { offset_start: 1000, offset_end: prompt.len() as u64, data: prompt[1000..].to_vec() };
+        assert!(matches!(guard.observe(&rest, 120, 40, t0), Some(GuardAction::Accept(_))), "incremental feed sees the prompt");
+
+        // Output before 1500 was evicted unseen: the guard restarts from what is left.
+        let mut late = TrustPromptGuard::new(TrustCli::Antigravity, Some(m.cwd.clone()), 120, 40, t0);
+        let _ = late.observe(&ring(&prompt[..1000]), 120, 40, t0);
+        let evicted = OutputSnapshot { offset_start: 1500, offset_end: prompt.len() as u64, data: prompt[1500..].to_vec() };
+        let _ = late.observe(&evicted, 120, 40, t0);
+        assert_eq!(late.fed_to(), prompt.len() as u64);
     }
 
     #[test]
     fn a_guard_that_saw_no_prompt_stops_after_the_watch_window() {
         let t0 = Instant::now();
-        let mut guard = TrustPromptGuard::new(TrustCli::Codex, Some(CODEX_CWD.into()), 120, 40, t0);
+        let mut guard = guard(TrustCli::Codex, CODEX_CWD, t0);
         assert!(guard.is_active(t0 + WATCH_WINDOW - Duration::from_secs(1)));
         assert_eq!(guard.observe(&ring(CODEX_PROMPT), 120, 40, t0 + WATCH_WINDOW), None);
         assert!(!guard.is_active(t0));
