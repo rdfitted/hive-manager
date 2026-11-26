@@ -32,7 +32,6 @@ high_risk_paths:                     # a diff touching these hits a hard stop
   - ".github/workflows/**"           # every workflow can reach the updater signing secrets
   - ".github/promotion-gate.yml"
   - "scripts/release/**"             # assembles and validates latest.json
-  - "scripts/smoke.py"
   - "scripts/check.py"               # local gate evidence
   - "scripts/local-gate.json"
   - "src-tauri/tauri.conf.json"      # updater endpoint and pubkey, CSP, bundle targets, identifier
