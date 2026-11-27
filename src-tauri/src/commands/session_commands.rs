@@ -142,6 +142,13 @@ fn list_files_under_roots(roots: Vec<PathBuf>, query: String) -> Result<Vec<Stri
     Ok(results)
 }
 
+/// The per-launch bearer token for the local HTTP API. Granted to the main
+/// window only (`main-window-commands`); the preview window's capability is empty.
+#[tauri::command]
+pub fn get_api_token() -> String {
+    crate::http::auth::api_token().to_string()
+}
+
 #[tauri::command]
 pub async fn launch_hive(
     registry: State<'_, Arc<ActionRegistry>>,

@@ -2333,7 +2333,7 @@ mod tests {
         let token = fixture.state.pty_manager.read().mint_heartbeat_token_for_test(WORKER_ID, SESSION_ID, false);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let app = crate::http::routes::create_router(Arc::clone(&fixture.state));
+        let app = crate::http::routes::create_unauthenticated_router(Arc::clone(&fixture.state));
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let injected = vec![("HIVE_SESSION_ID".to_string(), SESSION_ID.to_string()),
             ("HIVE_AGENT_ID".to_string(), WORKER_ID.to_string()), ("HIVE_AGENT_TOKEN".to_string(), token),

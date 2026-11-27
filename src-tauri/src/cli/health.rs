@@ -974,7 +974,7 @@ mod tests {
         storage_root: &Path,
         institutional_wiki_root: Option<&Path>,
     ) -> axum::Router {
-        crate::http::routes::create_router(health_test_state(storage_root, institutional_wiki_root).await)
+        crate::http::routes::create_unauthenticated_router(health_test_state(storage_root, institutional_wiki_root).await)
     }
 
     async fn assert_health_entrypoint_port(desktop: bool) {
@@ -995,7 +995,7 @@ mod tests {
                 if desktop {
                     assert!(get_cli_health(CliHealthState(state.clone())).await.clis.is_empty());
                 } else {
-                    let app = crate::http::routes::create_router(state.clone());
+                    let app = crate::http::routes::create_unauthenticated_router(state.clone());
                     let response = app.oneshot(Request::builder().uri("/api/cli-health").body(Body::empty()).unwrap()).await.unwrap();
                     assert_eq!(response.status(), StatusCode::OK);
                 }

@@ -22,7 +22,7 @@ use crate::domain::HiveExecutionPolicy;
 use crate::events::EventBus;
 use crate::http::handlers::heartbeats::PostHeartbeatRequest;
 use crate::http::handlers::workers::{AddWorkerRequest, ExecutedAs};
-use crate::http::routes::create_router;
+use crate::http::routes::create_unauthenticated_router as create_router;
 use crate::http::state::AppState;
 use crate::orchestrator::work_graph::archive::{
     ArchiveSourceKind, ArchiveSourceReport, WorkGraphArchive, WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,

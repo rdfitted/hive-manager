@@ -15,7 +15,7 @@ use crate::coordination::{HierarchyNode, InjectionManager, QueueManager, StateMa
 use crate::domain::HiveExecutionPolicy;
 use crate::events::EventBus;
 use crate::http::handlers::workers::ExecutedAs;
-use crate::http::routes::create_router;
+use crate::http::routes::create_unauthenticated_router as create_router;
 use crate::http::state::AppState;
 use crate::orchestrator::work_graph::archive::{
     archive_completed_session, WorkGraphArchive, WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,

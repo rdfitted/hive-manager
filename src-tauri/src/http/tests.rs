@@ -2,7 +2,7 @@ use crate::coordination::InjectionManager;
 use crate::coordination::{PeerMessageRecord, StateManager};
 use crate::domain::WorkspaceStrategy;
 use crate::events::EventBus;
-use crate::http::routes::create_router;
+use crate::http::routes::create_unauthenticated_router as create_router;
 use crate::http::state::AppState;
 use crate::orchestrator::work_graph::{
     BindingRef, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkNode,
@@ -11480,4 +11480,201 @@ async fn g57_approval_request_rejects_credentials_before_any_persistence() {
             "rejected credentials cannot enter live conversation events"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-launch bearer token on the production router (`http::auth`).
+// ---------------------------------------------------------------------------
+
+async fn authed_app() -> axum::Router {
+    crate::http::routes::create_router(setup_test_state().await)
+}
+
+fn bearer() -> String {
+    format!("Bearer {}", crate::http::auth::api_token())
+}
+
+async fn send(app: axum::Router, request: Request<Body>) -> axum::response::Response {
+    app.oneshot(request).await.unwrap()
+}
+
+#[tokio::test]
+async fn api_read_routes_require_the_bearer_token() {
+    let session = uuid::Uuid::new_v4();
+    for uri in [
+        "/api/sessions".to_string(),
+        format!("/api/sessions/{session}"),
+        format!("/api/sessions/{session}/conversations/shared"),
+        format!("/api/sessions/{session}/agent-feeds"),
+        format!("/api/sessions/{session}/agents/{session}-queen/events"),
+        format!("/api/sessions/{session}/heartbeats"),
+        format!("/api/sessions/{session}/events"),
+        format!("/api/sessions/{session}/run-journal"),
+    ] {
+        let response = send(
+            authed_app().await,
+            Request::builder().uri(&uri).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        assert_eq!(
+            response.headers().get("www-authenticate").unwrap(),
+            "Bearer",
+            "{uri}"
+        );
+
+        let wrong = send(
+            authed_app().await,
+            Request::builder()
+                .uri(&uri)
+                .header("authorization", "Bearer not-the-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn api_requests_with_the_bearer_token_are_served() {
+    let response = send(
+        authed_app().await,
+        Request::builder()
+            .uri("/api/sessions")
+            .header("authorization", bearer())
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Unknown session: the handler answers, the gate does not.
+    let response = send(
+        authed_app().await,
+        Request::builder()
+            .uri(format!("/api/sessions/{}/conversations/shared", uuid::Uuid::new_v4()))
+            .header("authorization", bearer())
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn api_write_routes_require_the_bearer_token() {
+    let session = uuid::Uuid::new_v4();
+    for uri in [
+        format!("/api/sessions/{session}/heartbeat"),
+        format!("/api/sessions/{session}/workers"),
+        format!("/api/sessions/{session}/inject"),
+        "/api/sessions/hive".to_string(),
+    ] {
+        let response = send(
+            authed_app().await,
+            Request::builder()
+                .method("POST")
+                .uri(&uri)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn health_stays_open_without_a_token() {
+    let response = send(
+        authed_app().await,
+        Request::builder().uri("/health").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn browser_origin_gate_still_applies_with_a_valid_token() {
+    let response = send(
+        authed_app().await,
+        Request::builder()
+            .uri("/api/sessions")
+            .header("origin", "https://evil.example")
+            .header("authorization", bearer())
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = send(
+        authed_app().await,
+        Request::builder()
+            .uri("/api/sessions")
+            .header("origin", "http://tauri.localhost")
+            .header("authorization", bearer())
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("access-control-allow-origin").unwrap(),
+        "http://tauri.localhost"
+    );
+}
+
+#[tokio::test]
+async fn cors_preflight_for_the_authorization_header_is_answered_without_a_token() {
+    let response = send(
+        authed_app().await,
+        Request::builder()
+            .method("OPTIONS")
+            .uri("/api/sessions")
+            .header("origin", "http://tauri.localhost")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "authorization")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert!(response.status().is_success(), "{}", response.status());
+    let allowed = response
+        .headers()
+        .get("access-control-allow-headers")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(allowed.contains("authorization"), "{allowed}");
+}
+
+#[tokio::test]
+async fn event_streams_accept_the_token_as_a_query_parameter() {
+    let session = uuid::Uuid::new_v4();
+    let without = send(
+        authed_app().await,
+        Request::builder()
+            .uri(format!("/api/sessions/{session}/stream"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(without.status(), StatusCode::UNAUTHORIZED);
+
+    let with = send(
+        authed_app().await,
+        Request::builder()
+            .uri(format!(
+                "/api/sessions/{session}/stream?{}={}",
+                crate::http::auth::STREAM_TOKEN_QUERY,
+                crate::http::auth::api_token()
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_ne!(with.status(), StatusCode::UNAUTHORIZED);
 }

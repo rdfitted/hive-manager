@@ -63,7 +63,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use commands::{
     add_worker_to_session, apply_fusion_winner, assign_task, close_session,
     continue_after_planning, create_pty,
-    get_app_config, get_coordination_log, get_current_branch, get_current_directory,
+    get_api_token, get_app_config, get_coordination_log, get_current_branch, get_current_directory,
     get_pty_snapshot, get_pty_status, get_qa_verdict, get_run_journal, get_session, get_session_plan,
     get_session_storage_path,
     get_workers_state, git_fetch, git_pull, git_push, git_worktree_add, git_worktree_list,
@@ -754,6 +754,8 @@ pub fn run() {
             preview::undock_preview_window,
             preview::reload_preview_window,
             preview::get_preview_status,
+            // Local HTTP API bearer token (main window only)
+            get_api_token,
             // Git commands
             list_branches,
             get_current_branch,

@@ -568,6 +568,39 @@ fn override_log_details(verdict: &str) -> Result<(&'static str, &'static str), A
     }
 }
 
+/// A PASS verdict must cite evidence: every submitted criterion carries at least
+/// one non-blank `evidence_refs` entry. FAIL and BLOCKED verdicts may leave refs
+/// empty (a failure can be reported before anything citable exists). The legacy
+/// untyped body without `criteria` is unaffected (#293 back-compat).
+fn require_pass_evidence_refs(
+    verdict: &str,
+    criteria: Option<&[PostCriterionResult]>,
+) -> Result<(), ApiError> {
+    if verdict != "PASS" {
+        return Ok(());
+    }
+    let Some(criteria) = criteria else {
+        return Ok(());
+    };
+    let uncited: Vec<String> = criteria
+        .iter()
+        .filter(|criterion| {
+            !criterion
+                .evidence_refs
+                .iter()
+                .any(|reference| !reference.trim().is_empty())
+        })
+        .map(|criterion| criterion.number.to_string())
+        .collect();
+    if uncited.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError::bad_request(format!(
+        "A PASS verdict must cite evidence: criteria {} have empty evidence_refs.          Add at least one QA-worker report or artifact reference per criterion,          or submit FAIL/BLOCKED instead",
+        uncited.join(", ")
+    )))
+}
+
 fn normalize_post_verdict(verdict: &str) -> Result<&'static str, ApiError> {
     match verdict.trim().to_ascii_uppercase().as_str() {
         "PASS" => Ok("PASS"),
@@ -1510,6 +1543,7 @@ pub async fn post_verdict(
     validate_session_id(&session_id)?;
 
     let verdict = normalize_post_verdict(&req.verdict)?;
+    require_pass_evidence_refs(verdict, req.criteria.as_deref())?;
     let commit_sha = req
         .commit_sha
         .as_deref()
@@ -2629,8 +2663,8 @@ mod tests {
         let request = serde_json::json!({
             "verdict": "PASS",
             "criteria": [
-                {"number": 1, "result": "pass", "evidence": "stable evidence"},
-                {"number": 2, "result": {"scored": 2}, "evidence": "design score"}
+                {"number": 1, "result": "pass", "evidence": "stable evidence", "evidence_refs": ["qa-worker-1#1"]},
+                {"number": 2, "result": {"scored": 2}, "evidence": "design score", "evidence_refs": ["qa-worker-2#2"]}
             ]
         });
         let response = app
@@ -2720,7 +2754,7 @@ mod tests {
         let request = serde_json::json!({
             "verdict": "PASS",
             "criteria": [
-                {"number": 1, "result": "pass", "evidence": "human-reviewed evidence"}
+                {"number": 1, "result": "pass", "evidence": "human-reviewed evidence", "evidence_refs": ["qa-worker-1#1"]}
             ]
         });
         let response = app
@@ -2778,8 +2812,8 @@ mod tests {
             let request = serde_json::json!({
                 "verdict": verdict,
                 "criteria": [
-                    {"number": 1, "result": result, "evidence": "unchanged evidence"},
-                    {"number": 2, "result": {"scored": 8}, "evidence": "unchanged design evidence"}
+                    {"number": 1, "result": result, "evidence": "unchanged evidence", "evidence_refs": ["qa-worker-1#1"]},
+                    {"number": 2, "result": {"scored": 8}, "evidence": "unchanged design evidence", "evidence_refs": ["qa-worker-2#2"]}
                 ]
             });
             let response = app
@@ -2899,7 +2933,7 @@ mod tests {
                     .uri(format!("/api/sessions/{session_id}/qa/verdict"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"verdict":"PASS","criteria":[{"number":99,"result":"pass","evidence":"not in contract"}]}"#,
+                        r#"{"verdict":"PASS","criteria":[{"number":99,"result":"pass","evidence":"not in contract","evidence_refs":["qa-worker-1#99"]}]}"#,
                     ))
                     .unwrap(),
             )
@@ -2909,7 +2943,9 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("99"));
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("Unknown QA criterion numbers"), "{body}");
+        assert!(body.contains("99"));
         assert!(matches!(
             controller.read().get_session(&session_id).unwrap().state,
             SessionState::QaInProgress { .. }
@@ -3408,5 +3444,88 @@ mod tests {
         assert!(String::from_utf8_lossy(&body).contains("Failed to snapshot forced prince-verdict"));
         assert_eq!(std::fs::read(qa_path).unwrap(), qa_before);
         assert!(matches!(controller.read().get_session(&session_id).unwrap().state, SessionState::QaInconclusive));
+    }
+
+    struct EvidenceRefsPost {
+        status: StatusCode,
+        body: String,
+        session_dir: std::path::PathBuf,
+        state: SessionState,
+        _storage: TempDir,
+        _project: TempDir,
+    }
+
+    async fn post_typed_verdict(verdict: &str, first_refs: serde_json::Value) -> EvidenceRefsPost {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, session_storage) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("evidence-refs-{}", uuid::Uuid::new_v4());
+        install_typed_contract(project.path(), &session_id);
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = SessionState::QaInProgress { iteration: Some(1) };
+        session.agents.push(evaluator_agent(&session_id));
+        controller.write().insert_test_session(session);
+
+        let request = serde_json::json!({
+            "verdict": verdict,
+            "rationale": "evidence-refs gate",
+            "criteria": [
+                {"number": 1, "result": if verdict == "PASS" { "pass" } else { "fail" },
+                 "evidence": "observed", "evidence_refs": first_refs},
+                {"number": 2, "result": {"scored": 8}, "evidence": "scored",
+                 "evidence_refs": ["qa-worker-2#2"]}
+            ]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let state = controller.read().get_session(&session_id).unwrap().state;
+        EvidenceRefsPost {
+            status,
+            body: String::from_utf8_lossy(&body).into_owned(),
+            session_dir: session_storage.session_dir(&session_id),
+            state,
+            _storage: storage,
+            _project: project,
+        }
+    }
+
+    #[tokio::test]
+    async fn pass_verdict_with_empty_evidence_refs_is_rejected() {
+        for refs in [serde_json::json!([]), serde_json::json!(["  "])] {
+            let post = post_typed_verdict("PASS", refs).await;
+            assert_eq!(post.status, StatusCode::BAD_REQUEST, "{}", post.body);
+            assert!(post.body.contains("must cite evidence"), "{}", post.body);
+            assert!(post.body.contains("criteria 1 "), "{}", post.body);
+            assert!(read_qa_verdict_record(&post.session_dir).unwrap().is_none());
+            assert!(matches!(post.state, SessionState::QaInProgress { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn pass_verdict_with_evidence_refs_is_accepted() {
+        let post = post_typed_verdict("PASS", serde_json::json!(["qa-worker-1#1"])).await;
+        assert_eq!(post.status, StatusCode::OK, "{}", post.body);
+        assert!(read_qa_verdict_record(&post.session_dir).unwrap().unwrap().passed);
+    }
+
+    #[tokio::test]
+    async fn fail_verdict_may_leave_evidence_refs_empty() {
+        let post = post_typed_verdict("FAIL", serde_json::json!([])).await;
+        assert_eq!(post.status, StatusCode::OK, "{}", post.body);
+        assert!(!read_qa_verdict_record(&post.session_dir).unwrap().unwrap().passed);
     }
 }

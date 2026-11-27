@@ -64,4 +64,5 @@ commands.allow = [
     "undock_preview_window",
     "reload_preview_window",
     "get_preview_status",
+    "get_api_token",
 ]

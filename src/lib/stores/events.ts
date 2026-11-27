@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store';
 import type { Event as SessionEvent } from '../types/domain';
 import { apiUrl } from '$lib/config';
+import { authorizedStreamUrl } from '$lib/apiAuth';
 
 const EVENT_TYPES = [
     'session_created',
@@ -104,7 +105,7 @@ function createEventsStore() {
             let consecutiveErrors = 0;
             update(state => ({ ...state, loading: true, error: null }));
 
-            const source = new EventSource(apiUrl(`/api/sessions/${sessionId}/stream`));
+            const source = new EventSource(authorizedStreamUrl(apiUrl(`/api/sessions/${sessionId}/stream`)));
             eventSource = source;
 
             source.onopen = () => {

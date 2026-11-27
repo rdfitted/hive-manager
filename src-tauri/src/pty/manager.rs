@@ -690,6 +690,10 @@ impl PtyManager {
         })?;
         let token = Self::new_heartbeat_token();
         identity.push(("HIVE_AGENT_TOKEN".into(), token.clone()));
+        identity.push((
+            crate::http::auth::API_TOKEN_ENV.into(),
+            crate::http::auth::api_token().into(),
+        ));
         let options = crate::transport::codex::CodexOptions::from_pty(
             command,
             args,
@@ -759,6 +763,10 @@ impl PtyManager {
         })?;
         let token = Self::new_heartbeat_token();
         identity.push(("HIVE_AGENT_TOKEN".into(), token.clone()));
+        identity.push((
+            crate::http::auth::API_TOKEN_ENV.into(),
+            crate::http::auth::api_token().into(),
+        ));
         let options = crate::transport::claude::ClaudeOptions::from_pty(
             command,
             args,
@@ -879,8 +887,12 @@ impl PtyManager {
     }
 
     pub(crate) fn heartbeat_credential_matcher(&self) -> HeartbeatCredentialMatcher {
+        // The launch-wide API token has the same 64-hex shape; recognizing it here
+        // makes payload rejection and audit redaction cover it too.
+        let api_token: [u8; 32] = Sha256::digest(crate::http::auth::api_token().as_bytes()).into();
         HeartbeatCredentialMatcher { digests: self.heartbeat_credentials
-            .read().values().map(|credential| credential.digest).collect() }
+            .read().values().map(|credential| credential.digest)
+            .chain(std::iter::once(api_token)).collect() }
     }
 
     #[cfg(test)]
@@ -1036,6 +1048,10 @@ impl PtyManager {
         });
         if let Some((_, _, token)) = &credential {
             identity_env.push(("HIVE_AGENT_TOKEN".to_string(), token.clone()));
+            identity_env.push((
+                crate::http::auth::API_TOKEN_ENV.to_string(),
+                crate::http::auth::api_token().to_string(),
+            ));
         }
         identity_env.extend(crate::adapters::agy_spawn_env(command)); // after the credential
         // Fail at the constructor boundary without changing the shared PTY stub.

@@ -7998,8 +7998,8 @@ Heartbeat while coordinating:
 With the default `"submit":true`, the sender delivers the payload inside one bracketed-paste envelope, then presses Enter as a discrete bare carriage-return write outside the envelope after the adapter's configured gap. The closed envelope is what lets composers with paste-coalescing (codex) register the Enter as a keystroke instead of swallowing it into the paste. Trailing `\r`/`\n` on the message are always stripped before writing, so a payload can never self-submit. Use `"submit":false` only when intentionally leaving text in the composer; text already staged in a composer can be flushed with `{{"message":"","submit":true}}`, which writes only the bare Enter.
 
 ```bash
-{api_curl} -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
-  -H "Content-Type: application/json" \\
+{api_curl} -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \
+  -H "Content-Type: application/json" \
   -d '{{"target_agent_id":"{session_id}-worker-N","message":"your message here"}}'
 ```
 
@@ -8973,8 +8973,11 @@ Log each iteration to `{session_root_prompt}/coordination.log`:
             .map_err(|e| format!("Failed to create prompts directory: {}", e))?;
 
         let file_path = prompts_dir.join(filename);
-        std::fs::write(&file_path, content)
-            .map_err(|e| format!("Failed to write prompt file: {}", e))?;
+        std::fs::write(
+            &file_path,
+            crate::http::auth::authorize_api_commands(content),
+        )
+        .map_err(|e| format!("Failed to write prompt file: {}", e))?;
 
         Ok(file_path)
     }
@@ -8995,7 +8998,11 @@ Log each iteration to `{session_root_prompt}/coordination.log`:
         })?;
 
         let file_path = prompts_dir.join(filename);
-        std::fs::write(&file_path, content).map_err(|e| {
+        std::fs::write(
+            &file_path,
+            crate::http::auth::authorize_api_commands(content),
+        )
+        .map_err(|e| {
             format!(
                 "Failed to write prompt file for worker {}: {}",
                 worker_index, e
@@ -9097,7 +9104,13 @@ Log each iteration to `{session_root_prompt}/coordination.log`:
             .map_err(|e| format!("Failed to create tools directory: {}", e))?;
 
         let file_path = tools_dir.join(filename);
-        std::fs::write(&file_path, Self::api_commands_for_cli(executor_cli, content))
+        std::fs::write(
+            &file_path,
+            crate::http::auth::authorize_api_commands(&Self::api_commands_for_cli(
+                executor_cli,
+                content,
+            )),
+        )
             .map_err(|e| format!("Failed to write tool file: {}", e))?;
 
         Ok(file_path)
@@ -22274,6 +22287,90 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert!(!prompt.contains("GPT-5.5"));
         assert!(!prompt.contains("codex exec"));
         assert!(!prompt.contains("one per worker"));
+    }
+
+    /// Local-API curl lines in `text` that lack the bearer header. Inspects its
+    /// input as given: callers authorize builder output explicitly, and tool
+    /// docs are checked exactly as written to disk.
+    fn unauthorized_api_curls(text: &str) -> Vec<String> {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut missing = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.contains("localhost:18800/api/") {
+                continue;
+            }
+            let mut start = index;
+            while !lines[start].contains("curl") && start > 0
+                && lines[start - 1].trim_end().ends_with('\\')
+            {
+                start -= 1;
+            }
+            if lines[start].contains("curl ") && !lines[start].contains("Bearer $HIVE_API_TOKEN") {
+                missing.push(lines[start].to_string());
+            }
+        }
+        missing
+    }
+
+    #[test]
+    fn rendered_queen_and_evaluator_prompts_authorize_every_api_curl() {
+        let policy = tiered_meta_harness_policy();
+        for cli in ["claude", "codex"] {
+            let queen = AgentConfig {
+                cli: cli.to_string(),
+                ..AgentConfig::default()
+            };
+            let prompt = SessionController::build_queen_master_prompt(
+                &queen,
+                Path::new("/repo"),
+                Path::new("/repo/.hive-manager/worktrees/session-auth/primary"),
+                "session-auth",
+                &[codex_principal()],
+                Some("Implement the operator objective"),
+                true,
+                true,
+                &policy,
+            );
+            assert!(prompt.contains("localhost:18800/api/"));
+            let missing =
+                unauthorized_api_curls(&crate::http::auth::authorize_api_commands(&prompt));
+            assert!(missing.is_empty(), "{cli} queen: {missing:#?}");
+        }
+        let evaluator = SessionController::build_evaluator_prompt(
+            "session-auth",
+            &AgentConfig {
+                cli: "codex".to_string(),
+                ..AgentConfig::default()
+            },
+            &[],
+            0,
+            "/repo/execution",
+            false,
+            Path::new("/repo"),
+        );
+        assert!(evaluator.contains("localhost:18800/api/"));
+        let missing =
+            unauthorized_api_curls(&crate::http::auth::authorize_api_commands(&evaluator));
+        assert!(missing.is_empty(), "evaluator: {missing:#?}");
+
+        // Tool docs are authorized when written; read back what agents see.
+        for cli in ["claude", "codex"] {
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            SessionController::write_tool_files(&PathBuf::from(temp_dir.path()), "session-auth", cli, cli)
+                .expect("write tool files");
+            let tools = temp_dir.path().join(".hive-manager").join("session-auth").join("tools");
+            let mut checked = 0;
+            for entry in std::fs::read_dir(&tools).expect("tools dir") {
+                let path = entry.expect("tool entry").path();
+                let content = std::fs::read_to_string(&path).expect("tool file");
+                if content.contains("localhost:18800/api/") {
+                    checked += 1;
+                }
+                let missing = unauthorized_api_curls(&content);
+                assert!(missing.is_empty(), "{cli} {}: {missing:#?}", path.display());
+            }
+            assert!(checked > 0, "no tool doc referenced the API");
+        }
     }
 
     #[test]

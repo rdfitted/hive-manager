@@ -3,7 +3,7 @@ use super::{tests::make_test_session_with_agents, tests_transport::FakeTransport
 use crate::{
     coordination::{InjectionManager, QueueManager},
     events::EventBus,
-    http::{routes::create_router, state::AppState},
+    http::{routes::create_unauthenticated_router as create_router, state::AppState},
     pty::PtyManager,
     session::SessionController,
     storage::{ApplicationStateDb, QueueRepo, SessionStorage},

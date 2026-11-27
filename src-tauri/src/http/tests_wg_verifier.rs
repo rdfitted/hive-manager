@@ -753,3 +753,125 @@ fn widening_and_narrowing_role_refinements_are_flagged_distinctly() {
         proposal.change_key == "review_escapes" && proposal.scope_impact == ScopeImpact::Narrowing
     }));
 }
+
+fn composed_role_prompt(role_id: &str) -> String {
+    let project = TempDir::new().expect("role prompt project");
+    let resolved = resolve_role_definition(project.path(), None, role_id);
+    assert!(resolved.definition.is_some(), "{role_id} must resolve");
+    let config = AgentConfig {
+        initial_prompt: Some(TASK_SENTINEL.to_string()),
+        role: Some(WorkerRole::new(role_id, role_id, "codex")),
+        ..AgentConfig::default()
+    };
+    let spawn_context = SpawnContext {
+        task_summary: Some(COMPOSER_SENTINEL.to_string()),
+        conversation: ConversationContext {
+            artifact_summary: Some(ARTIFACT_SENTINEL.to_string()),
+            spawner_conversation: Some(SPAWNER_CONVERSATION_POISON.to_string()),
+        },
+        ..SpawnContext::default()
+    };
+    SessionController::build_worker_prompt(
+        1,
+        &config,
+        &resolved,
+        &spawn_context,
+        "boundary-queen",
+        "boundary-session",
+        project.path(),
+        project.path(),
+        &HiveExecutionPolicy::default(),
+    )
+}
+
+#[test]
+fn undeclared_context_boundary_defaults_to_artifact() {
+    assert_eq!(ContextBoundary::default(), ContextBoundary::Artifact);
+    let parsed: crate::orchestrator::org_graph::RoleDefinition =
+        serde_json::from_str(r#"{"id":"bare","version":1}"#).expect("bare role definition");
+    assert_eq!(parsed.context_boundary, ContextBoundary::Artifact);
+}
+
+#[test]
+fn a_role_without_a_boundary_composes_without_spawner_conversation() {
+    // `backend` ships with no `context_boundary` field.
+    let resolved = resolve_role_definition(TempDir::new().unwrap().path(), None, "backend");
+    assert_eq!(
+        resolved.definition.as_ref().unwrap().context_boundary,
+        ContextBoundary::Artifact
+    );
+
+    let prompt = composed_role_prompt("backend");
+    assert!(prompt.contains(TASK_SENTINEL));
+    assert!(prompt.contains(COMPOSER_SENTINEL));
+    assert!(prompt.contains(ARTIFACT_SENTINEL));
+    assert!(!prompt.contains(SPAWNER_CONVERSATION_POISON));
+    assert!(!prompt.contains("### Spawner Conversation"));
+}
+
+#[test]
+fn rendered_worker_prompts_authorize_every_api_curl() {
+    for role in ["backend", "tester", "reviewer"] {
+        let rendered = crate::http::auth::authorize_api_commands(&composed_role_prompt(role));
+        let lines: Vec<&str> = rendered.lines().collect();
+        let mut checked = 0;
+        for (index, line) in lines.iter().enumerate() {
+            if !line.contains("localhost:18800/api/") {
+                continue;
+            }
+            let mut start = index;
+            while !lines[start].contains("curl") && start > 0
+                && lines[start - 1].trim_end().ends_with('\\')
+            {
+                start -= 1;
+            }
+            if lines[start].contains("curl ") {
+                checked += 1;
+                assert!(
+                    lines[start].contains("Bearer $HIVE_API_TOKEN"),
+                    "{role}: {}",
+                    lines[start]
+                );
+            }
+        }
+        assert!(checked > 0, "{role} prompt had no API curl");
+    }
+}
+
+#[test]
+fn an_explicit_full_role_still_receives_spawner_conversation() {
+    // `tester` declares `"context_boundary":"full"` explicitly.
+    let prompt = composed_role_prompt("tester");
+    assert!(prompt.contains(ARTIFACT_SENTINEL));
+    assert!(prompt.contains(SPAWNER_CONVERSATION_POISON));
+    assert!(prompt.contains("### Spawner Conversation"));
+}
+
+#[test]
+fn shipped_role_boundaries_match_the_audit() {
+    let project = TempDir::new().expect("audit project");
+    let expected = [
+        ("backend", ContextBoundary::Artifact),
+        ("frontend", ContextBoundary::Artifact),
+        ("coherence", ContextBoundary::Artifact),
+        ("simplify", ContextBoundary::Artifact),
+        ("resolver", ContextBoundary::Artifact),
+        ("code-quality", ContextBoundary::Artifact),
+        ("general", ContextBoundary::Artifact),
+        ("reviewer", ContextBoundary::Artifact),
+        ("reviewer-quick", ContextBoundary::Artifact),
+        ("evaluator", ContextBoundary::Artifact),
+        ("tester", ContextBoundary::Full),
+        ("researcher", ContextBoundary::Full),
+        ("master-planner", ContextBoundary::Full),
+        ("queen", ContextBoundary::Full),
+        ("prince", ContextBoundary::Full),
+    ];
+    for (role_id, boundary) in expected {
+        let resolved = resolve_role_definition(project.path(), None, role_id);
+        let definition = resolved
+            .definition
+            .unwrap_or_else(|| panic!("{role_id} must resolve"));
+        assert_eq!(definition.context_boundary, boundary, "{role_id}");
+    }
+}

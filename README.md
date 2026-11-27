@@ -130,12 +130,25 @@ On Windows, sessions are stored in `%APPDATA%/hive-manager/sessions/` and app co
   freshly mounted pane can replay the agent's current screen. Defaults to 512 KiB; values
   are clamped to 8 KiB..=1 MiB and apply to agents spawned after the app starts.
 
+### Local HTTP API authentication
+
+The HTTP API (`127.0.0.1:18800`) requires a bearer token on every `/api/*` request.
+Each app launch generates a new token and writes it to `%APPDATA%\hive-manager\api-token`
+(`~/.config/hive-manager/api-token` on macOS): one line, no trailing newline, readable only
+by your account. Send it as `Authorization: Bearer <token>`; requests without it get `401`.
+`/health` stays open. Agents spawned by the app receive the token as `HIVE_API_TOKEN`.
+
+```bash
+TOKEN=$(cat "$APPDATA/hive-manager/api-token")
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:18800/api/sessions
+```
+
 Local test runs before v0.50.0 leaked fixture sessions into the real session store. To
 list them, and then remove them, run against the running app:
 
 ```bash
-curl -X POST http://127.0.0.1:18800/api/maintenance/purge-fixture-sessions
-curl -X POST "http://127.0.0.1:18800/api/maintenance/purge-fixture-sessions?apply=true"
+curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:18800/api/maintenance/purge-fixture-sessions
+curl -H "Authorization: Bearer $TOKEN" -X POST "http://127.0.0.1:18800/api/maintenance/purge-fixture-sessions?apply=true"
 ```
 
 Removed: sessions whose project path no longer exists and whose id is not a UUID (or whose
