@@ -50,6 +50,14 @@ impl PtyManager {
         let since = ring.lock().since(offset);
         Some(since)
     }
+
+    /// Run `decide` on `id`'s current instance while it is held: a same-id spawn
+    /// publishes its instance under the write lock, so none can land until `decide`
+    /// returns. `decide` must not call back into this manager.
+    pub fn with_instance_held<T>(&self, id: &str, decide: impl FnOnce(Option<uuid::Uuid>) -> T) -> T {
+        let instances = self.instances.read();
+        decide(instances.get(id).map(|current| current.id))
+    }
 }
 
 /// A [`SessionProjects`] over a controller roster, held weakly. It waits briefly for the
