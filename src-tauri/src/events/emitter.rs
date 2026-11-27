@@ -12,13 +12,12 @@ pub struct EventEmitter {
     bus: Arc<EventBus>,
 }
 
-/// The payload of a trust-prompt event (#466). `action` is `accepted`, `cleared` or
-/// `escalated`; `reason` says why it escalated.
+/// The payload of a trust-prompt event (#466). `action` is `detected` or `cleared`;
+/// `path` is the agent's known spawn folder.
 pub struct TrustPromptEvent<'a> {
     pub adapter: &'a str,
     pub path: &'a str,
     pub action: &'a str,
-    pub reason: Option<&'a str>,
 }
 
 impl EventEmitter {
@@ -143,13 +142,12 @@ impl EventEmitter {
         agent_id: &str,
         prompt: &TrustPromptEvent<'_>,
     ) -> Result<(), String> {
-        let severity = if prompt.action == "escalated" { Severity::Warning } else { Severity::Info };
+        let severity = if prompt.action == "detected" { Severity::Warning } else { Severity::Info };
         self.emit(session_id, Some(cell_id), Some(agent_id), EventType::AgentWaitingInput, severity, json!({
             "prompt": "trust_prompt",
             "adapter": prompt.adapter,
             "path": prompt.path,
             "action": prompt.action,
-            "reason": prompt.reason,
         })).await
     }
 

@@ -14,5 +14,5 @@ mod session;
 #[allow(dead_code)]
 mod real_session;
 
-pub use manager::{PtyManager, PtySnapshot};
+pub use manager::{manager_trust, PtyManager, PtySnapshot};
 pub use session::{AgentConfig, AgentRole, AgentStatus, RoleDefinitionRef, WorkerRole};

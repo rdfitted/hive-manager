@@ -49,13 +49,24 @@ pub fn trust_args(command: &str, cwd: &Path, session_id: &str, store_dir: &Path,
 }
 
 /// [`trust_args`] at the PTY spawn choke point. The session is the agent id's UUID
-/// prefix (`<session>-<seat>`); an id without one gets no pre-trust.
-pub fn spawn_trust_args(command: &str, agent_id: &str, cwd: Option<&str>, store_dir: &Path, args: &[&str]) -> Vec<String> {
+/// prefix (`<session>-<seat>`), and `project_of` gives that session's recorded project.
+/// The worktree must belong to exactly that project; an id without a session, an unknown
+/// session or any other project gets no pre-trust.
+pub fn spawn_trust_args(
+    command: &str, agent_id: &str, cwd: Option<&str>, project_of: &dyn Fn(&str) -> Option<PathBuf>,
+    store_dir: &Path, args: &[&str],
+) -> Vec<String> {
     let session = agent_id.get(..36).filter(|id| uuid::Uuid::parse_str(id).is_ok() && agent_id[36..].starts_with('-'));
-    match (cwd, session) {
-        (Some(cwd), Some(session)) => trust_args(command, Path::new(cwd), session, store_dir, args),
-        _ => Vec::new(),
+    let (Some(cwd), Some(session)) = (cwd.map(Path::new), session) else {
+        return Vec::new();
+    };
+    let (Some(recorded), Some(project)) = (project_of(session), managed_worktree_project(cwd, session)) else {
+        return Vec::new();
+    };
+    if normalize_path(&recorded.to_string_lossy()) != normalize_path(&project.to_string_lossy()) {
+        return Vec::new();
     }
+    trust_args(command, cwd, session, store_dir, args)
 }
 
 fn cli_stem(command: &str) -> Option<String> {
@@ -104,27 +115,128 @@ fn codex_config_text() -> Option<String> {
     std::fs::read_to_string(home.join("config.toml")).ok()
 }
 
-/// Whether `config` has a `[projects.'<path>']` (or `"<path>"`) section for any of
-/// `paths` whose `trust_level` is `untrusted`. A line scan, not a TOML parser: it reads
-/// the section form codex itself writes.
+/// Whether the operator's codex `config.toml` marks any of `paths` untrusted.
 fn codex_marks_untrusted(config: &str, paths: &[PathBuf]) -> bool {
     let wanted: Vec<String> = paths.iter().map(|path| normalize_path(&path.to_string_lossy())).collect();
-    let mut in_match = false;
-    for line in config.lines().map(str::trim) {
-        if line.starts_with('[') {
-            let key = line
-                .strip_prefix("[projects.")
-                .and_then(|rest| rest.strip_suffix(']'))
-                .map(|key| key.trim_matches(|c| c == '\'' || c == '"'));
-            in_match = key.is_some_and(|key| wanted.contains(&normalize_path(&key.replace("\\\\", "\\"))));
-        } else if in_match {
-            let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-            if compact == "trust_level=\"untrusted\"" || compact == "trust_level='untrusted'" {
-                return true;
+    codex_untrusted_projects(config).iter().any(|key| wanted.contains(&normalize_path(key)))
+}
+
+/// Project paths a codex `config.toml` marks `trust_level = "untrusted"`, in every form
+/// TOML allows for that entry: a `[projects.'<path>']` table, dotted keys or inline
+/// tables under `[projects]`, and a top-level `projects = { ... }` inline table, with
+/// comments anywhere. Not a full TOML parser; anything it cannot read counts as absent.
+fn codex_untrusted_projects(config: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut section: Option<String> = None;
+    for raw in config.lines() {
+        let line = compact_toml_line(raw);
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            section = Some(header.to_string());
+            continue;
+        }
+        match section.as_deref() {
+            Some(header) if header.starts_with("projects.") => {
+                if let Some(key) = whole_quoted(&header["projects.".len()..]) {
+                    if is_untrusted_value(line.strip_prefix("trust_level=")) {
+                        found.push(key);
+                    }
+                }
+            }
+            Some("projects") => found.extend(untrusted_entries(&line)),
+            None => found.extend(line.strip_prefix("projects=").map(untrusted_entries).unwrap_or_default()),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// A TOML line without its comment and without the whitespace outside quoted strings.
+fn compact_toml_line(raw: &str) -> String {
+    let mut out = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in raw.chars() {
+        match quote {
+            Some(q) => {
+                out.push(c);
+                if q == '"' && c == '\\' && !escaped {
+                    escaped = true;
+                    continue;
+                }
+                if c == q && !escaped {
+                    quote = None;
+                }
+                escaped = false;
+            }
+            None if c == '#' => break,
+            None if c.is_whitespace() => {}
+            None => {
+                if c == '\'' || c == '"' {
+                    quote = Some(c);
+                }
+                out.push(c);
             }
         }
     }
-    false
+    out
+}
+
+/// The quoted string `text` consists of, unquoted: `'literal'` as written, `"basic"`
+/// with `\\` and `\"` unescaped. Returns the string and the length it took.
+fn leading_quoted(text: &str) -> Option<(String, usize)> {
+    let quote = text.chars().next().filter(|c| *c == '\'' || *c == '"')?;
+    let mut value = String::new();
+    let mut escaped = false;
+    for (i, c) in text.char_indices().skip(1) {
+        if quote == '"' && c == '\\' && !escaped {
+            escaped = true;
+            continue;
+        }
+        if c == quote && !escaped {
+            return Some((value, i + c.len_utf8()));
+        }
+        value.push(c);
+        escaped = false;
+    }
+    None
+}
+
+fn whole_quoted(text: &str) -> Option<String> {
+    leading_quoted(text).filter(|(_, len)| *len == text.len()).map(|(value, _)| value)
+}
+
+fn is_untrusted_value(value: Option<&str>) -> bool {
+    value.and_then(whole_quoted).is_some_and(|value| value == "untrusted")
+}
+
+/// `'<path>'={trust_level="untrusted",...}` and `'<path>'.trust_level="untrusted"`
+/// entries in a compacted `[projects]` line or `projects={...}` inline table.
+fn untrusted_entries(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < text.len() {
+        let Some((key, len)) = leading_quoted(&text[at..]) else {
+            at += text[at..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        };
+        let rest = &text[at + len..];
+        if let Some(value) = rest.strip_prefix(".trust_level=") {
+            let end = value.find([',', '}']).unwrap_or(value.len());
+            if is_untrusted_value(Some(&value[..end])) {
+                found.push(key);
+            }
+        } else if let Some(body) = rest.strip_prefix("={") {
+            let end = body.find('}').unwrap_or(body.len());
+            if body[..end].split(',').any(|pair| is_untrusted_value(pair.strip_prefix("trust_level="))) {
+                found.push(key);
+            }
+        }
+        at += len;
+    }
+    found
 }
 
 fn codex_trust_args(cwd: &Path, existing_args: &[&str]) -> Vec<String> {
@@ -331,10 +443,17 @@ mod tests {
         let (_repo, worktree) = managed_worktree_fixture(temp.path(), "repo", session, "worker-1");
         let cwd = worktree.to_string_lossy().into_owned();
         let store = temp.path().join("store");
-        assert_eq!(spawn_trust_args("codex", &format!("{session}-worker-1"), Some(&cwd), &store, &[]).len(), 2);
-        assert!(spawn_trust_args("codex", "scratch:terminal", Some(&cwd), &store, &[]).is_empty());
-        assert!(spawn_trust_args("codex", "00000000-0000-4000-8000-000000000999-worker-1", Some(&cwd), &store, &[]).is_empty());
-        assert!(spawn_trust_args("codex", &format!("{session}-worker-1"), None, &store, &[]).is_empty());
+        let recorded = |id: &str| (id == session).then(|| temp.path().join("repo"));
+        let id = format!("{session}-worker-1");
+        assert_eq!(spawn_trust_args("codex", &id, Some(&cwd), &recorded, &store, &[]).len(), 2);
+        assert!(spawn_trust_args("codex", "scratch:terminal", Some(&cwd), &recorded, &store, &[]).is_empty());
+        assert!(spawn_trust_args("codex", "00000000-0000-4000-8000-000000000999-worker-1", Some(&cwd), &recorded, &store, &[]).is_empty());
+        assert!(spawn_trust_args("codex", &id, None, &recorded, &store, &[]).is_empty());
+        // The session's recorded project is some other checkout: no pre-trust.
+        let elsewhere = |_: &str| Some(temp.path().join("other-project"));
+        assert!(spawn_trust_args("codex", &id, Some(&cwd), &elsewhere, &store, &[]).is_empty());
+        // No roster answer (unknown session, or a spawn racing the roster lock): none either.
+        assert!(spawn_trust_args("codex", &id, Some(&cwd), &|_: &str| None, &store, &[]).is_empty());
     }
 
     #[test]
@@ -397,6 +516,29 @@ mod tests {
         assert!(!codex_marks_untrusted(&config, &[worktree.clone()]), "only the root was marked");
         let trusted = config.replace("\"untrusted\"", "\"trusted\"");
         assert!(!codex_marks_untrusted(&trusted, &[repo]));
+    }
+
+    #[test]
+    fn every_toml_spelling_of_an_untrusted_project_is_read() {
+        let marked = |config: &str| codex_untrusted_projects(config);
+        let path = r"D:\Code Projects\repo";
+        for config in [
+            format!("[projects.'{path}'] # mine\ntrust_level = \"untrusted\" # leave it\n"),
+            format!("[projects.\"D:\\\\Code Projects\\\\repo\"]\ntrust_level='untrusted'\n"),
+            format!("[projects]\n'{path}' = {{ trust_level = \"untrusted\" }}\n"),
+            format!("[projects]\n'{path}'.trust_level = \"untrusted\"\n"),
+            format!("projects = {{ 'D:\\x' = {{ trust_level = \"trusted\" }}, '{path}' = {{ trust_level = \"untrusted\" }} }}\n"),
+        ] {
+            assert_eq!(marked(&config), [path.to_string()], "{config}");
+        }
+        for config in [
+            format!("[projects.'{path}']\ntrust_level = \"trusted\" # untrusted\n"),
+            format!("# [projects.'{path}']\n# trust_level = \"untrusted\"\n"),
+            format!("[projects.'{path}'.extra]\ntrust_level = \"untrusted\"\n"),
+            format!("[other]\n'{path}' = {{ trust_level = \"untrusted\" }}\n"),
+        ] {
+            assert!(marked(&config).is_empty(), "{config}");
+        }
     }
 
     #[cfg(windows)]

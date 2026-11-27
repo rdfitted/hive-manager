@@ -1,29 +1,31 @@
-//! `PtyManager` accessors for the folder-trust prompt sweep (#466).
+//! `PtyManager` pieces for folder-trust handling (#466).
 
-use super::{PtyError, PtyManager};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::PtyManager;
 use crate::pty::output_ring::OutputSnapshot;
 
+/// Looks up a session's recorded project directory by session id.
+pub type SessionProjects = Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
+
+/// How long a spawn waits for the session roster before giving up on pre-trust.
+const PROJECT_LOOKUP_WAIT: Duration = Duration::from_millis(50);
+
 impl PtyManager {
-    pub(super) fn record_trust_spawn(&self, id: &str, command: &str, args: &[&str], cwd: Option<&str>, size: (u16, u16)) {
-        self.pty_sizes.write().insert(id.to_string(), size);
-        let decided = crate::cli::folder_trust::operator_decides_trust(command, args, cwd.map(std::path::Path::new));
-        let mut opt_outs = self.trust_opt_outs.write();
-        if decided {
-            opt_outs.insert(id.to_string());
-        } else {
-            opt_outs.remove(id);
-        }
+    /// Install the lookup the spawn path uses to check pre-trust against a session's
+    /// recorded project. `SessionController::new` installs one over its roster.
+    pub fn set_session_projects(&self, lookup: SessionProjects) {
+        *self.session_projects.write() = Some(lookup);
     }
 
-    pub(super) fn forget_trust_spawn(&self, id: &str) {
-        self.pty_sizes.write().remove(id);
-        self.trust_opt_outs.write().remove(id);
-    }
-
-    /// Whether this spawn's own arguments set folder trust, so its prompt is the
-    /// operator's to answer.
-    pub fn operator_sets_trust(&self, id: &str) -> bool {
-        self.trust_opt_outs.read().contains(id)
+    /// Pre-trust flags for a spawn, only for the seat's own managed worktree of its
+    /// session's recorded project. No lookup, or no answer, means no flags.
+    pub(super) fn spawn_trust_args(&self, command: &str, id: &str, cwd: Option<&str>, store_dir: &Path, args: &[&str]) -> Vec<String> {
+        let lookup = self.session_projects.read().clone();
+        let project_of = |session_id: &str| lookup.as_ref().and_then(|lookup| lookup(session_id));
+        crate::cli::folder_trust::spawn_trust_args(command, id, cwd, &project_of, store_dir, args)
     }
 
     /// The PTY's size as last spawned or resized.
@@ -41,12 +43,17 @@ impl PtyManager {
         let since = ring.lock().since(offset);
         Some(since)
     }
+}
 
-    /// Write to `instance` only if no other input reached it after `revision` (from
-    /// [`PtyManager::input_fence`]), so an answer read off an earlier frame is never sent
-    /// after the operator has typed.
-    pub fn write_instance_at_revision(&self, id: &str, instance: uuid::Uuid, revision: u64, data: &[u8]) -> Result<(), PtyError> {
-        let (session, _admission) = self.admit_input_instance(id, Some(instance), Some(revision))?;
-        session.write(data)
-    }
+/// A [`SessionProjects`] over a controller roster, held weakly. It waits briefly for the
+/// roster lock and answers `None` rather than block a spawn made while it is held.
+pub fn roster_projects<S: Send + Sync + 'static>(
+    roster: std::sync::Weak<parking_lot::RwLock<std::collections::HashMap<String, S>>>,
+    project: fn(&S) -> PathBuf,
+) -> SessionProjects {
+    Arc::new(move |session_id| {
+        let roster = roster.upgrade()?;
+        let sessions = roster.try_read_for(PROJECT_LOOKUP_WAIT)?;
+        sessions.get(session_id).map(project)
+    })
 }

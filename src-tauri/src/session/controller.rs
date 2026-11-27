@@ -1352,8 +1352,12 @@ impl Drop for NewLaunchTransportSettings<'_> {
 
 impl SessionController {
     pub fn new(pty_manager: Arc<RwLock<PtyManager>>) -> Self {
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        // #466: spawn-time pre-trust checks the seat's worktree against its session's project.
+        pty_manager.read().set_session_projects(crate::pty::manager_trust::roster_projects(
+            Arc::downgrade(&sessions), |session: &Session| session.project_path.clone()));
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions,
             pty_manager,
             app_handle: None,
             event_emitter: None,

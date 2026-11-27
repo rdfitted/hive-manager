@@ -1,23 +1,20 @@
-//! Folder-trust prompt sweep (#466).
+//! Folder-trust prompt sweep (#466): notify only.
 //!
-//! Spawns into a Hive-managed worktree pre-trust it where the CLI allows
-//! (`cli::folder_trust`). This sweep is the fallback. It renders each PTY agent's new
-//! output and answers a trust prompt once, only when the prompt names the agent's own
-//! managed worktree and its highlighted option is the trust choice. Anything else is
-//! handed to the Queen and the operator. While a prompt is up the agent's status is
-//! `WaitingForInput("trust_prompt")`; it returns to `Running` when the prompt goes,
-//! whoever answered it.
+//! Spawns into a seat's own Hive-managed worktree pre-trust it where the CLI allows
+//! (`cli::folder_trust`). This sweep covers the rest: it renders each PTY agent's new
+//! output and, when a trust prompt is up, sets `WaitingForInput("trust_prompt")`, emits
+//! an event and tells the Queen and the operator. It never sends a keystroke: a screen
+//! match cannot prove which dialog has the terminal's input (Ryan, 2026-11-27). When the
+//! prompt goes, whoever answered it, the status the prompt replaced is put back.
 //!
-//! Every read, write and status change is bound to the PTY instance the guard was made
-//! for, so a same-ID respawn never receives an Enter meant for its predecessor.
+//! Reads and status changes are bound to the PTY instance a guard was made for. A
+//! same-id respawn gets a fresh guard, and a status its predecessor's prompt left behind
+//! is put back.
 
 use std::time::Instant;
 
 use super::*;
-use crate::cli::folder_trust::{managed_worktree_project, normalize_path};
-use crate::pty::trust_prompt::{
-    Escalation, GuardAction, Refusal, TrustCli, TrustPrompt, TrustPromptGuard, ACCEPT_KEYS, TRUST_PROMPT_STATUS,
-};
+use crate::pty::trust_prompt::{GuardAction, TrustCli, TrustPromptGuard, TRUST_PROMPT_STATUS};
 
 /// Grid used when a PTY's size was never recorded (it is recorded at every spawn).
 const FALLBACK_SIZE: (u16, u16) = (120, 40);
@@ -27,22 +24,28 @@ const FALLBACK_SIZE: (u16, u16) = (120, 40);
 pub struct TrustPromptOutcome {
     pub agent_id: String,
     pub adapter: &'static str,
+    /// The agent's known spawn folder, never text read off its screen.
     pub path: String,
-    /// `accepted`, `cleared` or `escalated`.
+    /// `detected` or `cleared`.
     pub action: &'static str,
-    pub reason: Option<&'static str>,
+}
+
+/// What one agent's observation found.
+enum Observation {
+    Action(Uuid, GuardAction),
+    /// The PTY was replaced since the last sweep (same-id respawn).
+    Replaced,
 }
 
 impl SessionController {
     /// Check every live PTY agent of `session_id` for a folder-trust prompt.
-    /// Runs on the desktop's five-second monitoring sweep beside dead-seat detection.
     pub fn sweep_trust_prompts(&self, session_id: &str) -> Vec<TrustPromptOutcome> {
         self.sweep_trust_prompts_at(session_id, Instant::now())
     }
 
     /// Sweep every session that is not finished, including ones waiting on fusion
     /// variants or debate rounds, whose agents may be the ones stopped on a prompt; drop
-    /// the guards of the rest.
+    /// the guards of the rest. Runs on the desktop's five-second monitoring loop.
     pub fn sweep_live_trust_prompts(&self) -> Vec<TrustPromptOutcome> {
         let live: Vec<String> = self
             .list_sessions()
@@ -75,31 +78,27 @@ impl SessionController {
             let Some(cli) = TrustCli::from_cli(&agent.config.cli) else {
                 continue;
             };
-            if let Some((instance, action)) = self.observe_trust_prompt(&session, &agent.id, cli, now) {
-                outcomes.push(self.report_trust_prompt(&session, agent, instance, cli, action));
+            match self.observe_trust_prompt(&session.id, &agent.id, cli, now) {
+                Some(Observation::Action(instance, action)) => {
+                    outcomes.push(self.report_trust_prompt(&session, agent, instance, cli, action));
+                }
+                Some(Observation::Replaced) => self.drop_inherited_trust_status(&session.id, &agent.id),
+                None => {}
             }
         }
         outcomes
     }
 
-    fn observe_trust_prompt(&self, session: &Session, agent_id: &str, cli: TrustCli, now: Instant) -> Option<(Uuid, GuardAction)> {
+    fn observe_trust_prompt(&self, session_id: &str, agent_id: &str, cli: TrustCli, now: Instant) -> Option<Observation> {
         let manager = self.pty_manager.read();
         if manager.protocol_agent(agent_id).is_some() {
             return None;
         }
-        // Taken before the output is read: an Enter is only sent if nothing else reached
-        // the terminal since, and never while other input is in flight.
-        let (instance, revision) = manager.input_fence(agent_id)?;
-        if !manager.is_alive(agent_id) {
-            // Exit handling owns a dead seat; its last frame is no prompt to act on.
-            if let Some((_, guard)) = self.trust_guards.write().get_mut(&(session.id.clone(), agent_id.to_string())) {
-                guard.finish();
-            }
-            return None;
-        }
+        let instance = manager.instance_id(agent_id)?;
         let mut guards = self.trust_guards.write();
-        let key = (session.id.clone(), agent_id.to_string());
-        if guards.get(&key).is_none_or(|(seen, _)| *seen != instance) {
+        let key = (session_id.to_string(), agent_id.to_string());
+        let previous = guards.get(&key).map(|(seen, _)| *seen);
+        if previous != Some(instance) {
             // Measure the watch window from the spawn, not from the first sweep.
             let age = manager
                 .spawned_at(agent_id)
@@ -107,65 +106,42 @@ impl SessionController {
                 .unwrap_or_default();
             let started = now.checked_sub(age).unwrap_or(now);
             let (cols, rows) = manager.pty_size(agent_id).unwrap_or(FALLBACK_SIZE);
-            let authority = if manager.operator_sets_trust(agent_id) {
-                Err(Refusal::OperatorOverride)
-            } else {
-                seat_worktree(session, manager.spawn_cwd(agent_id)).ok_or(Refusal::NotManagedWorktree)
-            };
-            let guard = TrustPromptGuard::new(cli, authority, cols, rows, started);
-            guards.insert(key.clone(), (instance, guard));
+            guards.insert(key.clone(), (instance, TrustPromptGuard::new(cli, cols, rows, started)));
+            if previous.is_some() {
+                return Some(Observation::Replaced);
+            }
         }
         let guard = &mut guards.get_mut(&key)?.1;
-        if !guard.is_active(now) {
-            guard.finish(); // release the screen; the instance marker stays
+        if !guard.is_active(now) || !manager.is_alive(agent_id) {
+            // Expired, or a dead seat that exit handling owns: release the screen. A
+            // prompt surfaced on a seat that died is cleared by the dead-seat path.
+            guard.finish();
             return None;
         }
         let snapshot = manager.output_since(agent_id, instance, guard.fed_to())?;
         let (cols, rows) = manager.pty_size(agent_id).unwrap_or(FALLBACK_SIZE);
-        let mut action = guard.observe(&snapshot, cols, rows, now)?;
-        if matches!(action, GuardAction::Accept(_)) {
-            // A trust dialog gates startup, before any input. Once anything has been typed
-            // or injected into this PTY, a matching screen is the operator's to answer.
-            let failure = if revision != 0 {
-                Some(Escalation::OperatorInput)
-            } else {
-                match manager.write_instance_at_revision(agent_id, instance, revision, ACCEPT_KEYS) {
-                Ok(()) => None,
-                Err(error) => {
-                    tracing::warn!(agent = %agent_id, %error, "did not answer a folder-trust prompt");
-                    let moved = manager.input_fence(agent_id).is_none_or(|fence| fence != (instance, revision));
-                    Some(if moved { Escalation::OperatorInput } else { Escalation::WriteFailed })
-                }
-                }
-            };
-            if let Some(escalated) = guard.accept_written(failure) {
-                action = escalated;
-            }
-        }
-        Some((instance, action))
+        let action = guard.observe(&snapshot, cols, rows, now)?;
+        Some(Observation::Action(instance, action))
     }
 
     fn report_trust_prompt(
         &self, session: &Session, agent: &AgentInfo, instance: Uuid, cli: TrustCli, action: GuardAction,
     ) -> TrustPromptOutcome {
-        let (prompt, name, reason): (TrustPrompt, &'static str, Option<&'static str>) = match action {
-            GuardAction::Accept(prompt) => (prompt, "accepted", None),
-            GuardAction::Cleared(prompt) => (prompt, "cleared", None),
-            GuardAction::Refused(prompt, refusal) => (prompt, "escalated", Some(refusal.reason())),
-            GuardAction::Escalated(prompt, escalation) => (prompt, "escalated", Some(escalation.reason())),
+        let name = match action {
+            GuardAction::Detected(_) => "detected",
+            GuardAction::Cleared(_) => "cleared",
         };
-        let outcome = TrustPromptOutcome {
-            agent_id: agent.id.clone(),
-            adapter: cli.name(),
-            path: prompt.folder.clone(),
-            action: name,
-            reason,
-        };
-        if name == "escalated" {
-            tracing::warn!(agent = %agent.id, adapter = cli.name(), path = %prompt.folder,
-                reason = reason.unwrap_or(""), "folder-trust prompt needs the operator");
+        // The known spawn folder, so nothing read off the screen reaches anyone.
+        let path = self
+            .pty_manager
+            .read()
+            .spawn_cwd(&agent.id)
+            .unwrap_or_else(|| "(unknown folder)".to_string());
+        let outcome = TrustPromptOutcome { agent_id: agent.id.clone(), adapter: cli.name(), path, action: name };
+        if name == "detected" {
+            tracing::warn!(agent = %agent.id, adapter = cli.name(), path = %outcome.path, "folder-trust prompt needs the operator");
         } else {
-            tracing::info!(agent = %agent.id, adapter = cli.name(), path = %prompt.folder, action = name, "folder-trust prompt");
+            tracing::info!(agent = %agent.id, adapter = cli.name(), path = %outcome.path, "folder-trust prompt gone");
         }
         if self.set_trust_prompt_status(&session.id, &agent.id, instance, name == "cleared").is_some() {
             self.update_session_storage(&session.id);
@@ -210,7 +186,29 @@ impl SessionController {
         })?
     }
 
-    /// The event for the operator, plus a Queen inbox notice when it needs a person.
+    /// A same-id respawn must not keep the `trust_prompt` status its predecessor's prompt
+    /// set: put back what that prompt replaced and forget the predecessor's record.
+    fn drop_inherited_trust_status(&self, session_id: &str, agent_id: &str) {
+        let key = (session_id.to_string(), agent_id.to_string());
+        let Some((_, before)) = self.trust_prior_status.write().remove(&key) else {
+            return;
+        };
+        let changed = {
+            let mut sessions = self.sessions.write();
+            sessions
+                .get_mut(session_id)
+                .and_then(|live| live.agents.iter_mut().find(|live| live.id == agent_id))
+                .filter(|live| live.status == AgentStatus::WaitingForInput(TRUST_PROMPT_STATUS.to_string()))
+                .map(|live| live.status = before)
+                .is_some()
+        };
+        if changed {
+            self.update_session_storage(session_id);
+            self.emit_session_update(session_id);
+        }
+    }
+
+    /// The event for the operator, plus a Queen inbox notice when a prompt comes up.
     fn publish_trust_prompt(&self, session: &Session, agent: &AgentInfo, outcome: &TrustPromptOutcome) {
         let Some(emitter) = self.event_emitter.clone() else {
             return;
@@ -218,10 +216,10 @@ impl SessionController {
         let session_id = session.id.clone();
         let cell_id = agent_cell_id(session, agent);
         let event = outcome.clone();
-        let notice = (outcome.action == "escalated").then(|| format!(
-            "{} ({}) is stopped on a folder-trust prompt for {}. Hive Manager did not answer it ({}). \
+        let notice = (outcome.action == "detected").then(|| format!(
+            "{} ({}) is stopped on a folder-trust prompt in {}. Hive Manager does not answer these. \
              Answer it in the agent's terminal, or stop the agent.",
-            agent.id, outcome.adapter, outcome.path, outcome.reason.unwrap_or("unknown"),
+            agent.id, outcome.adapter, outcome.path,
         ));
         let inboxes: Vec<String> = session
             .agents
@@ -231,9 +229,7 @@ impl SessionController {
             .collect();
         let storage = self.storage.clone();
         tokio::spawn(async move {
-            let payload = crate::events::TrustPromptEvent {
-                adapter: event.adapter, path: &event.path, action: event.action, reason: event.reason,
-            };
+            let payload = crate::events::TrustPromptEvent { adapter: event.adapter, path: &event.path, action: event.action };
             if let Err(error) = emitter.emit_agent_trust_prompt(&session_id, &cell_id, &event.agent_id, &payload).await {
                 tracing::warn!("Failed to emit trust prompt event: {}", error);
             }
@@ -247,12 +243,4 @@ impl SessionController {
             }
         });
     }
-}
-
-/// The agent's spawn folder when it is this seat's own managed worktree: made for this
-/// session, inside the session's recorded project, with git metadata that agrees.
-fn seat_worktree(session: &Session, cwd: Option<String>) -> Option<String> {
-    let cwd = cwd?;
-    let project = managed_worktree_project(std::path::Path::new(&cwd), &session.id)?;
-    (normalize_path(&project.to_string_lossy()) == normalize_path(&session.project_path.to_string_lossy())).then_some(cwd)
 }

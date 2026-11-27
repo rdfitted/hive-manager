@@ -444,7 +444,7 @@ pub struct PtyManager {
     /// Actual spawn arguments, retained after close for transcript attribution.
     spawn_cwds: RwLock<HashMap<String, String>>,
     pty_sizes: RwLock<HashMap<String, (u16, u16)>>, // #466: screen models match the PTY
-    trust_opt_outs: RwLock<std::collections::HashSet<String>>, // #466: the operator's args decide trust
+    session_projects: RwLock<Option<super::manager_trust::SessionProjects>>, // #466: pre-trust check
     transports: RwLock<Option<Arc<crate::transport::TransportRegistry>>>,
     agent_transports: RwLock<HashMap<String, crate::domain::agent_transport::AgentTransports>>,
     starting_transports: RwLock<HashMap<String, Arc<dyn crate::transport::AgentTransport>>>,
@@ -483,7 +483,7 @@ impl PtyManager {
             retired_output: RwLock::new(HashMap::new()),
             spawn_cwds: RwLock::new(HashMap::new()),
             pty_sizes: RwLock::new(HashMap::new()),
-            trust_opt_outs: RwLock::new(std::collections::HashSet::new()),
+            session_projects: RwLock::new(None),
             transports: RwLock::new(None),
             agent_transports: RwLock::new(HashMap::new()),
             starting_transports: RwLock::new(HashMap::new()),
@@ -1020,7 +1020,7 @@ impl PtyManager {
             }
         };
 
-        let trust_flags = crate::cli::folder_trust::spawn_trust_args(command, &id, cwd, &store_dir, args); // #466
+        let trust_flags = self.spawn_trust_args(command, &id, cwd, &store_dir, args); // #466
         // Isolation and trust flags go in front so the CLI's trailing positional prompt stays last.
         let effective_args: Vec<&str> = isolation_flags
             .iter()
@@ -1073,7 +1073,7 @@ impl PtyManager {
             sessions.insert(id.clone(), Arc::clone(&session));
             self.instances.write().insert(id.clone(), instance);
             self.record_spawn_cwd(&id, cwd);
-            self.record_trust_spawn(&id, command, args, cwd, (cols, rows));
+            self.pty_sizes.write().insert(id.clone(), (cols, rows));
         }
 
         // Start the output reader thread.
@@ -1181,10 +1181,10 @@ impl PtyManager {
     }
 
     fn admit_input(&self, id: &str) -> Result<(Arc<PtySession>, InputAdmission), PtyError> {
-        self.admit_input_instance(id, None, None)
+        self.admit_input_instance(id, None)
     }
 
-    fn admit_input_instance(&self, id: &str, expected: Option<uuid::Uuid>, revision: Option<u64>) -> Result<(Arc<PtySession>, InputAdmission), PtyError> {
+    fn admit_input_instance(&self, id: &str, expected: Option<uuid::Uuid>) -> Result<(Arc<PtySession>, InputAdmission), PtyError> {
         let _lifecycle = self.lifecycle.lock();
         if self.protocol_agent(id).is_some() {
             return Err(PtyError::CreateError("Agent has no terminal; use the inject route".into()));
@@ -1195,9 +1195,6 @@ impl PtyManager {
         let current = instances.get_mut(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
         if expected.is_some_and(|expected| expected != current.id) {
             return Err(PtyError::NotFound(format!("{id} (runtime instance replaced)")));
-        }
-        if revision.is_some_and(|revision| revision != current.input_revision || current.input_active != 0) {
-            return Err(PtyError::CreateError(format!("{id}: other input arrived first")));
         }
         current.input_revision = current.input_revision.saturating_add(1);
         current.input_active = current.input_active.saturating_add(1);
@@ -1212,17 +1209,17 @@ impl PtyManager {
 
     /// Validate identity at admission, then release lifecycle before blocking I/O.
     pub fn write_instance(&self, id: &str, instance: uuid::Uuid, data: &[u8]) -> Result<(), PtyError> {
-        let (session, _admission) = self.admit_input_instance(id, Some(instance), None)?;
+        let (session, _admission) = self.admit_input_instance(id, Some(instance))?;
         session.write(data)
     }
 
     pub fn submit_instance(&self, id: &str, instance: uuid::Uuid, data: &[u8]) -> Result<PtySubmitResult, PtyError> {
-        let (session, _admission) = self.admit_input_instance(id, Some(instance), None)?;
+        let (session, _admission) = self.admit_input_instance(id, Some(instance))?;
         session.submit(data)
     }
 
     pub fn write_bracketed_instance(&self, id: &str, instance: uuid::Uuid, data: &[u8]) -> Result<(), PtyError> {
-        let (session, _admission) = self.admit_input_instance(id, Some(instance), None)?;
+        let (session, _admission) = self.admit_input_instance(id, Some(instance))?;
         session.write_bracketed(data)
     }
 
@@ -1353,7 +1350,7 @@ impl PtyManager {
             {
                 sessions.remove(id);
                 self.heartbeat_credentials.write().remove(id);
-                self.forget_trust_spawn(id);
+                self.pty_sizes.write().remove(id);
             }
         }
         self.heartbeat_credentials.write().remove(id);
@@ -1497,7 +1494,7 @@ impl Default for PtyManager {
 }
 
 #[path = "manager_trust.rs"]
-mod trust; // #466 accessors for the trust-prompt sweep
+pub mod manager_trust; // #466 accessors for the trust-prompt sweep
 
 #[cfg(test)]
 mod cross_platform_spawn_tests {

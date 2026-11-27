@@ -1,14 +1,12 @@
 //! #466: the trust-prompt sweep against captured CLI screens, end to end through a stub
 //! PTY, the session roster, the event log and the Queen's inbox. The fixtures are real
-//! captures from scratch worktrees, with the account email and user name scrubbed;
-//! `retarget` points them at a managed worktree laid out for the test.
+//! captures from scratch worktrees, with the account email and user name scrubbed.
+//! Hive Manager only surfaces these prompts; no test here may see a keystroke.
 use super::tests::make_test_session_with_agents;
 use super::tests_agent_events::setup;
 use crate::cli::folder_trust::managed_worktree_fixture;
 use crate::http::state::AppState;
-use crate::pty::trust_prompt::tests::{
-    reframe, retarget, AGY_AFTER, AGY_CWD, AGY_PROMPT, CLAUDE_CWD, CLAUDE_PROMPT, CODEX_CWD, CODEX_PROMPT, CODEX_ROOT,
-};
+use crate::pty::trust_prompt::tests::{AGY_AFTER, AGY_PROMPT, CLAUDE_PROMPT, CODEX_PROMPT};
 use crate::pty::{AgentRole, AgentStatus};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,11 +24,10 @@ fn worker(n: u8) -> String {
 struct Hive {
     temp: tempfile::TempDir,
     state: Arc<AppState>,
-    repo: String,
 }
 
 impl Hive {
-    /// A worktree Hive Manager would have made for `name`.
+    /// A worktree Hive Manager would have made for `name` in this session's project.
     fn worktree(&self, name: &str) -> String {
         let (_, cwd) = managed_worktree_fixture(self.temp.path(), "project", SESSION, name);
         cwd.to_string_lossy().into_owned()
@@ -41,9 +38,7 @@ impl Hive {
         let command = if cli == "antigravity" { "agy" } else { cli };
         let pty = self.state.pty_manager.read();
         let _ = pty.kill(&worker(n));
-        // Wide enough for a hive worktree path on one row: the fixtures were laid out
-        // for their own shorter paths at 120 columns.
-        pty.create_session(worker(n), AgentRole::Worker { index: n, parent: None }, command, &[], Some(cwd), 200, 50)
+        pty.create_session(worker(n), AgentRole::Worker { index: n, parent: None }, command, &[], Some(cwd), 120, 40)
             .unwrap();
     }
 }
@@ -62,8 +57,7 @@ fn hive(clis: &[&str]) -> Hive {
     }
     state.session_controller.read().insert_test_session(session);
     std::fs::create_dir_all(state.storage.session_dir(SESSION)).unwrap();
-    let repo = temp.path().join("project").to_string_lossy().into_owned();
-    Hive { temp, state, repo }
+    Hive { temp, state }
 }
 
 fn status(state: &AppState, id: &str) -> AgentStatus {
@@ -72,9 +66,16 @@ fn status(state: &AppState, id: &str) -> AgentStatus {
     session.agents.iter().find(|agent| agent.id == id).unwrap().status.clone()
 }
 
-fn sweep(state: &AppState, at: Instant) -> Vec<(String, &'static str, Option<&'static str>)> {
+fn set_status(state: &AppState, id: &str, status: AgentStatus) {
+    let controller = state.session_controller.read();
+    let mut session = controller.get_session(SESSION).unwrap();
+    session.agents.iter_mut().find(|agent| agent.id == id).unwrap().status = status;
+    controller.insert_test_session(session);
+}
+
+fn sweep(state: &AppState, at: Instant) -> Vec<(String, &'static str)> {
     let mut outcomes: Vec<_> = state.session_controller.read().sweep_trust_prompts_at(SESSION, at)
-        .into_iter().map(|outcome| (outcome.agent_id, outcome.action, outcome.reason)).collect();
+        .into_iter().map(|outcome| (outcome.agent_id, outcome.action)).collect();
     outcomes.sort();
     outcomes
 }
@@ -83,8 +84,8 @@ fn output(state: &AppState, id: &str, bytes: &[u8]) {
     state.pty_manager.read().record_output_for_test(id, bytes);
 }
 
-fn enters(state: &AppState, id: &str) -> usize {
-    state.pty_manager.read().write_records_for_test(id).unwrap().iter().filter(|write| write.as_slice() == b"\r").count()
+fn writes(state: &AppState, id: &str) -> usize {
+    state.pty_manager.read().write_records_for_test(id).unwrap().len()
 }
 
 fn trust_events(state: &AppState) -> Vec<serde_json::Value> {
@@ -113,130 +114,142 @@ fn waiting() -> AgentStatus {
 }
 
 #[tokio::test]
-async fn agy_prompt_is_accepted_once_with_status_and_events_then_cleared() {
+async fn a_prompt_is_surfaced_once_with_status_event_and_notice_and_never_answered() {
     let h = hive(&["antigravity"]);
     let cwd = h.worktree("worker-1");
     h.spawn(1, "antigravity", &cwd);
     let t0 = Instant::now();
     assert!(sweep(&h.state, t0).is_empty(), "nothing on screen yet");
 
-    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]));
-    assert_eq!(sweep(&h.state, t0), [(worker(1), "accepted", None)]);
+    output(&h.state, &worker(1), AGY_PROMPT);
+    assert_eq!(sweep(&h.state, t0), [(worker(1), "detected")]);
     assert_eq!(status(&h.state, &worker(1)), waiting());
-    assert_eq!(enters(&h.state, &worker(1)), 1);
-    assert!(sweep(&h.state, t0 + Duration::from_secs(5)).is_empty(), "still waiting, no second Enter");
-    assert_eq!(enters(&h.state, &worker(1)), 1);
+    assert!(sweep(&h.state, t0 + Duration::from_secs(60)).is_empty(), "surfaced once, not looped");
 
+    // The operator answers it in the terminal; the CLI carries on.
     output(&h.state, &worker(1), AGY_AFTER);
-    assert_eq!(sweep(&h.state, t0 + Duration::from_secs(6)), [(worker(1), "cleared", None)]);
+    assert_eq!(sweep(&h.state, t0 + Duration::from_secs(65)), [(worker(1), "cleared")]);
     assert_eq!(status(&h.state, &worker(1)), AgentStatus::Running);
-
-    // The same prompt drawn again later is never answered a second time.
-    output(&h.state, &worker(1), b"\x1b[2J\x1b[H");
-    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]));
-    assert!(sweep(&h.state, t0 + Duration::from_secs(20)).is_empty());
-    assert_eq!(enters(&h.state, &worker(1)), 1, "at most one accept per spawn");
+    assert_eq!(writes(&h.state, &worker(1)), 0, "Hive Manager never typed into the terminal");
 
     wait_for(|| trust_events(&h.state).len() == 2).await;
     let events = trust_events(&h.state);
     let actions: Vec<_> = events.iter().map(|event| event["payload"]["action"].as_str().unwrap().to_string()).collect();
-    assert_eq!(actions, ["accepted", "cleared"]);
+    assert_eq!(actions, ["detected", "cleared"]);
     assert_eq!(events[0]["agent_id"], worker(1));
     assert_eq!(events[0]["event_type"], "agent_waiting_input");
+    assert_eq!(events[0]["severity"], "warning");
     assert_eq!(events[0]["payload"]["adapter"], "antigravity");
-    assert_eq!(events[0]["payload"]["path"], cwd);
-    assert!(inbox(&h.state, &queen()).is_empty(), "a handled prompt does not bother the Queen");
+    assert_eq!(events[0]["payload"]["path"], cwd, "the known spawn folder");
+    wait_for(|| !inbox(&h.state, &queen()).is_empty()).await;
+    let notice = inbox(&h.state, &queen());
+    assert!(notice.contains(&format!("folder-trust prompt in {cwd}")), "{notice}");
+    assert!(!notice.contains("hm466-scratch"), "screen text never reaches the Queen: {notice}");
 }
 
 #[tokio::test]
-async fn codex_prompt_for_its_own_worktree_and_root_is_accepted_and_agy_runs_beside_it() {
-    let h = hive(&["antigravity", "codex"]);
-    let (agy, codex) = (h.worktree("worker-1"), h.worktree("worker-2"));
-    h.spawn(1, "antigravity", &agy);
-    h.spawn(2, "codex", &codex);
-    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &agy)]));
-    output(&h.state, &worker(2), &reframe(CODEX_PROMPT, &[(CODEX_CWD, &codex), (CODEX_ROOT, &h.repo)]));
-    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "accepted", None), (worker(2), "accepted", None)]);
-    assert_eq!((enters(&h.state, &worker(1)), enters(&h.state, &worker(2))), (1, 1));
-}
-
-#[tokio::test]
-async fn a_prompt_outside_a_managed_worktree_or_for_another_path_is_surfaced_once() {
-    let h = hive(&["antigravity", "codex"]);
-    // worker-1 runs on a plain checkout (as a Queen would); worker-2 is shown a prompt
-    // for some other folder.
-    h.spawn(1, "antigravity", AGY_CWD);
-    let codex = h.worktree("worker-2");
-    h.spawn(2, "codex", &codex);
+async fn codex_claude_and_agy_prompts_are_all_surfaced_without_input() {
+    let h = hive(&["antigravity", "codex", "claude"]);
+    for (n, cli) in [(1, "antigravity"), (2, "codex"), (3, "claude")] {
+        let cwd = h.worktree(&format!("worker-{n}"));
+        h.spawn(n, cli, &cwd);
+    }
     output(&h.state, &worker(1), AGY_PROMPT);
     output(&h.state, &worker(2), CODEX_PROMPT);
-    assert_eq!(sweep(&h.state, Instant::now()), [
-        (worker(1), "escalated", Some("not_a_managed_worktree")),
-        (worker(2), "escalated", Some("foreign_path")),
-    ]);
-    assert_eq!((enters(&h.state, &worker(1)), enters(&h.state, &worker(2))), (0, 0));
-    assert_eq!(status(&h.state, &worker(2)), waiting());
-    wait_for(|| inbox(&h.state, &queen()).matches("folder-trust prompt").count() == 2).await;
-    let notice = inbox(&h.state, &queen());
-    assert!(notice.contains("folder-trust prompt for D:\\hm466-scratch\\repo-codex2-acc"), "{notice}");
-    assert!(notice.contains("foreign_path") && notice.contains("not_a_managed_worktree"), "{notice}");
-    assert!(sweep(&h.state, Instant::now() + Duration::from_secs(30)).is_empty(), "surfaced once, not looped");
-    wait_for(|| trust_events(&h.state).len() == 2).await;
-    assert!(trust_events(&h.state).iter().all(|event| event["severity"] == "warning"));
+    output(&h.state, &worker(3), CLAUDE_PROMPT);
+    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "detected"), (worker(2), "detected"), (worker(3), "detected")]);
+    for n in 1..=3 {
+        assert_eq!(status(&h.state, &worker(n)), waiting());
+        assert_eq!(writes(&h.state, &worker(n)), 0);
+    }
 }
 
 #[tokio::test]
-async fn an_operator_answered_prompt_clears_the_status() {
-    let h = hive(&["claude"]);
+async fn a_cleared_prompt_puts_back_exactly_the_status_it_replaced() {
+    for before in [AgentStatus::Idle, AgentStatus::Starting] {
+        let h = hive(&["claude"]);
+        set_status(&h.state, &worker(1), before.clone());
+        let cwd = h.worktree("worker-1");
+        h.spawn(1, "claude", &cwd);
+        output(&h.state, &worker(1), CLAUDE_PROMPT);
+        assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "detected")]);
+        output(&h.state, &worker(1), b"\x1b[2J\x1b[H> next\r\n");
+        assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "cleared")]);
+        assert_eq!(status(&h.state, &worker(1)), before, "a gone dialog is not proof of a start");
+    }
+}
+
+#[tokio::test]
+async fn a_newer_status_is_never_overwritten_when_the_prompt_goes() {
+    let h = hive(&["antigravity"]);
     let cwd = h.worktree("worker-1");
-    h.spawn(1, "claude", &cwd);
-    output(&h.state, &worker(1), &retarget(CLAUDE_PROMPT, &[(CLAUDE_CWD, &cwd)]));
-    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "escalated", Some("operator_decides"))]);
-    assert_eq!(enters(&h.state, &worker(1)), 0, "Claude's trust is always the operator's");
+    h.spawn(1, "antigravity", &cwd);
+    output(&h.state, &worker(1), AGY_PROMPT);
+    assert_eq!(sweep(&h.state, Instant::now())[0].1, "detected");
+    set_status(&h.state, &worker(1), AgentStatus::Idle);
+    output(&h.state, &worker(1), AGY_AFTER);
+    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "cleared")]);
+    assert_eq!(status(&h.state, &worker(1)), AgentStatus::Idle);
+}
+
+#[tokio::test]
+async fn a_respawn_drops_the_status_its_predecessors_prompt_left() {
+    let h = hive(&["antigravity"]);
+    let cwd = h.worktree("worker-1");
+    h.spawn(1, "antigravity", &cwd);
+    output(&h.state, &worker(1), AGY_PROMPT);
+    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "detected")]);
     assert_eq!(status(&h.state, &worker(1)), waiting());
-    output(&h.state, &worker(1), b"\x1b[2J\x1b[H> working on it\r\n");
-    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "cleared", None)]);
+
+    // Same id, new PTY that never shows a prompt: the old status must not stick.
+    h.spawn(1, "antigravity", &cwd);
+    assert!(sweep(&h.state, Instant::now()).is_empty());
+    assert_eq!(status(&h.state, &worker(1)), AgentStatus::Running, "the predecessor's status is put back");
+
+    // Its own prompt is surfaced on its own terms.
+    output(&h.state, &worker(1), AGY_PROMPT);
+    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "detected")]);
+    output(&h.state, &worker(1), AGY_AFTER);
+    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "cleared")]);
     assert_eq!(status(&h.state, &worker(1)), AgentStatus::Running);
 }
 
 #[tokio::test]
-async fn an_accept_that_leaves_the_screen_unchanged_is_escalated_once() {
+async fn an_exited_pty_is_left_to_exit_handling() {
     let h = hive(&["antigravity"]);
     let cwd = h.worktree("worker-1");
-    h.spawn(1, "antigravity", &cwd);
-    let t0 = Instant::now();
-    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]));
-    assert_eq!(sweep(&h.state, t0), [(worker(1), "accepted", None)]);
-    assert_eq!(sweep(&h.state, t0 + Duration::from_secs(10)), [(worker(1), "escalated", Some("screen_unchanged"))]);
-    assert_eq!(status(&h.state, &worker(1)), waiting());
-    assert!(sweep(&h.state, t0 + Duration::from_secs(60)).is_empty());
-    assert_eq!(enters(&h.state, &worker(1)), 1);
-    wait_for(|| inbox(&h.state, &queen()).contains("screen_unchanged")).await;
-    assert!(inbox(&h.state, &queen()).contains("screen_unchanged"));
+    h.state.pty_manager.read().create_session(worker(1), AgentRole::Worker { index: 1, parent: None }, "agy",
+        &["--stub-clean-exit"], Some(&cwd), 120, 40).unwrap();
+    output(&h.state, &worker(1), AGY_PROMPT);
+    assert!(!h.state.pty_manager.read().is_alive(&worker(1)), "the stub exited");
+    assert!(sweep(&h.state, Instant::now()).is_empty());
 }
 
 #[tokio::test]
-async fn a_respawn_gets_a_fresh_guard_and_the_old_prompt_never_reaches_it() {
-    let h = hive(&["antigravity"]);
-    let cwd = h.worktree("worker-1");
-    h.spawn(1, "antigravity", &cwd);
-    let prompt = retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]);
-    output(&h.state, &worker(1), &prompt);
-    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "accepted", None)]);
-    h.spawn(1, "antigravity", &cwd);
-    assert_eq!(enters(&h.state, &worker(1)), 0, "the replacement starts with no input");
-    assert!(sweep(&h.state, Instant::now()).is_empty(), "its own screen is still empty");
-    output(&h.state, &worker(1), &prompt);
-    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "accepted", None)], "one accept per spawn");
-    assert_eq!(enters(&h.state, &worker(1)), 1);
+async fn spawn_time_pre_trust_needs_the_sessions_own_project() {
+    let h = hive(&["antigravity", "antigravity"]);
+    let own = h.worktree("worker-1");
+    let (_, other) = managed_worktree_fixture(h.temp.path(), "other-project", SESSION, "worker-2");
+    let pty = h.state.pty_manager.read();
+    for (id, cwd) in [(worker(1), own.clone()), (worker(2), other.to_string_lossy().into_owned())] {
+        pty.create_session(id, AgentRole::Worker { index: 1, parent: None }, "agy", &[], Some(&cwd), 120, 40).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let overlay = |id: &str| pty.spawn_args_for_test(id).unwrap().iter().any(|arg| arg == "--settings");
+        assert!(overlay(&worker(1)), "the seat's own worktree of the recorded project");
+        assert!(!overlay(&worker(2)), "a matching worktree of another project gets nothing");
+    }
 }
 
 #[cfg(windows)]
 #[test]
-fn agy_spawns_disable_the_auto_updater_and_pre_trust_only_a_managed_worktree() {
+fn agy_spawns_disable_the_auto_updater_and_pre_trust_only_a_recorded_worktree() {
     let temp = tempfile::TempDir::new().unwrap();
     let manager = crate::pty::PtyManager::new();
     let (repo, cwd) = managed_worktree_fixture(temp.path(), "project", SESSION, "worker-9");
+    let recorded = repo.clone();
+    manager.set_session_projects(Arc::new(move |id| (id == SESSION).then(|| recorded.clone())));
     let cwd = cwd.to_string_lossy().into_owned();
     // An id no other test spawns: the per-agent store is keyed by agent id.
     let id = worker(9);
@@ -267,25 +280,6 @@ fn agy_spawns_disable_the_auto_updater_and_pre_trust_only_a_managed_worktree() {
     assert!(manager.spawn_args_for_test(&claude).unwrap().is_empty(), "claude argv is untouched");
 }
 
-#[tokio::test]
-async fn a_cleared_prompt_puts_back_the_status_it_replaced() {
-    let h = hive(&["claude"]);
-    {
-        let controller = h.state.session_controller.read();
-        let mut session = controller.get_session(SESSION).unwrap();
-        session.agents[1].status = AgentStatus::Idle;
-        controller.insert_test_session(session);
-    }
-    let cwd = h.worktree("worker-1");
-    h.spawn(1, "claude", &cwd);
-    output(&h.state, &worker(1), &retarget(CLAUDE_PROMPT, &[(CLAUDE_CWD, &cwd)]));
-    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "escalated", Some("operator_decides"))]);
-    assert_eq!(status(&h.state, &worker(1)), waiting());
-    output(&h.state, &worker(1), b"\x1b[2J\x1b[H> idle again\r\n");
-    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "cleared", None)]);
-    assert_eq!(status(&h.state, &worker(1)), AgentStatus::Idle);
-}
-
 #[test]
 fn agy_variable_never_becomes_a_heartbeat_identity() {
     // `create_session` derives the heartbeat credential from the identity env, so agy's
@@ -298,82 +292,4 @@ fn agy_variable_never_becomes_a_heartbeat_identity() {
     }
     manager.create_session(worker(1), AgentRole::Worker { index: 1, parent: None }, "agy", &[], None, 80, 24).unwrap();
     assert!(manager.has_heartbeat_credential_for_test(&worker(1)), "an identified seat still gets one");
-}
-
-#[tokio::test]
-async fn a_managed_worktree_of_another_project_is_not_this_seats() {
-    let h = hive(&["antigravity"]);
-    let (_, foreign) = managed_worktree_fixture(h.temp.path(), "other-project", SESSION, "worker-1");
-    let cwd = foreign.to_string_lossy().into_owned();
-    h.spawn(1, "antigravity", &cwd);
-    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]));
-    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "escalated", Some("not_a_managed_worktree"))]);
-    assert_eq!(enters(&h.state, &worker(1)), 0);
-}
-
-#[test]
-fn the_accept_is_refused_once_other_input_has_reached_the_terminal() {
-    let manager = crate::pty::PtyManager::new();
-    manager.create_session(worker(7), AgentRole::Worker { index: 7, parent: None }, "agy", &[], None, 80, 24).unwrap();
-    let (instance, revision) = manager.input_fence(&worker(7)).unwrap();
-    manager.write(&worker(7), b"x").unwrap();
-    assert!(manager.write_instance_at_revision(&worker(7), instance, revision, b"\r").is_err(), "the operator typed first");
-    let (instance, revision) = manager.input_fence(&worker(7)).unwrap();
-    manager.write_instance_at_revision(&worker(7), instance, revision, b"\r").unwrap();
-    assert_eq!(manager.write_records_for_test(&worker(7)).unwrap().last().map(Vec::as_slice), Some(b"\r".as_slice()));
-}
-
-#[tokio::test]
-async fn an_operator_trust_override_keeps_the_prompt_theirs() {
-    let h = hive(&["antigravity"]);
-    let cwd = h.worktree("worker-1");
-    {
-        let pty = h.state.pty_manager.read();
-        pty.create_session(worker(1), AgentRole::Worker { index: 1, parent: None }, "agy",
-            &["--settings", "operator.json"], Some(&cwd), 200, 50).unwrap();
-    }
-    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]));
-    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "escalated", Some("operator_trust_override"))]);
-    assert_eq!(enters(&h.state, &worker(1)), 0);
-}
-
-#[tokio::test]
-async fn a_seat_still_starting_stays_starting_when_its_prompt_goes() {
-    let h = hive(&["claude"]);
-    {
-        let controller = h.state.session_controller.read();
-        let mut session = controller.get_session(SESSION).unwrap();
-        session.agents[1].status = AgentStatus::Starting;
-        controller.insert_test_session(session);
-    }
-    let cwd = h.worktree("worker-1");
-    h.spawn(1, "claude", &cwd);
-    output(&h.state, &worker(1), &retarget(CLAUDE_PROMPT, &[(CLAUDE_CWD, &cwd)]));
-    assert_eq!(sweep(&h.state, Instant::now())[0].1, "escalated");
-    output(&h.state, &worker(1), b"\x1b[2J\x1b[H");
-    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "cleared", None)]);
-    assert_eq!(status(&h.state, &worker(1)), AgentStatus::Starting, "a gone dialog is not proof of a start");
-}
-
-#[tokio::test]
-async fn a_pty_that_already_had_input_is_never_answered() {
-    let h = hive(&["antigravity"]);
-    let cwd = h.worktree("worker-1");
-    h.spawn(1, "antigravity", &cwd);
-    h.state.pty_manager.read().write(&worker(1), b"x").unwrap();
-    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]));
-    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "escalated", Some("operator_input"))]);
-    assert_eq!(enters(&h.state, &worker(1)), 0);
-}
-
-#[tokio::test]
-async fn an_exited_pty_is_left_to_exit_handling() {
-    let h = hive(&["antigravity"]);
-    let cwd = h.worktree("worker-1");
-    h.state.pty_manager.read().create_session(worker(1), AgentRole::Worker { index: 1, parent: None }, "agy",
-        &["--stub-clean-exit"], Some(&cwd), 200, 50).unwrap();
-    output(&h.state, &worker(1), &retarget(AGY_PROMPT, &[(AGY_CWD, &cwd)]));
-    assert!(!h.state.pty_manager.read().is_alive(&worker(1)), "the stub exited");
-    assert!(sweep(&h.state, Instant::now()).is_empty());
-    assert_eq!(enters(&h.state, &worker(1)), 0);
 }
