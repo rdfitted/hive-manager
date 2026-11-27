@@ -221,6 +221,22 @@ fn a_cli_that_never_repaints_after_a_resize_stays_surfaced() {
 }
 
 #[test]
+fn a_clear_split_across_reads_still_ends_the_rebuild() {
+    let t0 = Instant::now();
+    let len = AGY_PROMPT.len() as u64;
+    let mut guard = guard(TrustCli::Antigravity, t0);
+    let _ = guard.observe(&ring(AGY_PROMPT), 120, 40, t0);
+    // Resize, then the CLI's clear arrives split over two reads, with one line after it.
+    assert_eq!(guard.observe(&more(len, b"\x1b[2"), 100, 30, t0), None);
+    assert!(matches!(guard.observe(&more(len + 3, b"J\x1b[Hdone"), 100, 30, t0), Some(GuardAction::Cleared(_))));
+    // A clear in one read and its content in the next counts too.
+    let mut guard = self::guard(TrustCli::Antigravity, t0);
+    let _ = guard.observe(&ring(AGY_PROMPT), 120, 40, t0);
+    assert_eq!(guard.observe(&more(len, b"\x1b[2J"), 100, 30, t0), None, "a clear alone draws nothing yet");
+    assert!(matches!(guard.observe(&more(len + 4, b"\x1b[Hdone"), 100, 30, t0), Some(GuardAction::Cleared(_))));
+}
+
+#[test]
 fn an_oversized_pty_does_not_reset_the_grid_every_turn() {
     let t0 = Instant::now();
     let mut guard = TrustPromptGuard::new(TrustCli::Antigravity, 2000, 900, t0);

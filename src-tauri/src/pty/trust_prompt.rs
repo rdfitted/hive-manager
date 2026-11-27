@@ -21,6 +21,10 @@ use super::screen::Screen;
 /// (a cursor move, one cell) never qualifies.
 const MIN_FRAME_ROWS: usize = 3;
 
+/// Bytes of each read kept so a clear sequence split across reads is still seen: one
+/// less than the longest sequence `clears_screen` matches (`ESC[?1049h`).
+const CLEAR_TAIL: usize = 7;
+
 /// Whether `bytes` redraw the whole screen from blank: erase display, full reset, or a
 /// switch into or out of the alternate screen (agy leaves its trust dialog that way).
 fn clears_screen(bytes: &[u8]) -> bool {
@@ -237,9 +241,13 @@ pub struct TrustPromptGuard {
     started: Instant,
     screen: Screen,
     fed_to: Option<u64>,
-    /// Set when the grid was thrown away (resize or eviction): turns of new output still
-    /// owed, and when the rebuild began. While set, a prompt is never reported cleared.
+    /// Set when the grid was thrown away (resize or eviction). While set, a prompt is
+    /// never reported cleared.
     rebuilding: bool,
+    /// A full-screen clear arrived since the rebuild began, in any read.
+    rebuild_cleared: bool,
+    /// The end of the last read, so a clear split across reads still counts.
+    clear_tail: Vec<u8>,
     state: GuardState,
 }
 
@@ -251,6 +259,8 @@ impl TrustPromptGuard {
             screen: Screen::new(cols, rows),
             fed_to: None,
             rebuilding: false,
+            rebuild_cleared: false,
+            clear_tail: Vec::new(),
             state: GuardState::Watching,
         }
     }
@@ -318,12 +328,19 @@ impl TrustPromptGuard {
     fn still_rebuilding(&mut self, reset: bool, new: &[u8], shown: bool, lines: &[String]) -> bool {
         if reset {
             self.rebuilding = true;
+            self.rebuild_cleared = false;
+            self.clear_tail.clear();
         }
+        let mut seen = std::mem::take(&mut self.clear_tail);
+        seen.extend_from_slice(new);
+        self.clear_tail = seen[seen.len().saturating_sub(CLEAR_TAIL)..].to_vec();
         if !self.rebuilding {
             return false;
         }
+        // A clear and the content after it may arrive in different reads.
+        self.rebuild_cleared |= clears_screen(&seen);
         let drawn = lines.iter().filter(|line| !line.trim().is_empty()).count();
-        let whole_frame = !new.is_empty() && ((clears_screen(new) && drawn > 0) || drawn >= MIN_FRAME_ROWS);
+        let whole_frame = !new.is_empty() && ((self.rebuild_cleared && drawn > 0) || drawn >= MIN_FRAME_ROWS);
         if shown || whole_frame {
             self.rebuilding = false;
             return false;

@@ -1077,6 +1077,9 @@ pub struct SessionController {
     trust_guards: RwLock<HashMap<(String, String), (Uuid, crate::pty::trust_prompt::TrustPromptGuard)>>,
     /// The status a trust prompt replaced, put back when the prompt goes (#466).
     trust_prior_status: RwLock<HashMap<(String, String), (Uuid, AgentStatus)>>,
+    /// Projects of sessions still launching: their seats spawn before the session
+    /// joins the roster, and spawn-time pre-trust needs the project then (#466).
+    launching_projects: Arc<RwLock<HashMap<String, PathBuf>>>,
 }
 
 // Explicitly implement Send + Sync
@@ -1353,9 +1356,9 @@ impl Drop for NewLaunchTransportSettings<'_> {
 impl SessionController {
     pub fn new(pty_manager: Arc<RwLock<PtyManager>>) -> Self {
         let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let launching_projects = Arc::new(RwLock::new(HashMap::new()));
         // #466: spawn-time pre-trust checks the seat's worktree against its session's project.
-        pty_manager.read().set_session_projects(crate::pty::manager_trust::roster_projects(
-            Arc::downgrade(&sessions), |session: &Session| session.project_path.clone()));
+        pty_manager.read().set_session_projects(trust_sweep::session_projects(&sessions, &launching_projects));
         Self {
             sessions,
             pty_manager,
@@ -1377,6 +1380,7 @@ impl SessionController {
             latest_inputs: RwLock::new(HashMap::new()),
             trust_guards: RwLock::new(HashMap::new()),
             trust_prior_status: RwLock::new(HashMap::new()),
+            launching_projects,
         }
     }
 
@@ -1540,6 +1544,7 @@ impl SessionController {
     ) -> Result<Session, String> {
         crate::instance::refuse("agent launch")?;
         let session_id = Uuid::new_v4().to_string();
+        let _launch_project = self.launching_project(&session_id, &project_path);
         let mut agents = Vec::new();
         let prompt_str = prompt.unwrap_or_default();
         let cwd = project_path.to_str().unwrap_or(".");
@@ -10041,6 +10046,7 @@ Last updated: {timestamp}
         retirement_settings: Option<super::retirement::RetirementSettings>,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
+        let _launch_project = self.launching_project(&session_id, &project_path);
         let settings = self.configure_new_launch_transports(&session_id, agent_transports)?;
         self.configure_launch_retirement(&session_id, retirement_settings.as_ref())?;
         let base_ref = resolve_fresh_base(&project_path);
@@ -10321,6 +10327,7 @@ Last updated: {timestamp}
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
         let project_path = PathBuf::from(&config.project_path);
+        let _launch_project = self.launching_project(&session_id, &project_path);
         let mut created_cells = Vec::new();
         let mut spawned_agent_ids = Vec::new();
 
@@ -10985,11 +10992,13 @@ phases and do EXACTLY this, then stop:
 
         if config.with_planning {
             let session_id = Uuid::new_v4().to_string();
+            let _launch_project = self.launching_project(&session_id, Path::new(&config.project_path));
             return self.launch_fusion_planning_phase(session_id, config);
         }
 
         let session_id = Uuid::new_v4().to_string();
         let project_path = PathBuf::from(&config.project_path);
+        let _launch_project = self.launching_project(&session_id, &project_path);
         let default_cli = if config.default_cli.trim().is_empty() {
             "claude".to_string()
         } else {
@@ -11290,11 +11299,13 @@ phases and do EXACTLY this, then stop:
 
         if config.with_planning {
             let session_id = Uuid::new_v4().to_string();
+            let _launch_project = self.launching_project(&session_id, Path::new(&config.project_path));
             return self.launch_debate_planning_phase(session_id, config);
         }
 
         let session_id = Uuid::new_v4().to_string();
         let project_path = PathBuf::from(&config.project_path);
+        let _launch_project = self.launching_project(&session_id, &project_path);
         let default_cli = if config.default_cli.trim().is_empty() {
             "claude".to_string()
         } else {
@@ -17174,6 +17185,7 @@ The backend composed and persisted the following authoritative skeleton before l
     pub fn launch_swarm(&self, config: SwarmLaunchConfig) -> Result<Session, String> {
         crate::instance::refuse("agent launch")?;
         let session_id = Uuid::new_v4().to_string();
+        let _launch_project = self.launching_project(&session_id, Path::new(&config.project_path));
         let default_cli = config.default_cli.trim().to_string();
         let default_model = config.default_model.clone();
 

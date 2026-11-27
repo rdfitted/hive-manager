@@ -316,3 +316,42 @@ impl SessionController {
         });
     }
 }
+
+/// The project lookup spawn-time pre-trust uses (#466): a launching session's project
+/// first (its seats spawn before the session joins the roster), then the roster's.
+pub(super) fn session_projects(
+    sessions: &Arc<RwLock<HashMap<String, Session>>>,
+    launching: &Arc<RwLock<HashMap<String, PathBuf>>>,
+) -> crate::pty::manager_trust::SessionProjects {
+    let roster = crate::pty::manager_trust::roster_projects(Arc::downgrade(sessions), |session: &Session| {
+        session.project_path.clone()
+    });
+    let launching = Arc::downgrade(launching);
+    Arc::new(move |session_id| {
+        let pending = launching.upgrade().and_then(|launching| launching.read().get(session_id).cloned());
+        pending.or_else(|| roster(session_id))
+    })
+}
+
+/// Holds a launching session's project for spawn-time pre-trust until the launch
+/// returns, whether it succeeded or failed.
+pub(crate) struct LaunchProject {
+    launching: std::sync::Weak<RwLock<HashMap<String, PathBuf>>>,
+    session_id: String,
+}
+
+impl Drop for LaunchProject {
+    fn drop(&mut self) {
+        if let Some(launching) = self.launching.upgrade() {
+            launching.write().remove(&self.session_id);
+        }
+    }
+}
+
+impl SessionController {
+    /// Record `project` as `session_id`'s project while it launches.
+    pub(crate) fn launching_project(&self, session_id: &str, project: &Path) -> LaunchProject {
+        self.launching_projects.write().insert(session_id.to_string(), project.to_path_buf());
+        LaunchProject { launching: Arc::downgrade(&self.launching_projects), session_id: session_id.to_string() }
+    }
+}

@@ -248,6 +248,28 @@ async fn spawn_time_pre_trust_needs_the_sessions_own_project() {
     }
 }
 
+/// A launch spawns its seats before the session joins the roster: the project it is
+/// launching into must already count for spawn-time pre-trust, and only while it launches.
+#[cfg(windows)]
+#[tokio::test]
+async fn seats_spawned_during_a_launch_are_pre_trusted_before_the_session_is_recorded() {
+    const FRESH: &str = "00000000-0000-4000-8000-000000000467";
+    let h = hive(&["antigravity"]);
+    let (project, cwd) = managed_worktree_fixture(h.temp.path(), "fresh", FRESH, "worker-1");
+    let cwd = cwd.to_string_lossy().into_owned();
+    let controller = h.state.session_controller.read();
+    let pty = h.state.pty_manager.read();
+    let overlay = |id: &str| pty.spawn_args_for_test(id).unwrap().iter().any(|arg| arg == "--settings");
+    let spawn = |id: &str| pty.create_session(id.into(), AgentRole::Worker { index: 1, parent: None }, "agy", &[], Some(&cwd), 120, 40).unwrap();
+    let launching = controller.launching_project(FRESH, &project);
+    spawn(&format!("{FRESH}-worker-1"));
+    assert!(overlay(&format!("{FRESH}-worker-1")), "the session isn't in the roster yet, but it is launching");
+    drop(launching);
+    let _ = pty.kill(&format!("{FRESH}-worker-1"));
+    spawn(&format!("{FRESH}-worker-1"));
+    assert!(!overlay(&format!("{FRESH}-worker-1")), "after the launch returns, only the roster counts");
+}
+
 #[cfg(windows)]
 #[test]
 fn agy_spawns_disable_the_auto_updater_and_pre_trust_only_a_recorded_worktree() {

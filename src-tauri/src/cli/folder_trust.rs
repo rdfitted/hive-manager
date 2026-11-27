@@ -111,12 +111,27 @@ pub fn operator_decides_trust(command: &str, args: &[&str]) -> bool {
 /// Whether the operator's codex `config.toml` might deny trust anywhere. A missing file
 /// denies nothing; a file that cannot be read counts as a denial.
 fn codex_config_may_deny() -> bool {
-    let Some(home) = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
+    codex_config_path().is_some_and(|path| config_file_may_deny(&path))
+}
+
+/// The operator's codex `config.toml`. Tests never read it: their results must not
+/// depend on the machine running them.
+#[cfg(not(test))]
+fn codex_config_path() -> Option<PathBuf> {
+    let home = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
         std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|home| PathBuf::from(home).join(".codex"))
-    }) else {
-        return false;
-    };
-    match std::fs::read_to_string(home.join("config.toml")) {
+    })?;
+    Some(home.join("config.toml"))
+}
+
+#[cfg(test)]
+fn codex_config_path() -> Option<PathBuf> {
+    None
+}
+
+/// No file means no denial; a file that exists but can't be read might hold one.
+fn config_file_may_deny(path: &Path) -> bool {
+    match std::fs::read_to_string(path) {
         Ok(config) => config_text_may_deny(&config),
         Err(error) => error.kind() != std::io::ErrorKind::NotFound,
     }
@@ -127,7 +142,10 @@ fn codex_config_may_deny() -> bool {
 /// - a quoted `untrusted` value in any case or quote style (`"untrusted"`, `'UNTRUSTED'`,
 ///   `'''untrusted'''`), so a bare word such as an env-var name does not count;
 /// - a `\u`/`\U` escape inside a double-quoted string, which could spell one;
-/// - a line ending in a line-continuation backslash, which could split one.
+/// - a line ending in a line-continuation backslash, which could split one;
+/// - any multi-line string delimiter (`"""` or `'''`). TOML drops a newline right
+///   after the opening delimiter, so `"""`+newline+`untrusted"""` is a denial, and the
+///   line checks above can't see inside a string that spans lines.
 ///
 /// Single-quoted strings have no escapes, so Windows paths such as `'C:\Users\x'` and
 /// escaped backslashes such as `"C:\\Users"` are not escapes here. A false positive only
@@ -136,6 +154,9 @@ fn codex_config_may_deny() -> bool {
 fn config_text_may_deny(config: &str) -> bool {
     let lower = config.to_ascii_lowercase();
     if lower.contains("\"untrusted\"") || lower.contains("'untrusted'") {
+        return true;
+    }
+    if config.contains("\"\"\"") || config.contains("'''") {
         return true;
     }
     config.lines().any(|line| {
@@ -524,6 +545,29 @@ mod tests {
         assert!(operator_sets_trust("agy", &["--settings=x.json"]));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn codex_is_recognised_through_a_unix_executable_path() {
+        let (_temp, _repo, worktree) = managed();
+        assert_eq!(trust_args("/usr/local/bin/codex", &worktree, "s1", Path::new("s"), &[]).len(), 2);
+    }
+
+    #[test]
+    fn the_codex_config_file_fails_closed_unless_it_is_missing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        assert!(!config_file_may_deny(&path), "no file, no denial");
+        std::fs::write(&path, "model = \"x\"\n").unwrap();
+        assert!(!config_file_may_deny(&path));
+        std::fs::write(&path, "[projects.'/r']\ntrust_level = '''\nuntrusted'''\n").unwrap();
+        assert!(config_file_may_deny(&path), "a multi-line string can hold a denial");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(config_file_may_deny(&path), "present but unreadable might hold one");
+        assert!(codex_config_path().is_none(), "tests never read the operator's config");
+    }
+
+    #[cfg(windows)]
     #[test]
     fn codex_is_recognised_through_a_windows_executable_path() {
         let (_temp, _repo, worktree) = managed();
