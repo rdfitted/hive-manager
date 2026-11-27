@@ -117,6 +117,7 @@ export type EventType =
     | 'agent_completed'
     | 'agent_stopped'
     | 'agent_waiting_input'
+    | 'agent_input_resolved'
     | 'agent_failed'
     | 'artifact_updated'
     | 'resolver_selected_candidate'

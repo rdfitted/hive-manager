@@ -26,6 +26,8 @@ pub enum EventType {
     AgentCompleted,
     AgentStopped,
     AgentWaitingInput,
+    /// A wait reported by `AgentWaitingInput` ended (a folder-trust prompt went away).
+    AgentInputResolved,
     AgentFailed,
     ArtifactUpdated,
     ResolverSelectedCandidate,

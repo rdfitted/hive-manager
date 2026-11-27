@@ -132,14 +132,18 @@ async fn a_prompt_is_surfaced_once_with_status_event_and_notice_and_never_answer
     assert_eq!(status(&h.state, &worker(1)), AgentStatus::Running);
     assert_eq!(writes(&h.state, &worker(1)), 0, "Hive Manager never typed into the terminal");
 
-    wait_for(|| !trust_events(&h.state).is_empty()).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for(|| trust_events(&h.state).len() == 2).await;
     let events = trust_events(&h.state);
-    let actions: Vec<_> = events.iter().map(|event| event["payload"]["action"].as_str().unwrap().to_string()).collect();
-    assert_eq!(actions, ["detected"], "the clear is the status change, not a second waiting-input event");
+    let kinds: Vec<_> = events.iter()
+        .map(|event| (event["event_type"].as_str().unwrap().to_string(), event["payload"]["action"].as_str().unwrap().to_string()))
+        .collect();
+    assert_eq!(kinds, [
+        ("agent_waiting_input".to_string(), "detected".to_string()),
+        ("agent_input_resolved".to_string(), "cleared".to_string()),
+    ], "the clear never reads as a second wait");
     assert!(events[0]["payload"]["instance_id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(events[0]["payload"]["instance_id"], events[1]["payload"]["instance_id"]);
     assert_eq!(events[0]["agent_id"], worker(1));
-    assert_eq!(events[0]["event_type"], "agent_waiting_input");
     assert_eq!(events[0]["severity"], "warning");
     assert_eq!(events[0]["payload"]["adapter"], "antigravity");
     assert_eq!(events[0]["payload"]["path"], cwd, "the known spawn folder");
@@ -294,4 +298,28 @@ fn agy_variable_never_becomes_a_heartbeat_identity() {
     }
     manager.create_session(worker(1), AgentRole::Worker { index: 1, parent: None }, "agy", &[], None, 80, 24).unwrap();
     assert!(manager.has_heartbeat_credential_for_test(&worker(1)), "an identified seat still gets one");
+}
+
+#[tokio::test]
+async fn a_seat_that_exits_or_disappears_at_its_prompt_is_not_left_waiting() {
+    let h = hive(&["antigravity", "antigravity"]);
+    for n in [1, 2] {
+        let cwd = h.worktree(&format!("worker-{n}"));
+        h.spawn(n, "antigravity", &cwd);
+        output(&h.state, &worker(n), AGY_PROMPT);
+    }
+    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "detected"), (worker(2), "detected")]);
+    // worker-1's process exits (the operator chose "No, exit"); worker-2's PTY is removed.
+    let cwd = h.worktree("worker-1");
+    {
+        let pty = h.state.pty_manager.read();
+        let _ = pty.kill(&worker(1));
+        pty.create_session(worker(1), AgentRole::Worker { index: 1, parent: None }, "agy",
+            &["--stub-clean-exit"], Some(&cwd), 120, 40).unwrap();
+        let _ = pty.kill(&worker(2));
+    }
+    let _ = sweep(&h.state, Instant::now());
+    let _ = sweep(&h.state, Instant::now());
+    assert_ne!(status(&h.state, &worker(1)), waiting(), "an exited seat is not waiting on anyone");
+    assert_eq!(status(&h.state, &worker(2)), AgentStatus::Error("exited_at_trust_prompt".into()));
 }

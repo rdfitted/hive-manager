@@ -409,6 +409,7 @@ pub fn run() {
                             | EventType::AgentCompleted
                             | EventType::AgentStopped
                             | EventType::AgentWaitingInput
+                            | EventType::AgentInputResolved
                             | EventType::AgentFailed
                             | EventType::ArtifactUpdated
                             | EventType::CellCreated
@@ -433,6 +434,7 @@ pub fn run() {
                                         | EventType::AgentCompleted
                                         | EventType::AgentStopped
                                         | EventType::AgentWaitingInput
+                                        | EventType::AgentInputResolved
                                         | EventType::AgentFailed
                                         | EventType::ArtifactUpdated
                                         | EventType::CellCreated

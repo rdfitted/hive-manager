@@ -16,6 +16,10 @@ use std::time::Instant;
 use super::*;
 use crate::pty::trust_prompt::{GuardAction, TrustCli, TrustPromptGuard, TRUST_PROMPT_STATUS};
 
+/// The status an agent gets when its process exits while its trust prompt is up and
+/// nothing else has recorded the exit.
+const TRUST_PROMPT_EXIT: &str = "exited_at_trust_prompt";
+
 /// Grid used when a PTY's size was never recorded (it is recorded at every spawn).
 const FALLBACK_SIZE: (u16, u16) = (120, 40);
 
@@ -35,6 +39,8 @@ enum Observation {
     Action(Uuid, GuardAction),
     /// The PTY was replaced since the last sweep (same-id respawn).
     Replaced,
+    /// The PTY exited or was removed.
+    Exited,
 }
 
 impl SessionController {
@@ -82,7 +88,9 @@ impl SessionController {
                 Some(Observation::Action(instance, action)) => {
                     outcomes.extend(self.report_trust_prompt(&session, agent, instance, cli, action));
                 }
-                Some(Observation::Replaced) => self.drop_inherited_trust_status(&session.id, &agent.id),
+                Some(Observation::Replaced) => self.drop_inherited_trust_status(&session.id, &agent.id, None),
+                Some(Observation::Exited) => self.drop_inherited_trust_status(
+                    &session.id, &agent.id, Some(AgentStatus::Error(TRUST_PROMPT_EXIT.to_string()))),
                 None => {}
             }
         }
@@ -94,9 +102,12 @@ impl SessionController {
         if manager.protocol_agent(agent_id).is_some() {
             return None;
         }
-        let instance = manager.instance_id(agent_id)?;
-        let mut guards = self.trust_guards.write();
         let key = (session_id.to_string(), agent_id.to_string());
+        let Some(instance) = manager.instance_id(agent_id) else {
+            // The PTY is gone: nobody can answer a prompt it showed.
+            return self.trust_guards.write().remove(&key).map(|_| Observation::Exited);
+        };
+        let mut guards = self.trust_guards.write();
         let previous = guards.get(&key).map(|(seen, _)| *seen);
         if previous != Some(instance) {
             // Measure the watch window from the spawn, not from the first sweep.
@@ -112,10 +123,14 @@ impl SessionController {
             }
         }
         let guard = &mut guards.get_mut(&key)?.1;
-        if !guard.is_active(now) || !manager.is_alive(agent_id) {
-            // Expired, or a dead seat that exit handling owns: release the screen. A
-            // prompt surfaced on a seat that died is cleared by the dead-seat path.
+        if !manager.is_alive(agent_id) {
+            // The process exited: release the screen and drop any status its prompt set.
+            let surfaced = guard.is_active(now);
             guard.finish();
+            return surfaced.then_some(Observation::Exited);
+        }
+        if !guard.is_active(now) {
+            guard.finish(); // release the screen; the instance marker stays
             return None;
         }
         let snapshot = manager.output_since(agent_id, instance, guard.fed_to())?;
@@ -145,9 +160,15 @@ impl SessionController {
         } else {
             tracing::info!(agent = %agent.id, adapter = cli.name(), path = %outcome.path, "folder-trust prompt gone");
         }
-        if self.set_trust_prompt_status(&session.id, &agent.id, instance, name == "cleared").is_some() {
+        let committed = self.set_trust_prompt_status(&session.id, &agent.id, instance, name == "cleared");
+        if committed.is_some() {
             self.update_session_storage(&session.id);
             self.emit_session_update(&session.id);
+        }
+        // A detection is reported only once its status landed on the observed instance;
+        // a clear is reported even when a newer status already replaced ours.
+        if name == "detected" && committed.is_none() {
+            return None;
         }
         self.publish_trust_prompt(session, agent, instance, &outcome);
         Some(outcome)
@@ -188,13 +209,15 @@ impl SessionController {
         })?
     }
 
-    /// A same-id respawn must not keep the `trust_prompt` status its predecessor's prompt
-    /// set: put back what that prompt replaced and forget the predecessor's record.
-    fn drop_inherited_trust_status(&self, session_id: &str, agent_id: &str) {
+    /// A `trust_prompt` status must not outlive the PTY whose prompt set it. After a
+    /// same-id respawn, put back what that prompt replaced; after an exit, `exited`, since
+    /// nothing is waiting any more. Forget the predecessor's record either way.
+    fn drop_inherited_trust_status(&self, session_id: &str, agent_id: &str, exited: Option<AgentStatus>) {
         let key = (session_id.to_string(), agent_id.to_string());
-        let Some((_, before)) = self.trust_prior_status.write().remove(&key) else {
+        let Some((_, prior)) = self.trust_prior_status.write().remove(&key) else {
             return;
         };
+        let before = exited.unwrap_or(prior);
         let changed = {
             let mut sessions = self.sessions.write();
             sessions
@@ -210,13 +233,9 @@ impl SessionController {
         }
     }
 
-    /// The `agent_waiting_input` event and a Queen inbox notice when a prompt comes up.
-    /// A prompt going away is carried by the roster's status change alone: an
-    /// `agent_waiting_input` event for it would read as a second "blocked" signal.
+    /// `agent_waiting_input` plus a Queen inbox notice when a prompt comes up, and
+    /// `agent_input_resolved` when it goes (never a second "waiting" signal).
     fn publish_trust_prompt(&self, session: &Session, agent: &AgentInfo, instance: Uuid, outcome: &TrustPromptOutcome) {
-        if outcome.action != "detected" {
-            return;
-        }
         let Some(emitter) = self.event_emitter.clone() else {
             return;
         };
@@ -224,7 +243,7 @@ impl SessionController {
         let cell_id = agent_cell_id(session, agent);
         let event = outcome.clone();
         let instance_id = instance.to_string();
-        let notice = Some(format!(
+        let notice = (outcome.action == "detected").then(|| format!(
             "{} ({}) is stopped on a folder-trust prompt in {}. Hive Manager does not answer these. \
              Answer it in the agent's terminal, or stop the agent.",
             agent.id, outcome.adapter, outcome.path,

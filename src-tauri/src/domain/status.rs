@@ -103,6 +103,7 @@ mod tests {
         assert_enum_round_trip(EventType::AgentLaunched, "\"agent_launched\"");
         assert_enum_round_trip(EventType::AgentCompleted, "\"agent_completed\"");
         assert_enum_round_trip(EventType::AgentWaitingInput, "\"agent_waiting_input\"");
+        assert_enum_round_trip(EventType::AgentInputResolved, "\"agent_input_resolved\"");
         assert_enum_round_trip(EventType::AgentFailed, "\"agent_failed\"");
         assert_enum_round_trip(EventType::ArtifactUpdated, "\"artifact_updated\"");
         assert_enum_round_trip(

@@ -12,8 +12,9 @@ pub struct EventEmitter {
     bus: Arc<EventBus>,
 }
 
-/// The payload of a trust-prompt event (#466): a prompt is up (`action` is `detected`);
-/// `path` is the agent's known spawn folder.
+/// The payload of a trust-prompt event (#466). `detected` goes out as
+/// `agent_waiting_input`, `cleared` as `agent_input_resolved`; `path` is the agent's known
+/// spawn folder.
 pub struct TrustPromptEvent<'a> {
     pub adapter: &'a str,
     pub path: &'a str,
@@ -144,7 +145,12 @@ impl EventEmitter {
         agent_id: &str,
         prompt: &TrustPromptEvent<'_>,
     ) -> Result<(), String> {
-        self.emit(session_id, Some(cell_id), Some(agent_id), EventType::AgentWaitingInput, Severity::Warning, json!({
+        let (event_type, severity) = if prompt.action == "detected" {
+            (EventType::AgentWaitingInput, Severity::Warning)
+        } else {
+            (EventType::AgentInputResolved, Severity::Info)
+        };
+        self.emit(session_id, Some(cell_id), Some(agent_id), event_type, severity, json!({
             "prompt": "trust_prompt",
             "adapter": prompt.adapter,
             "path": prompt.path,

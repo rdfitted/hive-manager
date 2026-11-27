@@ -131,15 +131,48 @@ fn codex_marks_untrusted(config: &str, paths: &[PathBuf]) -> bool {
     if codex_untrusted_projects(config).iter().any(|key| wanted.contains(&normalize_path(key))) {
         return true;
     }
-    config.lines().map(compact_toml_line).any(|line| {
-        // A string this scan cannot decode (a bad escape, a multi-line string) could hide
-        // a denial, so the whole config counts as one.
+    // Fallback, line by line. A line naming a path with "untrusted" counts, and so does
+    // any "untrusted" inside a `[projects.'<path>']` table for one of the paths, however
+    // its key is spelled.
+    let mut in_own_table = false;
+    let mut multiline: Option<&str> = None;
+    for raw in config.lines() {
+        // Multi-line strings are values: their lines are not decoded, but an "untrusted"
+        // in one inside this path's table, or on the line that opens one, still counts.
+        if let Some(delimiter) = multiline {
+            if in_own_table && raw.contains("untrusted") {
+                return true;
+            }
+            if raw.contains(delimiter) {
+                multiline = None;
+            }
+            continue;
+        }
+        if let Some(delimiter) = ["\"\"\"", "'''"].into_iter().find(|delimiter| raw.contains(delimiter)) {
+            if raw.contains("untrusted") && (in_own_table || raw.contains("trust_level")) {
+                return true;
+            }
+            if raw.matches(delimiter).count() % 2 == 1 {
+                multiline = Some(delimiter);
+            }
+            continue;
+        }
+        let line = compact_toml_line(raw);
+        // A string this scan cannot decode (a bad escape) could hide a denial, so the
+        // whole config counts as one.
         let Some(strings) = quoted_strings(&line) else {
             return true;
         };
+        if let Some(header) = line.strip_prefix('[') {
+            in_own_table = header.starts_with("projects.") && strings.iter().any(|value| wanted.contains(&normalize_path(value)));
+            continue;
+        }
         let untrusted = line.contains("untrusted") || strings.iter().any(|value| value.contains("untrusted"));
-        untrusted && strings.iter().any(|value| wanted.contains(&normalize_path(value)))
-    })
+        if untrusted && (in_own_table || strings.iter().any(|value| wanted.contains(&normalize_path(value)))) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Every quoted string in a compacted TOML line, decoded, or `None` if one cannot be
@@ -182,7 +215,7 @@ fn codex_untrusted_projects(config: &str) -> Vec<String> {
         match section.as_deref() {
             Some(header) if header.starts_with("projects.") => {
                 if let Some(key) = whole_quoted(&header["projects.".len()..]) {
-                    if is_untrusted_value(line.strip_prefix("trust_level=")) {
+                    if is_untrusted_value(trust_level_value(&line)) {
                         found.push(key);
                     }
                 }
@@ -275,6 +308,13 @@ fn whole_quoted(text: &str) -> Option<String> {
     leading_quoted(text).filter(|(_, len)| *len == text.len()).map(|(value, _)| value)
 }
 
+/// The value of a compacted `trust_level=...` assignment, bare or with a quoted key.
+fn trust_level_value(assignment: &str) -> Option<&str> {
+    ["trust_level=", "\"trust_level\"=", "'trust_level'="]
+        .iter()
+        .find_map(|key| assignment.strip_prefix(key))
+}
+
 fn is_untrusted_value(value: Option<&str>) -> bool {
     value.and_then(whole_quoted).is_some_and(|value| value == "untrusted")
 }
@@ -290,14 +330,14 @@ fn untrusted_entries(text: &str) -> Vec<String> {
             continue;
         };
         let rest = &text[at + len..];
-        if let Some(value) = rest.strip_prefix(".trust_level=") {
+        if let Some(value) = rest.strip_prefix('.').and_then(trust_level_value) {
             let end = value.find([',', '}']).unwrap_or(value.len());
             if is_untrusted_value(Some(&value[..end])) {
                 found.push(key);
             }
         } else if let Some(body) = rest.strip_prefix("={") {
             let end = body.find('}').unwrap_or(body.len());
-            if body[..end].split(',').any(|pair| is_untrusted_value(pair.strip_prefix("trust_level="))) {
+            if body[..end].split(',').any(|pair| is_untrusted_value(trust_level_value(pair))) {
                 found.push(key);
             }
         }
@@ -456,14 +496,19 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 /// trailing separator removed, and case folded on Windows.
 pub fn normalize_path(path: &str) -> String {
     let path = path.trim();
-    let path = path.strip_prefix(r"\\?\").unwrap_or(path);
-    let mut normalized = path.replace('/', "\\");
-    while normalized.len() > 1 && normalized.ends_with('\\') && !normalized.ends_with(":\\") {
-        normalized.pop();
-    }
     if cfg!(windows) {
+        let path = path.strip_prefix(r"\\?\").unwrap_or(path);
+        let mut normalized = path.replace('/', "\\");
+        while normalized.len() > 1 && normalized.ends_with('\\') && !normalized.ends_with(":\\") {
+            normalized.pop();
+        }
         normalized.to_lowercase()
     } else {
+        // A backslash is an ordinary filename character on Unix: keep it literal.
+        let mut normalized = path.to_string();
+        while normalized.len() > 1 && normalized.ends_with('/') {
+            normalized.pop();
+        }
         normalized
     }
 }
@@ -539,8 +584,24 @@ mod tests {
         assert!(codex_marks_untrusted(escaped, &[path.clone()]));
         // An escape this scan cannot decode fails closed.
         assert!(codex_marks_untrusted("[projects]\n\"\\q\" = 1\n", &[path.clone()]));
-        assert!(codex_marks_untrusted("note = \"\"\"\nmulti\n\"\"\"\n", &[path.clone()]));
+        // A multi-line string elsewhere does not disable pre-trust...
+        let prose = "instructions = \"\"\"\nDon't touch it's files\n\"\"\"\n[projects.'D:\\other']\ntrust_level = 'trusted'\n";
+        assert!(!codex_marks_untrusted(prose, &[path.clone()]));
+        // ...but a denial written as one still counts.
+        let denial = "[projects.'D:\\Code Projects\\repo']\ntrust_level = '''untrusted'''\n";
+        assert!(codex_marks_untrusted(denial, &[path.clone()]));
+        let spread = "[projects.'D:\\Code Projects\\repo']\ntrust_level = \"\"\"\nuntrusted\"\"\"\n";
+        assert!(codex_marks_untrusted(spread, &[path.clone()]));
         assert!(!codex_marks_untrusted("model = \"gpt\"\n[projects.'D:\\other']\ntrust_level = \"trusted\"\n", &[path]));
+    }
+
+    #[test]
+    fn any_untrusted_inside_the_paths_own_table_counts() {
+        let path = PathBuf::from(r"D:\Code Projects\repo");
+        let table = "[projects.'D:\\Code Projects\\repo']\n\"trust_level\"  =  'untrusted' # set by hand\n";
+        assert!(codex_marks_untrusted(table, &[path.clone()]));
+        let elsewhere = "[projects.'D:\\other']\n'trust_level' = 'untrusted'\n[projects.'D:\\Code Projects\\repo']\ntrust_level = 'trusted'\n";
+        assert!(!codex_marks_untrusted(elsewhere, &[path]));
     }
 
     #[test]
@@ -646,6 +707,9 @@ mod tests {
             format!("[projects]\n'{path}'.trust_level = \"untrusted\"\n"),
             format!("projects = {{ 'D:\\x' = {{ trust_level = \"trusted\" }}, '{path}' = {{ trust_level = \"untrusted\" }} }}\n"),
             format!("projects.'{path}'.trust_level = 'untrusted'\n"),
+            format!("[projects.'{path}']\n\"trust_level\" = \"untrusted\"\n"),
+            format!("[projects]\n'{path}' = {{ 'trust_level' = \"untrusted\" }}\n"),
+            format!("projects.'{path}'.\"trust_level\" = \"untrusted\"\n"),
             format!("model = \"x\"\nprojects.\"D:\\\\Code Projects\\\\repo\".trust_level = \"untrusted\" # no\n"),
         ] {
             assert_eq!(marked(&config), [path.to_string()], "{config}");
@@ -688,6 +752,14 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_backslash_is_a_filename_character_on_unix() {
+        assert_ne!(normalize_path("/tmp/team/repo"), normalize_path("/tmp/team\\repo"));
+        assert_eq!(normalize_path("/tmp/team/repo/"), normalize_path("/tmp/team/repo"));
+    }
+
+    #[cfg(windows)]
     #[test]
     fn printed_paths_compare_across_prefix_separators_and_trailing_slash() {
         assert_eq!(normalize_path(r"\\?\D:\Code Projects\hive\"), normalize_path("D:/Code Projects/hive"));
