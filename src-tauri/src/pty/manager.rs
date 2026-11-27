@@ -1450,7 +1450,7 @@ impl PtyManager {
             .map(|session| session.env_removed().to_vec())
     }
 
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub fn write_records_for_test(&self, id: &str) -> Option<Vec<Vec<u8>>> {
         let sessions = self.sessions.read();
         sessions.get(id).map(|session| session.write_records())
