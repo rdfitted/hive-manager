@@ -132,10 +132,12 @@ async fn a_prompt_is_surfaced_once_with_status_event_and_notice_and_never_answer
     assert_eq!(status(&h.state, &worker(1)), AgentStatus::Running);
     assert_eq!(writes(&h.state, &worker(1)), 0, "Hive Manager never typed into the terminal");
 
-    wait_for(|| trust_events(&h.state).len() == 2).await;
+    wait_for(|| !trust_events(&h.state).is_empty()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let events = trust_events(&h.state);
     let actions: Vec<_> = events.iter().map(|event| event["payload"]["action"].as_str().unwrap().to_string()).collect();
-    assert_eq!(actions, ["detected", "cleared"]);
+    assert_eq!(actions, ["detected"], "the clear is the status change, not a second waiting-input event");
+    assert!(events[0]["payload"]["instance_id"].as_str().is_some_and(|id| !id.is_empty()));
     assert_eq!(events[0]["agent_id"], worker(1));
     assert_eq!(events[0]["event_type"], "agent_waiting_input");
     assert_eq!(events[0]["severity"], "warning");

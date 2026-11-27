@@ -149,7 +149,7 @@ impl SessionController {
             self.update_session_storage(&session.id);
             self.emit_session_update(&session.id);
         }
-        self.publish_trust_prompt(session, agent, &outcome);
+        self.publish_trust_prompt(session, agent, instance, &outcome);
         Some(outcome)
     }
 
@@ -210,15 +210,21 @@ impl SessionController {
         }
     }
 
-    /// The event for the operator, plus a Queen inbox notice when a prompt comes up.
-    fn publish_trust_prompt(&self, session: &Session, agent: &AgentInfo, outcome: &TrustPromptOutcome) {
+    /// The `agent_waiting_input` event and a Queen inbox notice when a prompt comes up.
+    /// A prompt going away is carried by the roster's status change alone: an
+    /// `agent_waiting_input` event for it would read as a second "blocked" signal.
+    fn publish_trust_prompt(&self, session: &Session, agent: &AgentInfo, instance: Uuid, outcome: &TrustPromptOutcome) {
+        if outcome.action != "detected" {
+            return;
+        }
         let Some(emitter) = self.event_emitter.clone() else {
             return;
         };
         let session_id = session.id.clone();
         let cell_id = agent_cell_id(session, agent);
         let event = outcome.clone();
-        let notice = (outcome.action == "detected").then(|| format!(
+        let instance_id = instance.to_string();
+        let notice = Some(format!(
             "{} ({}) is stopped on a folder-trust prompt in {}. Hive Manager does not answer these. \
              Answer it in the agent's terminal, or stop the agent.",
             agent.id, outcome.adapter, outcome.path,
@@ -231,7 +237,9 @@ impl SessionController {
             .collect();
         let storage = self.storage.clone();
         tokio::spawn(async move {
-            let payload = crate::events::TrustPromptEvent { adapter: event.adapter, path: &event.path, action: event.action };
+            let payload = crate::events::TrustPromptEvent {
+                adapter: event.adapter, path: &event.path, action: event.action, instance_id: &instance_id,
+            };
             if let Err(error) = emitter.emit_agent_trust_prompt(&session_id, &cell_id, &event.agent_id, &payload).await {
                 tracing::warn!("Failed to emit trust prompt event: {}", error);
             }

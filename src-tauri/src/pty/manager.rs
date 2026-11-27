@@ -958,6 +958,8 @@ impl PtyManager {
 
         // Reverse local drop order is intentional: failed construction must
         // release lifecycle before its unpublished console and drain are closed.
+        // #466: file and roster reads, before the lifecycle lock other spawns wait on.
+        let trust_flags = self.spawn_trust_args(command, &id, cwd, &agent_store::store_dir_for(&id), args);
         let mut construction_cleanup = None;
         let mut lifecycle_guard = self.lifecycle.lock();
         loop {
@@ -1020,7 +1022,6 @@ impl PtyManager {
             }
         };
 
-        let trust_flags = self.spawn_trust_args(command, &id, cwd, &store_dir, args); // #466
         // Isolation and trust flags go in front so the CLI's trailing positional prompt stays last.
         let effective_args: Vec<&str> = isolation_flags
             .iter()

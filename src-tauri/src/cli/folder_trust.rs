@@ -132,24 +132,34 @@ fn codex_marks_untrusted(config: &str, paths: &[PathBuf]) -> bool {
         return true;
     }
     config.lines().map(compact_toml_line).any(|line| {
-        line.contains("untrusted") && quoted_strings(&line).iter().any(|value| wanted.contains(&normalize_path(value)))
+        // A string this scan cannot decode (a bad escape, a multi-line string) could hide
+        // a denial, so the whole config counts as one.
+        let Some(strings) = quoted_strings(&line) else {
+            return true;
+        };
+        let untrusted = line.contains("untrusted") || strings.iter().any(|value| value.contains("untrusted"));
+        untrusted && strings.iter().any(|value| wanted.contains(&normalize_path(value)))
     })
 }
 
-/// Every quoted string in a compacted TOML line, unquoted.
-fn quoted_strings(line: &str) -> Vec<String> {
+/// Every quoted string in a compacted TOML line, decoded, or `None` if one cannot be
+/// read (an invalid escape, an unterminated or multi-line string).
+fn quoted_strings(line: &str) -> Option<Vec<String>> {
+    if line.contains("\"\"\"") || line.contains("\'\'\'") {
+        return None;
+    }
     let mut found = Vec::new();
     let mut at = 0;
     while at < line.len() {
-        match leading_quoted(&line[at..]) {
-            Some((value, len)) => {
-                found.push(value);
-                at += len;
-            }
-            None => at += line[at..].chars().next().map_or(1, char::len_utf8),
+        if line[at..].starts_with(['\'', '"']) {
+            let (value, len) = leading_quoted(&line[at..])?;
+            found.push(value);
+            at += len;
+        } else {
+            at += line[at..].chars().next().map_or(1, char::len_utf8);
         }
     }
-    found
+    Some(found)
 }
 
 /// Project paths a codex `config.toml` marks `trust_level = "untrusted"`, in every form
@@ -227,17 +237,36 @@ fn compact_toml_line(raw: &str) -> String {
 fn leading_quoted(text: &str) -> Option<(String, usize)> {
     let quote = text.chars().next().filter(|c| *c == '\'' || *c == '"')?;
     let mut value = String::new();
-    let mut escaped = false;
-    for (i, c) in text.char_indices().skip(1) {
-        if quote == '"' && c == '\\' && !escaped {
-            escaped = true;
-            continue;
-        }
-        if c == quote && !escaped {
+    let mut chars = text.char_indices().skip(1);
+    while let Some((i, c)) = chars.next() {
+        if c == quote {
             return Some((value, i + c.len_utf8()));
         }
+        if quote == '"' && c == '\\' {
+            // TOML basic-string escapes; anything else is not valid TOML.
+            let (_, escape) = chars.next()?;
+            let decoded = match escape {
+                'b' => '\u{8}',
+                't' => '\t',
+                'n' => '\n',
+                'f' => '\u{c}',
+                'r' => '\r',
+                '"' => '"',
+                '\\' => '\\',
+                'u' | 'U' => {
+                    let digits = if escape == 'u' { 4 } else { 8 };
+                    let hex: String = (0..digits).filter_map(|_| chars.next().map(|(_, c)| c)).collect();
+                    if hex.len() != digits {
+                        return None;
+                    }
+                    char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?
+                }
+                _ => return None,
+            };
+            value.push(decoded);
+            continue;
+        }
         value.push(c);
-        escaped = false;
     }
     None
 }
@@ -343,7 +372,28 @@ pub fn managed_worktree_project(cwd: &Path, session_id: &str) -> Option<PathBuf>
     }
     let project = lexical_normalize(cwd).ancestors().nth(4)?.to_path_buf();
     let root = git_repo_root(cwd)?;
-    (normalize_path(&root.to_string_lossy()) == normalize_path(&project.to_string_lossy())).then_some(project)
+    if normalize_path(&root.to_string_lossy()) != normalize_path(&project.to_string_lossy()) {
+        return None;
+    }
+    // The worktree must be registered for this very directory: its admin entry under the
+    // project's `.git/worktrees/` points back at this `.git`, so a copied pointer file
+    // in some other directory does not qualify.
+    let admin = worktree_admin_dir(cwd)?;
+    let admin_parent = admin.parent().map(|dir| normalize_path(&dir.to_string_lossy()));
+    if admin_parent != Some(normalize_path(&project.join(".git").join("worktrees").to_string_lossy())) {
+        return None;
+    }
+    let back = std::fs::read_to_string(admin.join("gitdir")).ok()?;
+    let back = absolutize(&admin, Path::new(back.trim()));
+    (normalize_path(&lexical_normalize(&back).to_string_lossy()) == normalize_path(&cwd.join(".git").to_string_lossy()))
+        .then_some(project)
+}
+
+/// The admin directory a linked worktree's `.git` file points at.
+fn worktree_admin_dir(cwd: &Path) -> Option<PathBuf> {
+    let pointer = std::fs::read_to_string(cwd.join(".git")).ok()?;
+    let gitdir = pointer.lines().find_map(|line| line.strip_prefix("gitdir:"))?.trim();
+    Some(lexical_normalize(&absolutize(cwd, Path::new(gitdir))))
 }
 
 /// Paths the override can carry: no quote that would end a TOML literal string, no
@@ -430,6 +480,8 @@ pub(crate) fn managed_worktree_fixture(root: &Path, project: &str, session: &str
     std::fs::create_dir_all(&worktree).unwrap();
     std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
     std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+    // git writes the reverse pointer with forward slashes on Windows too.
+    std::fs::write(admin.join("gitdir"), format!("{}\n", worktree.join(".git").display().to_string().replace('\\', "/"))).unwrap();
     (repo, worktree)
 }
 
@@ -472,6 +524,23 @@ mod tests {
         std::fs::create_dir_all(&planted).unwrap();
         std::fs::copy(elsewhere.join(".git"), planted.join(".git")).unwrap();
         assert!(managed_worktree_project(&planted, "s1").is_none(), "metadata must agree with the path");
+        // worker-1's own pointer copied into an unregistered worker-4 directory.
+        let copied = repo.join(".hive-manager").join("worktrees").join("s1").join("worker-4");
+        std::fs::create_dir_all(&copied).unwrap();
+        std::fs::copy(worktree.join(".git"), copied.join(".git")).unwrap();
+        assert!(managed_worktree_project(&copied, "s1").is_none(), "the worktree must be registered for this directory");
+    }
+
+    #[test]
+    fn escaped_or_undecodable_strings_never_hide_a_denial() {
+        let path = PathBuf::from(r"D:\Code Projects\repo");
+        // "untrusted" and the path spelled with \u escapes, as codex itself would decode them.
+        let escaped = "[projects.\"D:\\\\Code Projects\\\\re\\u0070o\"]\ntrust_level = \"un\\u0074rusted\"\n";
+        assert!(codex_marks_untrusted(escaped, &[path.clone()]));
+        // An escape this scan cannot decode fails closed.
+        assert!(codex_marks_untrusted("[projects]\n\"\\q\" = 1\n", &[path.clone()]));
+        assert!(codex_marks_untrusted("note = \"\"\"\nmulti\n\"\"\"\n", &[path.clone()]));
+        assert!(!codex_marks_untrusted("model = \"gpt\"\n[projects.'D:\\other']\ntrust_level = \"trusted\"\n", &[path]));
     }
 
     #[test]

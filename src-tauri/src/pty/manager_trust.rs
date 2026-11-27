@@ -24,7 +24,14 @@ impl PtyManager {
     /// session's recorded project. No lookup, or no answer, means no flags.
     pub(super) fn spawn_trust_args(&self, command: &str, id: &str, cwd: Option<&str>, store_dir: &Path, args: &[&str]) -> Vec<String> {
         let lookup = self.session_projects.read().clone();
-        let project_of = |session_id: &str| lookup.as_ref().and_then(|lookup| lookup(session_id));
+        let project_of = |session_id: &str| {
+            let project = lookup.as_ref().and_then(|lookup| lookup(session_id));
+            if project.is_none() {
+                tracing::info!(agent = %id, session = %session_id,
+                    "no folder pre-trust: the session's project is unknown or its roster was busy");
+            }
+            project
+        };
         crate::cli::folder_trust::spawn_trust_args(command, id, cwd, &project_of, store_dir, args)
     }
 
