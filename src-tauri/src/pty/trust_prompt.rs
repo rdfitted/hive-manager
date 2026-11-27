@@ -105,8 +105,8 @@ pub fn detect(cli: TrustCli, lines: &[String]) -> Option<TrustPrompt> {
             let at = ordered(lines, &[
                 &|l| l == "Accessing workspace:",
                 &|l| l == "Do you trust the contents of this project?",
-                &|l| l.ends_with("Yes, I trust this folder"),
-                &|l| l.ends_with("No, exit"),
+                &|l| option(l) == "Yes, I trust this folder",
+                &|l| option(l) == "No, exit",
                 &|l| l.contains("Navigate") && l.ends_with("enter Confirm"),
             ])?;
             Some(TrustPrompt {
@@ -128,9 +128,10 @@ pub fn detect(cli: TrustCli, lines: &[String]) -> Option<TrustPrompt> {
         TrustCli::Codex => {
             let at = ordered(lines, &[
                 &|l| l == "Folder access",
-                &|l| l.starts_with("Trust this folder? Codex can read, edit, and run files here"),
-                &|l| l.ends_with("1. Trust and continue"),
-                &|l| l.starts_with("2. "),
+                // Its opening words only: a narrow pane wraps the rest of the question.
+                &|l| l.starts_with("Trust this folder?"),
+                &|l| option(l) == "1. Trust and continue",
+                &|l| option(l).starts_with("2. "),
                 &|l| l.starts_with("enter continue"),
             ])?;
             // Ends with "repository root:" even when a narrow pane wraps the sentence.
@@ -152,9 +153,9 @@ pub fn detect(cli: TrustCli, lines: &[String]) -> Option<TrustPrompt> {
         TrustCli::Claude => {
             let at = ordered(lines, &[
                 &|l| l == "Accessing workspace:",
-                &|l| l.contains("Is this a project you created or one you trust?"),
-                &|l| l.ends_with("No, exit"),
-                &|l| l.ends_with("Yes, I trust this folder"),
+                &|l| l.contains("Is this a project you created"),
+                &|l| option(l) == "No, exit",
+                &|l| option(l) == "Yes, I trust this folder",
                 &|l| l.starts_with("Enter to confirm"),
             ])?;
             Some(TrustPrompt {
@@ -168,6 +169,12 @@ pub fn detect(cli: TrustCli, lines: &[String]) -> Option<TrustPrompt> {
 }
 
 type LineTest<'a> = &'a dyn Fn(&str) -> bool;
+
+/// An option row without its selection marker, so the dialog still matches whichever
+/// option the operator has moved the selection to.
+fn option(line: &str) -> &str {
+    line.trim_start_matches(['>', '\u{203a}', '\u{276f}']).trim_start()
+}
 
 /// Row indexes of `steps` matched in order, each after the last, within [`DIALOG_SPAN`].
 /// Tries each match of the first step, bottom-most first, so the live dialog wins over
@@ -339,7 +346,8 @@ impl TrustPromptGuard {
     fn feed(&mut self, snapshot: &OutputSnapshot, cols: u16, rows: u16) -> (bool, Vec<u8>) {
         // A resize makes ConPTY repaint the whole viewport, so a fresh grid at the new
         // size is filled again by the following frames.
-        let mut reset = self.screen.size() != (cols, rows);
+        // Compare clamped sizes, or a PTY beyond the grid's limits would reset every turn.
+        let mut reset = self.screen.size() != Screen::clamped(cols, rows);
         if reset {
             self.screen = Screen::new(cols, rows);
         }

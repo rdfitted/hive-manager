@@ -50,8 +50,9 @@ pub fn trust_args(command: &str, cwd: &Path, session_id: &str, store_dir: &Path,
 
 /// [`trust_args`] at the PTY spawn choke point. The session is the agent id's UUID
 /// prefix (`<session>-<seat>`), and `project_of` gives that session's recorded project.
-/// The worktree must belong to exactly that project; an id without a session, an unknown
-/// session or any other project gets no pre-trust.
+/// The worktree must be the one named for this seat in exactly that project; an id
+/// without a session, another seat's worktree, an unknown session or any other project
+/// gets no pre-trust.
 pub fn spawn_trust_args(
     command: &str, agent_id: &str, cwd: Option<&str>, project_of: &dyn Fn(&str) -> Option<PathBuf>,
     store_dir: &Path, args: &[&str],
@@ -60,6 +61,12 @@ pub fn spawn_trust_args(
     let (Some(cwd), Some(session)) = (cwd.map(Path::new), session) else {
         return Vec::new();
     };
+    // The worktree must be this seat's own: Hive Manager names it after the seat
+    // (`<session>-worker-2` gets `worker-2`, the Queen gets `queen`).
+    let seat = &agent_id[37..];
+    if cwd.file_name().and_then(|name| name.to_str()) != Some(seat) {
+        return Vec::new();
+    }
     let (Some(recorded), Some(project)) = (project_of(session), managed_worktree_project(cwd, session)) else {
         return Vec::new();
     };
@@ -115,16 +122,41 @@ fn codex_config_text() -> Option<String> {
     std::fs::read_to_string(home.join("config.toml")).ok()
 }
 
-/// Whether the operator's codex `config.toml` marks any of `paths` untrusted.
+/// Whether the operator's codex `config.toml` marks any of `paths` untrusted. Errs toward
+/// "untrusted": any line naming one of the paths together with `untrusted` counts, even in
+/// a form the scan below does not read, because the cost of a miss is overriding an
+/// explicit denial and the cost of a false hit is only a consent prompt.
 fn codex_marks_untrusted(config: &str, paths: &[PathBuf]) -> bool {
     let wanted: Vec<String> = paths.iter().map(|path| normalize_path(&path.to_string_lossy())).collect();
-    codex_untrusted_projects(config).iter().any(|key| wanted.contains(&normalize_path(key)))
+    if codex_untrusted_projects(config).iter().any(|key| wanted.contains(&normalize_path(key))) {
+        return true;
+    }
+    config.lines().map(compact_toml_line).any(|line| {
+        line.contains("untrusted") && quoted_strings(&line).iter().any(|value| wanted.contains(&normalize_path(value)))
+    })
+}
+
+/// Every quoted string in a compacted TOML line, unquoted.
+fn quoted_strings(line: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < line.len() {
+        match leading_quoted(&line[at..]) {
+            Some((value, len)) => {
+                found.push(value);
+                at += len;
+            }
+            None => at += line[at..].chars().next().map_or(1, char::len_utf8),
+        }
+    }
+    found
 }
 
 /// Project paths a codex `config.toml` marks `trust_level = "untrusted"`, in every form
 /// TOML allows for that entry: a `[projects.'<path>']` table, dotted keys or inline
-/// tables under `[projects]`, and a top-level `projects = { ... }` inline table, with
-/// comments anywhere. Not a full TOML parser; anything it cannot read counts as absent.
+/// tables under `[projects]`, a top-level `projects.'<path>'.trust_level` or
+/// `projects = { ... }`, with comments anywhere. Not a full TOML parser; the line
+/// fallback in [`codex_marks_untrusted`] covers what this misses.
 fn codex_untrusted_projects(config: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut section: Option<String> = None;
@@ -146,7 +178,13 @@ fn codex_untrusted_projects(config: &str) -> Vec<String> {
                 }
             }
             Some("projects") => found.extend(untrusted_entries(&line)),
-            None => found.extend(line.strip_prefix("projects=").map(untrusted_entries).unwrap_or_default()),
+            None => {
+                if let Some(table) = line.strip_prefix("projects=") {
+                    found.extend(untrusted_entries(table));
+                } else if let Some(dotted) = line.strip_prefix("projects.") {
+                    found.extend(untrusted_entries(dotted));
+                }
+            }
             _ => {}
         }
     }
@@ -437,6 +475,14 @@ mod tests {
     }
 
     #[test]
+    fn an_unusual_spelling_naming_the_path_with_untrusted_still_counts() {
+        let path = PathBuf::from(r"D:\Code Projects\repo");
+        let odd = "[projects]\n\"D:\\\\Code Projects\\\\repo\" = { \"trust_level\" = \"untrusted\" }\n";
+        assert!(codex_marks_untrusted(odd, &[path.clone()]));
+        assert!(!codex_marks_untrusted("[projects.'D:\\other']\ntrust_level = \"untrusted\"\n", &[path]));
+    }
+
+    #[test]
     fn spawn_trust_needs_the_session_in_the_agent_id() {
         let temp = tempfile::TempDir::new().unwrap();
         let session = "00000000-0000-4000-8000-000000000466";
@@ -454,6 +500,8 @@ mod tests {
         assert!(spawn_trust_args("codex", &id, Some(&cwd), &elsewhere, &store, &[]).is_empty());
         // No roster answer (unknown session, or a spawn racing the roster lock): none either.
         assert!(spawn_trust_args("codex", &id, Some(&cwd), &|_: &str| None, &store, &[]).is_empty());
+        // Another seat of the same session spawned into worker-1's worktree: none.
+        assert!(spawn_trust_args("codex", &format!("{session}-worker-2"), Some(&cwd), &recorded, &store, &[]).is_empty());
     }
 
     #[test]
@@ -528,6 +576,8 @@ mod tests {
             format!("[projects]\n'{path}' = {{ trust_level = \"untrusted\" }}\n"),
             format!("[projects]\n'{path}'.trust_level = \"untrusted\"\n"),
             format!("projects = {{ 'D:\\x' = {{ trust_level = \"trusted\" }}, '{path}' = {{ trust_level = \"untrusted\" }} }}\n"),
+            format!("projects.'{path}'.trust_level = 'untrusted'\n"),
+            format!("model = \"x\"\nprojects.\"D:\\\\Code Projects\\\\repo\".trust_level = \"untrusted\" # no\n"),
         ] {
             assert_eq!(marked(&config), [path.to_string()], "{config}");
         }

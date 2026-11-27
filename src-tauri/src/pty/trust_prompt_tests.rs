@@ -116,6 +116,35 @@ fn a_codex_note_wrapped_by_a_narrow_pane_still_yields_its_root() {
     assert_eq!(detect(TrustCli::Codex, &lines).and_then(|prompt| prompt.repo_root), Some(CODEX_ROOT.into()));
 }
 
+#[test]
+fn moving_the_selection_keeps_the_dialog_detected() {
+    let moved = reframe(CODEX_PROMPT, &[
+        ("\u{203a} 1. Trust and continue", "  1. Trust and continue"),
+        ("  2. Back to Agent Command Center", "\u{203a} 2. Back to Agent Command Center"),
+    ]);
+    let shown = detect(TrustCli::Codex, &screen(&moved)).expect("still the codex dialog");
+    assert!(!shown.trust_highlighted);
+    let mut guard = guard(TrustCli::Codex, Instant::now());
+    assert!(matches!(guard.observe(&ring(CODEX_PROMPT), 120, 40, Instant::now()), Some(GuardAction::Detected(_))));
+    let at = CODEX_PROMPT.len() as u64;
+    assert_eq!(guard.observe(&more(at, &moved), 120, 40, Instant::now()), None, "not cleared by a moved selection");
+    assert!(guard.is_surfaced());
+    let agy = String::from_utf8(AGY_PROMPT.to_vec()).unwrap()
+        .replace("> Yes, I trust this folder", "  Yes, I trust this folder").replace("  \u{1b}[38;5;246mNo, exit", "> \u{1b}[38;5;246mNo, exit");
+    assert!(detect(TrustCli::Antigravity, &screen(agy.as_bytes())).is_some());
+}
+
+#[test]
+fn a_codex_question_wrapped_by_a_narrow_pane_is_still_detected() {
+    let mut lines = screen(CODEX_PROMPT);
+    let at = lines.iter().position(|line| line.trim().starts_with("Trust this folder?")).unwrap();
+    let question = lines[at].clone();
+    let (head, tail) = question.split_at(question.find(" Codex can").unwrap());
+    lines[at] = head.to_string();
+    lines.insert(at + 1, format!("  {}", tail.trim()));
+    assert!(detect(TrustCli::Codex, &lines).is_some());
+}
+
 #[cfg(windows)]
 #[test]
 fn a_windows_executable_path_names_its_cli() {
@@ -188,6 +217,16 @@ fn a_cli_that_never_repaints_after_a_resize_is_released_after_the_rebuild_limit(
     assert_eq!(guard.observe(&nothing, 100, 30, t0 + REBUILD_LIMIT - Duration::from_secs(1)), None);
     assert!(matches!(guard.observe(&nothing, 100, 30, t0 + REBUILD_LIMIT), Some(GuardAction::Cleared(_))),
         "the status cannot be held forever by a pane that never repaints");
+}
+
+#[test]
+fn an_oversized_pty_does_not_reset_the_grid_every_turn() {
+    let t0 = Instant::now();
+    let mut guard = TrustPromptGuard::new(TrustCli::Antigravity, 2000, 900, t0);
+    assert!(matches!(guard.observe(&ring(AGY_PROMPT), 2000, 900, t0), Some(GuardAction::Detected(_))));
+    let at = AGY_PROMPT.len() as u64;
+    assert_eq!(guard.observe(&more(at, b"\x1b[50;1Htick"), 2000, 900, t0 + Duration::from_secs(5)), None);
+    assert!(guard.is_surfaced(), "the prompt is still on the kept grid");
 }
 
 #[test]

@@ -80,7 +80,7 @@ impl SessionController {
             };
             match self.observe_trust_prompt(&session.id, &agent.id, cli, now) {
                 Some(Observation::Action(instance, action)) => {
-                    outcomes.push(self.report_trust_prompt(&session, agent, instance, cli, action));
+                    outcomes.extend(self.report_trust_prompt(&session, agent, instance, cli, action));
                 }
                 Some(Observation::Replaced) => self.drop_inherited_trust_status(&session.id, &agent.id),
                 None => {}
@@ -126,17 +126,19 @@ impl SessionController {
 
     fn report_trust_prompt(
         &self, session: &Session, agent: &AgentInfo, instance: Uuid, cli: TrustCli, action: GuardAction,
-    ) -> TrustPromptOutcome {
+    ) -> Option<TrustPromptOutcome> {
         let name = match action {
             GuardAction::Detected(_) => "detected",
             GuardAction::Cleared(_) => "cleared",
         };
-        // The known spawn folder, so nothing read off the screen reaches anyone.
-        let path = self
-            .pty_manager
-            .read()
-            .spawn_cwd(&agent.id)
-            .unwrap_or_else(|| "(unknown folder)".to_string());
+        // The known spawn folder, so nothing read off the screen reaches anyone, and only
+        // while the observed instance is still the one running: a respawn in between
+        // gets no notice about its predecessor's prompt.
+        let path = {
+            let manager = self.pty_manager.read();
+            manager.with_current_instance(&agent.id, instance, |_| manager.spawn_cwd(&agent.id))?
+        }
+        .unwrap_or_else(|| "(unknown folder)".to_string());
         let outcome = TrustPromptOutcome { agent_id: agent.id.clone(), adapter: cli.name(), path, action: name };
         if name == "detected" {
             tracing::warn!(agent = %agent.id, adapter = cli.name(), path = %outcome.path, "folder-trust prompt needs the operator");
@@ -148,7 +150,7 @@ impl SessionController {
             self.emit_session_update(&session.id);
         }
         self.publish_trust_prompt(session, agent, &outcome);
-        outcome
+        Some(outcome)
     }
 
     /// Set the trust-prompt status for the agent's current instance, remembering what it

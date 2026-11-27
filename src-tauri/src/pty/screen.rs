@@ -43,6 +43,11 @@ pub struct Screen {
 }
 
 impl Screen {
+    /// The grid size a screen for a `cols` x `rows` terminal actually has.
+    pub fn clamped(cols: u16, rows: u16) -> (u16, u16) {
+        ((cols as usize).clamp(1, MAX_COLS) as u16, (rows as usize).clamp(1, MAX_ROWS) as u16)
+    }
+
     pub fn new(cols: u16, rows: u16) -> Self {
         let cols = (cols as usize).clamp(1, MAX_COLS);
         let rows = (rows as usize).clamp(1, MAX_ROWS);
