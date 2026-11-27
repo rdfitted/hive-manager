@@ -1,1 +1,2 @@
 tools/judgment/tests/fixtures/retrieval-parity/*.json text eol=lf
+src-tauri/src/pty/trust_prompt_fixtures/*.bin binary

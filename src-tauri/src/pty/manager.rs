@@ -443,6 +443,8 @@ pub struct PtyManager {
     retired_output: RwLock<HashMap<String, Arc<Mutex<super::output_ring::OutputRing>>>>,
     /// Actual spawn arguments, retained after close for transcript attribution.
     spawn_cwds: RwLock<HashMap<String, String>>,
+    pty_sizes: RwLock<HashMap<String, (u16, u16)>>, // #466: screen models match the PTY
+    session_projects: RwLock<Option<super::manager_trust::SessionProjects>>, // #466: pre-trust check
     transports: RwLock<Option<Arc<crate::transport::TransportRegistry>>>,
     agent_transports: RwLock<HashMap<String, crate::domain::agent_transport::AgentTransports>>,
     starting_transports: RwLock<HashMap<String, Arc<dyn crate::transport::AgentTransport>>>,
@@ -480,6 +482,8 @@ impl PtyManager {
             instances: Arc::new(RwLock::new(HashMap::new())),
             retired_output: RwLock::new(HashMap::new()),
             spawn_cwds: RwLock::new(HashMap::new()),
+            pty_sizes: RwLock::new(HashMap::new()),
+            session_projects: RwLock::new(None),
             transports: RwLock::new(None),
             agent_transports: RwLock::new(HashMap::new()),
             starting_transports: RwLock::new(HashMap::new()),
@@ -954,6 +958,8 @@ impl PtyManager {
 
         // Reverse local drop order is intentional: failed construction must
         // release lifecycle before its unpublished console and drain are closed.
+        // #466: file and roster reads, before the lifecycle lock other spawns wait on.
+        let trust_flags = self.spawn_trust_args(command, &id, cwd, &agent_store::store_dir_for(&id), args);
         let mut construction_cleanup = None;
         let mut lifecycle_guard = self.lifecycle.lock();
         loop {
@@ -1016,9 +1022,10 @@ impl PtyManager {
             }
         };
 
-        // Isolation flags go in front so the CLI's trailing positional prompt stays last.
+        // Isolation and trust flags go in front so the CLI's trailing positional prompt stays last.
         let effective_args: Vec<&str> = isolation_flags
             .iter()
+            .chain(&trust_flags)
             .map(String::as_str)
             .chain(args.iter().copied())
             .collect();
@@ -1030,6 +1037,7 @@ impl PtyManager {
         if let Some((_, _, token)) = &credential {
             identity_env.push(("HIVE_AGENT_TOKEN".to_string(), token.clone()));
         }
+        identity_env.extend(crate::adapters::agy_spawn_env(command)); // after the credential
         // Fail at the constructor boundary without changing the shared PTY stub.
         #[cfg(test)]
         if args.contains(&"--stub-create-fails") {
@@ -1066,6 +1074,7 @@ impl PtyManager {
             sessions.insert(id.clone(), Arc::clone(&session));
             self.instances.write().insert(id.clone(), instance);
             self.record_spawn_cwd(&id, cwd);
+            self.pty_sizes.write().insert(id.clone(), (cols, rows));
         }
 
         // Start the output reader thread.
@@ -1241,7 +1250,7 @@ impl PtyManager {
         if crate::instance::is_isolated() && !sessions.contains_key(id) { return Ok(()); }
         let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
         tracing::debug!("Resizing PTY {} to {}x{}", id, cols, rows);
-        session.resize(cols, rows)
+        session.resize(cols, rows).map(|()| { self.pty_sizes.write().insert(id.to_string(), (cols, rows)); })
     }
 
     /// Identity of the current runtime, including a protocol seat still starting.
@@ -1342,6 +1351,7 @@ impl PtyManager {
             {
                 sessions.remove(id);
                 self.heartbeat_credentials.write().remove(id);
+                self.pty_sizes.write().remove(id);
             }
         }
         self.heartbeat_credentials.write().remove(id);
@@ -1440,7 +1450,7 @@ impl PtyManager {
             .map(|session| session.env_removed().to_vec())
     }
 
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub fn write_records_for_test(&self, id: &str) -> Option<Vec<Vec<u8>>> {
         let sessions = self.sessions.read();
         sessions.get(id).map(|session| session.write_records())
@@ -1483,6 +1493,9 @@ impl Default for PtyManager {
         Self::new()
     }
 }
+
+#[path = "manager_trust.rs"]
+pub mod manager_trust; // #466 accessors for the trust-prompt sweep
 
 #[cfg(test)]
 mod cross_platform_spawn_tests {

@@ -17,6 +17,23 @@ use crate::cli::CliRegistry;
 
 use super::{AgentLaunchSpec, AgentSignal, BootstrapContext, CliAdapter, LaunchCommand};
 
+/// Environment variable that stops agy's background auto-updater.
+pub const AGY_DISABLE_AUTO_UPDATE_ENV: &str = "AGY_CLI_DISABLE_AUTO_UPDATE";
+
+/// Environment every agy process gets, whatever builds its command line. The PTY spawn
+/// choke point applies this; `build_launch_command` sets it too.
+pub fn agy_spawn_env(command: &str) -> Vec<(String, String)> {
+    let is_agy = std::path::Path::new(command)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("agy") || stem.eq_ignore_ascii_case("antigravity"));
+    if is_agy {
+        vec![(AGY_DISABLE_AUTO_UPDATE_ENV.to_string(), "true".to_string())]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Antigravity CLI (`agy`) adapter.
 pub struct AntigravityAdapter;
 
@@ -39,6 +56,10 @@ impl CliAdapter for AntigravityAdapter {
         }
         cmd = cmd.args(flags);
         cmd = cmd.envs(spec.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        // agy's background auto-updater runs whenever its last update check is over 15
+        // minutes old, and it opens a visible PseudoConsoleWindow. Only `true` disables
+        // it; `1` is ignored (rdfitted/review-gate#4). Set last so a spec cannot undo it.
+        cmd = cmd.env(AGY_DISABLE_AUTO_UPDATE_ENV, "true");
 
         // inline_task is solo/single-shot mode: `-p` runs one prompt and exits.
         // prompt_file is worker mode where the agent stays alive: `-i` starts
@@ -170,6 +191,20 @@ mod tests {
         let prompt_at = cmd.args.iter().position(|arg| arg == "-i").unwrap();
         assert_eq!(cmd.args[prompt_at + 1], "Read /project/task.md and execute.");
         assert!(!cmd.args.contains(&"-p".to_string()));
+    }
+
+    #[test]
+    fn every_agy_spawn_disables_the_windowed_auto_updater() {
+        let mut spec = make_spec();
+        let worker = AntigravityAdapter.build_launch_command(&spec);
+        assert_eq!(worker.env.get("AGY_CLI_DISABLE_AUTO_UPDATE").map(String::as_str), Some("true"));
+
+        spec.prompt_file = None;
+        spec.inline_task = Some("Fix the bug".to_string());
+        spec.env.insert("AGY_CLI_DISABLE_AUTO_UPDATE".to_string(), "1".to_string());
+        let solo = AntigravityAdapter.build_launch_command(&spec);
+        assert_eq!(solo.env.get("AGY_CLI_DISABLE_AUTO_UPDATE").map(String::as_str), Some("true"),
+            "`1` is ignored by agy, so a spec value never replaces `true`");
     }
 
     #[test]

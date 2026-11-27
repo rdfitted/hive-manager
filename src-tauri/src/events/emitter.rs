@@ -12,6 +12,17 @@ pub struct EventEmitter {
     bus: Arc<EventBus>,
 }
 
+/// The payload of a trust-prompt event (#466). `detected` goes out as
+/// `agent_waiting_input`, `cleared` as `agent_input_resolved`; `path` is the agent's known
+/// spawn folder.
+pub struct TrustPromptEvent<'a> {
+    pub adapter: &'a str,
+    pub path: &'a str,
+    pub action: &'a str,
+    /// The PTY instance observed, so a consumer can drop an event that outlived it.
+    pub instance_id: &'a str,
+}
+
 impl EventEmitter {
     pub fn new(bus: Arc<EventBus>) -> Self {
         Self { bus }
@@ -123,6 +134,28 @@ impl EventEmitter {
     ) -> Result<(), String> {
         self.emit(session_id, Some(cell_id), Some(agent_id), EventType::AgentWaitingInput, Severity::Warning, json!({
             "prompt": prompt,
+        })).await
+    }
+
+    /// A folder-trust prompt on an agent's terminal (#466): what Hive Manager did about it.
+    pub async fn emit_agent_trust_prompt(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+        agent_id: &str,
+        prompt: &TrustPromptEvent<'_>,
+    ) -> Result<(), String> {
+        let (event_type, severity) = if prompt.action == "detected" {
+            (EventType::AgentWaitingInput, Severity::Warning)
+        } else {
+            (EventType::AgentInputResolved, Severity::Info)
+        };
+        self.emit(session_id, Some(cell_id), Some(agent_id), event_type, severity, json!({
+            "prompt": "trust_prompt",
+            "adapter": prompt.adapter,
+            "path": prompt.path,
+            "action": prompt.action,
+            "instance_id": prompt.instance_id,
         })).await
     }
 

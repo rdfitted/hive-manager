@@ -7,6 +7,8 @@ pub mod tests;
 #[cfg(test)]
 pub mod tests_agent_events;
 #[cfg(test)]
+mod tests_trust_prompt;
+#[cfg(test)]
 pub mod tests_transport;
 #[cfg(test)]
 mod tests_plan_continue;
