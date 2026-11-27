@@ -28,7 +28,7 @@ const ladderCells = [
   { provider: 'codex', tier: 'low', model: 'gpt-6-luna', flags: ['-c', 'model_reasoning_effort="medium"'] },
   { provider: 'codex', tier: 'medium', model: 'gpt-6.2-sol', flags: ['-c', 'model_reasoning_effort="medium"'] },
   { provider: 'codex', tier: 'high', model: 'gpt-6.2-sol', flags: ['-c', 'model_reasoning_effort="xhigh"'] },
-  { provider: 'codex', tier: 'critical', model: 'gpt-6.2-astra', flags: ['-c', 'model_reasoning_effort="max"'] },
+  { provider: 'codex', tier: 'critical', model: 'gpt-6.2-sol', flags: ['-c', 'model_reasoning_effort="max"'] },
 ];
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -179,7 +179,8 @@ describe('LaunchDialog tier routing', () => {
     const codexLadder = view.getByLabelText('Codex tier ladder').textContent;
     expect(codexLadder).toContain('gpt-6-luna');
     expect(codexLadder).toContain('gpt-6.2-sol');
-    expect(codexLadder).toContain('gpt-6.2-astra');
+    expect(codexLadder).toContain('model_reasoning_effort="max"');
+    expect(codexLadder).not.toContain('astra');
     expect(codexLadder).toContain('model_reasoning_effort="xhigh"');
     expect(fetch).toHaveBeenCalledWith(expect.stringMatching(
       /\/api\/tier-ladder\?project_path=C%3A%2Fcode%2Fproject$/,
