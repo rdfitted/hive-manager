@@ -15,8 +15,8 @@
 //! `running` row with a stale (or absent) heartbeat as claimable, which is the
 //! reclaim-after-cutoff guarantee folded into the same statement. Dependency readiness is
 //! part of that SAME `UPDATE`: a correlated `NOT EXISTS` rejects a row until every recorded
-//! prerequisite has a finalized queue row or a validated external completion. There is
-//! deliberately no check-then-claim pre-read.
+//! prerequisite has a successfully completed queue row or a validated external completion.
+//! There is deliberately no check-then-claim pre-read.
 //!
 //! The queue table is the SOURCE OF TRUTH for sub-agent runs; the in-memory
 //! `Session.agents` Vec is a UI cache that is reconciled against this table on resume.
@@ -29,6 +29,9 @@ use serde::{Deserialize, Serialize};
 
 use super::application_state::ApplicationStateDb;
 use super::StorageError;
+
+/// Reserved outcome for budget exhaustion; workers cannot send this heartbeat status.
+pub const EXHAUSTED_LAST_STATUS: &str = "exhausted";
 
 /// Lifecycle status of a queued sub-agent run.
 ///
@@ -834,6 +837,7 @@ impl QueueRepo {
                              WHERE prerequisite.session_id = dependency.session_id
                                AND prerequisite.task_id = dependency.prerequisite_task_id
                                AND prerequisite.status = 'finalized'
+                               AND prerequisite.last_status = 'completed'
                          )
                          AND NOT EXISTS (
                              SELECT 1
@@ -901,6 +905,7 @@ impl QueueRepo {
                        WHERE prerequisite.session_id = dependency.session_id
                          AND prerequisite.task_id = dependency.prerequisite_task_id
                          AND prerequisite.status = 'finalized'
+                         AND prerequisite.last_status = 'completed'
                    )
                    AND NOT EXISTS (
                        SELECT 1
@@ -1296,7 +1301,8 @@ impl QueueRepo {
                              SELECT 1 FROM agent_run_queue AS prerequisite
                              WHERE prerequisite.session_id = ?6
                                AND prerequisite.task_id = dep.prerequisite_task_id
-                               AND prerequisite.status = 'finalized')
+                               AND prerequisite.status = 'finalized'
+                               AND prerequisite.last_status = 'completed')
                          AND NOT EXISTS (
                              SELECT 1 FROM agent_run_queue_external_completions AS external
                              WHERE external.session_id = ?6
@@ -1593,10 +1599,10 @@ impl QueueRepo {
             if !ids.is_empty() {
                 conn.execute(
                     "UPDATE agent_run_queue
-                     SET status = 'finalized', updated_at = ?3
+                     SET status = 'finalized', last_status = ?4, updated_at = ?3
                      WHERE status IN ('queued', 'running')
                        AND (continuation_count >= ?1 OR no_progress_count >= ?2)",
-                    params![max_continuations, max_no_progress, now_ms],
+                    params![max_continuations, max_no_progress, now_ms, EXHAUSTED_LAST_STATUS],
                 )?;
             }
             Ok(ids)
@@ -1914,6 +1920,64 @@ mod tests {
         let repo = QueueRepo::new(db);
         repo.ensure_schema().unwrap();
         repo
+    }
+
+    fn dependency_fixture(completed: bool) -> QueueRepo {
+        let repo = repo();
+        for (id, deps) in [("T0", vec![]), ("T1", vec!["T0".into()])] {
+            let mut row = sample_row(id, "s1", id);
+            row.task_id = Some(id.into());
+            repo.enqueue_with_dependencies(&row, &deps).unwrap();
+        }
+        assert!(repo.try_claim("T0", 0, 2000).unwrap().is_some());
+        if completed {
+            assert!(repo.record_heartbeat("s1", "T0", "completed", 3000).unwrap());
+        } else {
+            for now in 3000..3006 {
+                assert!(repo.record_heartbeat("s1", "T0", "working", now).unwrap());
+            }
+            assert_eq!(repo.finalize_no_progress(8, 5, 4000).unwrap(), vec!["T0"]);
+        }
+        repo
+    }
+
+    #[test]
+    fn exhausted_prerequisite_blocks_claim() {
+        let repo = dependency_fixture(false);
+        assert!(repo.try_claim("T1", 0, 5000).unwrap().is_none());
+        assert_eq!(repo.pending_dependencies("T1").unwrap(), vec!["T0"]);
+        let prerequisite = repo.get_row("T0").unwrap().unwrap();
+        assert_eq!(prerequisite.status, QueueStatus::Finalized);
+        assert_eq!(prerequisite.last_status.as_deref(), Some("exhausted"));
+    }
+
+    #[test]
+    fn exhausted_prerequisite_remains_pending() {
+        let repo = dependency_fixture(false);
+        assert_eq!(repo.pending_dependencies("T1").unwrap(), vec!["T0"]);
+    }
+
+    #[test]
+    fn exhausted_prerequisite_blocks_reassignment() {
+        let repo = dependency_fixture(false);
+        let before = repo.get_row("T1").unwrap().unwrap();
+        assert!(matches!(repo.reassign_with_preparation("s1",
+            &[QueueReassignment::new(before.clone(), "new-worker".into())], 5000,
+            || panic!("exhausted prerequisite must block before graph writes"), || Ok(())),
+            Err(QueueReassignmentError::Conflict(_))));
+        assert_eq!(repo.get_row("T1").unwrap().unwrap(), before);
+    }
+
+    #[test]
+    fn completed_prerequisite_allows_claim_and_reassignment() {
+        let repo = dependency_fixture(true);
+        assert!(repo.pending_dependencies("T1").unwrap().is_empty());
+        assert!(repo.try_claim("T1", 0, 5000).unwrap().is_some());
+        let before = repo.get_row("T1").unwrap().unwrap();
+        repo.reassign_with_preparation("s1",
+            &[QueueReassignment::new(before, "new-worker".into())], 6000,
+            || Ok(()), || Ok(())).unwrap();
+        assert_eq!(repo.get_row("T1").unwrap().unwrap().worker_id, "new-worker");
     }
 
     /// #175(d). The release must be fenced on the claim epoch, not just on

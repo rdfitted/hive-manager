@@ -9197,7 +9197,7 @@ A 4xx here is actionable — read `reason` before retrying.
 | Status | `reason` | What it means | What to do |
 |--------|----------|---------------|------------|
 | 409 | `already_claimed` | This worker index is already claimed and running | STOP. Do not retry — you would double-spawn. Check `GET /workers` |
-| 409 | `dependencies_pending` | The task is queued because declared prerequisites were not finalized when the atomic claim ran, or another claim briefly reserved the same roster slot | Read `blocking_task_ids`, refresh `GET /workers` and `GET /queue`, keep working on other ready tasks, and retry this exact request after readiness changes. The list is advisory, may already be stale, and can be empty after a race. |
+| 409 | `dependencies_pending` | The task is queued because declared prerequisites had not completed successfully when the atomic claim ran, or another claim briefly reserved the same roster slot. A prerequisite that ran out of budget shows as `failed` and stays blocking | Read `blocking_task_ids`, refresh `GET /workers` and `GET /queue`, keep working on other ready tasks, and retry this exact request after readiness changes. The list is advisory, may already be stale, and can be empty after a race. |
 | 409 | `session_state` | The session cannot accept workers right now (see `current_state`) | Do not retry blindly. Resolve the state first (e.g. an unresolved QA verdict) |
 | 409 | `index_raced` | The roster moved between reservation and spawn | Re-read `GET /workers`, then retry ONCE |
 | 409 | `spawn_failed` | The spawn failed repeatedly and the queue row was retired (`attempts` included) | Call the release endpoint in `recovery`, then retry once |
