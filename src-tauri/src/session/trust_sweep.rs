@@ -227,14 +227,14 @@ impl SessionController {
             return;
         };
         let changed = {
-            // Same lock order as `report_trust_prompt`: PTY instances, then the roster.
-            // The instance stays held until the status is written, so a same-id respawn
-            // can't land between the check and the write and inherit the exit.
+            // Same lock order as `set_trust_prompt_status`: PTY manager, roster, then the
+            // PTY instance. The instance stays held until the status is written, so a
+            // same-id respawn can't land between the check and the write and inherit the exit.
             let manager = self.pty_manager.read();
+            let mut sessions = self.sessions.write();
             manager.with_instance_held(&agent.id, |current| {
                 let replaced = current.is_some_and(|current| current != ended);
                 let next = if exited && !replaced { AgentStatus::Error(TRUST_PROMPT_EXIT.to_string()) } else { prior };
-                let mut sessions = self.sessions.write();
                 sessions
                     .get_mut(&session.id)
                     .and_then(|live| live.agents.iter_mut().find(|live| live.id == agent.id))

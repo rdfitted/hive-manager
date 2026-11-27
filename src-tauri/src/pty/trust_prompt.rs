@@ -28,12 +28,20 @@ const CLEAR_TAIL: usize = 7;
 /// Whether `bytes` redraw the whole screen from blank: erase display, full reset, or a
 /// switch into or out of the alternate screen (agy leaves its trust dialog that way).
 fn clears_screen(bytes: &[u8]) -> bool {
+    clears_screen_after(bytes, 0)
+}
+
+/// Whether `bytes` hold a full-screen clear that ends after the first `carried` bytes,
+/// which were already seen in an earlier read.
+fn clears_screen_after(bytes: &[u8], carried: usize) -> bool {
     [
         b"\x1b[2J".as_slice(), b"\x1bc", b"\x1b[?1049h", b"\x1b[?1049l", b"\x1b[?1047h", b"\x1b[?1047l",
         b"\x1b[?47h", b"\x1b[?47l",
     ]
         .iter()
-        .any(|needle| bytes.windows(needle.len()).any(|window| window == *needle))
+        .any(|needle| {
+            bytes.windows(needle.len()).enumerate().any(|(at, window)| window == *needle && at + needle.len() > carried)
+        })
 }
 
 /// The status reason set while a trust prompt is on screen.
@@ -244,8 +252,6 @@ pub struct TrustPromptGuard {
     /// Set when the grid was thrown away (resize or eviction). While set, a prompt is
     /// never reported cleared.
     rebuilding: bool,
-    /// A full-screen clear arrived since the rebuild began, in any read.
-    rebuild_cleared: bool,
     /// The end of the last read, so a clear split across reads still counts.
     clear_tail: Vec<u8>,
     state: GuardState,
@@ -259,7 +265,6 @@ impl TrustPromptGuard {
             screen: Screen::new(cols, rows),
             fed_to: None,
             rebuilding: false,
-            rebuild_cleared: false,
             clear_tail: Vec::new(),
             state: GuardState::Watching,
         }
@@ -328,19 +333,21 @@ impl TrustPromptGuard {
     fn still_rebuilding(&mut self, reset: bool, new: &[u8], shown: bool, lines: &[String]) -> bool {
         if reset {
             self.rebuilding = true;
-            self.rebuild_cleared = false;
             self.clear_tail.clear();
         }
         let mut seen = std::mem::take(&mut self.clear_tail);
+        let carried = seen.len();
         seen.extend_from_slice(new);
         self.clear_tail = seen[seen.len().saturating_sub(CLEAR_TAIL)..].to_vec();
         if !self.rebuilding {
             return false;
         }
-        // A clear and the content after it may arrive in different reads.
-        self.rebuild_cleared |= clears_screen(&seen);
+        // A clear counts with the content drawn in the same read, even when its escape
+        // sequence started at the end of the previous read. A clear whose content comes
+        // in later reads needs MIN_FRAME_ROWS rows like any frame: a partial repaint of a
+        // still-open dialog must not end the notice.
         let drawn = lines.iter().filter(|line| !line.trim().is_empty()).count();
-        let whole_frame = !new.is_empty() && ((self.rebuild_cleared && drawn > 0) || drawn >= MIN_FRAME_ROWS);
+        let whole_frame = !new.is_empty() && ((clears_screen_after(&seen, carried) && drawn > 0) || drawn >= MIN_FRAME_ROWS);
         if shown || whole_frame {
             self.rebuilding = false;
             return false;

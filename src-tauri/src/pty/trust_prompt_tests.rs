@@ -229,11 +229,13 @@ fn a_clear_split_across_reads_still_ends_the_rebuild() {
     // Resize, then the CLI's clear arrives split over two reads, with one line after it.
     assert_eq!(guard.observe(&more(len, b"\x1b[2"), 100, 30, t0), None);
     assert!(matches!(guard.observe(&more(len + 3, b"J\x1b[Hdone"), 100, 30, t0), Some(GuardAction::Cleared(_))));
-    // A clear in one read and its content in the next counts too.
+    // A clear whose content comes in a later read needs a whole frame: one row could be
+    // the start of the same dialog being repainted.
     let mut guard = self::guard(TrustCli::Antigravity, t0);
     let _ = guard.observe(&ring(AGY_PROMPT), 120, 40, t0);
     assert_eq!(guard.observe(&more(len, b"\x1b[2J"), 100, 30, t0), None, "a clear alone draws nothing yet");
-    assert!(matches!(guard.observe(&more(len + 4, b"\x1b[Hdone"), 100, 30, t0), Some(GuardAction::Cleared(_))));
+    assert_eq!(guard.observe(&more(len + 4, b"\x1b[Hone"), 100, 30, t0), None, "one row in a later read is not a frame");
+    assert!(matches!(guard.observe(&more(len + 9, b"\r\ntwo\r\nthree"), 100, 30, t0), Some(GuardAction::Cleared(_))));
 }
 
 #[test]
