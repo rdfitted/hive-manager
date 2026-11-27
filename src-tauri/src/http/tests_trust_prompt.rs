@@ -320,6 +320,29 @@ async fn a_seat_that_exits_or_disappears_at_its_prompt_is_not_left_waiting() {
     }
     let _ = sweep(&h.state, Instant::now());
     let _ = sweep(&h.state, Instant::now());
-    assert_ne!(status(&h.state, &worker(1)), waiting(), "an exited seat is not waiting on anyone");
+    // worker-1 has a new PTY instance: its predecessor's exit never marks it failed.
+    assert_eq!(status(&h.state, &worker(1)), AgentStatus::Running, "the replacement keeps the status the prompt replaced");
     assert_eq!(status(&h.state, &worker(2)), AgentStatus::Error("exited_at_trust_prompt".into()));
+    // Both prompts are reported resolved, each under the instance that showed it.
+    wait_for(|| trust_events(&h.state).iter().filter(|event| event["event_type"] == "agent_input_resolved").count() == 2).await;
+    let resolved: Vec<_> = trust_events(&h.state).into_iter().filter(|event| event["event_type"] == "agent_input_resolved").collect();
+    assert_eq!(resolved.len(), 2);
+    let detected: Vec<_> = trust_events(&h.state).into_iter().filter(|event| event["event_type"] == "agent_waiting_input").collect();
+    for done in &resolved {
+        assert!(detected.iter().any(|up| up["agent_id"] == done["agent_id"] && up["payload"]["instance_id"] == done["payload"]["instance_id"]),
+            "a resolution names the instance whose prompt it ends: {done}");
+    }
+}
+
+#[tokio::test]
+async fn a_trust_prompt_status_persisted_by_an_earlier_run_is_reset() {
+    let h = hive(&["antigravity"]);
+    set_status(&h.state, &worker(1), waiting());
+    let cwd = h.worktree("worker-1");
+    h.spawn(1, "antigravity", &cwd);
+    assert!(sweep(&h.state, Instant::now()).is_empty());
+    assert_eq!(status(&h.state, &worker(1)), AgentStatus::Running, "no record behind it: stale from a previous run");
+    // If the prompt is in fact still up, the fresh guard surfaces it again.
+    output(&h.state, &worker(1), AGY_PROMPT);
+    assert_eq!(sweep(&h.state, Instant::now()), [(worker(1), "detected")]);
 }

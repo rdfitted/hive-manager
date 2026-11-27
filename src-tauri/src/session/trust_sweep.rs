@@ -37,10 +37,10 @@ pub struct TrustPromptOutcome {
 /// What one agent's observation found.
 enum Observation {
     Action(Uuid, GuardAction),
-    /// The PTY was replaced since the last sweep (same-id respawn).
-    Replaced,
-    /// The PTY exited or was removed.
-    Exited,
+    /// The PTY instance named was replaced since the last sweep (same-id respawn).
+    Replaced(Uuid),
+    /// The PTY instance named exited or was removed.
+    Exited(Uuid),
 }
 
 impl SessionController {
@@ -84,13 +84,13 @@ impl SessionController {
             let Some(cli) = TrustCli::from_cli(&agent.config.cli) else {
                 continue;
             };
+            self.drop_stale_trust_status(&session.id, &agent.id);
             match self.observe_trust_prompt(&session.id, &agent.id, cli, now) {
                 Some(Observation::Action(instance, action)) => {
                     outcomes.extend(self.report_trust_prompt(&session, agent, instance, cli, action));
                 }
-                Some(Observation::Replaced) => self.drop_inherited_trust_status(&session.id, &agent.id, None),
-                Some(Observation::Exited) => self.drop_inherited_trust_status(
-                    &session.id, &agent.id, Some(AgentStatus::Error(TRUST_PROMPT_EXIT.to_string()))),
+                Some(Observation::Replaced(ended)) => self.end_trust_prompt(&session, agent, cli, ended, false),
+                Some(Observation::Exited(ended)) => self.end_trust_prompt(&session, agent, cli, ended, true),
                 None => {}
             }
         }
@@ -105,7 +105,7 @@ impl SessionController {
         let key = (session_id.to_string(), agent_id.to_string());
         let Some(instance) = manager.instance_id(agent_id) else {
             // The PTY is gone: nobody can answer a prompt it showed.
-            return self.trust_guards.write().remove(&key).map(|_| Observation::Exited);
+            return self.trust_guards.write().remove(&key).map(|(seen, _)| Observation::Exited(seen));
         };
         let mut guards = self.trust_guards.write();
         let previous = guards.get(&key).map(|(seen, _)| *seen);
@@ -118,8 +118,8 @@ impl SessionController {
             let started = now.checked_sub(age).unwrap_or(now);
             let (cols, rows) = manager.pty_size(agent_id).unwrap_or(FALLBACK_SIZE);
             guards.insert(key.clone(), (instance, TrustPromptGuard::new(cli, cols, rows, started)));
-            if previous.is_some() {
-                return Some(Observation::Replaced);
+            if let Some(previous) = previous {
+                return Some(Observation::Replaced(previous));
             }
         }
         let guard = &mut guards.get_mut(&key)?.1;
@@ -127,7 +127,7 @@ impl SessionController {
             // The process exited: release the screen and drop any status its prompt set.
             let surfaced = guard.is_active(now);
             guard.finish();
-            return surfaced.then_some(Observation::Exited);
+            return surfaced.then_some(Observation::Exited(instance));
         }
         if !guard.is_active(now) {
             guard.finish(); // release the screen; the instance marker stays
@@ -209,22 +209,61 @@ impl SessionController {
         })?
     }
 
-    /// A `trust_prompt` status must not outlive the PTY whose prompt set it. After a
-    /// same-id respawn, put back what that prompt replaced; after an exit, `exited`, since
-    /// nothing is waiting any more. Forget the predecessor's record either way.
-    fn drop_inherited_trust_status(&self, session_id: &str, agent_id: &str, exited: Option<AgentStatus>) {
-        let key = (session_id.to_string(), agent_id.to_string());
-        let Some((_, prior)) = self.trust_prior_status.write().remove(&key) else {
+    /// A `trust_prompt` status must not outlive the PTY whose prompt set it. `ended` is
+    /// that PTY instance. Only its own record is consumed. After a same-id respawn (a
+    /// different instance now runs), the status the prompt replaced is put back. After
+    /// an exit with no replacement, the agent shows `exited_at_trust_prompt`, since
+    /// nobody is waiting any more. Either way an `agent_input_resolved` event follows.
+    fn end_trust_prompt(&self, session: &Session, agent: &AgentInfo, cli: TrustCli, ended: Uuid, exited: bool) {
+        let key = (session.id.clone(), agent.id.clone());
+        let prior = {
+            let mut records = self.trust_prior_status.write();
+            match records.get(&key) {
+                Some((owner, _)) if *owner == ended => records.remove(&key).map(|(_, status)| status),
+                _ => None,
+            }
+        };
+        let Some(prior) = prior else {
             return;
         };
-        let before = exited.unwrap_or(prior);
+        let changed = {
+            // Same lock order as `flag_dead_startup_seats`: PTY manager, then the roster.
+            let manager = self.pty_manager.read();
+            let replaced = manager.instance_id(&agent.id).is_some_and(|current| current != ended);
+            let next = if exited && !replaced { AgentStatus::Error(TRUST_PROMPT_EXIT.to_string()) } else { prior };
+            let mut sessions = self.sessions.write();
+            sessions
+                .get_mut(&session.id)
+                .and_then(|live| live.agents.iter_mut().find(|live| live.id == agent.id))
+                .filter(|live| live.status == AgentStatus::WaitingForInput(TRUST_PROMPT_STATUS.to_string()))
+                .map(|live| live.status = next)
+                .is_some()
+        };
+        if changed {
+            self.update_session_storage(&session.id);
+            self.emit_session_update(&session.id);
+        }
+        let path = self.pty_manager.read().spawn_cwd(&agent.id).unwrap_or_else(|| "(unknown folder)".to_string());
+        let outcome = TrustPromptOutcome { agent_id: agent.id.clone(), adapter: cli.name(), path, action: "cleared" };
+        self.publish_trust_prompt(session, agent, ended, &outcome);
+    }
+
+    /// A `trust_prompt` status with no prompt record behind it was persisted by an
+    /// earlier run of the app (the records live in memory). Put the agent back to
+    /// `Running`; if its prompt is still up, the new guard surfaces it again.
+    fn drop_stale_trust_status(&self, session_id: &str, agent_id: &str) {
+        let key = (session_id.to_string(), agent_id.to_string());
+        if self.trust_prior_status.read().contains_key(&key) || self.trust_guards.read().contains_key(&key) {
+            return;
+        }
+        let waiting = AgentStatus::WaitingForInput(TRUST_PROMPT_STATUS.to_string());
         let changed = {
             let mut sessions = self.sessions.write();
             sessions
                 .get_mut(session_id)
                 .and_then(|live| live.agents.iter_mut().find(|live| live.id == agent_id))
-                .filter(|live| live.status == AgentStatus::WaitingForInput(TRUST_PROMPT_STATUS.to_string()))
-                .map(|live| live.status = before)
+                .filter(|live| live.status == waiting)
+                .map(|live| live.status = AgentStatus::Running)
                 .is_some()
         };
         if changed {

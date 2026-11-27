@@ -70,7 +70,7 @@ pub fn spawn_trust_args(
     let (Some(recorded), Some(project)) = (project_of(session), managed_worktree_project(cwd, session)) else {
         return Vec::new();
     };
-    if normalize_path(&recorded.to_string_lossy()) != normalize_path(&project.to_string_lossy()) {
+    if !same_path(&recorded, &project) {
         return Vec::new();
     }
     trust_args(command, cwd, session, store_dir, args)
@@ -101,258 +101,93 @@ pub fn operator_sets_trust(command: &str, args: &[&str]) -> bool {
     }
 }
 
-/// [`operator_sets_trust`], or a codex project the operator marked
-/// `trust_level = "untrusted"` in their own `config.toml` for this worktree or its root.
-pub fn operator_decides_trust(command: &str, args: &[&str], cwd: Option<&Path>) -> bool {
-    if operator_sets_trust(command, args) {
-        return true;
-    }
-    let (Some("codex"), Some(cwd)) = (cli_stem(command).as_deref(), cwd) else {
+/// [`operator_sets_trust`], or, for codex, any sign in the operator's own `config.toml`
+/// that they set a project's trust by hand. Hive Manager then neither pre-trusts nor
+/// answers the prompt.
+pub fn operator_decides_trust(command: &str, args: &[&str]) -> bool {
+    operator_sets_trust(command, args) || (cli_stem(command).as_deref() == Some("codex") && codex_config_may_deny())
+}
+
+/// Whether the operator's codex `config.toml` might deny trust anywhere. A missing file
+/// denies nothing; a file that cannot be read counts as a denial.
+fn codex_config_may_deny() -> bool {
+    let Some(home) = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|home| PathBuf::from(home).join(".codex"))
+    }) else {
         return false;
     };
-    let mut paths = vec![cwd.to_path_buf()];
-    paths.extend(git_repo_root(cwd));
-    codex_config_text().is_some_and(|config| codex_marks_untrusted(&config, &paths))
+    match std::fs::read_to_string(home.join("config.toml")) {
+        Ok(config) => config_text_may_deny(&config),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
-fn codex_config_text() -> Option<String> {
-    let home = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
-        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|home| PathBuf::from(home).join(".codex"))
-    })?;
-    std::fs::read_to_string(home.join("config.toml")).ok()
-}
-
-/// Whether the operator's codex `config.toml` marks any of `paths` untrusted. Errs toward
-/// "untrusted": any line naming one of the paths together with `untrusted` counts, even in
-/// a form the scan below does not read, because the cost of a miss is overriding an
-/// explicit denial and the cost of a false hit is only a consent prompt.
-fn codex_marks_untrusted(config: &str, paths: &[PathBuf]) -> bool {
-    let wanted: Vec<String> = paths.iter().map(|path| normalize_path(&path.to_string_lossy())).collect();
-    if codex_untrusted_projects(config).iter().any(|key| wanted.contains(&normalize_path(key))) {
+/// Fails closed on the raw text instead of parsing TOML. Any of these counts as a
+/// possible denial:
+/// - a quoted `untrusted` value in any case or quote style (`"untrusted"`, `'UNTRUSTED'`,
+///   `'''untrusted'''`), so a bare word such as an env-var name does not count;
+/// - a `\u`/`\U` escape inside a double-quoted string, which could spell one;
+/// - a line ending in a line-continuation backslash, which could split one.
+///
+/// Single-quoted strings have no escapes, so Windows paths such as `'C:\Users\x'` and
+/// escaped backslashes such as `"C:\\Users"` are not escapes here. A false positive only
+/// costs a consent prompt, which is surfaced; a parser that missed one valid spelling
+/// would override an explicit denial.
+fn config_text_may_deny(config: &str) -> bool {
+    let lower = config.to_ascii_lowercase();
+    if lower.contains("\"untrusted\"") || lower.contains("'untrusted'") {
         return true;
     }
-    // Fallback, line by line. A line naming a path with "untrusted" counts, and so does
-    // any "untrusted" inside a `[projects.'<path>']` table for one of the paths, however
-    // its key is spelled.
-    let mut in_own_table = false;
-    let mut multiline: Option<&str> = None;
-    for raw in config.lines() {
-        // Multi-line strings are values: their lines are not decoded, but an "untrusted"
-        // in one inside this path's table, or on the line that opens one, still counts.
-        if let Some(delimiter) = multiline {
-            if in_own_table && raw.contains("untrusted") {
-                return true;
+    config.lines().any(|line| {
+        let trimmed = line.trim_end();
+        let continuation = (trimmed.len() - trimmed.trim_end_matches('\\').len()) % 2 == 1;
+        continuation || has_unicode_escape(line)
+    })
+}
+
+/// Whether a line has a `\u`/`\U` escape inside a double-quoted string.
+fn has_unicode_escape(line: &str) -> bool {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '#' => return false,
+            '\'' => {
+                i = chars[i + 1..].iter().position(|c| *c == '\'').map_or(chars.len(), |end| i + 1 + end + 1);
             }
-            if raw.contains(delimiter) {
-                multiline = None;
+            '"' => {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '"' {
+                    if chars[j] == '\\' && j + 1 < chars.len() {
+                        if matches!(chars[j + 1], 'u' | 'U') {
+                            return true;
+                        }
+                        j += 2;
+                        continue;
+                    }
+                    j += 1;
+                }
+                i = j + 1;
             }
-            continue;
-        }
-        if let Some(delimiter) = ["\"\"\"", "'''"].into_iter().find(|delimiter| raw.contains(delimiter)) {
-            if raw.contains("untrusted") && (in_own_table || raw.contains("trust_level")) {
-                return true;
-            }
-            if raw.matches(delimiter).count() % 2 == 1 {
-                multiline = Some(delimiter);
-            }
-            continue;
-        }
-        let line = compact_toml_line(raw);
-        // A string this scan cannot decode (a bad escape) could hide a denial, so the
-        // whole config counts as one.
-        let Some(strings) = quoted_strings(&line) else {
-            return true;
-        };
-        if let Some(header) = line.strip_prefix('[') {
-            in_own_table = header.starts_with("projects.") && strings.iter().any(|value| wanted.contains(&normalize_path(value)));
-            continue;
-        }
-        let untrusted = line.contains("untrusted") || strings.iter().any(|value| value.contains("untrusted"));
-        if untrusted && (in_own_table || strings.iter().any(|value| wanted.contains(&normalize_path(value)))) {
-            return true;
+            _ => i += 1,
         }
     }
     false
 }
 
-/// Every quoted string in a compacted TOML line, decoded, or `None` if one cannot be
-/// read (an invalid escape, an unterminated or multi-line string).
-fn quoted_strings(line: &str) -> Option<Vec<String>> {
-    if line.contains("\"\"\"") || line.contains("\'\'\'") {
-        return None;
-    }
-    let mut found = Vec::new();
-    let mut at = 0;
-    while at < line.len() {
-        if line[at..].starts_with(['\'', '"']) {
-            let (value, len) = leading_quoted(&line[at..])?;
-            found.push(value);
-            at += len;
-        } else {
-            at += line[at..].chars().next().map_or(1, char::len_utf8);
-        }
-    }
-    Some(found)
-}
-
-/// Project paths a codex `config.toml` marks `trust_level = "untrusted"`, in every form
-/// TOML allows for that entry: a `[projects.'<path>']` table, dotted keys or inline
-/// tables under `[projects]`, a top-level `projects.'<path>'.trust_level` or
-/// `projects = { ... }`, with comments anywhere. Not a full TOML parser; the line
-/// fallback in [`codex_marks_untrusted`] covers what this misses.
-fn codex_untrusted_projects(config: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    let mut section: Option<String> = None;
-    for raw in config.lines() {
-        let line = compact_toml_line(raw);
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(header) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
-            section = Some(header.to_string());
-            continue;
-        }
-        match section.as_deref() {
-            Some(header) if header.starts_with("projects.") => {
-                if let Some(key) = whole_quoted(&header["projects.".len()..]) {
-                    if is_untrusted_value(trust_level_value(&line)) {
-                        found.push(key);
-                    }
-                }
-            }
-            Some("projects") => found.extend(untrusted_entries(&line)),
-            None => {
-                if let Some(table) = line.strip_prefix("projects=") {
-                    found.extend(untrusted_entries(table));
-                } else if let Some(dotted) = line.strip_prefix("projects.") {
-                    found.extend(untrusted_entries(dotted));
-                }
-            }
-            _ => {}
-        }
-    }
-    found
-}
-
-/// A TOML line without its comment and without the whitespace outside quoted strings.
-fn compact_toml_line(raw: &str) -> String {
-    let mut out = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for c in raw.chars() {
-        match quote {
-            Some(q) => {
-                out.push(c);
-                if q == '"' && c == '\\' && !escaped {
-                    escaped = true;
-                    continue;
-                }
-                if c == q && !escaped {
-                    quote = None;
-                }
-                escaped = false;
-            }
-            None if c == '#' => break,
-            None if c.is_whitespace() => {}
-            None => {
-                if c == '\'' || c == '"' {
-                    quote = Some(c);
-                }
-                out.push(c);
-            }
-        }
-    }
-    out
-}
-
-/// The quoted string `text` consists of, unquoted: `'literal'` as written, `"basic"`
-/// with `\\` and `\"` unescaped. Returns the string and the length it took.
-fn leading_quoted(text: &str) -> Option<(String, usize)> {
-    let quote = text.chars().next().filter(|c| *c == '\'' || *c == '"')?;
-    let mut value = String::new();
-    let mut chars = text.char_indices().skip(1);
-    while let Some((i, c)) = chars.next() {
-        if c == quote {
-            return Some((value, i + c.len_utf8()));
-        }
-        if quote == '"' && c == '\\' {
-            // TOML basic-string escapes; anything else is not valid TOML.
-            let (_, escape) = chars.next()?;
-            let decoded = match escape {
-                'b' => '\u{8}',
-                't' => '\t',
-                'n' => '\n',
-                'f' => '\u{c}',
-                'r' => '\r',
-                '"' => '"',
-                '\\' => '\\',
-                'u' | 'U' => {
-                    let digits = if escape == 'u' { 4 } else { 8 };
-                    let hex: String = (0..digits).filter_map(|_| chars.next().map(|(_, c)| c)).collect();
-                    if hex.len() != digits {
-                        return None;
-                    }
-                    char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?
-                }
-                _ => return None,
-            };
-            value.push(decoded);
-            continue;
-        }
-        value.push(c);
-    }
-    None
-}
-
-fn whole_quoted(text: &str) -> Option<String> {
-    leading_quoted(text).filter(|(_, len)| *len == text.len()).map(|(value, _)| value)
-}
-
-/// The value of a compacted `trust_level=...` assignment, bare or with a quoted key.
-fn trust_level_value(assignment: &str) -> Option<&str> {
-    ["trust_level=", "\"trust_level\"=", "'trust_level'="]
-        .iter()
-        .find_map(|key| assignment.strip_prefix(key))
-}
-
-fn is_untrusted_value(value: Option<&str>) -> bool {
-    value.and_then(whole_quoted).is_some_and(|value| value == "untrusted")
-}
-
-/// `'<path>'={trust_level="untrusted",...}` and `'<path>'.trust_level="untrusted"`
-/// entries in a compacted `[projects]` line or `projects={...}` inline table.
-fn untrusted_entries(text: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    let mut at = 0;
-    while at < text.len() {
-        let Some((key, len)) = leading_quoted(&text[at..]) else {
-            at += text[at..].chars().next().map_or(1, char::len_utf8);
-            continue;
-        };
-        let rest = &text[at + len..];
-        if let Some(value) = rest.strip_prefix('.').and_then(trust_level_value) {
-            let end = value.find([',', '}']).unwrap_or(value.len());
-            if is_untrusted_value(Some(&value[..end])) {
-                found.push(key);
-            }
-        } else if let Some(body) = rest.strip_prefix("={") {
-            let end = body.find('}').unwrap_or(body.len());
-            if body[..end].split(',').any(|pair| is_untrusted_value(trust_level_value(pair))) {
-                found.push(key);
-            }
-        }
-        at += len;
-    }
-    found
+/// Whether two paths name the same file or directory on disk, by canonical path. Any
+/// error (missing, unreadable) is "no", so trust is never granted on a guess.
+fn same_path(a: &Path, b: &Path) -> bool {
+    matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
 fn codex_trust_args(cwd: &Path, existing_args: &[&str]) -> Vec<String> {
-    if operator_decides_trust("codex", existing_args, Some(cwd)) {
+    if operator_decides_trust("codex", existing_args) {
         return Vec::new();
     }
     let mut keys = vec![cwd.to_path_buf()];
     if let Some(root) = git_repo_root(cwd) {
-        if normalize_path(&root.to_string_lossy()) != normalize_path(&cwd.to_string_lossy()) {
+        if !same_path(&root, cwd) {
             keys.push(root);
         }
     }
@@ -412,21 +247,19 @@ pub fn managed_worktree_project(cwd: &Path, session_id: &str) -> Option<PathBuf>
     }
     let project = lexical_normalize(cwd).ancestors().nth(4)?.to_path_buf();
     let root = git_repo_root(cwd)?;
-    if normalize_path(&root.to_string_lossy()) != normalize_path(&project.to_string_lossy()) {
+    if !same_path(&root, &project) {
         return None;
     }
     // The worktree must be registered for this very directory: its admin entry under the
     // project's `.git/worktrees/` points back at this `.git`, so a copied pointer file
     // in some other directory does not qualify.
     let admin = worktree_admin_dir(cwd)?;
-    let admin_parent = admin.parent().map(|dir| normalize_path(&dir.to_string_lossy()));
-    if admin_parent != Some(normalize_path(&project.join(".git").join("worktrees").to_string_lossy())) {
+    if !same_path(admin.parent()?, &project.join(".git").join("worktrees")) {
         return None;
     }
     let back = std::fs::read_to_string(admin.join("gitdir")).ok()?;
     let back = absolutize(&admin, Path::new(back.trim()));
-    (normalize_path(&lexical_normalize(&back).to_string_lossy()) == normalize_path(&cwd.join(".git").to_string_lossy()))
-        .then_some(project)
+    same_path(&back, &cwd.join(".git")).then_some(project)
 }
 
 /// The admin directory a linked worktree's `.git` file points at.
@@ -493,7 +326,8 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 }
 
 /// Comparable form of a path as a CLI prints it: `\\?\` dropped, separators unified,
-/// trailing separator removed, and case folded on Windows.
+/// trailing separator removed, and case folded on Windows. For display and loose
+/// matching only; trust decisions compare canonical paths ([`same_path`]).
 pub fn normalize_path(path: &str) -> String {
     let path = path.trim();
     if cfg!(windows) {
@@ -577,39 +411,46 @@ mod tests {
     }
 
     #[test]
-    fn escaped_or_undecodable_strings_never_hide_a_denial() {
-        let path = PathBuf::from(r"D:\Code Projects\repo");
-        // "untrusted" and the path spelled with \u escapes, as codex itself would decode them.
-        let escaped = "[projects.\"D:\\\\Code Projects\\\\re\\u0070o\"]\ntrust_level = \"un\\u0074rusted\"\n";
-        assert!(codex_marks_untrusted(escaped, &[path.clone()]));
-        // An escape this scan cannot decode fails closed.
-        assert!(codex_marks_untrusted("[projects]\n\"\\q\" = 1\n", &[path.clone()]));
-        // A multi-line string elsewhere does not disable pre-trust...
-        let prose = "instructions = \"\"\"\nDon't touch it's files\n\"\"\"\n[projects.'D:\\other']\ntrust_level = 'trusted'\n";
-        assert!(!codex_marks_untrusted(prose, &[path.clone()]));
-        // ...but a denial written as one still counts.
-        let denial = "[projects.'D:\\Code Projects\\repo']\ntrust_level = '''untrusted'''\n";
-        assert!(codex_marks_untrusted(denial, &[path.clone()]));
-        let spread = "[projects.'D:\\Code Projects\\repo']\ntrust_level = \"\"\"\nuntrusted\"\"\"\n";
-        assert!(codex_marks_untrusted(spread, &[path.clone()]));
-        assert!(!codex_marks_untrusted("model = \"gpt\"\n[projects.'D:\\other']\ntrust_level = \"trusted\"\n", &[path]));
+    fn a_codex_config_that_might_deny_anything_fails_closed() {
+        for config in [
+            "[projects.'D:\\repo']\ntrust_level = \"untrusted\"\n",
+            "[\"projects\".'D:\\repo']\n\"trust_level\" = 'UNTRUSTED'\n",
+            "[projects.'D:\\repo']\ntrust_level = '''untrusted'''\n",
+            "projects = { 'x' = { trust_level = \"un\\u0074rusted\" } }\n",
+            "note = \"\\U0001F600\"\n",
+            "trust_level = \"\"\"un\\\ntrusted\"\"\"\n",
+        ] {
+            assert!(config_text_may_deny(config), "{config}");
+        }
+        // The shapes in a real Windows config: literal-string paths, escaped backslashes,
+        // and the word in an identifier rather than a value.
+        let ordinary = "[projects.'C:\\Users\\me']\ntrust_level = \"trusted\"\n\
+            notify = [ \"C:\\\\Users\\\\me\\\\app.exe\" ]\n\
+            NODE_REPL_UNTRUSTED_ENV_ALLOWLIST = \"X\"\n# a comment with \"\\u\" in it\n";
+        assert!(!config_text_may_deny(ordinary), "{ordinary}");
     }
 
     #[test]
-    fn any_untrusted_inside_the_paths_own_table_counts() {
-        let path = PathBuf::from(r"D:\Code Projects\repo");
-        let table = "[projects.'D:\\Code Projects\\repo']\n\"trust_level\"  =  'untrusted' # set by hand\n";
-        assert!(codex_marks_untrusted(table, &[path.clone()]));
-        let elsewhere = "[projects.'D:\\other']\n'trust_level' = 'untrusted'\n[projects.'D:\\Code Projects\\repo']\ntrust_level = 'trusted'\n";
-        assert!(!codex_marks_untrusted(elsewhere, &[path]));
+    fn path_identity_is_the_filesystem_not_the_spelling() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        let sibling = temp.path().join("repo2");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        assert!(same_path(&repo, &temp.path().join(".").join("repo")));
+        assert!(!same_path(&repo, &sibling));
+        assert!(!same_path(&repo, &temp.path().join("missing")), "an error is never a match");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn an_unusual_spelling_naming_the_path_with_untrusted_still_counts() {
-        let path = PathBuf::from(r"D:\Code Projects\repo");
-        let odd = "[projects]\n\"D:\\\\Code Projects\\\\repo\" = { \"trust_level\" = \"untrusted\" }\n";
-        assert!(codex_marks_untrusted(odd, &[path.clone()]));
-        assert!(!codex_marks_untrusted("[projects.'D:\\other']\ntrust_level = \"untrusted\"\n", &[path]));
+    fn a_trailing_space_names_a_different_checkout_on_unix() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        let spaced = temp.path().join("repo ");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&spaced).unwrap();
+        assert!(!same_path(&repo, &spaced));
     }
 
     #[test]
@@ -683,48 +524,6 @@ mod tests {
         assert!(operator_sets_trust("agy", &["--settings=x.json"]));
     }
 
-    #[test]
-    fn an_operators_untrusted_codex_project_is_left_alone() {
-        let (_temp, repo, worktree) = managed();
-        let config = format!(
-            "model = \"x\"\n\n[projects.'{}']\ntrust_level = \"untrusted\"\n\n[projects.'D:\\other']\ntrust_level = \"trusted\"\n",
-            repo.display()
-        );
-        assert!(codex_marks_untrusted(&config, &[worktree.clone(), repo.clone()]));
-        assert!(!codex_marks_untrusted(&config, &[worktree.clone()]), "only the root was marked");
-        let trusted = config.replace("\"untrusted\"", "\"trusted\"");
-        assert!(!codex_marks_untrusted(&trusted, &[repo]));
-    }
-
-    #[test]
-    fn every_toml_spelling_of_an_untrusted_project_is_read() {
-        let marked = |config: &str| codex_untrusted_projects(config);
-        let path = r"D:\Code Projects\repo";
-        for config in [
-            format!("[projects.'{path}'] # mine\ntrust_level = \"untrusted\" # leave it\n"),
-            format!("[projects.\"D:\\\\Code Projects\\\\repo\"]\ntrust_level='untrusted'\n"),
-            format!("[projects]\n'{path}' = {{ trust_level = \"untrusted\" }}\n"),
-            format!("[projects]\n'{path}'.trust_level = \"untrusted\"\n"),
-            format!("projects = {{ 'D:\\x' = {{ trust_level = \"trusted\" }}, '{path}' = {{ trust_level = \"untrusted\" }} }}\n"),
-            format!("projects.'{path}'.trust_level = 'untrusted'\n"),
-            format!("[projects.'{path}']\n\"trust_level\" = \"untrusted\"\n"),
-            format!("[projects]\n'{path}' = {{ 'trust_level' = \"untrusted\" }}\n"),
-            format!("projects.'{path}'.\"trust_level\" = \"untrusted\"\n"),
-            format!("model = \"x\"\nprojects.\"D:\\\\Code Projects\\\\repo\".trust_level = \"untrusted\" # no\n"),
-        ] {
-            assert_eq!(marked(&config), [path.to_string()], "{config}");
-        }
-        for config in [
-            format!("[projects.'{path}']\ntrust_level = \"trusted\" # untrusted\n"),
-            format!("# [projects.'{path}']\n# trust_level = \"untrusted\"\n"),
-            format!("[projects.'{path}'.extra]\ntrust_level = \"untrusted\"\n"),
-            format!("[other]\n'{path}' = {{ trust_level = \"untrusted\" }}\n"),
-        ] {
-            assert!(marked(&config).is_empty(), "{config}");
-        }
-    }
-
-    #[cfg(windows)]
     #[test]
     fn codex_is_recognised_through_a_windows_executable_path() {
         let (_temp, _repo, worktree) = managed();

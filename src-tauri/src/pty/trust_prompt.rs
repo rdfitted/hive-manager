@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 use super::output_ring::OutputSnapshot;
 use super::screen::Screen;
 
-/// Turns of new output that must follow a grid reset before an absent prompt counts as
-/// gone, unless the output clears the whole screen first.
-const REBUILD_TURNS: u8 = 2;
+/// Non-empty rows a frame drawn after a grid reset must have before an absent prompt
+/// counts as gone, unless the frame starts with a full-screen clear. A partial repaint
+/// (a cursor move, one cell) never qualifies.
+const MIN_FRAME_ROWS: usize = 3;
 
 /// Whether `bytes` redraw the whole screen from blank: erase display, full reset, or a
 /// switch into or out of the alternate screen (agy leaves its trust dialog that way).
@@ -34,9 +35,6 @@ fn clears_screen(bytes: &[u8]) -> bool {
 /// The status reason set while a trust prompt is on screen.
 pub const TRUST_PROMPT_STATUS: &str = "trust_prompt";
 
-/// Longest a rebuilt grid is held before an absent prompt counts as gone anyway, for a
-/// CLI that answers a resize with no repaint at all.
-pub const REBUILD_LIMIT: Duration = Duration::from_secs(30);
 
 /// How long after spawn a guard keeps watching for a first prompt. Codex drew its prompt
 /// 90-115 s after spawn in the captures, behind its startup work.
@@ -241,7 +239,7 @@ pub struct TrustPromptGuard {
     fed_to: Option<u64>,
     /// Set when the grid was thrown away (resize or eviction): turns of new output still
     /// owed, and when the rebuild began. While set, a prompt is never reported cleared.
-    rebuilding: Option<(u8, Instant)>,
+    rebuilding: bool,
     state: GuardState,
 }
 
@@ -252,7 +250,7 @@ impl TrustPromptGuard {
             started,
             screen: Screen::new(cols, rows),
             fed_to: None,
-            rebuilding: None,
+            rebuilding: false,
             state: GuardState::Watching,
         }
     }
@@ -288,7 +286,7 @@ impl TrustPromptGuard {
         let (reset, new) = self.feed(snapshot, cols, rows);
         let lines = self.screen.lines();
         let shown = detect(self.cli, &lines);
-        if self.still_rebuilding(reset, &new, shown.is_some(), now) {
+        if self.still_rebuilding(reset, &new, shown.is_some(), &lines) {
             return None;
         }
         match (std::mem::replace(&mut self.state, GuardState::Done), shown) {
@@ -312,27 +310,24 @@ impl TrustPromptGuard {
         }
     }
 
-    /// A thrown-away grid cannot prove that a prompt went away. It is whole again when
-    /// the prompt shows, when new output clears the full screen, after REBUILD_TURNS
-    /// further turns that each drew something, or once REBUILD_LIMIT has passed (a CLI
-    /// that never repaints must not hold the status forever).
-    fn still_rebuilding(&mut self, reset: bool, new: &[u8], shown: bool, now: Instant) -> bool {
+    /// A thrown-away grid cannot prove that a prompt went away, and nothing hangs on a
+    /// notice that stays up, so the guard waits for a real frame: the prompt showing
+    /// again, or new output that draws a whole screen without it (a full-screen clear
+    /// followed by content, or at least MIN_FRAME_ROWS non-empty rows). Time alone, an
+    /// empty grid or escape-only output never ends the wait.
+    fn still_rebuilding(&mut self, reset: bool, new: &[u8], shown: bool, lines: &[String]) -> bool {
         if reset {
-            self.rebuilding = Some((REBUILD_TURNS + 1, now));
+            self.rebuilding = true;
         }
-        let Some((turns, since)) = self.rebuilding else {
-            return false;
-        };
-        if shown || clears_screen(new) || now.duration_since(since) >= REBUILD_LIMIT {
-            self.rebuilding = None;
+        if !self.rebuilding {
             return false;
         }
-        let turns = if new.is_empty() { turns } else { turns.saturating_sub(1) };
-        if turns == 0 {
-            self.rebuilding = None;
+        let drawn = lines.iter().filter(|line| !line.trim().is_empty()).count();
+        let whole_frame = !new.is_empty() && ((clears_screen(new) && drawn > 0) || drawn >= MIN_FRAME_ROWS);
+        if shown || whole_frame {
+            self.rebuilding = false;
             return false;
         }
-        self.rebuilding = Some((turns, since));
         true
     }
 

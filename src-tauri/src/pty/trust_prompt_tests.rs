@@ -207,16 +207,17 @@ fn a_resize_whose_own_bytes_redraw_everything_is_complete_at_once() {
 }
 
 #[test]
-fn a_cli_that_never_repaints_after_a_resize_is_released_after_the_rebuild_limit() {
+fn a_cli_that_never_repaints_after_a_resize_stays_surfaced() {
     let t0 = Instant::now();
     let len = AGY_PROMPT.len() as u64;
     let mut guard = guard(TrustCli::Antigravity, t0);
     let _ = guard.observe(&ring(AGY_PROMPT), 120, 40, t0);
     let nothing = more(len, b"");
     assert_eq!(guard.observe(&nothing, 100, 30, t0), None);
-    assert_eq!(guard.observe(&nothing, 100, 30, t0 + REBUILD_LIMIT - Duration::from_secs(1)), None);
-    assert!(matches!(guard.observe(&nothing, 100, 30, t0 + REBUILD_LIMIT), Some(GuardAction::Cleared(_))),
-        "the status cannot be held forever by a pane that never repaints");
+    assert_eq!(guard.observe(&nothing, 100, 30, t0 + Duration::from_secs(600)), None, "time alone never clears it");
+    // Escape-only output (a cursor blink, mode switches) draws nothing.
+    assert_eq!(guard.observe(&more(len, b"\x1b[?25l\x1b[?25h\x1b[H"), 100, 30, t0 + Duration::from_secs(601)), None);
+    assert!(guard.is_surfaced(), "a notice that stays up hangs nothing");
 }
 
 #[test]
